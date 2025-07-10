@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
-    QFileDialog, QLabel, QLineEdit, QDialog, QMenuBar, QMenu
+    QFileDialog, QLabel, QLineEdit, QDialog, QMenuBar, QMenu, QMessageBox
 )
 from PySide6.QtGui import QAction
 
@@ -83,29 +83,41 @@ class MainWindow(QMainWindow):
         # File Menu
         file_menu = menubar.addMenu("File")
 
+        # --- Open ---
         self.open_action = QAction("Open", self)
-
-        save_action = QAction("Save As", self)
-        save_action.setEnabled(False)
-        file_menu.addAction(save_action)
-
-        export_action = QAction("Export As", self)
-
         file_menu.addAction(self.open_action)
 
+        # --- Save As (disabled for main window) ---
+        self.save_action = QAction("Save As", self)
+        self.save_action.setEnabled(False)
+        file_menu.addAction(self.save_action)
 
+        # --- Export As ---
+        self.export_action = QAction("Export As", self)
+        file_menu.addAction(self.export_action)
+        self.export_action.triggered.connect(self.export_figure)
 
-        file_menu.addAction(export_action)
+        # --- About (inside File menu) ---
+        #file_menu.addSeparator()
+        #about_action = QAction("About", self)
+        #bout_action.setMenuRole(QAction.NoRole)  # 🛑 Prevent macOS hijacking
+        #file_menu.addAction(about_action)
+
 
         # Edit Menu
         edit_menu = menubar.addMenu("Edit")
         reset_action = QAction("Reset All", self)
         edit_menu.addAction(reset_action)
+        reset_action.triggered.connect(self.reset_all)
 
         # About Menu
         about_menu = menubar.addMenu("About")
         about_action = QAction("About", self)
+        about_action.setMenuRole(QAction.NoRole)
         about_menu.addAction(about_action)
+        about_action.triggered.connect(self.show_about_dialog)
+
+
 
         # (OPTIONAL) Connect them later like:
         # open_action.triggered.connect(self.open_file)
@@ -124,6 +136,7 @@ class MainWindow(QMainWindow):
         self.freqs = None
         self.time = None
         self.filename = ""
+        self.current_plot_type = "Raw"  # or "NoiseReduced" or "Isolated"
 
         self.lasso = None
         self.lasso_mask = None
@@ -165,6 +178,7 @@ class MainWindow(QMainWindow):
         self.canvas.ax.set_ylabel("Frequency [MHz]")
         self.canvas.ax.set_title(f"{self.filename} - {title}", fontsize=14)
         self.canvas.draw()
+        self.current_plot_type = title
 
     def activate_lasso(self):
         if self.noise_reduced_data is None:
@@ -217,13 +231,67 @@ class MainWindow(QMainWindow):
         time_channel_number = np.linspace(0, nx, nx)
         max_intensity_freqs = self.freqs[np.argmax(data, axis=0)]
 
-        dialog = MaxIntensityPlotDialog(time_channel_number, max_intensity_freqs, self)
+        dialog = MaxIntensityPlotDialog(time_channel_number, max_intensity_freqs, self.filename, self)
         dialog.exec()
+
+    def export_figure(self):
+        from PySide6.QtWidgets import QFileDialog
+
+        if not self.filename:
+            print("No file loaded.")
+            return
+
+        base_name = self.filename.split(".")[0]
+        suffix = self.current_plot_type.replace(" ", "")  # e.g. "NoiseReduced"
+        full_title = f"{base_name}_{suffix}"
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export PNG",
+            f"{full_title}.png",
+            "PNG files (*.png)"
+        )
+        if not file_path:
+            return
+
+        self.canvas.fig.savefig(file_path, dpi=300, bbox_inches="tight")
+        print(f"Saved image: {file_path}")
+
+    def reset_all(self):
+        # Clear canvas
+        self.canvas.ax.clear()
+        self.canvas.draw()
+
+        # Clear internal variables
+        self.raw_data = None
+        self.freqs = None
+        self.time = None
+        self.filename = ""
+        self.noise_reduced_data = None
+        self.lasso_mask = None
+        self.current_plot_type = "Raw"
+
+        # Reset text boxes
+        self.lower_thresh_input.setText("")
+        self.upper_thresh_input.setText("")
+
+        print("Application reset to initial state.")
+
+    def show_about_dialog(self):
+        QMessageBox.information(
+            self,
+            "About e-Callisto FITS Analyzer",
+            "This application is for analyzing solar radio data from e-Callisto.\n\n"
+            "Developed by Sahan Liyanage — 2025\n\n"
+            "All Rights Reserved"
+        )
 
 
 class MaxIntensityPlotDialog(QDialog):
-    def __init__(self, time_channels, max_freqs, parent=None):
+    def __init__(self, time_channels, max_freqs,filename, parent=None):
         super().__init__(parent)
+
+        self.filename = filename
 
         # ----- Menu Bar -----
         menubar = QMenuBar(self)
@@ -232,23 +300,27 @@ class MaxIntensityPlotDialog(QDialog):
         file_menu = menubar.addMenu("File")
         open_action = QAction("Open", self)
         self.save_action = QAction("Save As", self)
+        self.export_action = QAction("Export As", self)
 
-
-        export_action = QAction("Export As", self)
         file_menu.addAction(open_action)
         file_menu.addAction(self.save_action)
+        file_menu.addAction(self.export_action)
         self.save_action.triggered.connect(self.save_as_csv)
-        file_menu.addAction(export_action)
+        self.export_action.triggered.connect(self.export_figure)
+
 
         # Edit Menu
         edit_menu = menubar.addMenu("Edit")
         reset_action = QAction("Reset All", self)
         edit_menu.addAction(reset_action)
+        reset_action.triggered.connect(self.reset_all)
 
         # About Menu
         about_menu = menubar.addMenu("About")
         about_action = QAction("About", self)
+        about_action.setMenuRole(QAction.NoRole)
         about_menu.addAction(about_action)
+        about_action.triggered.connect(self.show_about_dialog)
 
         # Insert into layout (before other widgets)
         layout = QVBoxLayout()
@@ -350,6 +422,59 @@ class MaxIntensityPlotDialog(QDialog):
             print(f"Data saved to {file_path}")
         except Exception as e:
             print(f"Error saving file: {e}")
+
+    def export_figure(self):
+        from PySide6.QtWidgets import QFileDialog
+
+        if not self.filename:
+            print("No base filename available.")
+            return
+
+        base_name = self.filename.split(".")[0]
+        full_title = f"{base_name}_MaxIntensities"
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export PNG",
+            f"{full_title}.png",
+            "PNG files (*.png)"
+        )
+        if not file_path:
+            return
+
+        self.canvas.fig.savefig(file_path, dpi=300, bbox_inches="tight")
+        print(f"Saved image: {file_path}")
+
+    def reset_all(self):
+        # Clear canvas
+        self.canvas.ax.clear()
+        self.canvas.draw()
+
+        # Clear internal variables
+        self.raw_data = None
+        self.freqs = None
+        self.time = None
+        self.filename = ""
+        self.noise_reduced_data = None
+        self.lasso_mask = None
+        self.current_plot_type = "Raw"
+
+        # Reset text boxes
+        self.lower_thresh_input.setText("")
+        self.upper_thresh_input.setText("")
+
+        print("Application reset to initial state.")
+
+    def show_about_dialog(self):
+        QMessageBox.information(
+            self,
+            "About e-Callisto FITS Analyzer",
+            "This application is for analyzing solar radio data from e-Callisto.\n\n"
+            "Developed by Sahan Liyanage — 2025\n\n"
+            "All Rights Reserved"
+        )
+
+
 
 
 
