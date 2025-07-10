@@ -1,7 +1,9 @@
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
-    QFileDialog, QLabel, QLineEdit, QDialog
+    QFileDialog, QLabel, QLineEdit, QDialog, QMenuBar, QMenu
 )
+from PySide6.QtGui import QAction
+
 from PySide6.QtGui import QFont
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -74,6 +76,40 @@ class MainWindow(QMainWindow):
 
         container = QWidget()
         container.setLayout(layout)
+
+        # ----- Menu Bar -----
+        menubar = self.menuBar()
+
+        # File Menu
+        file_menu = menubar.addMenu("File")
+
+        self.open_action = QAction("Open", self)
+
+        save_action = QAction("Save As", self)
+        save_action.setEnabled(False)
+        file_menu.addAction(save_action)
+
+        export_action = QAction("Export As", self)
+
+        file_menu.addAction(self.open_action)
+
+
+
+        file_menu.addAction(export_action)
+
+        # Edit Menu
+        edit_menu = menubar.addMenu("Edit")
+        reset_action = QAction("Reset All", self)
+        edit_menu.addAction(reset_action)
+
+        # About Menu
+        about_menu = menubar.addMenu("About")
+        about_action = QAction("About", self)
+        about_menu.addAction(about_action)
+
+        # (OPTIONAL) Connect them later like:
+        # open_action.triggered.connect(self.open_file)
+
         self.setCentralWidget(container)
 
         # Signals
@@ -81,6 +117,7 @@ class MainWindow(QMainWindow):
         self.noise_button.clicked.connect(self.apply_noise)
         self.lasso_button.clicked.connect(self.activate_lasso)
         self.max_plot_button.clicked.connect(self.plot_max_intensities)
+        self.open_action.triggered.connect(self.load_file)
 
         # Data placeholders
         self.raw_data = None
@@ -187,6 +224,36 @@ class MainWindow(QMainWindow):
 class MaxIntensityPlotDialog(QDialog):
     def __init__(self, time_channels, max_freqs, parent=None):
         super().__init__(parent)
+
+        # ----- Menu Bar -----
+        menubar = QMenuBar(self)
+
+        # File Menu
+        file_menu = menubar.addMenu("File")
+        open_action = QAction("Open", self)
+        self.save_action = QAction("Save As", self)
+
+
+        export_action = QAction("Export As", self)
+        file_menu.addAction(open_action)
+        file_menu.addAction(self.save_action)
+        self.save_action.triggered.connect(self.save_as_csv)
+        file_menu.addAction(export_action)
+
+        # Edit Menu
+        edit_menu = menubar.addMenu("Edit")
+        reset_action = QAction("Reset All", self)
+        edit_menu.addAction(reset_action)
+
+        # About Menu
+        about_menu = menubar.addMenu("About")
+        about_action = QAction("About", self)
+        about_menu.addAction(about_action)
+
+        # Insert into layout (before other widgets)
+        layout = QVBoxLayout()
+        layout.setMenuBar(menubar)
+
         self.setWindowTitle("Maximum Intensities")
         self.resize(800, 600)
 
@@ -199,12 +266,9 @@ class MaxIntensityPlotDialog(QDialog):
         self.ax = self.canvas.ax
 
         # Initial plot
+        self.time_new = self.time_channels*0.25
         self.ax.scatter(self.time_channels, self.freqs, marker="o", s=5, color='red')
-        self.ax.axvline(x=2300, color='b')
-        self.ax.axvline(x=780, color='b')
-        self.ax.axhline(y=49, color='r', linestyle='-')
-        self.ax.axhline(y=70, color='r', linestyle='-')
-        self.ax.set_xlabel("Time Channel Number")
+        self.ax.set_xlabel("Time (s)")
         self.ax.set_ylabel("Frequency (MHz)")
         self.ax.set_title("Maximum Intensity for Each Time Channel")
         self.canvas.draw()
@@ -268,6 +332,25 @@ class MaxIntensityPlotDialog(QDialog):
         self.ax.set_ylabel("Frequency (MHz)")
         self.ax.set_title("Filtered Max Intensities")
         self.canvas.draw()
+
+    def save_as_csv(self):
+        from PySide6.QtWidgets import QFileDialog
+        import csv
+
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save CSV File", "", "CSV files (*.csv)")
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["Time Channel", "Frequency (MHz)"])
+                for t, fval in zip(self.time_channels*0.25, self.freqs):
+                    writer.writerow([t, fval])
+            print(f"Data saved to {file_path}")
+        except Exception as e:
+            print(f"Error saving file: {e}")
+
 
 
 
