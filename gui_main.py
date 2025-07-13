@@ -12,6 +12,8 @@ from matplotlib.path import Path
 import matplotlib.pyplot as plt
 from astropy.io import fits
 import numpy as np
+from matplotlib.colors import LinearSegmentedColormap
+import matplotlib.colors as mcolors
 
 
 class MplCanvas(FigureCanvas):
@@ -170,10 +172,16 @@ class MainWindow(QMainWindow):
             self.noise_reduced_data = data
             self.plot_data(data, title="Noise Reduced")
 
+
     def plot_data(self, data, title="Dynamic Spectrum"):
+
+        cmap = LinearSegmentedColormap.from_list('custom_cmap', [(0, 'darkblue'), (1, 'orange')])
+        colors = [(0.0, 'blue'), (0.5, 'red'), (1.0, 'yellow')]
+        custom_cmap = mcolors.LinearSegmentedColormap.from_list('custom_RdYlBu', colors)
+
         self.canvas.ax.clear()
         extent = [0, self.time[-1], self.freqs[-1], self.freqs[0]]
-        self.canvas.ax.imshow(data, aspect='auto', extent=extent, cmap='viridis')
+        self.canvas.ax.imshow(data, aspect='auto', extent=extent, cmap=custom_cmap)
         self.canvas.ax.set_xlabel("Time [s]")
         self.canvas.ax.set_ylabel("Frequency [MHz]")
         self.canvas.ax.set_title(f"{self.filename} - {title}", fontsize=14)
@@ -185,9 +193,13 @@ class MainWindow(QMainWindow):
             print("Apply noise reduction first.")
             return
 
+        cmap = LinearSegmentedColormap.from_list('custom_cmap', [(0, 'darkblue'), (1, 'orange')])
+        colors = [(0.0, 'blue'), (0.5, 'red'), (1.0, 'yellow')]
+        custom_cmap = mcolors.LinearSegmentedColormap.from_list('custom_RdYlBu', colors)
+
         self.canvas.ax.clear()
         extent = [0, self.time[-1], self.freqs[-1], self.freqs[0]]
-        self.canvas.ax.imshow(self.noise_reduced_data, aspect='auto', extent=extent, cmap='viridis')
+        self.canvas.ax.imshow(self.noise_reduced_data, aspect='auto', extent=extent, cmap=custom_cmap)
         self.canvas.ax.set_title("Draw around the burst")
         self.canvas.draw()
 
@@ -208,9 +220,13 @@ class MainWindow(QMainWindow):
         burst_isolated = np.zeros_like(self.noise_reduced_data)
         burst_isolated[mask] = self.noise_reduced_data[mask]
 
+        cmap = LinearSegmentedColormap.from_list('custom_cmap', [(0, 'darkblue'), (1, 'orange')])
+        colors = [(0.0, 'blue'), (0.5, 'red'), (1.0, 'yellow')]
+        custom_cmap = mcolors.LinearSegmentedColormap.from_list('custom_RdYlBu', colors)
+
         self.canvas.ax.clear()
         extent = [0, self.time[-1], self.freqs[-1], self.freqs[0]]
-        self.canvas.ax.imshow(burst_isolated, aspect='auto', extent=extent, cmap='viridis')
+        self.canvas.ax.imshow(burst_isolated, aspect='auto', extent=extent, cmap=custom_cmap)
         self.canvas.ax.set_title("Isolated Burst")
         self.canvas.ax.set_xlabel("Time [s]")
         self.canvas.ax.set_ylabel("Frequency [MHz]")
@@ -321,6 +337,7 @@ class MaxIntensityPlotDialog(QDialog):
         about_action.setMenuRole(QAction.NoRole)
         about_menu.addAction(about_action)
         about_action.triggered.connect(self.show_about_dialog)
+
 
         # Insert into layout (before other widgets)
         layout = QVBoxLayout()
