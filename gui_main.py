@@ -1,9 +1,9 @@
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
-    QFileDialog, QLabel, QLineEdit, QDialog, QMenuBar, QMenu, QMessageBox
+    QFileDialog, QLabel, QLineEdit, QDialog, QMenuBar, QMenu, QMessageBox, QComboBox
 )
 from PySide6.QtGui import QAction
-
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -14,6 +14,9 @@ from astropy.io import fits
 import numpy as np
 from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.colors as mcolors
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_squared_error, r2_score
+from scipy.optimize import curve_fit
 
 
 class MplCanvas(FigureCanvas):
@@ -331,6 +334,12 @@ class MaxIntensityPlotDialog(QDialog):
         edit_menu.addAction(reset_action)
         reset_action.triggered.connect(self.reset_all)
 
+        # Analyze Menu
+        analyze_menu = menubar.addMenu("Analyze")
+        analyze_action = QAction("Open Analyzer", self)
+        analyze_menu.addAction(analyze_action)
+        analyze_action.triggered.connect(self.open_analyze_window)
+
         # About Menu
         about_menu = menubar.addMenu("About")
         about_action = QAction("About", self)
@@ -490,6 +499,307 @@ class MaxIntensityPlotDialog(QDialog):
             "Developed by Sahan Liyanage — 2025\n\n"
             "All Rights Reserved"
         )
+
+    def open_analyze_window(self):
+        dialog = AnalyzeDialog(self.time_channels, self.freqs, self.filename, self)
+        dialog.exec()
+
+class AnalyzeDialog(QDialog):
+    def __init__(self, time_channels, freqs, filename, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Analyzer")
+        self.resize(1100, 700)
+
+        self.time = np.array(time_channels) * 0.25
+        self.freq = np.array(freqs)
+        self.filename = filename.split(".")[0]
+
+        # Canvas
+        self.canvas = MplCanvas(self, width=8, height=5)
+
+        # Equation and metrics labels
+        self.current_plot_title = f"{self.filename}_Best_Fit"  # default
+        self.equation_label = QLabel("Best Fit Equation:")
+        self.equation_display = QLabel("")
+        self.equation_display.setTextFormat(Qt.RichText)
+        self.equation_display.setStyleSheet("font-size: 18px; padding: 4px;")
+
+        self.stats_label = QLabel("Fit Quality Metrics:")
+        self.r2_display = QLabel("R² = ")
+        self.rmse_display = QLabel("RMSE = ")
+
+        self.metrics_label = QLabel("Shock Parameters:")
+        self.drift_display = QLabel("")
+        self.drift_display.setObjectName("value")
+
+        self.start_freq_display = QLabel("")
+        self.start_freq_display.setObjectName("value")
+
+        self.initial_shock_speed_display = QLabel("")
+        self.initial_shock_speed_display.setObjectName("value")
+
+        self.initial_shock_height_display = QLabel("")
+        self.initial_shock_height_display.setObjectName("value")
+
+        self.avg_shock_speed_display = QLabel("")
+        self.avg_shock_speed_display.setObjectName("value")
+
+        self.avg_shock_height_display = QLabel("")
+        self.avg_shock_height_display.setObjectName("value")
+
+        # Buttons
+        self.max_button = QPushButton("Maximum Intensities")
+        self.fit_button = QPushButton("Best Fit")
+        self.max_button.clicked.connect(self.plot_max)
+        self.fit_button.clicked.connect(self.plot_fit)
+
+        button_layout = QHBoxLayout()
+        button_layout.addWidget(self.max_button)
+        button_layout.addWidget(self.fit_button)
+
+        # Vertical layout for plot + button
+        left_layout = QVBoxLayout()
+        left_layout.addLayout(button_layout)
+        left_layout.addWidget(self.canvas)
+
+        # Vertical layout for all text labels
+        right_layout = QVBoxLayout()
+        right_layout.addWidget(self.equation_label)
+        right_layout.addWidget(self.equation_display)
+        right_layout.addWidget(self.stats_label)
+        right_layout.addWidget(self.r2_display)
+        right_layout.addWidget(self.rmse_display)
+        right_layout.addWidget(self.metrics_label)
+        right_layout.addWidget(self.drift_display)
+        right_layout.addWidget(self.start_freq_display)
+        right_layout.addWidget(self.initial_shock_speed_display)
+        right_layout.addWidget(self.initial_shock_height_display)
+        right_layout.addWidget(self.avg_shock_speed_display)
+        right_layout.addWidget(self.avg_shock_height_display)
+        self.save_plot_button = QPushButton("Save Graph")
+        self.save_data_button = QPushButton("Save Data")
+
+        self.save_plot_button.clicked.connect(self.save_graph)
+        self.save_data_button.clicked.connect(self.save_data)
+
+        right_layout.addWidget(self.save_plot_button)
+        right_layout.addWidget(self.save_data_button)
+
+        self.extra_plot_label = QLabel("Extra Plots:")
+        self.extra_plot_combo = QComboBox()
+        self.extra_plot_combo.addItems([
+            "Shock Speed vs Shock Height",
+            "Shock Speed vs Frequency",
+            "Shock Height vs Frequency"
+        ])
+        self.extra_plot_button = QPushButton("Plot")
+        self.extra_plot_button.clicked.connect(self.plot_extra)
+
+        right_layout.addWidget(self.extra_plot_label)
+        right_layout.addWidget(self.extra_plot_combo)
+        right_layout.addWidget(self.extra_plot_button)
+
+        right_layout.addStretch(1)  # pushes content to the top
+
+        # Combine both sections into a horizontal layout
+        main_layout = QHBoxLayout()
+        main_layout.addLayout(left_layout, stretch=3)
+        main_layout.addLayout(right_layout, stretch=2)
+
+        self.setLayout(main_layout)
+
+        # Styling
+        self.setStyleSheet("""
+            QLabel {
+                font-size: 14px;
+                padding: 2px;
+            }
+            QLabel#value {
+                font-weight: bold;
+            }
+        """)
+
+    def plot_max(self):
+        self.canvas.ax.clear()
+        self.canvas.ax.scatter(self.time, self.freq, s=10, color='blue')
+        self.canvas.ax.set_title(f"{self.filename}_Maximum_Intensity")
+        self.canvas.ax.set_xlabel("Time (s)")
+        self.canvas.ax.set_ylabel("Frequency (MHz)")
+        self.canvas.draw()
+        self.equation_display.setText("")  # clear equation
+
+    def plot_fit(self):
+        def model_func(t, a, b):
+            return a * t ** (-b)
+
+        def drift_rate(t, a_, b_):
+            return -a_ * b_ * t ** (-(b_ + 1))
+
+        # Nonlinear curve fit
+        params, covariance = curve_fit(model_func, self.time, self.freq, maxfev=10000)
+        a, b = params
+        std_errs = np.sqrt(np.diag(covariance))
+
+        # Best fit curve
+        time_fit = np.linspace(self.time.min(), self.time.max(), 400)
+        freq_fit = model_func(time_fit, a, b)
+
+        # Plot
+        self.canvas.ax.clear()
+        self.canvas.ax.scatter(self.time, self.freq, s=10, color='blue', label="Original Data")
+        self.canvas.ax.plot(time_fit, freq_fit, color='red', label=fr"Best Fit: $f = {a:.2f} \cdot t^{{-{b:.2f}}}$")
+        self.canvas.ax.set_title(f"{self.filename}_Best_Fit")
+        self.canvas.ax.set_xlabel("Time (s)")
+        self.canvas.ax.set_ylabel("Frequency (MHz)")
+        self.canvas.ax.legend()
+        self.canvas.draw()
+
+        # Metrics
+        predicted_freqs = model_func(self.time, a, b)
+        r_squared = r2_score(self.freq, predicted_freqs)
+        rmse = np.sqrt(mean_squared_error(self.freq, predicted_freqs))
+        self.equation_display.setText(f"<b>f(t) = {a:.2f} · t<sup>-{b:.2f}</sup></b>")
+        self.r2_display.setText(f"R² = {r_squared:.4f}")
+        self.rmse_display.setText(f"RMSE = {rmse:.4f}")
+
+        # Drift rate & errors
+        drift_vals = drift_rate(self.time, a, b)
+        residuals = self.freq - predicted_freqs
+        freq_err = np.std(residuals)
+        drift_errs = np.abs(drift_vals) * np.sqrt((std_errs[0] / a) ** 2 + (std_errs[1] / b) ** 2)
+
+        # Shock speed and height
+        shock_speed = (13853221.38 * np.abs(drift_vals)) / (self.freq * (np.log(self.freq ** 2 / 3.385)) ** 2)
+        R_p = 4.32 * np.log(10) / np.log(self.freq ** 2 / 3.385)
+
+        # Starting point
+        percentile_threshold = 90
+        start_freq = np.percentile(self.freq, percentile_threshold)
+        start_index = np.abs(self.freq - start_freq).argmin()
+        start_shock_speed = shock_speed[start_index]
+        start_height = R_p[start_index]
+        drift0 = drift_vals[start_index]
+        drift_err0 = drift_errs[start_index]
+        f0 = self.freq[start_index]
+
+        # Errors at starting point
+        shock_speed_error = (13853221.38 * drift_err0) / (f0 * (np.log(f0 ** 2 / 3.385)) ** 2)
+        dRp_dFreq0 = (8.64 / f0) / np.log(10) / np.log(f0 ** 2 / 3.385)
+        error_R_p = np.abs(dRp_dFreq0 * freq_err)
+
+        # Averages
+        avg_drift = np.mean(drift_vals)
+        avg_drift_err = np.std(drift_vals) / np.sqrt(len(drift_vals))
+        avg_speed = np.mean(shock_speed)
+        avg_speed_err = np.std(shock_speed) / np.sqrt(len(shock_speed))
+        avg_height = np.mean(R_p)
+        avg_height_err = np.std(R_p) / np.sqrt(len(R_p))
+
+        self.shock_speed = shock_speed
+        self.R_p = R_p
+        self.start_freq = start_freq
+        self.start_height = start_height
+
+        # Display
+        self.drift_display.setText(
+            f"Average Drift Rate: <b>{avg_drift:.4f} ± {avg_drift_err:.4f}</b> MHz/s")
+
+        self.start_freq_display.setText(
+            f"Starting Frequency: <b>{start_freq:.2f} ± {freq_err:.2f}</b> MHz")
+
+        self.initial_shock_speed_display.setText(
+            f"Initial Shock Speed: <b>{start_shock_speed:.2f} ± {shock_speed_error:.2f}</b> km/s")
+
+        self.initial_shock_height_display.setText(
+            f"Initial Shock Height: <b>{start_height:.3f} ± {error_R_p:.3f}</b> Rₛ")
+
+        self.avg_shock_speed_display.setText(
+            f"Average Shock Speed: <b>{avg_speed:.2f} ± {avg_speed_err:.2f}</b> km/s")
+
+        self.avg_shock_height_display.setText(
+            f"Average Shock Height: <b>{avg_height:.3f} ± {avg_height_err:.3f}</b> Rₛ")
+
+    def save_graph(self):
+        options = QFileDialog.Options()
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+    "Save Plot",
+    f"{self.current_plot_title}.png",
+            "PNG Files (*.png)",
+            options=options
+        )
+        if file_path:
+            self.canvas.fig.savefig(file_path, dpi=300, bbox_inches='tight')
+
+    def save_data(self):
+        options = QFileDialog.Options()
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Data",
+            f"{self.filename}_data.txt",
+            "Text Files (*.txt)",
+            options=options
+        )
+        if not file_path:
+            return
+
+        # Collect data
+        lines = [
+            f"{self.equation_label.text()} {self.equation_display.text().strip()}",
+            f"{self.stats_label.text()}",
+            self.r2_display.text(),
+            self.rmse_display.text(),
+            f"{self.metrics_label.text()}",
+            self.drift_display.text(),
+            self.start_freq_display.text(),
+            self.initial_shock_speed_display.text(),
+            self.initial_shock_height_display.text(),
+            self.avg_shock_speed_display.text(),
+            self.avg_shock_height_display.text(),
+        ]
+
+        # Clean HTML from bold if present
+        cleaned_lines = [line.replace("<b>", "").replace("</b>", "") for line in lines]
+
+        with open(file_path, 'w') as f:
+            f.write("\n".join(cleaned_lines))
+
+    def plot_extra(self):
+        choice = self.extra_plot_combo.currentText()
+        self.canvas.ax.clear()
+
+        if choice == "Shock Speed vs Shock Height":
+            self.canvas.ax.scatter(self.R_p, self.shock_speed, color='green', s=10)
+            self.canvas.ax.set_xlabel("Shock Height (Rₛ)")
+            self.canvas.ax.set_ylabel("Shock Speed (km/s)")
+            self.canvas.ax.set_title(f"{self.filename}_Shock_Speed_vs_Shock_Height")
+            self.current_plot_title = f"{self.filename}_Shock_Speed_vs_Shock_Height"
+
+        elif choice == "Shock Speed vs Frequency":
+            self.canvas.ax.scatter(self.freq, self.shock_speed, color='purple', s=10)
+            self.canvas.ax.set_xlabel("Frequency (MHz)")
+            self.canvas.ax.set_ylabel("Shock Speed (km/s)")
+            self.canvas.ax.set_title(f"{self.filename}_Shock_Speed_vs_Frequency")
+            self.current_plot_title = f"{self.filename}_Shock_Speed_vs_Frequency"
+
+        elif choice == "Shock Height vs Frequency":
+            self.canvas.ax.scatter(self.R_p, self.freq, color='red', marker='o', s=50)
+            self.canvas.ax.set_xlabel("Shock Height (Rₛ)")
+            self.canvas.ax.set_ylabel("Frequency (MHz)")
+            self.canvas.ax.set_title(f"{self.filename}_Rs_vs_Freq")
+            self.current_plot_title = f"{self.filename}_Rs_vs_Freq"
+
+        self.canvas.ax.grid(True)
+        self.canvas.draw()
+
+
+
+
+
+
+
+
+
 
 
 
