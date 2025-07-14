@@ -4,8 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="22c2ea24-4065-4bfd-8ffe-617e0297cf9a" name="Changes" comment="Custom colormaps added to the plots.">
-      <change afterPath="$PROJECT_DIR$/setup.py" afterDir="false" />
+    <list default="true" id="22c2ea24-4065-4bfd-8ffe-617e0297cf9a" name="Changes" comment="Shock parameter calculations are added in analyzer.">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/build/FITS_Analyzer/Analysis-00.toc" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/build/FITS_Analyzer/BUNDLE-00.toc" beforeDir="false" />
@@ -22,7 +21,6 @@
       <change beforePath="$PROJECT_DIR$/dist/FITS_Analyzer.app/Contents/MacOS/FITS_Analyzer" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/dist/FITS_Analyzer.app/Contents/Resources/icon-windowed.icns" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/dist/FITS_Analyzer.app/Contents/_CodeSignature/CodeResources" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/gui_main.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui_main.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -123,7 +121,7 @@
       <workItem from="1752133463014" duration="14634000" />
       <workItem from="1752343389968" duration="4000" />
       <workItem from="1752343406384" duration="213000" />
-      <workItem from="1752438358938" duration="17546000" />
+      <workItem from="1752438358938" duration="18070000" />
     </task>
     <task id="LOCAL-00001" summary="Initial commit">
       <option name="closed" value="true" />
@@ -173,7 +171,15 @@
       <option name="project" value="LOCAL" />
       <updated>1752439778726</updated>
     </task>
-    <option name="localTasksCounter" value="7" />
+    <task id="LOCAL-00007" summary="Shock parameter calculations are added in analyzer.">
+      <option name="closed" value="true" />
+      <created>1752527428135</created>
+      <option name="number" value="00007" />
+      <option name="presentableId" value="LOCAL-00007" />
+      <option name="project" value="LOCAL" />
+      <updated>1752527428135</updated>
+    </task>
+    <option name="localTasksCounter" value="8" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -207,7 +213,8 @@
     <MESSAGE value="Add functionalities" />
     <MESSAGE value="Phase one done." />
     <MESSAGE value="Custom colormaps added to the plots." />
-    <option name="LAST_COMMIT_MESSAGE" value="Custom colormaps added to the plots." />
+    <MESSAGE value="Shock parameter calculations are added in analyzer." />
+    <option name="LAST_COMMIT_MESSAGE" value="Shock parameter calculations are added in analyzer." />
   </component>
   <component name="XDebuggerManager">
     <breakpoint-manager>

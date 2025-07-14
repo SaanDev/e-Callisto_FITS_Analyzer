@@ -1,3 +1,0 @@
-([('FITS_Analyzer',
-   '/Users/saan/Desktop/e-Callisto_FITS_Analyzer/dist/FITS_Analyzer',
-   'EXECUTABLE')],)
