@@ -1,23 +1,15 @@
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QPushButton, QVBoxLayout, QHBoxLayout,
-    QFileDialog, QLabel, QLineEdit, QDialog, QMenuBar, QMenu, QMessageBox, QComboBox, QDoubleSpinBox,
-    QFormLayout, QGroupBox, QSizePolicy, QStatusBar
+    QMainWindow, QLineEdit, QDialog, QMenuBar, QMessageBox, QDoubleSpinBox,
+    QFormLayout, QGroupBox, QStatusBar
 )
 from PySide6.QtGui import QAction
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
 from matplotlib.widgets import LassoSelector
 from matplotlib.path import Path
-import matplotlib.pyplot as plt
 from astropy.io import fits
-import numpy as np
 from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.colors as mcolors
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_squared_error, r2_score
-from scipy.optimize import curve_fit
 import csv
 
 
@@ -428,17 +420,21 @@ class MaxIntensityPlotDialog(QDialog):
         # Buttons
         self.select_button = QPushButton("Select Outliers")
         self.remove_button = QPushButton("Remove Outliers")
+        self.analyze_button = QPushButton("Analyze Burst")
         self.select_button.setToolTip("Use Lasso tool to select points to remove")
         self.remove_button.setToolTip("Remove previously selected outliers")
         self.select_button.setMinimumWidth(150)
         self.remove_button.setMinimumWidth(150)
+        self.analyze_button.setMinimumWidth(150)
         self.select_button.clicked.connect(self.activate_lasso)
         self.remove_button.clicked.connect(self.remove_selected_outliers)
+        self.analyze_button.clicked.connect(self.open_analyze_window)
 
         # Layouts
         button_layout = QHBoxLayout()
         button_layout.addWidget(self.select_button)
         button_layout.addWidget(self.remove_button)
+        button_layout.addWidget(self.analyze_button)
         button_layout.addStretch()
 
         # Status bar
@@ -726,8 +722,8 @@ class AnalyzeDialog(QDialog):
         self.status.showMessage("Max intensities plotted successfully!", 3000)
 
     def plot_fit(self):
-        def model_func(t, a, b): return a * t ** (-b)
-        def drift_rate(t, a_, b_): return -a_ * b_ * t ** (-(b_ + 1))
+        def model_func(t, a, b): return a * t ** (b)
+        def drift_rate(t, a_, b_): return a_ * b_ * t ** (b_ - 1)
 
         params, cov = curve_fit(model_func, self.time, self.freq, maxfev=10000)
         a, b = params
@@ -738,7 +734,7 @@ class AnalyzeDialog(QDialog):
 
         self.canvas.ax.clear()
         self.canvas.ax.scatter(self.time, self.freq, s=10, color='blue', label="Original Data")
-        self.canvas.ax.plot(time_fit, freq_fit, color='red', label=fr"Best Fit: $f = {a:.2f} \cdot t^{{-{b:.2f}}}$")
+        self.canvas.ax.plot(time_fit, freq_fit, color='red', label=fr"Best Fit: $f = {a:.2f} \cdot t^{{{b:.2f}}}$")
         self.canvas.ax.set_title(f"{self.filename}_Best_Fit")
         self.canvas.ax.set_xlabel("Time (s)")
         self.canvas.ax.set_ylabel("Frequency (MHz)")
@@ -751,7 +747,7 @@ class AnalyzeDialog(QDialog):
         r2 = r2_score(self.freq, predicted)
         rmse = np.sqrt(mean_squared_error(self.freq, predicted))
 
-        self.equation_display.setText(f"<b>f(t) = {a:.2f} · t<sup>-{b:.2f}</sup></b>")
+        self.equation_display.setText(f"<b>f(t) = {a:.2f} · t<sup>{b:.2f}</sup></b>")
         self.r2_display.setText(f"R² = {r2:.4f}")
         self.rmse_display.setText(f"RMSE = {rmse:.4f}")
 

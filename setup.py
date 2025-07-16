@@ -9,6 +9,7 @@ OPTIONS = {
         'PySide6',
         'sklearn',
         'importlib_metadata',
+        'csv',
     ],
     'iconfile': 'icon.icns',  # optional
 }
