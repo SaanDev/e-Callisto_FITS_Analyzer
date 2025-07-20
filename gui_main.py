@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (
     QMainWindow, QLineEdit, QDialog, QMenuBar, QMessageBox, QDoubleSpinBox,
-    QFormLayout, QGroupBox, QStatusBar, QProgressBar, QApplication
+    QFormLayout, QGroupBox, QStatusBar, QProgressBar, QApplication, QCheckBox
 )
 from PySide6.QtGui import QAction, QPixmap, QImage
 from PySide6.QtCore import Qt
@@ -39,6 +39,9 @@ class MainWindow(QMainWindow):
 
         #Statusbar
         self.setStatusBar(QStatusBar())
+
+        # backup before lasso
+        self.noise_reduced_original = None
 
         # Threshold input fields
         self.lower_thresh_input = QLineEdit("")
@@ -88,6 +91,53 @@ class MainWindow(QMainWindow):
         thresh_group.setLayout(thresh_form_layout)
         thresh_group.setMaximumWidth(250)
 
+        # === Graph Properties Group ===
+        graph_group = QGroupBox("Graph Properties")
+        graph_layout = QVBoxLayout()
+
+        # -- Colormap Dropdown --
+        self.cmap_dropdown = QComboBox()
+        self.cmap_dropdown.addItems(['custom_RdYlBu', 'viridis', 'plasma', 'inferno', 'magma', 'cividis', 'gray'])
+        self.cmap_dropdown.currentTextChanged.connect(self.update_plot_style)
+        graph_layout.addWidget(QLabel("Colormap:"))
+        graph_layout.addWidget(self.cmap_dropdown)
+
+        # -- Font Sizes --
+        font_form = QFormLayout()
+        self.title_font_spin = QDoubleSpinBox()
+        self.title_font_spin.setRange(6, 30)
+        self.title_font_spin.setValue(14)
+        self.title_font_spin.setSingleStep(1)
+        self.title_font_spin.valueChanged.connect(self.update_plot_style)
+
+        self.axis_font_spin = QDoubleSpinBox()
+        self.axis_font_spin.setRange(6, 30)
+        self.axis_font_spin.setValue(11)
+        self.axis_font_spin.setSingleStep(1)
+        self.axis_font_spin.valueChanged.connect(self.update_plot_style)
+
+        self.tick_font_spin = QDoubleSpinBox()
+        self.tick_font_spin.setRange(6, 30)
+        self.tick_font_spin.setValue(10)
+        self.tick_font_spin.setSingleStep(1)
+        self.tick_font_spin.valueChanged.connect(self.update_plot_style)
+
+        font_form.addRow("Title Font Size:", self.title_font_spin)
+        font_form.addRow("Axis Label Font Size:", self.axis_font_spin)
+        font_form.addRow("Tick Label Font Size:", self.tick_font_spin)
+
+        graph_layout.addLayout(font_form)
+
+        # -- Font Style Checkboxes --
+        self.bold_checkbox = QCheckBox("Bold Text")
+        self.italic_checkbox = QCheckBox("Italic Text")
+        self.bold_checkbox.stateChanged.connect(self.update_plot_style)
+        self.italic_checkbox.stateChanged.connect(self.update_plot_style)
+        graph_layout.addWidget(self.bold_checkbox)
+        graph_layout.addWidget(self.italic_checkbox)
+
+        graph_group.setLayout(graph_layout)
+
         self.lower_thresh_input.setToolTip("Lower clipping threshold for pixel intensity.\nRecommended: -5")
         self.upper_thresh_input.setToolTip("Upper clipping threshold for pixel intensity.\nRecommended: 20")
 
@@ -129,11 +179,13 @@ class MainWindow(QMainWindow):
         side_panel.addWidget(thresh_group)
         side_panel.addSpacing(10)
         side_panel.addLayout(button_layout)
+        side_panel.addWidget(graph_group)
 
         # Main layout with side panel and canvas
         main_layout = QHBoxLayout()
         main_layout.addLayout(side_panel)
         main_layout.addWidget(self.canvas, stretch=1)
+
 
         container = QWidget()
         container.setLayout(main_layout)
@@ -158,13 +210,6 @@ class MainWindow(QMainWindow):
         self.export_action = QAction("Export As", self)
         file_menu.addAction(self.export_action)
         self.export_action.triggered.connect(self.export_figure)
-
-        # --- About (inside File menu) ---
-        #file_menu.addSeparator()
-        #about_action = QAction("About", self)
-        #bout_action.setMenuRole(QAction.NoRole)  # 🛑 Prevent macOS hijacking
-        #file_menu.addAction(about_action)
-
 
         # Edit Menu
         edit_menu = menubar.addMenu("Edit")
@@ -204,6 +249,12 @@ class MainWindow(QMainWindow):
         self.reset_selection_button.clicked.connect(self.reset_selection)
         self.reset_all_button.clicked.connect(self.reset_all)
         self.close_button.clicked.connect(self.close)
+        self.title_font_spin.valueChanged.connect(self.update_plot_style)
+        self.axis_font_spin.valueChanged.connect(self.update_plot_style)
+        self.tick_font_spin.valueChanged.connect(self.update_plot_style)
+        self.cmap_dropdown.currentTextChanged.connect(self.update_plot_style)
+        self.bold_checkbox.stateChanged.connect(self.update_plot_style)
+        self.italic_checkbox.stateChanged.connect(self.update_plot_style)
 
         # Data placeholders
         self.raw_data = None
@@ -230,7 +281,14 @@ class MainWindow(QMainWindow):
             }
         """)
 
-        self.noise_reduced_original = None  # backup before lasso
+        self.current_cmap_name = "custom_RdYlBu"
+        self.plot_font_settings = {
+            "title": 14,
+            "axis": 11,
+            "tick": 10,
+            "bold": False,
+            "italic": False
+        }
 
     def load_file(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Open FITS File", "", "FITS files (*.fit.gz)")
@@ -276,8 +334,14 @@ class MainWindow(QMainWindow):
             self.current_colorbar = None
 
         # Custom colormap
-        colors = [(0.0, 'blue'), (0.5, 'red'), (1.0, 'yellow')]
-        custom_cmap = mcolors.LinearSegmentedColormap.from_list('custom_RdYlBu', colors)
+        # Colormap selection
+        cmap_name = getattr(self, "current_cmap_name", "viridis")  # fallback if not set
+
+        if cmap_name == "custom_RdYlBu":
+            colors = [(0.0, 'blue'), (0.5, 'red'), (1.0, 'yellow')]
+            cmap = mcolors.LinearSegmentedColormap.from_list('custom_RdYlBu', colors)
+        else:
+            cmap = plt.get_cmap(cmap_name)
 
         extent = [0, self.time[-1], self.freqs[-1], self.freqs[0]]
 
@@ -286,7 +350,18 @@ class MainWindow(QMainWindow):
         cax = divider.append_axes("right", size="5%", pad=0.1)
         self.current_cax = cax  # <- Store reference to remove later
 
-        im = self.canvas.ax.imshow(data, aspect='auto', extent=extent, cmap=custom_cmap)
+        im = self.canvas.ax.imshow(data, aspect='auto', extent=extent, cmap=cmap)
+
+        # Font style logic
+        fs = self.plot_font_settings
+        weight = "bold" if fs["bold"] else "normal"
+        style = "italic" if fs["italic"] else "normal"
+
+        self.canvas.ax.set_xlabel("Time [s]", fontsize=fs["axis"], weight=weight, style=style)
+        self.canvas.ax.set_ylabel("Frequency [MHz]", fontsize=fs["axis"], weight=weight, style=style)
+        self.canvas.ax.set_title(f"{self.filename} - {title}", fontsize=fs["title"], weight=weight, style=style)
+        self.canvas.ax.tick_params(labelsize=fs["tick"])
+
         self.current_colorbar = self.canvas.figure.colorbar(im, cax=cax)
         self.current_colorbar.set_label("Intensity", fontsize=11)
 
@@ -434,6 +509,25 @@ class MainWindow(QMainWindow):
     def open_combine_time_window(self):
         dialog = CombineTimeDialog(self)
         dialog.exec()
+
+    def update_plot_style(self):
+        # Update font settings
+        self.plot_font_settings["title"] = self.title_font_spin.value()
+        self.plot_font_settings["axis"] = self.axis_font_spin.value()
+        self.plot_font_settings["tick"] = self.tick_font_spin.value()
+        self.plot_font_settings["bold"] = self.bold_checkbox.isChecked()
+        self.plot_font_settings["italic"] = self.italic_checkbox.isChecked()
+
+        # Update colormap
+        self.current_cmap_name = self.cmap_dropdown.currentText()
+
+        # Refresh the currently plotted data with the new style
+        if self.current_plot_type == "Raw" and self.raw_data is not None:
+            self.plot_data(self.raw_data, title="Raw Data")
+        elif self.current_plot_type == "Noise Reduced" and self.noise_reduced_data is not None:
+            self.plot_data(self.noise_reduced_data, title="Noise Reduced")
+        elif self.current_plot_type == "Isolated" and self.noise_reduced_data is not None:
+            self.plot_data(self.noise_reduced_data, title="Isolated Burst")
 
 
 class MaxIntensityPlotDialog(QDialog):
