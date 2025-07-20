@@ -1,8 +1,8 @@
 from PySide6.QtWidgets import (
     QMainWindow, QLineEdit, QDialog, QMenuBar, QMessageBox, QDoubleSpinBox,
-    QFormLayout, QGroupBox, QStatusBar
+    QFormLayout, QGroupBox, QStatusBar, QProgressBar, QApplication
 )
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QPixmap, QImage
 from PySide6.QtCore import Qt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.widgets import LassoSelector
@@ -11,8 +11,9 @@ from astropy.io import fits
 from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.colors as mcolors
 import csv
-
-
+import matplotlib.pyplot as plt
+import io
+import os
 
 class MplCanvas(FigureCanvas):
     def __init__(self, parent=None, width=10, height=6, dpi=100):
@@ -166,14 +167,23 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(reset_action)
         reset_action.triggered.connect(self.reset_all)
 
+        # Combine Menu
+        combine_menu = menubar.addMenu("Combine FITS")
+
+        combine_freq_action = QAction("Combine Frequency", self)
+        combine_freq_action.triggered.connect(self.open_combine_freq_window)
+        combine_menu.addAction(combine_freq_action)
+
+        combine_time_action = QAction("Combine Time", self)
+        combine_time_action.triggered.connect(self.open_combine_time_window)
+        combine_menu.addAction(combine_time_action)
+
         # About Menu
         about_menu = menubar.addMenu("About")
         about_action = QAction("About", self)
         about_action.setMenuRole(QAction.NoRole)
         about_menu.addAction(about_action)
         about_action.triggered.connect(self.show_about_dialog)
-
-
 
         # (OPTIONAL) Connect them later like:
         # open_action.triggered.connect(self.open_file)
@@ -394,6 +404,14 @@ class MainWindow(QMainWindow):
             self.lasso = None
             self.statusBar().showMessage("Selection Reset", 4000)
             print("Lasso selection reset. Original noise-reduced data restored.")
+
+    def open_combine_freq_window(self):
+        dialog = CombineFrequencyDialog(self)
+        dialog.exec()
+
+    def open_combine_time_window(self):
+        dialog = CombineTimeDialog(self)
+        dialog.exec()
 
 
 class MaxIntensityPlotDialog(QDialog):
@@ -844,6 +862,290 @@ class AnalyzeDialog(QDialog):
             self.status.showMessage("Shock Height vs Frequency plotted successfully!", 3000)
         self.canvas.ax.grid(True)
         self.canvas.draw()
+
+class CombineFrequencyDialog(QDialog):
+    def __init__(self, main_window, parent=None):
+        super().__init__(parent)
+        self.main_window = main_window
+        self.setWindowTitle("Combine Frequency Ranges")
+        self.setMinimumWidth(600)
+
+        self.file_paths = []
+
+        self.load_button = QPushButton("Import FITS Files")
+        self.load_button.clicked.connect(self.load_files)
+
+        self.combine_button = QPushButton("Combine")
+        self.combine_button.clicked.connect(self.combine_files)
+        self.combine_button.setEnabled(False)
+
+        self.import_button = QPushButton("Import to Analyzer")
+        self.import_button.clicked.connect(self.import_to_main)
+        self.import_button.setEnabled(False)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(False)
+
+        self.image_label = QLabel("Combined output will appear here.")
+        self.image_label.setAlignment(Qt.AlignCenter)
+
+        layout = QVBoxLayout()
+        layout.addWidget(self.load_button)
+        layout.addWidget(self.combine_button)
+        layout.addWidget(self.import_button)
+        layout.addWidget(self.image_label)
+        layout.addWidget(self.progress_bar)
+
+        self.setLayout(layout)
+
+        self.combined_data = None
+        self.combined_freqs = None
+        self.combined_time = None
+        self.combined_filename = "Combined_Frequency"
+
+    def load_files(self):
+        files, _ = QFileDialog.getOpenFileNames(self, "Select Two FITS Files", "", "FITS files (*.fit.gz)")
+        if len(files) != 2:
+            QMessageBox.warning(self, "Error", "Please select exactly TWO files.")
+            return
+
+        station1 = files[0].split("/")[-1].split("_")[0]
+        station2 = files[1].split("/")[-1].split("_")[0]
+
+        if station1 != station2:
+            QMessageBox.critical(self, "Error", "You must select consecutive frequency data files from the same station!")
+            return
+
+        self.file_paths = files
+        self.combine_button.setEnabled(True)
+
+    def combine_files(self):
+        from astropy.io import fits
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(10)
+        QApplication.processEvents()
+
+        try:
+            hdul1 = fits.open(self.file_paths[0])
+            data1 = hdul1[0].data
+            freqs1 = hdul1[1].data['frequency'][0]
+            time1 = hdul1[1].data['time'][0]
+            hdul1.close()
+            self.progress_bar.setValue(30)
+            QApplication.processEvents()
+
+            hdul2 = fits.open(self.file_paths[1])
+            data2 = hdul2[0].data
+            freqs2 = hdul2[1].data['frequency'][0]
+            time2 = hdul2[1].data['time'][0]
+            hdul2.close()
+            self.progress_bar.setValue(60)
+            QApplication.processEvents()
+
+            if not np.allclose(time1, time2, rtol=1e-2):
+                QMessageBox.critical(self, "Error", "Time arrays must match to combine frequencies.")
+                self.progress_bar.setVisible(False)
+                return
+
+            self.combined_data = np.vstack([data1, data2])
+            self.combined_freqs = np.concatenate([freqs1, freqs2])
+            self.combined_time = time1
+            self.progress_bar.setValue(80)
+            QApplication.processEvents()
+
+            # Plot image
+            fig, ax = plt.subplots(figsize=(6, 4))
+            extent = [0, self.combined_time[-1], self.combined_freqs[-1], self.combined_freqs[0]]
+            cmap = mcolors.LinearSegmentedColormap.from_list("custom", [(0.0, 'blue'), (0.5, 'red'), (1.0, 'yellow')])
+            ax.imshow(self.combined_data, aspect='auto', extent=extent, cmap=cmap)
+            ax.set_xlabel("Time [s]")
+            ax.set_ylabel("Frequency [MHz]")
+            # Extract base filenames (e.g., 'BIR_20240720_123000_123000_00.fit.gz')
+            fname1 = os.path.basename(self.file_paths[0])
+            fname2 = os.path.basename(self.file_paths[1])
+
+            # Extract focus codes (last 2 digits before .fit.gz, assuming filename ends with _00.fit.gz or _01.fit.gz etc.)
+            focus1 = fname1.split("_")[-1].split(".")[0]
+            focus2 = fname2.split("_")[-1].split(".")[0]
+
+            # Extract common base (e.g., remove focus code and extension)
+            base_name = "_".join(fname1.split("_")[:-1])
+
+            # Set title with base + both focus codes
+            ax.set_title(f"{base_name}_{focus1}+{focus2} (Combined Frequency)")
+
+            self.combined_title = f"{base_name}_{focus1}+{focus2} (Combined Frequency)"
+            ax.set_title(self.combined_title)
+
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png')
+            buf.seek(0)
+            img = QImage()
+            img.loadFromData(buf.read())
+            self.image_label.setPixmap(QPixmap.fromImage(img).scaledToWidth(550))
+            buf.close()
+            plt.close(fig)
+
+            self.progress_bar.setValue(100)
+            QApplication.processEvents()
+            self.import_button.setEnabled(True)
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+            self.progress_bar.setVisible(False)
+
+    def import_to_main(self):
+        if self.combined_data is None or self.combined_freqs is None or self.combined_time is None:
+            QMessageBox.warning(self, "No Data", "Please combine the files first.")
+            return
+        self.main_window.raw_data = self.combined_data
+        self.main_window.freqs = self.combined_freqs
+        self.main_window.time = self.combined_time
+        self.main_window.filename = self.combined_title  # ✅ update filename as the title
+        self.main_window.plot_data(self.combined_data, title="Raw Data (Combined Frequency)")
+        self.close()
+
+class CombineTimeDialog(QDialog):
+    def __init__(self, main_window, parent=None):
+        super().__init__(parent)
+        self.main_window = main_window
+        self.setWindowTitle("Combine Time Ranges")
+        self.setMinimumWidth(600)
+
+        self.file_paths = []
+        self.combined_data = None
+
+        # Buttons
+        self.load_button = QPushButton("Import FITS Files")
+        self.load_button.clicked.connect(self.load_files)
+
+        self.combine_button = QPushButton("Combine")
+        self.combine_button.clicked.connect(self.combine_files)
+        self.combine_button.setEnabled(False)
+
+        self.import_button = QPushButton("Import to Analyzer")
+        self.import_button.clicked.connect(self.import_to_main)
+        self.import_button.setEnabled(False)
+
+        # Progress Bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(False)
+
+        # Output Image Preview
+        self.image_label = QLabel("Combined output will appear here.")
+        self.image_label.setAlignment(Qt.AlignCenter)
+
+        # Layout
+        layout = QVBoxLayout()
+        layout.addWidget(self.load_button)
+        layout.addWidget(self.combine_button)
+        layout.addWidget(self.import_button)
+        layout.addWidget(self.image_label)
+        layout.addWidget(self.progress_bar)
+        self.setLayout(layout)
+
+    def load_files(self):
+        files, _ = QFileDialog.getOpenFileNames(self, "Select 2 FITS Files", "", "FITS files (*.fit.gz)")
+        if len(files) != 2:
+            QMessageBox.warning(self, "Error", "Please select exactly 2 FITS files.")
+            return
+
+        try:
+            # Extract filename components
+            f1 = os.path.basename(files[0])
+            f2 = os.path.basename(files[1])
+            parts1 = f1.split("_")
+            parts2 = f2.split("_")
+
+            # Must match station and date
+            if parts1[0] != parts2[0] or parts1[1] != parts2[1]:
+                raise ValueError("Different station or date")
+
+            # Extract time as datetime
+            from datetime import datetime
+            t1 = datetime.strptime(parts1[2], "%H%M%S")
+            t2 = datetime.strptime(parts2[2], "%H%M%S")
+            diff_sec = abs((t2 - t1).total_seconds())
+
+            if not (800 <= diff_sec <= 1000):  # approx 15min ±1.5min
+                raise ValueError("Not consecutive in time")
+
+            # Save sorted paths
+            self.file_paths = sorted(files, key=lambda f: os.path.basename(f).split("_")[2])
+            self.combine_button.setEnabled(True)
+
+        except Exception:
+            QMessageBox.critical(self, "Invalid Selection", "You must select consecutive time data files from the same station!")
+
+    def combine_files(self):
+        if len(self.file_paths) != 2:
+            QMessageBox.warning(self, "Error", "Load 2 valid FITS files first.")
+            return
+
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(10)
+
+        try:
+            hdul1 = fits.open(self.file_paths[0])
+            hdul2 = fits.open(self.file_paths[1])
+            self.progress_bar.setValue(30)
+
+            data1 = hdul1[0].data
+            data2 = hdul2[0].data
+            freqs1 = hdul1[1].data["frequency"][0]
+            freqs2 = hdul2[1].data["frequency"][0]
+            time1 = hdul1[1].data["time"][0]
+            time2 = hdul2[1].data["time"][0]
+
+            if not np.allclose(freqs1, freqs2):
+                raise ValueError("Frequencies must match for time combination!")
+
+            combined_data = np.concatenate((data1, data2), axis=1)
+            combined_time = np.concatenate((time1, time2))
+
+            self.main_window.freqs = freqs1
+            self.main_window.time = combined_time
+            self.combined_data = combined_data
+
+            self.progress_bar.setValue(80)
+
+            # Plot preview
+            fig, ax = plt.subplots(figsize=(6, 4))
+            extent = [0, combined_time[-1], freqs1[-1], freqs1[0]]
+            cmap = LinearSegmentedColormap.from_list('custom_cmap', [(0, 'darkblue'), (1, 'orange')])
+            im = ax.imshow(combined_data, aspect='auto', extent=extent, cmap=cmap)
+            ax.set_xlabel("Time [s]")
+            ax.set_ylabel("Frequency [MHz]")
+            ax.set_title("Combined Time Plot")
+            fig.tight_layout()
+
+            preview_path = "preview_combined_time.png"
+            fig.savefig(preview_path, dpi=100)
+            plt.close(fig)
+
+            self.image_label.setPixmap(QPixmap(preview_path).scaled(550, 350, Qt.KeepAspectRatio))
+            self.progress_bar.setValue(100)
+            self.import_button.setEnabled(True)
+
+            # Set filename
+            base1 = os.path.basename(self.file_paths[0]).split(".")[0]
+            self.main_window.filename = base1 + "_combined_time"
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to combine:\n{str(e)}")
+
+    def import_to_main(self):
+        if self.combined_data is not None:
+            self.main_window.raw_data = self.combined_data
+            self.main_window.plot_data(self.combined_data, title="Combined Time")
+            self.close()
+
+
+
+
+
 
 
 
