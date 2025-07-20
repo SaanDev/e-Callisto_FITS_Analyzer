@@ -10,6 +10,7 @@ from matplotlib.path import Path
 from astropy.io import fits
 from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.colors as mcolors
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 import csv
 import matplotlib.pyplot as plt
 import io
@@ -31,6 +32,10 @@ class MainWindow(QMainWindow):
 
         # Canvas
         self.canvas = MplCanvas(self, width=10, height=6)
+
+        # Colorbar
+        self.current_colorbar = None
+        self.current_cax = None
 
         #Statusbar
         self.setStatusBar(QStatusBar())
@@ -259,21 +264,38 @@ class MainWindow(QMainWindow):
             self.reset_selection_button.setEnabled(True)
             self.statusBar().showMessage("Noise reduction applied", 5000)
 
-    def plot_data(self, data, title="Dynamic Spectrum"):
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-        cmap = LinearSegmentedColormap.from_list('custom_cmap', [(0, 'darkblue'), (1, 'orange')])
+    def plot_data(self, data, title="Dynamic Spectrum"):
+        self.canvas.ax.clear()
+
+        # Remove old colorbar axis if it exists
+        if self.current_cax is not None:
+            self.current_cax.remove()
+            self.current_cax = None
+            self.current_colorbar = None
+
+        # Custom colormap
         colors = [(0.0, 'blue'), (0.5, 'red'), (1.0, 'yellow')]
         custom_cmap = mcolors.LinearSegmentedColormap.from_list('custom_RdYlBu', colors)
 
-        self.canvas.ax.clear()
         extent = [0, self.time[-1], self.freqs[-1], self.freqs[0]]
-        self.canvas.ax.imshow(data, aspect='auto', extent=extent, cmap=custom_cmap)
+
+        # Use divider to allocate space for colorbar
+        divider = make_axes_locatable(self.canvas.ax)
+        cax = divider.append_axes("right", size="5%", pad=0.1)
+        self.current_cax = cax  # <- Store reference to remove later
+
+        im = self.canvas.ax.imshow(data, aspect='auto', extent=extent, cmap=custom_cmap)
+        self.current_colorbar = self.canvas.figure.colorbar(im, cax=cax)
+        self.current_colorbar.set_label("Intensity", fontsize=11)
+
         self.canvas.ax.set_xlabel("Time [s]")
         self.canvas.ax.set_ylabel("Frequency [MHz]")
         self.canvas.ax.set_title(f"{self.filename} - {title}", fontsize=14)
         self.canvas.draw()
-        self.current_plot_type = title
 
+        self.current_plot_type = title
         self.noise_button.setEnabled(True)
         self.reset_all_button.setEnabled(True)
         self.statusBar().showMessage(f"Loaded: {self.filename}", 5000)
@@ -392,8 +414,8 @@ class MainWindow(QMainWindow):
             self,
             "About e-Callisto FITS Analyzer",
             "This application is for analyzing solar radio data from e-Callisto.\n\n"
-            "Developed by Sahan Liyanage — 2025\n\n"
-            "All Rights Reserved"
+            "Developed by Sahan S Liyanage\n\n"
+            "2025 Copyright© All Rights Reserved"
         )
 
     def reset_selection(self):
@@ -591,8 +613,8 @@ class MaxIntensityPlotDialog(QDialog):
             self,
             "About e-Callisto FITS Analyzer (v0.05)",
             "This application is for analyzing solar radio data from e-CALLISTO Network.\n\n"
-            "Developed by Sahan Liyanage — 2025\n\n"
-            "All Rights Reserved"
+            "Developed by Sahan S Liyanage\n\n"
+            "2025 Copyright© All Rights Reserved"
         )
 
     def open_analyze_window(self):
