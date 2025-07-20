@@ -10,6 +10,8 @@ OPTIONS = {
         'sklearn',
         'importlib_metadata',
         'csv',
+        'io',
+        'os',
     ],
     'iconfile': 'icon.icns',  # optional
 }
