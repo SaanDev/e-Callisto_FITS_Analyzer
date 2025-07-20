@@ -177,9 +177,10 @@ class MainWindow(QMainWindow):
         # Sidebar layout with thresholds and buttons
         side_panel = QVBoxLayout()
         side_panel.addWidget(thresh_group)
-        side_panel.addSpacing(10)
-        side_panel.addLayout(button_layout)
+        side_panel.addSpacing(5)
         side_panel.addWidget(graph_group)
+        side_panel.addLayout(button_layout)
+
 
         # Main layout with side panel and canvas
         main_layout = QHBoxLayout()
