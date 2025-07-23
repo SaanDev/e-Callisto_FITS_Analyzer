@@ -286,7 +286,7 @@ class MainWindow(QMainWindow):
         cax = divider.append_axes("right", size="5%", pad=0.1)
         self.current_cax = cax  # <- Store reference to remove later
 
-        im = self.canvas.ax.imshow(data, aspect='auto', extent=extent, cmap=custom_cmap)
+        im = self.canvas.ax.imshow(data, aspect='auto', extent=extent, cmap="magma")
         self.current_colorbar = self.canvas.figure.colorbar(im, cax=cax)
         self.current_colorbar.set_label("Intensity", fontsize=11)
 
@@ -311,7 +311,7 @@ class MainWindow(QMainWindow):
 
         self.canvas.ax.clear()
         extent = [0, self.time[-1], self.freqs[-1], self.freqs[0]]
-        self.canvas.ax.imshow(self.noise_reduced_data, aspect='auto', extent=extent, cmap=custom_cmap)
+        self.canvas.ax.imshow(self.noise_reduced_data, aspect='auto', extent=extent, cmap="magma")
         self.canvas.ax.set_title("Draw around the burst")
         self.canvas.draw()
 
@@ -338,7 +338,7 @@ class MainWindow(QMainWindow):
 
         self.canvas.ax.clear()
         extent = [0, self.time[-1], self.freqs[-1], self.freqs[0]]
-        self.canvas.ax.imshow(burst_isolated, aspect='auto', extent=extent, cmap=custom_cmap)
+        self.canvas.ax.imshow(burst_isolated, aspect='auto', extent=extent, cmap="magma")
         self.canvas.ax.set_title("Isolated Burst")
         self.canvas.ax.set_xlabel("Time [s]")
         self.canvas.ax.set_ylabel("Frequency [MHz]")
