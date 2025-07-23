@@ -26,7 +26,7 @@ class MplCanvas(FigureCanvas):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("e-CALLISTO FITS Analyzer (v0.05)")
+        self.setWindowTitle("e-CALLISTO FITS Analyzer")
         self.resize(1000, 700)
         self.setMinimumSize(1440, 786)
 
