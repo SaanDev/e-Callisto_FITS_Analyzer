@@ -413,9 +413,11 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "About e-Callisto FITS Analyzer",
-            "This application is for analyzing solar radio data from e-Callisto.\n\n"
+            "e-CALLISTO FITS Analyzer version 1.0.\n\n"
             "Developed by Sahan S Liyanage\n\n"
-            "2025 Copyright© All Rights Reserved"
+            "Astronomical and Space Science Unit\n"
+            "University of Colombo, Sri Lanka\n\n"
+            "2025©Copyright, All Rights Reserved."
         )
 
     def reset_selection(self):
@@ -611,10 +613,12 @@ class MaxIntensityPlotDialog(QDialog):
     def show_about_dialog(self):
         QMessageBox.information(
             self,
-            "About e-Callisto FITS Analyzer (v0.05)",
-            "This application is for analyzing solar radio data from e-CALLISTO Network.\n\n"
+            "About e-Callisto FITS Analyzer",
+            "e-CALLISTO FITS Analyzer version 1.0.\n\n"
             "Developed by Sahan S Liyanage\n\n"
-            "2025 Copyright© All Rights Reserved"
+            "Astronomical and Space Science Unit\n"
+            "University of Colombo, Sri Lanka\n\n"
+            "2025©Copyright, All Rights Reserved."
         )
 
     def open_analyze_window(self):
