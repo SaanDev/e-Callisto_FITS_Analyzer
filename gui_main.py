@@ -384,7 +384,7 @@ class MainWindow(QMainWindow):
         if not file_path:
             return
 
-        self.canvas.fig.savefig(file_path, dpi=300, bbox_inches="tight")
+        self.canvas.figure.savefig(file_path, dpi=300, bbox_inches="tight")
         print(f"Saved image: {file_path}")
 
     def reset_all(self):
