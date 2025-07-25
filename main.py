@@ -3,7 +3,6 @@ from gui_main import MainWindow
 import sys
 import faulthandler
 
-
 faulthandler.enable()
 
 if __name__ == "__main__":

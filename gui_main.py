@@ -45,9 +45,9 @@ class MainWindow(QMainWindow):
         self.setStatusBar(QStatusBar())
 
         # Threshold input fields
-        self.lower_thresh_input = QLineEdit("")
+        self.lower_thresh_input = QLineEdit("-5")
         self.lower_thresh_input.setMaximumWidth(80)
-        self.upper_thresh_input = QLineEdit("")
+        self.upper_thresh_input = QLineEdit("20")
         self.upper_thresh_input.setMaximumWidth(80)
 
         # Labels
@@ -55,27 +55,35 @@ class MainWindow(QMainWindow):
         upper_label = QLabel("Upper Threshold:")
 
         # Buttons
-        self.load_button = QPushButton("Load FITS File")
-        self.load_button.setMaximumWidth(200)
-        self.noise_button = QPushButton("Apply Noise Reduction")
-        self.noise_button.setMaximumWidth(200)
-        self.lasso_button = QPushButton("Isolate Burst")
-        self.lasso_button.setMaximumWidth(200)
-        self.max_plot_button = QPushButton("Plot Maximum Intensities")
-        self.max_plot_button.setMaximumWidth(250)
+        button_defs = [
+            ("Load FITS File", "load_button"),
+            ("Apply Noise Reduction", "noise_button"),
+            ("Estimate Drift Rate", "drift_button"),
+            ("Isolate Burst", "lasso_button"),
+            ("Plot Maximum Intensities", "max_plot_button"),
+            ("Reset Selection", "reset_selection_button"),
+            ("Reset All", "reset_all_button"),
+            ("Close Application", "close_button")
+        ]
+
+        for label, attr in button_defs:
+            btn = QPushButton(label)
+            btn.setMinimumWidth(180)
+            btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            setattr(self, attr, btn)
 
         # Threshold input fields using QDoubleSpinBox
         self.lower_thresh_input = QDoubleSpinBox()
-        self.lower_thresh_input.setRange(-100, 100)
+        self.lower_thresh_input.setRange(-1000, 1000)
         self.lower_thresh_input.setValue(0)
-        self.lower_thresh_input.setDecimals(2)
+        self.lower_thresh_input.setDecimals(0)
         self.lower_thresh_input.setSingleStep(1)
         self.lower_thresh_input.setFixedWidth(100)
 
         self.upper_thresh_input = QDoubleSpinBox()
-        self.upper_thresh_input.setRange(-100, 100)
+        self.upper_thresh_input.setRange(-1000, 1000)
         self.upper_thresh_input.setValue(0)
-        self.upper_thresh_input.setDecimals(2)
+        self.upper_thresh_input.setDecimals(0)
         self.upper_thresh_input.setSingleStep(1)
         self.upper_thresh_input.setFixedWidth(100)
 
@@ -116,6 +124,7 @@ class MainWindow(QMainWindow):
         button_layout = QVBoxLayout()
         button_layout.addWidget(self.load_button)
         button_layout.addWidget(self.noise_button)
+        button_layout.addWidget(self.drift_button)
         button_layout.addWidget(self.lasso_button)
         button_layout.addWidget(self.max_plot_button)
         button_layout.addWidget(self.reset_selection_button)
@@ -123,10 +132,12 @@ class MainWindow(QMainWindow):
         button_layout.addWidget(self.close_button)
 
         self.noise_button.setEnabled(False)
+        self.drift_button.setEnabled(False)
         self.lasso_button.setEnabled(False)
         self.max_plot_button.setEnabled(False)
         self.reset_selection_button.setEnabled(False)
         self.reset_all_button.setEnabled(False)
+
 
         # Sidebar layout with thresholds and buttons
         side_panel = QVBoxLayout()
@@ -163,12 +174,6 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.export_action)
         self.export_action.triggered.connect(self.export_figure)
 
-        # --- About (inside File menu) ---
-        #file_menu.addSeparator()
-        #about_action = QAction("About", self)
-        #bout_action.setMenuRole(QAction.NoRole)  # 🛑 Prevent macOS hijacking
-        #file_menu.addAction(about_action)
-
 
         # Edit Menu
         edit_menu = menubar.addMenu("Edit")
@@ -202,6 +207,7 @@ class MainWindow(QMainWindow):
         # Signals
         self.load_button.clicked.connect(self.load_file)
         self.noise_button.clicked.connect(self.apply_noise)
+        self.drift_button.clicked.connect(self.activate_drift_tool)
         self.lasso_button.clicked.connect(self.activate_lasso)
         self.max_plot_button.clicked.connect(self.plot_max_intensities)
         self.open_action.triggered.connect(self.load_file)
@@ -263,6 +269,7 @@ class MainWindow(QMainWindow):
             self.noise_reduced_data = data
             self.noise_reduced_original = data.copy()  # backup
             self.plot_data(data, title="Noise Reduced")
+            self.drift_button.setEnabled(True)
             self.lasso_button.setEnabled(True)
             self.max_plot_button.setEnabled(True)
             self.reset_selection_button.setEnabled(True)
@@ -319,6 +326,47 @@ class MainWindow(QMainWindow):
         self.noise_button.setEnabled(True)
         self.reset_all_button.setEnabled(True)
         self.statusBar().showMessage(f"Loaded: {self.filename}", 5000)
+
+    def activate_drift_tool(self):
+        self.statusBar().showMessage("Click multiple points along the burst. Right-click or double-click to finish.",
+                                     8000)
+        self.drift_points = []
+        self.drift_click_cid = self.canvas.mpl_connect("button_press_event", self.on_drift_point_click)
+
+    def on_drift_point_click(self, event):
+        if not event.inaxes:
+            return
+
+        # Right-click or double-click to finish
+        if event.button == 3 or event.dblclick:
+            self.finish_drift_estimation()
+            return
+
+        self.drift_points.append((event.xdata, event.ydata))
+        self.canvas.ax.plot(event.xdata, event.ydata, 'w*')
+        self.canvas.draw()
+
+    def finish_drift_estimation(self):
+        self.canvas.mpl_disconnect(self.drift_click_cid)
+
+        if len(self.drift_points) < 2:
+            self.statusBar().showMessage("Need at least two points to estimate drift.", 4000)
+            return
+
+        drift_rates = []
+        for i in range(len(self.drift_points) - 1):
+            x1, y1 = self.drift_points[i]
+            x2, y2 = self.drift_points[i + 1]
+            drift = (y2 - y1) / (x2 - x1)
+            drift_rates.append(drift)
+            # Draw line between points
+            self.canvas.ax.plot([x1, x2], [y1, y2], linestyle='--', color='lime')
+
+        avg_drift = np.mean(drift_rates)
+        self.canvas.ax.legend(["Drift Segments"])
+        self.canvas.draw()
+
+        self.statusBar().showMessage(f"Average Drift Rate: {avg_drift:.3f} MHz/s", 12000)
 
     def activate_lasso(self):
         if self.noise_reduced_data is None:
@@ -485,6 +533,7 @@ class MainWindow(QMainWindow):
 
         # Disable buttons
         self.noise_button.setEnabled(False)
+        self.drift_button.setEnabled(False)
         self.lasso_button.setEnabled(False)
         self.max_plot_button.setEnabled(False)
         self.reset_selection_button.setEnabled(False)
