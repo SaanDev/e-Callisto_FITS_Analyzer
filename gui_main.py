@@ -4,6 +4,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QAction, QPixmap, QImage
 from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.widgets import LassoSelector
 from matplotlib.path import Path
@@ -15,6 +16,9 @@ import csv
 import matplotlib.pyplot as plt
 import io
 import os
+
+def start_combine(self):
+    QTimer.singleShot(100, self.combine_files)  # delays execution and avoids UI freeze
 
 class MplCanvas(FigureCanvas):
     def __init__(self, parent=None, width=10, height=6, dpi=100):
@@ -264,16 +268,32 @@ class MainWindow(QMainWindow):
             self.reset_selection_button.setEnabled(True)
             self.statusBar().showMessage("Noise reduction applied", 5000)
 
-    from mpl_toolkits.axes_grid1 import make_axes_locatable
 
     def plot_data(self, data, title="Dynamic Spectrum"):
+        QTimer.singleShot(0, lambda: self._plot_data_internal(data, title))
+
+    def _plot_data_internal(self, data, title="Dynamic Spectrum"):
+
+        if self.time is None or self.freqs is None:
+            print("Time or frequency data not loaded. Skipping plot.")
+            return
+
+        if not hasattr(self.canvas, 'ax') or self.canvas.ax is None:
+            print("Canvas not ready yet")
+            return
+
         self.canvas.ax.clear()
 
-        # Remove old colorbar axis if it exists
-        if self.current_cax is not None:
-            self.current_cax.remove()
-            self.current_cax = None
-            self.current_colorbar = None
+        # Remove old colorbar axis safely
+        try:
+            if self.current_cax:
+                self.current_cax.remove()
+                self.current_cax = None
+            if self.current_colorbar:
+                self.current_colorbar.remove()
+                self.current_colorbar = None
+        except Exception as e:
+            print("Error removing previous colorbar:", e)
 
         # Custom colormap
         colors = [(0.0, 'blue'), (0.5, 'red'), (1.0, 'yellow')]
@@ -299,6 +319,7 @@ class MainWindow(QMainWindow):
         self.noise_button.setEnabled(True)
         self.reset_all_button.setEnabled(True)
         self.statusBar().showMessage(f"Loaded: {self.filename}", 5000)
+
 
     def activate_lasso(self):
         if self.noise_reduced_data is None:
@@ -390,6 +411,23 @@ class MainWindow(QMainWindow):
     def reset_all(self):
         # Clear canvas
         self.canvas.ax.clear()
+
+        # Safely remove colorbar
+        if self.current_colorbar is not None:
+            try:
+                if self.current_colorbar.ax is not None:
+                    self.current_colorbar.remove()
+            except AttributeError:
+                pass
+            self.current_colorbar = None
+
+        if self.current_cax is not None:
+            try:
+                self.current_cax.remove()
+            except Exception:
+                pass
+            self.current_cax = None
+
         self.canvas.draw()
 
         # Clear internal variables
@@ -406,7 +444,6 @@ class MainWindow(QMainWindow):
         self.upper_thresh_input.setValue(0.0)
 
         self.statusBar().showMessage("All reset", 4000)
-
         print("Application reset to initial state.")
 
     def show_about_dialog(self):
@@ -423,11 +460,14 @@ class MainWindow(QMainWindow):
     def reset_selection(self):
         if self.noise_reduced_original is not None:
             self.noise_reduced_data = self.noise_reduced_original.copy()
-            self.plot_data(self.noise_reduced_data, title="Noise Reduced")
+            if self.time is not None and self.freqs is not None:
+                self.plot_data(self.noise_reduced_data, title="Noise Reduced")
             self.lasso_mask = None
             self.lasso = None
             self.statusBar().showMessage("Selection Reset", 4000)
             print("Lasso selection reset. Original noise-reduced data restored.")
+        else:
+            print("No noise-reduced backup found. Reset skipped.")
 
     def open_combine_freq_window(self):
         dialog = CombineFrequencyDialog(self)
