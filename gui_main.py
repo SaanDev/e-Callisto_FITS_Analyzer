@@ -320,25 +320,30 @@ class MainWindow(QMainWindow):
         self.reset_all_button.setEnabled(True)
         self.statusBar().showMessage(f"Loaded: {self.filename}", 5000)
 
-
     def activate_lasso(self):
         if self.noise_reduced_data is None:
-            print("Apply noise reduction first.")
+            QMessageBox.warning(self, "Error", "Please apply noise reduction before isolating a burst.")
             return
 
-        cmap = LinearSegmentedColormap.from_list('custom_cmap', [(0, 'darkblue'), (1, 'orange')])
-        colors = [(0.0, 'blue'), (0.5, 'red'), (1.0, 'yellow')]
-        custom_cmap = mcolors.LinearSegmentedColormap.from_list('custom_RdYlBu', colors)
+        # Disconnect old lasso
+        if self.lasso:
+            try:
+                self.lasso.disconnect_events()
+            except Exception:
+                pass
+            self.lasso = None
 
-        self.canvas.ax.clear()
-        extent = [0, self.time[-1], self.freqs[-1], self.freqs[0]]
-        self.canvas.ax.imshow(self.noise_reduced_data, aspect='auto', extent=extent, cmap=custom_cmap)
         self.canvas.ax.set_title("Draw around the burst")
         self.canvas.draw()
 
         self.lasso = LassoSelector(self.canvas.ax, onselect=self.on_lasso_select)
 
     def on_lasso_select(self, verts):
+
+        if self.noise_reduced_data is None:
+            print("Lasso used before data was prepared. Ignoring.")
+            return
+
         path = Path(verts)
 
         ny, nx = self.noise_reduced_data.shape
@@ -349,26 +354,61 @@ class MainWindow(QMainWindow):
         coords = np.column_stack((X.flatten(), Y.flatten()))
         mask = path.contains_points(coords).reshape(ny, nx)
 
-        # Apply mask
+        self.lasso_mask = mask  # store for use later
+
+        # Safely disconnect the lasso tool
+        if self.lasso:
+            try:
+                self.lasso.disconnect_events()
+            except Exception:
+                pass
+            self.lasso = None
+
+        # Defer drawing to avoid crash during event handling
+        QTimer.singleShot(0, lambda: self._plot_isolated_burst(mask))
+
+    def _plot_isolated_burst(self, mask):
         burst_isolated = np.zeros_like(self.noise_reduced_data)
         burst_isolated[mask] = self.noise_reduced_data[mask]
 
-        cmap = LinearSegmentedColormap.from_list('custom_cmap', [(0, 'darkblue'), (1, 'orange')])
+        self.canvas.ax.clear()
+
+        # Safely remove previous colorbar and colorbar axis
+        if self.current_colorbar:
+            try:
+                self.current_colorbar.remove()
+            except Exception:
+                pass
+            self.current_colorbar = None
+
+        if self.current_cax:
+            try:
+                self.current_cax.remove()
+            except Exception:
+                pass
+            self.current_cax = None
+
+        # Use your consistent colormap
         colors = [(0.0, 'blue'), (0.5, 'red'), (1.0, 'yellow')]
         custom_cmap = mcolors.LinearSegmentedColormap.from_list('custom_RdYlBu', colors)
 
-        self.canvas.ax.clear()
         extent = [0, self.time[-1], self.freqs[-1], self.freqs[0]]
-        self.canvas.ax.imshow(burst_isolated, aspect='auto', extent=extent, cmap=custom_cmap)
+
+        # Add new colorbar
+        divider = make_axes_locatable(self.canvas.ax)
+        cax = divider.append_axes("right", size="5%", pad=0.1)
+        self.current_cax = cax
+
+        im = self.canvas.ax.imshow(burst_isolated, aspect='auto', extent=extent, cmap=custom_cmap)
+        self.current_colorbar = self.canvas.figure.colorbar(im, cax=cax)
+        self.current_colorbar.set_label("Intensity", fontsize=11)
+
         self.canvas.ax.set_title("Isolated Burst")
         self.canvas.ax.set_xlabel("Time [s]")
         self.canvas.ax.set_ylabel("Frequency [MHz]")
         self.canvas.draw()
 
-        self.lasso_mask = mask
         self.noise_reduced_data = burst_isolated
-        self.lasso.disconnect_events()
-        self.lasso = None
 
         self.statusBar().showMessage("Burst isolated using lasso", 4000)
 
@@ -409,41 +449,47 @@ class MainWindow(QMainWindow):
         print(f"Saved image: {file_path}")
 
     def reset_all(self):
+        # Safely remove colorbar
+        try:
+            if self.current_colorbar and self.current_colorbar.ax:
+                self.current_colorbar.remove()
+        except Exception:
+            pass
+        self.current_colorbar = None
+
+        try:
+            if self.current_cax:
+                self.current_cax.remove()
+        except Exception:
+            pass
+        self.current_cax = None
+
         # Clear canvas
         self.canvas.ax.clear()
-
-        # Safely remove colorbar
-        if self.current_colorbar is not None:
-            try:
-                if self.current_colorbar.ax is not None:
-                    self.current_colorbar.remove()
-            except AttributeError:
-                pass
-            self.current_colorbar = None
-
-        if self.current_cax is not None:
-            try:
-                self.current_cax.remove()
-            except Exception:
-                pass
-            self.current_cax = None
-
         self.canvas.draw()
 
-        # Clear internal variables
+        # Clear data
         self.raw_data = None
         self.freqs = None
         self.time = None
         self.filename = ""
         self.noise_reduced_data = None
+        self.noise_reduced_original = None
         self.lasso_mask = None
         self.current_plot_type = "Raw"
 
-        # Reset text boxes
+        # Reset GUI
         self.lower_thresh_input.setValue(0.0)
         self.upper_thresh_input.setValue(0.0)
-
         self.statusBar().showMessage("All reset", 4000)
+
+        # Disable buttons
+        self.noise_button.setEnabled(False)
+        self.lasso_button.setEnabled(False)
+        self.max_plot_button.setEnabled(False)
+        self.reset_selection_button.setEnabled(False)
+        self.reset_all_button.setEnabled(False)
+
         print("Application reset to initial state.")
 
     def show_about_dialog(self):
