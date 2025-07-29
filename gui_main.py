@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (
     QMainWindow, QLineEdit, QDialog, QMenuBar, QMessageBox, QDoubleSpinBox,
-    QFormLayout, QGroupBox, QStatusBar, QProgressBar, QApplication
+    QFormLayout, QGroupBox, QStatusBar, QProgressBar, QApplication, QMenu
 )
 from PySide6.QtGui import QAction, QPixmap, QImage
 from PySide6.QtCore import Qt
@@ -12,6 +12,7 @@ from astropy.io import fits
 from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.colors as mcolors
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+from matplotlib.ticker import FuncFormatter, ScalarFormatter
 import csv
 import matplotlib.pyplot as plt
 import io
@@ -33,6 +34,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("e-CALLISTO FITS Analyzer")
         self.resize(1000, 700)
         self.setMinimumSize(1440, 786)
+
+        self.use_utc = False
+        self.ut_start_sec = None
 
         # Canvas
         self.canvas = MplCanvas(self, width=10, height=6)
@@ -192,6 +196,24 @@ class MainWindow(QMainWindow):
         combine_time_action.triggered.connect(self.open_combine_time_window)
         combine_menu.addAction(combine_time_action)
 
+        # Graph Menu
+        graph_menu = menubar.addMenu("Graph")
+
+        xaxis_unit_menu = QMenu("x-axis units", self)
+        self.xaxis_sec_action = QAction("Seconds (s)", self, checkable=True)
+        self.xaxis_ut_action = QAction("Universal Time (UT)", self, checkable=True)
+
+        # Make "Seconds" default
+        self.xaxis_sec_action.setChecked(True)
+
+        xaxis_unit_menu.addAction(self.xaxis_sec_action)
+        xaxis_unit_menu.addAction(self.xaxis_ut_action)
+        graph_menu.addMenu(xaxis_unit_menu)
+
+        # Toggle logic
+        self.xaxis_sec_action.triggered.connect(self.set_axis_to_seconds)
+        self.xaxis_ut_action.triggered.connect(self.set_axis_to_utc)
+
         # About Menu
         about_menu = menubar.addMenu("About")
         about_action = QAction("About", self)
@@ -250,6 +272,15 @@ class MainWindow(QMainWindow):
             self.raw_data = hdul[0].data
             self.freqs = hdul[1].data['frequency'][0]
             self.time = hdul[1].data['time'][0]
+            hdr = hdul[0].header
+            hh, mm, ss = hdr['TIME-OBS'].split(":")
+            hh = int(hh)
+            mm = int(mm)
+            ss = float(ss)  # allow fractional seconds
+            self.ut_start_sec = hh * 3600 + mm * 60 + ss
+
+            self.ut_start_sec = hh * 3600 + mm * 60 + ss
+
             hdul.close()
             self.plot_data(self.raw_data, title="Raw Data")
 
@@ -302,24 +333,27 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print("Error removing previous colorbar:", e)
 
-        # Custom colormap
+        # Define colormap
         colors = [(0.0, 'blue'), (0.5, 'red'), (1.0, 'yellow')]
         custom_cmap = mcolors.LinearSegmentedColormap.from_list('custom_RdYlBu', colors)
 
+        # x-axis always in seconds, UT formatting handled separately
         extent = [0, self.time[-1], self.freqs[-1], self.freqs[0]]
 
-        # Use divider to allocate space for colorbar
+        # Prepare colorbar axis
         divider = make_axes_locatable(self.canvas.ax)
         cax = divider.append_axes("right", size="5%", pad=0.1)
-        self.current_cax = cax  # <- Store reference to remove later
+        self.current_cax = cax
 
+        # Show image
         im = self.canvas.ax.imshow(data, aspect='auto', extent=extent, cmap=custom_cmap)
         self.current_colorbar = self.canvas.figure.colorbar(im, cax=cax)
         self.current_colorbar.set_label("Intensity", fontsize=11)
 
-        self.canvas.ax.set_xlabel("Time [s]")
         self.canvas.ax.set_ylabel("Frequency [MHz]")
         self.canvas.ax.set_title(f"{self.filename} - {title}", fontsize=14)
+
+        self.format_axes()  # Format x-axis based on user selection (seconds/UT)
         self.canvas.draw()
 
         self.current_plot_type = title
@@ -571,6 +605,37 @@ class MainWindow(QMainWindow):
     def open_combine_time_window(self):
         dialog = CombineTimeDialog(self)
         dialog.exec()
+
+    def set_axis_to_seconds(self):
+        self.use_utc = False
+        self.xaxis_sec_action.setChecked(True)
+        self.xaxis_ut_action.setChecked(False)
+        if self.raw_data is not None:
+            self.plot_data(self.raw_data, title=self.current_plot_type)
+
+    def set_axis_to_utc(self):
+        self.use_utc = True
+        self.xaxis_sec_action.setChecked(False)
+        self.xaxis_ut_action.setChecked(True)
+        if self.raw_data is not None:
+            self.plot_data(self.raw_data, title=self.current_plot_type)
+
+    def format_axes(self):
+        if self.use_utc and self.ut_start_sec is not None:
+            def format_func(x, pos):
+                total_seconds = self.ut_start_sec + x
+                hours = int(total_seconds // 3600) % 24
+                minutes = int((total_seconds % 3600) // 60)
+                seconds = int(total_seconds % 60)
+                return f"{hours:02d}:{minutes:02d}"
+
+            self.canvas.ax.xaxis.set_major_formatter(FuncFormatter(format_func))
+            self.canvas.ax.set_xlabel("Time [UT]")
+        else:
+            self.canvas.ax.xaxis.set_major_formatter(ScalarFormatter())
+            self.canvas.ax.set_xlabel("Time [s]")
+
+        self.canvas.ax.figure.canvas.draw()
 
 
 class MaxIntensityPlotDialog(QDialog):
