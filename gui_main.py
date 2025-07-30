@@ -1273,94 +1273,86 @@ class CombineTimeDialog(QDialog):
         self.setLayout(layout)
 
     def load_files(self):
-        files, _ = QFileDialog.getOpenFileNames(self, "Select 2 FITS Files", "", "FITS files (*.fit.gz)")
-        if len(files) != 2:
-            QMessageBox.warning(self, "Error", "Please select exactly 2 FITS files.")
+        files, _ = QFileDialog.getOpenFileNames(self, "Select FITS Files to Combine", "", "FITS files (*.fit.gz)")
+        if len(files) < 2:
+            QMessageBox.warning(self, "Error", "Please select at least 2 FITS files.")
             return
 
         try:
-            # Extract filename components
-            f1 = os.path.basename(files[0])
-            f2 = os.path.basename(files[1])
-            parts1 = f1.split("_")
-            parts2 = f2.split("_")
-
-            # Must match station and date
-            if parts1[0] != parts2[0] or parts1[1] != parts2[1]:
-                raise ValueError("Different station or date")
-
-            # Extract time as datetime
             from datetime import datetime
-            t1 = datetime.strptime(parts1[2], "%H%M%S")
-            t2 = datetime.strptime(parts2[2], "%H%M%S")
-            diff_sec = abs((t2 - t1).total_seconds())
 
-            if not (800 <= diff_sec <= 1000):  # approx 15min ±1.5min
-                raise ValueError("Not consecutive in time")
-
-            # Save sorted paths
+            # Sort files by timestamp
             self.file_paths = sorted(files, key=lambda f: os.path.basename(f).split("_")[2])
+
+            # Check station/date and time continuity
+            parts_ref = os.path.basename(self.file_paths[0]).split("_")
+            t_ref = datetime.strptime(parts_ref[2], "%H%M%S")
+
+            for f in self.file_paths[1:]:
+                parts = os.path.basename(f).split("_")
+                if parts[0] != parts_ref[0] or parts[1] != parts_ref[1]:
+                    raise ValueError("Different station or date")
+
+                t_next = datetime.strptime(parts[2], "%H%M%S")
+                diff = abs((t_next - t_ref).total_seconds())
+                if not (800 <= diff <= 1000):  # ~15min ±1.5min
+                    raise ValueError(f"File {f} is not consecutive")
+                t_ref = t_next
+
             self.combine_button.setEnabled(True)
 
-        except Exception:
-            QMessageBox.critical(self, "Invalid Selection", "You must select consecutive time data files from the same station!")
+        except Exception as e:
+            QMessageBox.critical(self, "Invalid Selection", f"Error while validating files:\n{str(e)}")
 
     def combine_files(self):
-        if len(self.file_paths) != 2:
-            QMessageBox.warning(self, "Error", "Load 2 valid FITS files first.")
+        if len(self.file_paths) < 2:
+            QMessageBox.warning(self, "Error", "Please load at least 2 valid FITS files to combine.")
             return
 
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(10)
 
         try:
-            hdul1 = fits.open(self.file_paths[0])
-            hdul2 = fits.open(self.file_paths[1])
-            self.progress_bar.setValue(30)
+            combined_data = None
+            combined_time = None
+            reference_freqs = None
 
-            data1 = hdul1[0].data
-            data2 = hdul2[0].data
-            freqs1 = hdul1[1].data["frequency"][0]
-            freqs2 = hdul2[1].data["frequency"][0]
-            time1 = hdul1[1].data["time"][0]
-            time2 = hdul2[1].data["time"][0]
+            for idx, file_path in enumerate(self.file_paths):
+                hdul = fits.open(file_path)
+                data = hdul[0].data
+                freqs = hdul[1].data["frequency"][0]
+                time = hdul[1].data["time"][0]
 
-            if not np.allclose(freqs1, freqs2):
-                raise ValueError("Frequencies must match for time combination!")
+                if reference_freqs is None:
+                    reference_freqs = freqs
+                elif not np.allclose(freqs, reference_freqs):
+                    raise ValueError("Frequency mismatch in file: " + os.path.basename(file_path))
 
-            # FIX: Ensure time2 follows time1
-            dt1 = time1[1] - time1[0]
-            dt2 = time2[1] - time2[0]
-            assert np.isclose(dt1, dt2), "Time resolutions do not match!"
-            dt = dt1
+                # Compute dt and shift time
+                if idx == 0:
+                    dt = time[1] - time[0]
+                    adjusted_time = time
+                    combined_data = data
+                    combined_time = adjusted_time
+                else:
+                    dt = time[1] - time[0]
+                    shift = combined_time[-1] + dt
+                    adjusted_time = time + shift
+                    combined_data = np.concatenate((combined_data, data), axis=1)
+                    combined_time = np.concatenate((combined_time, adjusted_time))
 
-            time2_shifted = time2 + time1[-1] + dt
-            combined_time = np.concatenate((time1, time2_shifted))
-            # Optional normalization
-            # combined_time = combined_time - combined_time[0]
+                hdul.close()
 
-            combined_data = np.concatenate((data1, data2), axis=1)
-
-            # Compute time step assuming it's uniform
-            dt1 = time1[1] - time1[0]
-            dt2 = time2[1] - time2[0]
-            assert np.isclose(dt1, dt2), "Time resolutions of files differ!"
-            dt = dt1
-
-            # Shift second time array so it follows the first
-            time2_shifted = time2 + time1[-1] + dt
-            combined_time = np.concatenate((time1, time2_shifted))
-
-            self.combined_time = combined_time
-            self.main_window.freqs = freqs1
-            self.main_window.time = combined_time
             self.combined_data = combined_data
+            self.combined_time = combined_time
+            self.main_window.freqs = reference_freqs
+            self.main_window.time = combined_time
 
             self.progress_bar.setValue(80)
 
             # Plot preview
             fig, ax = plt.subplots(figsize=(6, 4))
-            extent = [combined_time[0], combined_time[-1], freqs1[-1], freqs1[0]]
+            extent = [combined_time[0], combined_time[-1], reference_freqs[-1], reference_freqs[0]]
             cmap = LinearSegmentedColormap.from_list('custom_cmap', [(0, 'darkblue'), (1, 'orange')])
             im = ax.imshow(combined_data, aspect='auto', extent=extent, cmap=cmap)
             ax.set_xlabel("Time [s]")
