@@ -1328,9 +1328,30 @@ class CombineTimeDialog(QDialog):
             if not np.allclose(freqs1, freqs2):
                 raise ValueError("Frequencies must match for time combination!")
 
-            combined_data = np.concatenate((data1, data2), axis=1)
-            combined_time = np.concatenate((time1, time2))
+            # FIX: Ensure time2 follows time1
+            dt1 = time1[1] - time1[0]
+            dt2 = time2[1] - time2[0]
+            assert np.isclose(dt1, dt2), "Time resolutions do not match!"
+            dt = dt1
 
+            time2_shifted = time2 + time1[-1] + dt
+            combined_time = np.concatenate((time1, time2_shifted))
+            # Optional normalization
+            # combined_time = combined_time - combined_time[0]
+
+            combined_data = np.concatenate((data1, data2), axis=1)
+
+            # Compute time step assuming it's uniform
+            dt1 = time1[1] - time1[0]
+            dt2 = time2[1] - time2[0]
+            assert np.isclose(dt1, dt2), "Time resolutions of files differ!"
+            dt = dt1
+
+            # Shift second time array so it follows the first
+            time2_shifted = time2 + time1[-1] + dt
+            combined_time = np.concatenate((time1, time2_shifted))
+
+            self.combined_time = combined_time
             self.main_window.freqs = freqs1
             self.main_window.time = combined_time
             self.combined_data = combined_data
@@ -1339,7 +1360,7 @@ class CombineTimeDialog(QDialog):
 
             # Plot preview
             fig, ax = plt.subplots(figsize=(6, 4))
-            extent = [0, combined_time[-1], freqs1[-1], freqs1[0]]
+            extent = [combined_time[0], combined_time[-1], freqs1[-1], freqs1[0]]
             cmap = LinearSegmentedColormap.from_list('custom_cmap', [(0, 'darkblue'), (1, 'orange')])
             im = ax.imshow(combined_data, aspect='auto', extent=extent, cmap=cmap)
             ax.set_xlabel("Time [s]")
@@ -1363,10 +1384,29 @@ class CombineTimeDialog(QDialog):
             QMessageBox.critical(self, "Error", f"Failed to combine:\n{str(e)}")
 
     def import_to_main(self):
-        if self.combined_data is not None:
+        if self.combined_data is not None and self.combined_time is not None:
             self.main_window.raw_data = self.combined_data
+            self.main_window.freqs = self.main_window.freqs  # already set earlier
+            self.main_window.time = self.combined_time
+            self.main_window.filename = self.main_window.filename  # already set earlier
+
+            # Calculate UT start from FITS header of first file
+            try:
+                hdul = fits.open(self.file_paths[0])
+                hdr = hdul[0].header
+                hh, mm, ss = hdr['TIME-OBS'].split(":")
+                hh = int(hh)
+                mm = int(mm)
+                ss = float(ss)
+                self.main_window.ut_start_sec = hh * 3600 + mm * 60 + ss
+                hdul.close()
+            except Exception as e:
+                print("⚠️ Could not extract UT time from first file:", e)
+                self.main_window.ut_start_sec = None
+
             self.main_window.plot_data(self.combined_data, title="Combined Time")
             self.close()
+
 
 
 
