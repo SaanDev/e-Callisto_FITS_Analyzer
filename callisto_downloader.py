@@ -1,4 +1,3 @@
-
 from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QComboBox, QVBoxLayout,
     QHBoxLayout, QDateEdit, QListWidget, QFileDialog, QMessageBox,
@@ -64,11 +63,6 @@ class DownloadTask(QRunnable):
         except Exception:
             self.callback(False)
 
-class PreviewWindow(QMainWindow):
-    def __init__(self, file_path, filename):
-        super().__init__()
-        self.setWindowTitle("FITS Preview: " + filename)
-        self.resize(900, 600)
         with fits.open(file_path) as hdul:
             data = hdul[0].data
             freqs = hdul[1].data['frequency'][0]
@@ -77,11 +71,9 @@ class PreviewWindow(QMainWindow):
         fig = Figure()
         canvas = FigureCanvas(fig)
         ax = fig.add_subplot(111)
-        im = ax.imshow(data, aspect='auto', extent=extent, cmap='inferno', vmin=data.min(), vmax=data.max())
         ax.set_xlabel("Time [s]")
         ax.set_ylabel("Frequency [MHz]")
         fig.colorbar(im, ax=ax)
-        self.setCentralWidget(canvas)
 
 class CallistoDownloaderApp(QDialog):
     def __init__(self):
@@ -321,7 +313,6 @@ class CallistoDownloaderApp(QDialog):
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".fit.gz") as tmp:
                         tmp.write(r.content)
                         tmp_path = tmp.name
-                    win = PreviewWindow(tmp_path, name)
                     win.show()
                     self.preview_windows.append(win)
                 except Exception as e:
