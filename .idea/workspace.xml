@@ -4,10 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="22c2ea24-4065-4bfd-8ffe-617e0297cf9a" name="Changes" comment="Multiple FITS files more than 2 combine enabled.">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/gui_main.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui_main.py" afterDir="false" />
-    </list>
+    <list default="true" id="22c2ea24-4065-4bfd-8ffe-617e0297cf9a" name="Changes" comment="Upgraded to version 1.5.0 with integrating e-CALLISTO FITS Downloader with the application." />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -114,7 +111,7 @@
       <workItem from="1753044327606" duration="302000" />
       <workItem from="1753089187884" duration="1759000" />
       <workItem from="1753290665285" duration="657000" />
-      <workItem from="1753965334310" duration="651000" />
+      <workItem from="1753965334310" duration="757000" />
     </task>
     <task id="LOCAL-00001" summary="Initial commit">
       <option name="closed" value="true" />
@@ -276,7 +273,15 @@
       <option name="project" value="LOCAL" />
       <updated>1753859844044</updated>
     </task>
-    <option name="localTasksCounter" value="21" />
+    <task id="LOCAL-00021" summary="Upgraded to version 1.5.0 with integrating e-CALLISTO FITS Downloader with the application.">
+      <option name="closed" value="true" />
+      <created>1753966063089</created>
+      <option name="number" value="00021" />
+      <option name="presentableId" value="LOCAL-00021" />
+      <option name="project" value="LOCAL" />
+      <updated>1753966063089</updated>
+    </task>
+    <option name="localTasksCounter" value="22" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -319,7 +324,8 @@
     <MESSAGE value="New menu &quot;Graph&quot; added and x-axis unit changer between seconds and UT added." />
     <MESSAGE value="Combined Time graphs x-axis calibration bugs were fixed." />
     <MESSAGE value="Multiple FITS files more than 2 combine enabled." />
-    <option name="LAST_COMMIT_MESSAGE" value="Multiple FITS files more than 2 combine enabled." />
+    <MESSAGE value="Upgraded to version 1.5.0 with integrating e-CALLISTO FITS Downloader with the application." />
+    <option name="LAST_COMMIT_MESSAGE" value="Upgraded to version 1.5.0 with integrating e-CALLISTO FITS Downloader with the application." />
   </component>
   <component name="XDebuggerManager">
     <breakpoint-manager>
@@ -334,7 +340,7 @@
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
     <SUITE FILE_PATH="coverage/e_Callisto_FITS_Analyzer$gui_main.coverage" NAME="gui_main Coverage Results" MODIFIED="1753965829358" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
-    <SUITE FILE_PATH="coverage/e_Callisto_FITS_Analyzer$main.coverage" NAME="main Coverage Results" MODIFIED="1753965847031" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/e_Callisto_FITS_Analyzer$main.coverage" NAME="main Coverage Results" MODIFIED="1753965992646" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/e_Callisto_FITS_Analyzer$e_Callisto_FITS_Analyzer.coverage" NAME="e-Callisto_FITS_Analyzer Coverage Results" MODIFIED="1753183215204" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="" />
     <SUITE FILE_PATH="coverage/e_Callisto_FITS_Analyzer$Plott_FIT.coverage" NAME="Plott_FIT Coverage Results" MODIFIED="1753212063682" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/e_Callisto_FITS_Analyzer$FITplotWithAxes.coverage" NAME="FITplotWithAxes Coverage Results" MODIFIED="1753211940146" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
