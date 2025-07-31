@@ -1411,19 +1411,3 @@ class CombineTimeDialog(QDialog):
 
             self.main_window.plot_data(self.combined_data, title="Combined Time")
             self.close()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
