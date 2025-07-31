@@ -63,17 +63,36 @@ class DownloadTask(QRunnable):
         except Exception:
             self.callback(False)
 
+class PreviewWindow(QDialog):
+    def __init__(self, file_path, title, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"FITS Preview: {title}")
+        self.setMinimumSize(900, 600)
+
         with fits.open(file_path) as hdul:
             data = hdul[0].data
             freqs = hdul[1].data['frequency'][0]
             time = hdul[1].data['time'][0]
+
         extent = [0, time[-1], freqs[-1], freqs[0]]
+
         fig = Figure()
         canvas = FigureCanvas(fig)
         ax = fig.add_subplot(111)
+        im = ax.imshow(data, aspect='auto', extent=extent, cmap='inferno')
         ax.set_xlabel("Time [s]")
         ax.set_ylabel("Frequency [MHz]")
         fig.colorbar(im, ax=ax)
+
+        layout = QVBoxLayout()
+        layout.addWidget(canvas)
+        self.setLayout(layout)
+
+        # Make the preview window stay in front but non-blocking
+        self.setWindowFlags(Qt.Dialog | Qt.WindowStaysOnTopHint | Qt.WindowCloseButtonHint)
+        self.setWindowModality(Qt.NonModal)
+        self.setAttribute(Qt.WA_DeleteOnClose)
+
 
 class CallistoDownloaderApp(QDialog):
     def __init__(self):
@@ -300,7 +319,8 @@ class CallistoDownloaderApp(QDialog):
         QMessageBox.information(self, "Download Complete", "All selected files downloaded.")
 
     def preview_selected_files(self):
-        selected = [self.file_list.item(i) for i in range(self.file_list.count()) if self.file_list.item(i).checkState() == Qt.Checked]
+        selected = [self.file_list.item(i) for i in range(self.file_list.count()) if
+                    self.file_list.item(i).checkState() == Qt.Checked]
         if not selected:
             QMessageBox.warning(self, "No Selection", "Please select files to preview.")
             return
@@ -313,7 +333,9 @@ class CallistoDownloaderApp(QDialog):
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".fit.gz") as tmp:
                         tmp.write(r.content)
                         tmp_path = tmp.name
+                    win = PreviewWindow(tmp_path, name, parent=self)
                     win.show()
                     self.preview_windows.append(win)
                 except Exception as e:
                     QMessageBox.critical(self, "Preview Error", f"{name}\n{e}")
+
