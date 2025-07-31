@@ -179,6 +179,12 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.export_action)
         self.export_action.triggered.connect(self.export_figure)
 
+        # Edit Menu
+        edit_menu = menubar.addMenu("Edit")
+        reset_action = QAction("Reset All", self)
+        edit_menu.addAction(reset_action)
+        reset_action.triggered.connect(self.reset_all)
+
         # Download Menu
         download_menu = menubar.addMenu("Download")
 
@@ -186,12 +192,6 @@ class MainWindow(QMainWindow):
         launch_downloader_action = QAction("Launch FITS Downloader", self)
         download_menu.addAction(launch_downloader_action)
         launch_downloader_action.triggered.connect(self.launch_downloader)
-
-        # Edit Menu
-        edit_menu = menubar.addMenu("Edit")
-        reset_action = QAction("Reset All", self)
-        edit_menu.addAction(reset_action)
-        reset_action.triggered.connect(self.reset_all)
 
         # Combine Menu
         combine_menu = menubar.addMenu("Combine FITS")
