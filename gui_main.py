@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QAction, QPixmap, QImage
 from PySide6.QtCore import Qt
 from PySide6.QtCore import QTimer
+from callisto_downloader import CallistoDownloaderApp
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.widgets import LassoSelector
 from matplotlib.path import Path
@@ -31,7 +32,7 @@ class MplCanvas(FigureCanvas):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("e-CALLISTO FITS Analyzer")
+        self.setWindowTitle("e-CALLISTO FITS Analyzer 1.5")
         self.resize(1000, 700)
         self.setMinimumSize(1440, 786)
 
@@ -178,6 +179,13 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.export_action)
         self.export_action.triggered.connect(self.export_figure)
 
+        # Download Menu
+        download_menu = menubar.addMenu("Download")
+
+        # --- Launch Downloader ---
+        launch_downloader_action = QAction("Launch FITS Downloader", self)
+        download_menu.addAction(launch_downloader_action)
+        launch_downloader_action.triggered.connect(self.launch_downloader)
 
         # Edit Menu
         edit_menu = menubar.addMenu("Edit")
@@ -579,7 +587,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "About e-Callisto FITS Analyzer",
-            "e-CALLISTO FITS Analyzer version 1.0.\n\n"
+            "e-CALLISTO FITS Analyzer version 1.5.0.\n\n"
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"
@@ -636,6 +644,11 @@ class MainWindow(QMainWindow):
             self.canvas.ax.set_xlabel("Time [s]")
 
         self.canvas.ax.figure.canvas.draw()
+
+    def launch_downloader(self):
+        self.downloader_dialog = CallistoDownloaderApp()
+        self.downloader_dialog.setModal(True)
+        self.downloader_dialog.exec()
 
 
 class MaxIntensityPlotDialog(QDialog):
@@ -814,7 +827,7 @@ class MaxIntensityPlotDialog(QDialog):
         QMessageBox.information(
             self,
             "About e-Callisto FITS Analyzer",
-            "e-CALLISTO FITS Analyzer version 1.0.\n\n"
+            "e-CALLISTO FITS Analyzer version 1.5.0.\n\n"
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"
