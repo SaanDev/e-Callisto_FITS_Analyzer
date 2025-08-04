@@ -29,6 +29,20 @@ class FetchWorker(QObject):
 
     def run(self):
         results = []
+        base_url_check = BASE_URL.rstrip('/') + '/'
+
+        # Step 1: Check if base server responds at all
+        try:
+            test_response = requests.head(base_url_check, timeout=5)
+            if test_response.status_code >= 400:
+                raise ConnectionError(f"FITS server not responding (HTTP {test_response.status_code})")
+        except Exception as e:
+            # Flag as server unreachable
+            results.append((f"__SERVER_UNREACHABLE__", str(e)))
+            self.finished.emit(results)
+            return
+
+        # Step 2: Try to load actual data directory
         url_day = f"{BASE_URL}{self.date.year}/{self.date.month:02}/{self.date.day:02}/"
         try:
             page = requests.get(url_day, timeout=10)
@@ -42,8 +56,9 @@ class FetchWorker(QObject):
                         results.append((file, url_day + file))
                 self.progressStep.emit(i)
         except Exception as e:
-            results.append((f"❌ Error: {e}", None))
+            results.append((f"__FETCH_ERROR__", str(e)))
         self.finished.emit(results)
+
 
 class DownloadTask(QRunnable):
     def __init__(self, url, filename, output_dir, callback):
@@ -268,12 +283,25 @@ class CallistoDownloaderApp(QDialog):
         self.file_list.clear()
         self.progress_bar.setVisible(False)
 
+        # Case 1: Server unreachable
+        if files and files[0][0] == "__SERVER_UNREACHABLE__":
+            QMessageBox.critical(self, "Server Error", f"FITS server is not responding.\n\nDetails:\n{files[0][1]}")
+            return
+
+        # Case 2: Error fetching page for date
+        if files and files[0][0] == "__FETCH_ERROR__":
+            QMessageBox.critical(self, "Fetch Error",
+                                 f"Could not load FITS directory for selected date.\n\nDetails:\n{files[0][1]}")
+            return
+
+        # Case 3: No matching FITS files
         valid_files = [(name, url) for name, url in files if url]
         if not valid_files:
             QMessageBox.information(self, "No Data Found",
                                     "No FITS files were found for the selected station and time.")
             return
 
+        # Case 4: Show valid files
         for name, url in valid_files:
             item = QListWidgetItem(name)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
