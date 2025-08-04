@@ -34,7 +34,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("e-CALLISTO FITS Analyzer 1.5")
         self.resize(1000, 700)
-        self.setMinimumSize(1440, 786)
+        self.setMinimumSize(1000, 700)
 
         self.use_utc = False
         self.ut_start_sec = None
@@ -1068,10 +1068,15 @@ class AnalyzeDialog(QDialog):
             self.initial_shock_speed_display.text(), self.initial_shock_height_display.text(),
             self.avg_shock_speed_display.text(), self.avg_shock_height_display.text()
         ]
-        with open(path, 'w') as f:
-            f.write("\n".join([line.replace("<b>", "").replace("</b>", "") for line in lines]))
+        try:
+            with open(path, 'w', encoding='utf-8', newline='') as f:
+                clean_lines = [line.replace("<b>", "").replace("</b>", "") for line in lines]
+                f.write("\n".join(clean_lines))
+            self.status.showMessage("Data saved successfully!", 3000)
 
-        self.status.showMessage("Data saved successfully!", 3000)
+        except Exception as e:
+            QMessageBox.critical(self, "Save Error", f"Could not save file:\n{str(e)}")
+            self.status.showMessage("❌ Failed to save data.", 3000)
 
     def plot_extra(self):
         choice = self.extra_plot_combo.currentText()
