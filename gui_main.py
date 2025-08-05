@@ -34,7 +34,7 @@ class MplCanvas(FigureCanvas):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("e-CALLISTO FITS Analyzer 1.5")
+        self.setWindowTitle("e-CALLISTO FITS Analyzer 1.5.1")
         self.resize(1000, 700)
         self.setMinimumSize(1000, 700)
 
@@ -589,7 +589,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "About e-Callisto FITS Analyzer",
-            "e-CALLISTO FITS Analyzer version 1.5.0.\n\n"
+            "e-CALLISTO FITS Analyzer version 1.5.1.\n\n"
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"
@@ -829,7 +829,7 @@ class MaxIntensityPlotDialog(QDialog):
         QMessageBox.information(
             self,
             "About e-Callisto FITS Analyzer",
-            "e-CALLISTO FITS Analyzer version 1.5.0.\n\n"
+            "e-CALLISTO FITS Analyzer version 1.5.1.\n\n"
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"
