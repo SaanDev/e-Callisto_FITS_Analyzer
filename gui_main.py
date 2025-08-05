@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (
     QMainWindow, QLineEdit, QDialog, QMenuBar, QMessageBox, QDoubleSpinBox,
-    QFormLayout, QGroupBox, QStatusBar, QProgressBar, QApplication, QMenu
+    QFormLayout, QGroupBox, QStatusBar, QProgressBar, QApplication, QMenu, QCheckBox
 )
 from PySide6.QtGui import QAction, QPixmap, QImage
 from PySide6.QtCore import Qt
@@ -16,8 +16,10 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 from matplotlib.ticker import FuncFormatter, ScalarFormatter
 import csv
 import matplotlib.pyplot as plt
+from openpyxl import load_workbook, Workbook
 import io
 import os
+import re
 
 def start_combine(self):
     QTimer.singleShot(100, self.combine_files)  # delays execution and avoids UI freeze
@@ -875,6 +877,7 @@ class AnalyzeDialog(QDialog):
         self.fit_button = QPushButton("Best Fit")
         self.save_plot_button = QPushButton("Save Graph")
         self.save_data_button = QPushButton("Save Data")
+        self.existing_excel_checkbox = QCheckBox("Existing Excel File")
 
         self.extra_plot_label = QLabel("Extra Plots:")
         self.extra_plot_combo = QComboBox()
@@ -911,6 +914,7 @@ class AnalyzeDialog(QDialog):
         self.rmse_display = QLabel("RMSE = ")
 
         self.shock_header = QLabel("<b>Shock Parameters:</b>")
+        self.avg_freq_display = QLabel("")
         self.drift_display = QLabel("")
         self.start_freq_display = QLabel("")
         self.initial_shock_speed_display = QLabel("")
@@ -922,10 +926,10 @@ class AnalyzeDialog(QDialog):
             self.equation_label, self.equation_display,
             self.stats_header, self.r2_display, self.rmse_display,
             self.shock_header,
-            self.drift_display, self.start_freq_display,
+            self.avg_freq_display, self.drift_display, self.start_freq_display,
             self.initial_shock_speed_display, self.initial_shock_height_display,
             self.avg_shock_speed_display, self.avg_shock_height_display,
-            self.save_plot_button, self.save_data_button,
+            self.save_plot_button, self.save_data_button,self.existing_excel_checkbox,
             self.extra_plot_label, self.extra_plot_combo, self.extra_plot_button
         ]
 
@@ -1029,6 +1033,8 @@ class AnalyzeDialog(QDialog):
         dRp_df = (8.64 / f0) / np.log(10) / np.log(f0 ** 2 / 3.385)
         Rp_err = np.abs(dRp_df * freq_err)
 
+        avg_freq = np.mean(self.freq)
+        avg_freq_err = np.std(self.freq)/np.sqrt(len(self.freq))
         avg_drift = np.mean(drift_vals)
         avg_drift_err = np.std(drift_vals) / np.sqrt(len(drift_vals))
         avg_speed = np.mean(shock_speed)
@@ -1045,6 +1051,7 @@ class AnalyzeDialog(QDialog):
         self.status.showMessage("Best fit plotted successfully!", 3000)
 
         # Display values
+        self.avg_freq_display.setText(f"Average Frequency: <b>{avg_freq:.2f} ± {avg_freq_err:.2f}</b> MHz")
         self.drift_display.setText(f"Average Drift Rate: <b>{avg_drift:.4f} ± {avg_drift_err:.4f}</b> MHz/s")
         self.start_freq_display.setText(f"Starting Frequency: <b>{start_freq:.2f} ± {freq_err:.2f}</b> MHz")
         self.initial_shock_speed_display.setText(f"Initial Shock Speed: <b>{start_shock_speed:.2f} ± {shock_speed_err:.2f}</b> km/s")
@@ -1059,24 +1066,101 @@ class AnalyzeDialog(QDialog):
         self.status.showMessage("Graph saved successfully!.", 3000)
 
     def save_data(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Save Data", f"{self.filename}_data.txt", "Text Files (*.txt)")
-        if not path: return
-        lines = [
-            f"{self.equation_label.text()} {self.equation_display.text()}",
-            self.stats_header.text(), self.r2_display.text(), self.rmse_display.text(),
-            self.shock_header.text(), self.drift_display.text(), self.start_freq_display.text(),
-            self.initial_shock_speed_display.text(), self.initial_shock_height_display.text(),
-            self.avg_shock_speed_display.text(), self.avg_shock_height_display.text()
-        ]
+        # Extract Station and Date from filename
         try:
-            with open(path, 'w', encoding='utf-8', newline='') as f:
-                clean_lines = [line.replace("<b>", "").replace("</b>", "") for line in lines]
-                f.write("\n".join(clean_lines))
-            self.status.showMessage("Data saved successfully!", 3000)
+            match = re.match(r"([A-Z\-]+)_(\d{4})(\d{2})(\d{2})_", self.filename)
+            if match:
+                station = match.group(1)
+                date = f"{match.group(2)}-{match.group(3)}-{match.group(4)}"
+            else:
+                station = "UNKNOWN"
+                date = "UNKNOWN"
+        except Exception:
+            station = "UNKNOWN"
+            date = "UNKNOWN"
+
+        # Excel handling
+        if self.existing_excel_checkbox.isChecked():
+            path, _ = QFileDialog.getOpenFileName(self, "Select Existing Excel File", "", "Excel Files (*.xlsx)")
+            if not path:
+                return
+
+            try:
+                wb = load_workbook(path)
+                ws = wb.active
+            except Exception as e:
+                QMessageBox.critical(self, "Load Error", f"Could not open Excel file:\n{str(e)}")
+                return
+        else:
+            path, _ = QFileDialog.getSaveFileName(self, "Save as Excel", f"{self.filename}_data.xlsx",
+                                                  "Excel Files (*.xlsx)")
+            if not path:
+                return
+
+            try:
+                wb = Workbook()
+                ws = wb.active
+                headers = [
+                    "Date", "Station", "Best_fit", "R_sq", "RMSE",
+                    "avg_freq", "avg_freq_err", "Avg_drift", "avg_drift_err",
+                    "start_freq", "start_freq_err", "initial_shock_speed", "initial_shock_speed_err",
+                    "initial_shock_height", "initial_shock_height_err", "avg_shock_speed", "avg_shock_speed_err",
+                    "avg_shock_height", "avg_shock_height_err"
+                ]
+                ws.append(headers)
+            except Exception as e:
+                QMessageBox.critical(self, "Save Error", f"Could not create Excel file:\n{str(e)}")
+                return
+
+        # Prepare data
+        try:
+            best_fit = self.equation_display.text().replace("<b>", "").replace("</b>", "").replace("<sup>",
+                                                                                                   "^").replace(
+                "</sup>", "")
+            r2 = self.r2_display.text().split("=")[-1].strip()
+            rmse = self.rmse_display.text().split("=")[-1].strip()
+
+            def extract_val_err(label):
+                # Remove HTML tags
+                clean_text = re.sub(r'<[^>]+>', '', label.text())
+
+                # Remove units and stray characters
+                clean_text = re.sub(r'(MHz|km/s|Rₛ|s|/)', '', clean_text)
+
+                # Remove any extra whitespace
+                clean_text = clean_text.strip()
+
+                # Extract number ± error
+                value_text = clean_text.split(":")[-1].strip()
+                if "±" in value_text:
+                    value, err = value_text.split("±")
+                    return value.strip(), err.strip()
+                else:
+                    return value_text.strip(), ""
+
+            avg_freq, avg_freq_err = extract_val_err(self.avg_freq_display)
+            avg_drift, avg_drift_err = extract_val_err(self.drift_display)
+            start_freq, start_freq_err = extract_val_err(self.start_freq_display)
+            init_speed, init_speed_err = extract_val_err(self.initial_shock_speed_display)
+            init_height, init_height_err = extract_val_err(self.initial_shock_height_display)
+            avg_speed, avg_speed_err = extract_val_err(self.avg_shock_speed_display)
+            avg_height, avg_height_err = extract_val_err(self.avg_shock_height_display)
+
+            row = [
+                date, station, best_fit, r2, rmse,
+                avg_freq, avg_freq_err, avg_drift, avg_drift_err,
+                start_freq, start_freq_err, init_speed, init_speed_err,
+                init_height, init_height_err, avg_speed, avg_speed_err,
+                avg_height, avg_height_err
+            ]
+
+            ws.append(row)
+            wb.save(path)
+            self.status.showMessage("✅ Data saved to Excel successfully!", 3000)
 
         except Exception as e:
-            QMessageBox.critical(self, "Save Error", f"Could not save file:\n{str(e)}")
-            self.status.showMessage("❌ Failed to save data.", 3000)
+            QMessageBox.critical(self, "Write Error", f"Could not write to Excel file:\n{str(e)}")
+            self.status.showMessage("❌ Failed to save data to Excel.", 3000)
 
     def plot_extra(self):
         choice = self.extra_plot_combo.currentText()
