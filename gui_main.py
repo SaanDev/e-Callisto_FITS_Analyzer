@@ -2,7 +2,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QLineEdit, QDialog, QMenuBar, QMessageBox, QDoubleSpinBox,
     QFormLayout, QGroupBox, QStatusBar, QProgressBar, QApplication, QMenu, QCheckBox
 )
-from PySide6.QtGui import QAction, QPixmap, QImage
+from PySide6.QtGui import QAction, QPixmap, QImage, QGuiApplication
 from PySide6.QtCore import Qt
 from PySide6.QtCore import QTimer
 from callisto_downloader import CallistoDownloaderApp
@@ -20,6 +20,7 @@ from openpyxl import load_workbook, Workbook
 import io
 import os
 import re
+import gc
 
 def start_combine(self):
     QTimer.singleShot(100, self.combine_files)  # delays execution and avoids UI freeze
@@ -43,6 +44,8 @@ class MainWindow(QMainWindow):
 
         # Canvas
         self.canvas = MplCanvas(self, width=10, height=6)
+        self.canvas.figure.clf()
+        self.canvas.ax = self.canvas.figure.add_subplot(111)
 
         # Colorbar
         self.current_colorbar = None
@@ -321,7 +324,6 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, lambda: self._plot_data_internal(data, title))
 
     def _plot_data_internal(self, data, title="Dynamic Spectrum"):
-
         if self.time is None or self.freqs is None:
             print("Time or frequency data not loaded. Skipping plot.")
             return
@@ -331,6 +333,8 @@ class MainWindow(QMainWindow):
             return
 
         self.canvas.ax.clear()
+        self.canvas.figure.clf()
+        self.canvas.ax = self.canvas.figure.add_subplot(111)
 
         # Remove old colorbar axis safely
         try:
@@ -464,6 +468,8 @@ class MainWindow(QMainWindow):
         burst_isolated[mask] = self.noise_reduced_data[mask]
 
         self.canvas.ax.clear()
+        self.canvas.figure.clf()
+        self.canvas.ax = self.canvas.figure.add_subplot(111)
 
         # Safely remove previous colorbar and colorbar axis
         if self.current_colorbar:
@@ -509,13 +515,30 @@ class MainWindow(QMainWindow):
             print("No burst-isolated data available.")
             return
 
-        data = self.noise_reduced_data
-        ny, nx = data.shape
-        time_channel_number = np.linspace(0, nx, nx)
-        max_intensity_freqs = self.freqs[np.argmax(data, axis=0)]
+        # Diagnostics
+        print("🖥️ Screens:", QGuiApplication.screens())
+        print("🎯 Creating MaxIntensityPlotDialog...")
 
-        dialog = MaxIntensityPlotDialog(time_channel_number, max_intensity_freqs, self.filename, self)
-        dialog.exec()
+        try:
+            data = self.noise_reduced_data
+            ny, nx = data.shape
+            time_channel_number = np.linspace(0, nx, nx)
+            max_intensity_freqs = self.freqs[np.argmax(data, axis=0)]
+
+            # Safely create the dialog
+            dialog = MaxIntensityPlotDialog(time_channel_number, max_intensity_freqs, self.filename, self)
+            dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+
+            # Connect to GC after close
+            dialog.finished.connect(lambda: gc.collect())
+
+            dialog.exec()
+            gc.collect()
+
+        except Exception as e:
+            print(f"❌ Error showing MaxIntensityPlotDialog: {e}")
+
+
 
     def export_figure(self):
         from PySide6.QtWidgets import QFileDialog
@@ -666,8 +689,12 @@ class MaxIntensityPlotDialog(QDialog):
         self.selected_mask = np.zeros_like(self.time_channels, dtype=bool)
         self.lasso = None
 
+
+
         # Canvas
         self.canvas = MplCanvas(self, width=10, height=6)
+        self.canvas.figure.clf()
+        self.canvas.ax = self.canvas.figure.add_subplot(111)
         self.canvas.ax.scatter(self.time_channels, self.freqs, marker="o", s=5, color='red')
         self.canvas.ax.set_xlabel("Time (s)")
         self.canvas.ax.set_ylabel("Frequency (MHz)")
@@ -766,6 +793,9 @@ class MaxIntensityPlotDialog(QDialog):
         self.selected_mask = np.zeros_like(self.time_channels, dtype=bool)
 
         self.canvas.ax.clear()
+        self.canvas.figure.clf()
+        self.canvas.ax = self.canvas.figure.add_subplot(111)
+
         self.canvas.ax.scatter(self.time_channels, self.freqs, marker="o", s=5, color='red')
         self.canvas.ax.set_xlabel("Time Channel Number")
         self.canvas.ax.set_ylabel("Frequency (MHz)")
@@ -840,6 +870,21 @@ class MaxIntensityPlotDialog(QDialog):
         dialog = AnalyzeDialog(self.time_channels, self.freqs, self.filename, self)
         dialog.exec()
 
+    def closeEvent(self, event):
+        try:
+            if hasattr(self.canvas, 'ax'):
+                self.canvas.ax.clear()
+            self.canvas.figure.clf()
+            self.canvas.deleteLater()
+
+            if self.lasso:
+                self.lasso.disconnect_events()
+                self.lasso = None
+        except Exception as e:
+            print(f"Cleanup error: {e}")
+        event.accept()
+
+
 from PySide6.QtWidgets import (
     QDialog, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
     QFileDialog, QComboBox, QScrollArea, QWidget, QSizePolicy
@@ -851,10 +896,10 @@ from scipy.optimize import curve_fit
 from sklearn.metrics import r2_score, mean_squared_error
 
 class MplCanvas(FigureCanvas):
-    def __init__(self, parent=None, width=8, height=5, dpi=100):
-        fig = Figure(figsize=(width, height), dpi=dpi)
-        self.ax = fig.add_subplot(111)
-        super().__init__(fig)
+    def __init__(self, parent=None, width=10, height=6, dpi=100):
+        self.fig = Figure(figsize=(width, height), dpi=dpi)
+        self.ax = self.fig.add_subplot(111)
+        super().__init__(self.fig)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.updateGeometry()
 
@@ -871,6 +916,8 @@ class AnalyzeDialog(QDialog):
 
         # Canvas
         self.canvas = MplCanvas(self, width=8, height=5)
+        self.canvas.figure.clf()
+        self.canvas.ax = self.canvas.figure.add_subplot(111)
 
         # Buttons
         self.max_button = QPushButton("Maximum Intensities")
@@ -994,6 +1041,9 @@ class AnalyzeDialog(QDialog):
         freq_fit = model_func(time_fit, a, b)
 
         self.canvas.ax.clear()
+        self.canvas.figure.clf()
+        self.canvas.ax = self.canvas.figure.add_subplot(111)
+
         self.canvas.ax.scatter(self.time, self.freq, s=10, color='blue', label="Original Data")
         self.canvas.ax.plot(time_fit, freq_fit, color='red', label=fr"Best Fit: $f = {a:.2f} \cdot t^{{{b:.2f}}}$")
         self.canvas.ax.set_title(f"{self.filename}_Best_Fit")

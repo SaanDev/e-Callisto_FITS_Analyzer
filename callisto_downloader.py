@@ -14,6 +14,7 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 import tempfile, os
 
+
 BASE_URL = 'http://soleil80.cs.technik.fhnw.ch/solarradio/data/2002-20yy_Callisto/'
 
 class FetchWorker(QObject):
@@ -363,8 +364,10 @@ class CallistoDownloaderApp(QDialog):
                         tmp.write(r.content)
                         tmp_path = tmp.name
                     win = PreviewWindow(tmp_path, name, parent=self)
+                    WA_DeleteOnClose = Qt.WidgetAttribute.WA_DeleteOnClose
+                    win.setAttribute(WA_DeleteOnClose)
                     win.show()
-                    self.preview_windows.append(win)
+                    self.preview_windows = [w for w in self.preview_windows if not w.isHidden()]
                 except Exception as e:
                     QMessageBox.critical(self, "Preview Error", f"{name}\n{e}")
 
