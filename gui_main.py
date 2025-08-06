@@ -1066,25 +1066,46 @@ class AnalyzeDialog(QDialog):
         self.status.showMessage("Graph saved successfully!.", 3000)
 
     def save_data(self):
-        # Extract Station and Date from filename
-        try:
-            match = re.match(r"([A-Z\-]+)_(\d{4})(\d{2})(\d{2})_", self.filename)
-            if match:
-                station = match.group(1)
-                date = f"{match.group(2)}-{match.group(3)}-{match.group(4)}"
-            else:
-                station = "UNKNOWN"
-                date = "UNKNOWN"
-        except Exception:
-            station = "UNKNOWN"
+
+        # All known e-Callisto station names
+        station_list = [
+            'ALASKA-ANCHORAGE', 'ALASKA-COHOE', 'ALASKA-HAARP', 'ALGERIA-CRAAG', 'ALMATY',
+            'Arecibo-observatory', 'AUSTRIA-Krumbach', 'AUSTRIA-MICHELBACH', 'AUSTRIA-OE3FLB',
+            'AUSTRIA-UNIGRAZ', 'Australia-ASSA', 'BRAZIL', 'BIR', 'Croatia-Visnjan', 'DENMARK',
+            'EGYPT-Alexandria', 'EGYPT-SpaceAgency', 'ETHIOPIA', 'FINLAND-Siuntio', 'FINLAND-Kempele',
+            'GERMANY-ESSEN', 'GERMANY-DLR', 'GLASGOW', 'GREENLAND', 'HUMAIN', 'HURBANOVO',
+            'INDIA-GAURI', 'INDIA-Nashik', 'INDIA-OOTY', 'INDIA-UDAIPUR', 'INDONESIA',
+            'ITALY-Strassolt', 'JAPAN-IBARAKI', 'KASI', 'KRIM', 'MEXART',
+            'MEXICO-ENSENADA-UNAM', 'MEXICO-FCFM-UANL', 'MEXICO-FCFM-UNACH', 'MEXICO-LANCE-A',
+            'MEXICO-LANCE-B', 'MEXICO-UANL-INFIERNILLO', 'MONGOLIA-UB', 'MRO', 'MRT1', 'MRT3',
+            'Malaysia_Banting', 'NASA-GSFC', 'NORWAY-EGERSUND', 'NORWAY-NY-AALESUND', 'NORWAY-RANDABERG',
+            'PARAGUAY', 'POLAND-BALDY', 'POLAND-Grotniki', 'ROMANIA', 'ROSWELL-NM', 'RWANDA',
+            'SOUTHAFRICA-SANSA', 'SPAIN-ALCALA', 'SPAIN-PERALEJOS', 'SPAIN-SIGUENZA', 'SRI-Lanka',
+            'SSRT', 'SWISS-CalU', 'SWISS-FM', 'SWISS-HB9SCT', 'SWISS-HEITERSWIL', 'SWISS-IRSOL',
+            'SWISS-Landschlacht', 'SWISS-MUHEN', 'TAIWAN-NCU', 'THAILAND-Pathumthani', 'TRIEST',
+            'TURKEY', 'UNAM', 'URUGUAY', 'USA-ARIZONA-ERAU', 'USA-BOSTON', 'UZBEKISTAN'
+        ]
+
+        # ✅ Extract Station
+        station = "UNKNOWN"
+        filename_lower = self.filename.lower()
+        for s in station_list:
+            if filename_lower.startswith(s.lower()):
+                station = s
+                break
+
+        # ✅ Extract Date
+        date_match = re.search(r'_(\d{4})(\d{2})(\d{2})_', self.filename)
+        if date_match:
+            date = f"{date_match.group(1)}-{date_match.group(2)}-{date_match.group(3)}"
+        else:
             date = "UNKNOWN"
 
-        # Excel handling
+        # ✅ Excel File Handling
         if self.existing_excel_checkbox.isChecked():
             path, _ = QFileDialog.getOpenFileName(self, "Select Existing Excel File", "", "Excel Files (*.xlsx)")
             if not path:
                 return
-
             try:
                 wb = load_workbook(path)
                 ws = wb.active
@@ -1096,7 +1117,6 @@ class AnalyzeDialog(QDialog):
                                                   "Excel Files (*.xlsx)")
             if not path:
                 return
-
             try:
                 wb = Workbook()
                 ws = wb.active
@@ -1112,31 +1132,27 @@ class AnalyzeDialog(QDialog):
                 QMessageBox.critical(self, "Save Error", f"Could not create Excel file:\n{str(e)}")
                 return
 
-        # Prepare data
+        # ✅ Extract and clean text
+        def extract_val_err(label):
+            # Remove HTML tags
+            clean_text = re.sub(r'<[^>]+>', '', label.text())
+            # Remove units and stray characters
+            clean_text = re.sub(r'(MHz|km/s|Rₛ|s|/)', '', clean_text)
+            # Clean spaces
+            clean_text = clean_text.strip()
+            # Extract value ± error
+            value_text = clean_text.split(":")[-1].strip()
+            if "±" in value_text:
+                value, err = value_text.split("±")
+                return value.strip(), err.strip()
+            else:
+                return value_text.strip(), ""
+
+        # ✅ Read values
         try:
-            best_fit = self.equation_display.text().replace("<b>", "").replace("</b>", "").replace("<sup>",
-                                                                                                   "^").replace(
-                "</sup>", "")
+            best_fit = re.sub(r'<[^>]+>', '', self.equation_display.text()).replace("<sup>", "^").replace("</sup>", "")
             r2 = self.r2_display.text().split("=")[-1].strip()
             rmse = self.rmse_display.text().split("=")[-1].strip()
-
-            def extract_val_err(label):
-                # Remove HTML tags
-                clean_text = re.sub(r'<[^>]+>', '', label.text())
-
-                # Remove units and stray characters
-                clean_text = re.sub(r'(MHz|km/s|Rₛ|s|/)', '', clean_text)
-
-                # Remove any extra whitespace
-                clean_text = clean_text.strip()
-
-                # Extract number ± error
-                value_text = clean_text.split(":")[-1].strip()
-                if "±" in value_text:
-                    value, err = value_text.split("±")
-                    return value.strip(), err.strip()
-                else:
-                    return value_text.strip(), ""
 
             avg_freq, avg_freq_err = extract_val_err(self.avg_freq_display)
             avg_drift, avg_drift_err = extract_val_err(self.drift_display)
