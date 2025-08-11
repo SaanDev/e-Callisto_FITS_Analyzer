@@ -1,7 +1,14 @@
+import sys
+import os
 from PySide6.QtWidgets import QApplication
 from gui_main import MainWindow
-import sys
 import faulthandler
+
+# Fix for PyInstaller GUI mode when console=False
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, 'w')
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, 'w')
 
 faulthandler.enable()
 

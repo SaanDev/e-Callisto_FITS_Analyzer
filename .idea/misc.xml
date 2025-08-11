@@ -3,4 +3,5 @@
   <component name="Black">
     <option name="sdkName" value="/opt/anaconda3" />
   </component>
+  <component name="ProjectRootManager" version="2" project-jdk-name="Python 3.13 (e-Callisto_FITS_Analyzer)" project-jdk-type="Python SDK" />
 </project>
