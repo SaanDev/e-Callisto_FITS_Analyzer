@@ -1175,7 +1175,7 @@ class AnalyzeDialog(QDialog):
                     "avg_freq", "avg_freq_err", "Avg_drift", "avg_drift_err",
                     "start_freq", "start_freq_err", "initial_shock_speed", "initial_shock_speed_err",
                     "initial_shock_height", "initial_shock_height_err", "avg_shock_speed", "avg_shock_speed_err",
-                    "avg_shock_height", "avg_shock_height_err"
+                    "avg_shock_height", "avg_shock_height_err", "avg_drift_abs"
                 ]
                 ws.append(headers)
             except Exception as e:
@@ -1206,6 +1206,12 @@ class AnalyzeDialog(QDialog):
 
             avg_freq, avg_freq_err = extract_val_err(self.avg_freq_display)
             avg_drift, avg_drift_err = extract_val_err(self.drift_display)
+
+            try:
+                avg_drift_abs = abs(float(avg_drift))
+            except ValueError:
+                avg_drift_abs = ""
+
             start_freq, start_freq_err = extract_val_err(self.start_freq_display)
             init_speed, init_speed_err = extract_val_err(self.initial_shock_speed_display)
             init_height, init_height_err = extract_val_err(self.initial_shock_height_display)
@@ -1217,7 +1223,7 @@ class AnalyzeDialog(QDialog):
                 avg_freq, avg_freq_err, avg_drift, avg_drift_err,
                 start_freq, start_freq_err, init_speed, init_speed_err,
                 init_height, init_height_err, avg_speed, avg_speed_err,
-                avg_height, avg_height_err
+                avg_height, avg_height_err,avg_drift_abs
             ]
 
             ws.append(row)
