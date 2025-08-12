@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (
     QMainWindow, QLineEdit, QDialog, QMenuBar, QMessageBox, QDoubleSpinBox,
-    QFormLayout, QGroupBox, QStatusBar, QProgressBar, QApplication, QMenu, QCheckBox
+    QFormLayout, QGroupBox, QStatusBar, QProgressBar, QApplication, QMenu, QCheckBox, QRadioButton, QButtonGroup
 )
 from PySide6.QtGui import QAction, QPixmap, QImage, QGuiApplication
 from PySide6.QtCore import Qt
@@ -704,6 +704,15 @@ class MaxIntensityPlotDialog(QDialog):
         # Buttons
         self.select_button = QPushButton("Select Outliers")
         self.remove_button = QPushButton("Remove Outliers")
+
+        self.fundamental_radio = QRadioButton("Fundamental")
+        self.harmonic_radio = QRadioButton("Harmonic")
+        self.fundamental_radio.setChecked(True)
+
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.addButton(self.fundamental_radio)
+        self.mode_group.addButton(self.harmonic_radio)
+
         self.analyze_button = QPushButton("Analyze Burst")
         self.select_button.setToolTip("Use Lasso tool to select points to remove")
         self.remove_button.setToolTip("Remove previously selected outliers")
@@ -712,12 +721,18 @@ class MaxIntensityPlotDialog(QDialog):
         self.analyze_button.setMinimumWidth(150)
         self.select_button.clicked.connect(self.activate_lasso)
         self.remove_button.clicked.connect(self.remove_selected_outliers)
-        self.analyze_button.clicked.connect(self.open_analyze_window)
+
+        self.analyze_button.clicked.connect(lambda: self.open_analyze_window(
+            fundamental=self.fundamental_radio.isChecked(),
+            harmonic=self.harmonic_radio.isChecked()
+        ))
 
         # Layouts
         button_layout = QHBoxLayout()
         button_layout.addWidget(self.select_button)
         button_layout.addWidget(self.remove_button)
+        button_layout.addWidget(self.fundamental_radio)
+        button_layout.addWidget(self.harmonic_radio)
         button_layout.addWidget(self.analyze_button)
         button_layout.addStretch()
 
@@ -866,8 +881,8 @@ class MaxIntensityPlotDialog(QDialog):
             "2025©Copyright, All Rights Reserved."
         )
 
-    def open_analyze_window(self):
-        dialog = AnalyzeDialog(self.time_channels, self.freqs, self.filename, self)
+    def open_analyze_window(self, fundamental=True, harmonic=False):
+        dialog = AnalyzeDialog(self.time_channels, self.freqs, self.filename, fundamental=fundamental, harmonic=harmonic, parent=self)
         dialog.exec()
 
     def closeEvent(self, event):
@@ -904,8 +919,11 @@ class MplCanvas(FigureCanvas):
         self.updateGeometry()
 
 class AnalyzeDialog(QDialog):
-    def __init__(self, time_channels, freqs, filename, parent=None):
+    def __init__(self, time_channels, freqs, filename, fundamental=True, harmonic=False, parent=None):
         super().__init__(parent)
+        self.fundamental = fundamental
+        self.harmonic = harmonic
+
         self.setWindowTitle("Analyzer")
         self.resize(1100, 700)
 
@@ -1072,6 +1090,10 @@ class AnalyzeDialog(QDialog):
 
         percentile = 90
         start_freq = np.percentile(self.freq, percentile)
+
+        if self.harmonic:
+            start_freq = start_freq / 2
+
         idx = np.abs(self.freq - start_freq).argmin()
         f0 = self.freq[idx]
         start_shock_speed = shock_speed[idx]
