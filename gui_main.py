@@ -6,6 +6,7 @@ from PySide6.QtGui import QAction, QPixmap, QImage, QGuiApplication
 from PySide6.QtCore import Qt
 from PySide6.QtCore import QTimer
 from callisto_downloader import CallistoDownloaderApp
+from goes_xrs_gui import MainWindow as GoesXrsWindow
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.widgets import LassoSelector
 from matplotlib.path import Path
@@ -226,6 +227,12 @@ class MainWindow(QMainWindow):
         # Toggle logic
         self.xaxis_sec_action.triggered.connect(self.set_axis_to_seconds)
         self.xaxis_ut_action.triggered.connect(self.set_axis_to_utc)
+
+        #Flares
+        flares_menu = self.menuBar().addMenu("Flares")
+        goes_flux_action = QAction("GOES X-Ray Flux", self)
+        goes_flux_action.triggered.connect(self.open_goes_xrs_window)
+        flares_menu.addAction(goes_flux_action)
 
         # About Menu
         about_menu = menubar.addMenu("About")
@@ -612,7 +619,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "About e-Callisto FITS Analyzer",
-            "e-CALLISTO FITS Analyzer version 1.5.1.\n\n"
+            "e-CALLISTO FITS Analyzer version 1.6.0.\n\n"
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"
@@ -674,6 +681,10 @@ class MainWindow(QMainWindow):
         self.downloader_dialog = CallistoDownloaderApp()
         self.downloader_dialog.setModal(True)
         self.downloader_dialog.exec()
+
+    def open_goes_xrs_window(self):
+        self.goes_window = GoesXrsWindow()
+        self.goes_window.show()
 
 
 class MaxIntensityPlotDialog(QDialog):
@@ -874,7 +885,7 @@ class MaxIntensityPlotDialog(QDialog):
         QMessageBox.information(
             self,
             "About e-Callisto FITS Analyzer",
-            "e-CALLISTO FITS Analyzer version 1.5.1.\n\n"
+            "e-CALLISTO FITS Analyzer version 1.6.0.\n\n"
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"
