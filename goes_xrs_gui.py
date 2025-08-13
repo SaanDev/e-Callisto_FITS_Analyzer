@@ -1,3 +1,4 @@
+#This enables to view and download GOES X-Ray Flux.
 import os
 import sys
 import csv

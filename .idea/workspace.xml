@@ -4,10 +4,11 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="22c2ea24-4065-4bfd-8ffe-617e0297cf9a" name="Changes" comment="Now data can be saved as an excel file.">
-      <change afterPath="$PROJECT_DIR$/goes_xrs_gui.py" afterDir="false" />
+    <list default="true" id="22c2ea24-4065-4bfd-8ffe-617e0297cf9a" name="Changes" comment="GOES X-Ray Flux plotter added. Version number is updated to 1.6.0.">
+      <change beforePath="$PROJECT_DIR$/.idea/e-Callisto_FITS_Analyzer.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/e-Callisto_FITS_Analyzer.iml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/gui_main.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui_main.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/goes_xrs_gui.py" beforeDir="false" afterPath="$PROJECT_DIR$/goes_xrs_gui.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -22,6 +23,7 @@
     </option>
   </component>
   <component name="Git.Settings">
+    <option name="PUSH_AUTO_UPDATE" value="true" />
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
   <component name="GitHubPullRequestSearchHistory">{
@@ -49,7 +51,7 @@
     "ASKED_SHARE_PROJECT_CONFIGURATION_FILES": "true",
     "Python.SFA1.executor": "Run",
     "Python.callisto_downloader.executor": "Run",
-    "Python.gui_main.executor": "Run",
+    "Python.gui_main.executor": "Debug",
     "Python.main.executor": "Run",
     "RunOnceActivity.ShowReadmeOnStart": "true",
     "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager": "true",
@@ -361,7 +363,15 @@
       <option name="project" value="LOCAL" />
       <updated>1754919839655</updated>
     </task>
-    <option name="localTasksCounter" value="29" />
+    <task id="LOCAL-00029" summary="GOES X-Ray Flux plotter added. Version number is updated to 1.6.0.">
+      <option name="closed" value="true" />
+      <created>1755084745694</created>
+      <option name="number" value="00029" />
+      <option name="presentableId" value="LOCAL-00029" />
+      <option name="project" value="LOCAL" />
+      <updated>1755084745694</updated>
+    </task>
+    <option name="localTasksCounter" value="30" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -378,7 +388,7 @@
                   <entry key="branch">
                     <value>
                       <list>
-                        <option value="master" />
+                        <option value="origin/master" />
                       </list>
                     </value>
                   </entry>
@@ -411,7 +421,8 @@
     <MESSAGE value="Save data bugs were fixed." />
     <MESSAGE value="Application crashing problem fixed." />
     <MESSAGE value="Now data can be saved as an excel file." />
-    <option name="LAST_COMMIT_MESSAGE" value="Now data can be saved as an excel file." />
+    <MESSAGE value="GOES X-Ray Flux plotter added. Version number is updated to 1.6.0." />
+    <option name="LAST_COMMIT_MESSAGE" value="GOES X-Ray Flux plotter added. Version number is updated to 1.6.0." />
   </component>
   <component name="XDebuggerManager">
     <breakpoint-manager>
@@ -433,7 +444,7 @@
     <SUITE FILE_PATH="coverage/e_Callisto_FITS_Analyzer$callisto_downloader.coverage" NAME="callisto_downloader Coverage Results" MODIFIED="1754295564129" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/e_Callisto_FITS_Analyzer$main.coverage" NAME="main Coverage Results" MODIFIED="1755083159802" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/e_Callisto_FITS_Analyzer$SFA1.coverage" NAME="SFA1 Coverage Results" MODIFIED="1754737286036" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/../New folder (2)" />
-    <SUITE FILE_PATH="coverage/e_Callisto_FITS_Analyzer$gui_main.coverage" NAME="gui_main Coverage Results" MODIFIED="1755083109054" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/e_Callisto_FITS_Analyzer$gui_main.coverage" NAME="gui_main Coverage Results" MODIFIED="1755083899921" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/e_Callisto_FITS_Analyzer$Plott_FIT.coverage" NAME="Plott_FIT Coverage Results" MODIFIED="1753212063682" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/e_Callisto_FITS_Analyzer$e_Callisto_FITS_Analyzer.coverage" NAME="e-Callisto_FITS_Analyzer Coverage Results" MODIFIED="1753183215204" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="" />
   </component>
