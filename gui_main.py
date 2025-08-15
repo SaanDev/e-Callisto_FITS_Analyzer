@@ -7,7 +7,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtCore import QTimer
 from callisto_downloader import CallistoDownloaderApp
 from goes_xrs_gui import MainWindow as GoesXrsWindow
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.widgets import LassoSelector
 from matplotlib.path import Path
 from astropy.io import fits
@@ -36,7 +36,7 @@ class MplCanvas(FigureCanvas):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("e-CALLISTO FITS Analyzer 1.5.1")
+        self.setWindowTitle("e-CALLISTO FITS Analyzer 1.6.0")
         self.resize(1000, 700)
         self.setMinimumSize(1000, 700)
 
@@ -518,6 +518,14 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Burst isolated using lasso", 4000)
 
     def plot_max_intensities(self):
+        # Ensure any active lasso from the main plot is fully disconnected
+        if getattr(self, "lasso", None):
+            try:
+                self.lasso.disconnect_events()
+            except Exception:
+                pass
+            self.lasso = None
+
         if self.noise_reduced_data is None:
             print("No burst-isolated data available.")
             return
@@ -915,7 +923,7 @@ from PySide6.QtWidgets import (
     QDialog, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
     QFileDialog, QComboBox, QScrollArea, QWidget, QSizePolicy
 )
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import numpy as np
 from scipy.optimize import curve_fit
