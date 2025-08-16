@@ -1,4 +1,6 @@
-#This enables to view and download GOES X-Ray Flux.
+# This enables to view and download GOES X-Ray Flux with spacecraft selection (GOES-16..19),
+# and stores downloaded NetCDFs in a TEMPORARY cache that is removed when the app exits.
+
 import os
 import sys
 import csv
@@ -25,37 +27,45 @@ from PySide6.QtWidgets import (
     QGroupBox, QFormLayout, QFileDialog, QProgressBar
 )
 
+# ---------- TEMP CACHE: make a temp folder and remove it on exit ----------
+import tempfile, atexit, shutil
+CACHE_DIR = tempfile.mkdtemp(prefix="goes_xrs_cache_")
+@atexit.register
+def _cleanup_cache_dir():
+    shutil.rmtree(CACHE_DIR, ignore_errors=True)
+# -------------------------------------------------------------------------
+
 # ------------------------------
 # Data helpers (download/read/slice)
 # ------------------------------
 
-BASE_URL = (
+BASE_URL_TMPL = (
     "https://data.ngdc.noaa.gov/platforms/solar-space-observing-satellites/"
-    "goes/goes16/l2/data/xrsf-l2-avg1m_science"
+    "goes/goes{goes_num}/l2/data/xrsf-l2-avg1m_science"
 )
 CANDIDATE_VERSIONS = ["v2-2-2", "v2-2-1", "v2-2-0"]
-CACHE_DIR = os.path.join(os.path.abspath("."), "goes_cache")
-os.makedirs(CACHE_DIR, exist_ok=True)
 
 def day_parts(dt: datetime) -> Tuple[int, int, int]:
     return dt.year, dt.month, dt.day
 
-def build_filename(year: int, month: int, day: int, version: str) -> str:
-    return f"sci_xrsf-l2-avg1m_g16_d{year:04d}{month:02d}{day:02d}_{version}.nc"
+def build_filename(goes_num: int, year: int, month: int, day: int, version: str) -> str:
+    return f"sci_xrsf-l2-avg1m_g{goes_num:02d}_d{year:04d}{month:02d}{day:02d}_{version}.nc"
 
-def build_url(year: int, month: int, day: int, version: str) -> str:
-    return f"{BASE_URL}/{year:04d}/{month:02d}/{build_filename(year, month, day, version)}"
+def build_url(goes_num: int, year: int, month: int, day: int, version: str) -> str:
+    base = BASE_URL_TMPL.format(goes_num=goes_num)
+    return f"{base}/{year:04d}/{month:02d}/{build_filename(goes_num, year, month, day, version)}"
 
 def get_local_path(filename: str) -> str:
     return os.path.join(CACHE_DIR, filename)
 
-def download_file(year: int, month: int, day: int, progress_cb=None) -> str:
+def download_file(goes_num: int, year: int, month: int, day: int, progress_cb=None) -> str:
     last_err = None
     if progress_cb:
-        progress_cb(None, "Locating file…")
+        progress_cb(None, f"Locating file for GOES-{goes_num}…")
+
     for ver in CANDIDATE_VERSIONS:
-        fname = build_filename(year, month, day, ver)
-        url = build_url(year, month, day, ver)
+        fname = build_filename(goes_num, year, month, day, ver)
+        url = build_url(goes_num, year, month, day, ver)
         local = get_local_path(fname)
         if os.path.exists(local):
             if progress_cb: progress_cb(20, f"Using cached file: {fname}")
@@ -78,7 +88,7 @@ def download_file(year: int, month: int, day: int, progress_cb=None) -> str:
         except Exception as e:
             last_err = e
     raise RuntimeError(
-        f"Could not download GOES-16 XRS file for {year:04d}-{month:02d}-{day:02d}. "
+        f"Could not download GOES-{goes_num} XRS file for {year:04d}-{month:02d}-{day:02d}. "
         f"Tried: {', '.join(CANDIDATE_VERSIONS)}.\nLast error: {last_err}"
     )
 
@@ -122,33 +132,36 @@ def fmt_timedelta_seconds(seconds: float) -> str:
     return f"{h:d}h {m:02d}m {s:02d}s" if h else f"{m:d}m {s:02d}s"
 
 # ------------------------------
-# Worker running in a background thread
+# Worker thread
 # ------------------------------
 
+from PySide6.QtCore import QObject, Signal, Slot, QThread
+
 class DataWorker(QObject):
-    progress = Signal(object, object)          # (value:int|None, text:str|None)
-    finished = Signal(object, object, object, str)  # (times, xrsa, xrsb, local_path)
+    progress = Signal(object, object)                 # (value:int|None, text:str|None)
+    finished = Signal(object, object, object, str, int)  # (times, xrsa, xrsb, local_path, goes_num)
     failed   = Signal(str)
 
-    def __init__(self, year: int, month: int, day: int, start_dt: datetime, end_dt: datetime):
+    def __init__(self, goes_num: int, year: int, month: int, day: int, start_dt: datetime, end_dt: datetime):
         super().__init__()
+        self.goes_num = goes_num
         self.year, self.month, self.day = year, month, day
         self.start_dt, self.end_dt = start_dt, end_dt
 
     @Slot()
     def run(self):
         try:
-            local_path = download_file(self.year, self.month, self.day,
+            local_path = download_file(self.goes_num, self.year, self.month, self.day,
                                        progress_cb=lambda v,t: self.progress.emit(v, t))
             times, xrsa, xrsb = load_and_slice(local_path, self.start_dt, self.end_dt,
                                                progress_cb=lambda v,t: self.progress.emit(v, t))
             self.progress.emit(95, "Preparing plot…")
-            self.finished.emit(times, xrsa, xrsb, local_path)
+            self.finished.emit(times, xrsa, xrsb, local_path, self.goes_num)
         except Exception:
             self.failed.emit(traceback.format_exc())
 
 # ------------------------------
-# Matplotlib canvas with rectangle selector
+# Matplotlib canvas + selector
 # ------------------------------
 
 class PlotCanvas(FigureCanvas):
@@ -199,7 +212,7 @@ class PlotCanvas(FigureCanvas):
         self.ax.clear()
         self.draw_idle()
 
-    def plot_xrs(self, times, xrsa, xrsb, start_dt: datetime, end_dt: datetime):
+    def plot_xrs(self, times, xrsa, xrsb, start_dt: datetime, end_dt: datetime, goes_num: int):
         self.ax.clear()
 
         self._times = np.array(times, dtype=object)
@@ -212,7 +225,7 @@ class PlotCanvas(FigureCanvas):
         self.ax.set_yscale("log")
         self.ax.set_ylabel("X-ray Flux (W/m²)")
         self.ax.set_xlabel("Time (UTC)")
-        self.ax.set_title(f"GOES-16 XRS X-ray Flux ({start_dt.isoformat()} — {end_dt.isoformat()})")
+        self.ax.set_title(f"GOES-{goes_num} XRS X-ray Flux ({start_dt.isoformat()} — {end_dt.isoformat()})")
 
         flare_levels = {"A1": 1e-8, "B1": 1e-7, "C1": 1e-6, "M1": 1e-5, "X1": 1e-4}
         if len(self._times) > 0:
@@ -289,10 +302,11 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.setWindowTitle("GOES XRS Plotter")
-        self.resize(1200, 750)
+        self.resize(1250, 760)
 
         self.current_start_dt: Optional[datetime] = None
         self.current_end_dt: Optional[datetime] = None
+        self.current_goes_num: int = 16  # default
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -315,7 +329,9 @@ class MainWindow(QMainWindow):
         grid.addWidget(QLabel("Date"), 0, 1)
         grid.addWidget(QLabel("Hour"), 0, 2)
         grid.addWidget(QLabel("Minute"), 0, 3)
+        grid.addWidget(QLabel("Spacecraft"), 0, 4)
 
+        # Start/End
         start_hdr = QLabel("Start:"); start_hdr.setStyleSheet("font-weight: 600;")
         self.start_date = QDateEdit(); self.start_date.setCalendarPopup(True); self.start_date.setDisplayFormat("yyyy-MM-dd")
         self.start_hour, self.start_min = _build_time_combo(1)
@@ -324,13 +340,21 @@ class MainWindow(QMainWindow):
         self.end_date = QDateEdit(); self.end_date.setCalendarPopup(True); self.end_date.setDisplayFormat("yyyy-MM-dd")
         self.end_hour, self.end_min = _build_time_combo(1)
 
+        # Spacecraft dropdown
+        self.spacecraft_cb = QComboBox()
+        for n in (16, 17, 18, 19):
+            self.spacecraft_cb.addItem(f"GOES-{n}", n)
+        self.spacecraft_cb.setCurrentIndex(0)
+
         # Defaults
-        self.start_date.setDate(QDate(2023, 5, 4)); self.end_date.setDate(QDate(2023, 5, 4))
+        self.start_date.setDate(QDate.currentDate()); self.end_date.setDate(QDate.currentDate())
         self.start_hour.setCurrentIndex(0); self.start_min.setCurrentIndex(0)
         self.end_hour.setCurrentIndex(23); self.end_min.setCurrentIndex(59)
 
+        # Place in grid
         grid.addWidget(start_hdr, 1, 0); grid.addWidget(self.start_date, 1, 1); grid.addWidget(self.start_hour, 1, 2); grid.addWidget(self.start_min, 1, 3)
         grid.addWidget(end_hdr,   2, 0); grid.addWidget(self.end_date,   2, 1); grid.addWidget(self.end_hour,   2, 2); grid.addWidget(self.end_min,   2, 3)
+        grid.addWidget(QLabel("Use:"), 1, 4, alignment=Qt.AlignRight); grid.addWidget(self.spacecraft_cb, 1, 5)
 
         # Preset row
         preset_row = QHBoxLayout()
@@ -381,10 +405,8 @@ class MainWindow(QMainWindow):
         self.sb = self.statusBar()
         self.sb.showMessage("Ready")
         self.progress = QProgressBar()
-        self.progress.setTextVisible(True)
-        self.progress.setFormat("%p%")
-        self.progress.setMinimumWidth(200)
-        self.progress.setVisible(False)
+        self.progress.setTextVisible(True); self.progress.setFormat("%p%")
+        self.progress.setMinimumWidth(200); self.progress.setVisible(False)
         self.sb.addPermanentWidget(self.progress, 1)
 
         self.setStyleSheet("#top_panel { background: #f7f7f7; }")
@@ -408,7 +430,7 @@ class MainWindow(QMainWindow):
     def progress_report(self, value, text):
         if text: self.sb.showMessage(text)
         if value is not None:
-            if self.progress.maximum() == 0:  # was indeterminate
+            if self.progress.maximum() == 0:
                 self.progress.setRange(0, 100)
             self.progress.setValue(max(0, min(100, int(value))))
 
@@ -425,7 +447,7 @@ class MainWindow(QMainWindow):
         self.end_hour.setCurrentIndex(23);  self.end_min.setCurrentIndex(59)
         self.sb.showMessage("Preset applied: Whole day 00:00–23:59")
 
-    # ---- Plot (spawns background thread) ----
+    # ---- Plot (background thread) ----
     def on_plot_clicked(self):
         try:
             start_dt = _get_dt(self.start_date, self.start_hour, self.start_min)
@@ -436,24 +458,22 @@ class MainWindow(QMainWindow):
             if (y1, m1, d1) != (y2, m2, d2):
                 raise ValueError("For now, please choose a start and end within the same day.")
 
+            goes_num = int(self.spacecraft_cb.currentData())
+            self.current_goes_num = goes_num
             self.current_start_dt, self.current_end_dt = start_dt, end_dt
 
-            # disable buttons while working
             for b in (self.plot_btn, self.save_plot_btn, self.save_data_btn, self.reset_btn):
                 b.setEnabled(False)
 
-            # start progress and spawn worker thread
-            self.start_progress("Preparing…", indeterminate=True)
+            self.start_progress(f"Preparing (GOES-{goes_num})…", indeterminate=True)
             self.thread = QThread()
-            self.worker = DataWorker(y1, m1, d1, start_dt, end_dt)
+            self.worker = DataWorker(goes_num, y1, m1, d1, start_dt, end_dt)
             self.worker.moveToThread(self.thread)
 
-            # Wire signals
             self.thread.started.connect(self.worker.run)
             self.worker.progress.connect(self.progress_report)
             self.worker.finished.connect(self._on_worker_finished)
             self.worker.failed.connect(self._on_worker_failed)
-            # Cleanup
             self.worker.finished.connect(self.thread.quit)
             self.worker.failed.connect(self.thread.quit)
             self.thread.finished.connect(self.worker.deleteLater)
@@ -471,19 +491,19 @@ class MainWindow(QMainWindow):
         for b in (self.plot_btn, self.save_plot_btn, self.save_data_btn, self.reset_btn):
             b.setEnabled(True)
 
-    @Slot(object, object, object, str)
-    def _on_worker_finished(self, times, xrsa, xrsb, local_path):
+    @Slot(object, object, object, str, int)
+    def _on_worker_finished(self, times, xrsa, xrsb, local_path, goes_num):
         if len(times) == 0:
             QMessageBox.information(self, "No Data", "No samples found in the selected time range.")
             self.canvas.clear_plot()
             self.finish_progress("No data in range.")
             return
         self.progress_report(98, "Rendering plot…")
-        self.canvas.plot_xrs(times, xrsa, xrsb, self.current_start_dt, self.current_end_dt)
+        self.canvas.plot_xrs(times, xrsa, xrsb, self.current_start_dt, self.current_end_dt, goes_num)
         self.canvas.reset_selector()
         self.update_flare_info({"status": "Plotted", "t0": None, "t1": None, "n": None,
                                 "peak_flux": None, "peak_time": None, "rise_time": None, "class_label": None})
-        self.finish_progress(f"Plotted {len(times)} points. Source: {os.path.basename(local_path)}")
+        self.finish_progress(f"Plotted {len(times)} points (GOES-{goes_num}). Source: {os.path.basename(local_path)}")
 
     @Slot(str)
     def _on_worker_failed(self, tb_str: str):
@@ -497,7 +517,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Nothing to Save", "Please plot some data first."); return
         start = self.current_start_dt or self.canvas._times[0]
         end = self.current_end_dt or self.canvas._times[-1]
-        default_name = f"GOES16_XRS_{start:%Y%m%d_%H%M}-{end:%H%M}.png"
+        default_name = f"GOES{self.current_goes_num}_XRS_{start:%Y%m%d_%H%M}-{end:%H%M}.png"
         path, _ = QFileDialog.getSaveFileName(self, "Save Plot as PNG", default_name, "PNG Image (*.png)")
         if not path: return
         try:
@@ -510,9 +530,9 @@ class MainWindow(QMainWindow):
     def on_save_data(self):
         t = self.canvas._times; a = self.canvas._xrsa; b = self.canvas._xrsb
         if t is None or a is None or b is None or len(t) == 0:
-            QMessageBox.showMessage(self, "Nothing to Save", "Please plot some data first."); return
+            QMessageBox.information(self, "Nothing to Save", "Please plot some data first."); return
         start = self.current_start_dt or t[0]; end = self.current_end_dt or t[-1]
-        default_name = f"GOES16_XRS_{start:%Y%m%d_%H%M}-{end:%H%M}.csv"
+        default_name = f"GOES{self.current_goes_num}_XRS_{start:%Y%m%d_%H%M}-{end:%H%M}.csv"
         path, _ = QFileDialog.getSaveFileName(self, "Save Data as CSV", default_name, "CSV File (*.csv)")
         if not path: return
         try:
