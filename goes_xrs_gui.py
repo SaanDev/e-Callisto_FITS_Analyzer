@@ -12,8 +12,6 @@ import requests
 import netCDF4 as nc
 import numpy as np
 import cftime
-import matplotlib
-matplotlib.use("QtAgg")
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
