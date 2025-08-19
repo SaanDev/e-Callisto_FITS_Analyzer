@@ -1,5 +1,6 @@
 # This enables to view and download GOES X-Ray Flux with spacecraft selection (GOES-16..19),
-# and stores downloaded NetCDFs in a TEMPORARY cache that is removed when the app exits.
+# stores downloaded NetCDFs in a TEMPORARY cache removed on exit, and shows rise/decay/duration
+# for a user-selected flare window.
 
 import os
 import sys
@@ -85,10 +86,13 @@ def download_file(goes_num: int, year: int, month: int, day: int, progress_cb=No
             return local
         except Exception as e:
             last_err = e
-    raise RuntimeError(
-        f"Could not download GOES-{goes_num} XRS file for {year:04d}-{month:02d}-{day:02d}. "
-        f"Tried: {', '.join(CANDIDATE_VERSIONS)}.\nLast error: {last_err}"
+
+    raise FileNotFoundError(
+        f"GOES-{goes_num} XRS file for {year:04d}-{month:02d}-{day:02d} "
+        f"is not available on the NOAA server. "
+        f"Tried versions: {', '.join(CANDIDATE_VERSIONS)}."
     )
+
 
 def load_and_slice(local_nc_path: str, start_dt: datetime, end_dt: datetime, progress_cb=None):
     if progress_cb: progress_cb(80, "Reading NetCDF…")
@@ -254,7 +258,8 @@ class PlotCanvas(FigureCanvas):
                     "status": "No samples in selected area.",
                     "t0": None, "t1": None, "n": 0,
                     "peak_flux": None, "peak_time": None,
-                    "rise_time": None, "class_label": None
+                    "rise_time": None, "decay_time": None, "flare_time": None,
+                    "class_label": None
                 })
             return
 
@@ -263,7 +268,11 @@ class PlotCanvas(FigureCanvas):
         idx_peak  = int(np.nanargmax(sel_xrsb))
         peak_flux = float(sel_xrsb[idx_peak])
         peak_time = sel_times[idx_peak]
-        rise_seconds = (peak_time - sel_times[0]).total_seconds()
+
+        # Times
+        rise_seconds  = (peak_time     - sel_times[0]).total_seconds()
+        decay_seconds = (sel_times[-1] - peak_time    ).total_seconds()
+        flare_seconds = (sel_times[-1] - sel_times[0] ).total_seconds()
 
         if self.on_flare_info:
             self.on_flare_info({
@@ -271,7 +280,9 @@ class PlotCanvas(FigureCanvas):
                 "t0": sel_times[0], "t1": sel_times[-1], "n": len(sel_times),
                 "peak_flux": peak_flux,
                 "peak_time": peak_time,
-                "rise_time": fmt_timedelta_seconds(rise_seconds),
+                "rise_time":  fmt_timedelta_seconds(rise_seconds),
+                "decay_time": fmt_timedelta_seconds(decay_seconds),
+                "flare_time": fmt_timedelta_seconds(flare_seconds),
                 "class_label": classify_goes_flux(peak_flux)
             })
 
@@ -376,12 +387,19 @@ class MainWindow(QMainWindow):
         # -- Flare info
         info_group = QGroupBox("Flare Information")
         info_form = QFormLayout(); info_form.setLabelAlignment(Qt.AlignLeft)
-        self.info_selection = QLabel("—"); self.info_peak_flux = QLabel("—"); self.info_peak_time = QLabel("—")
-        self.info_rise_time = QLabel("—"); self.info_class = QLabel("—")
+        self.info_selection = QLabel("—")
+        self.info_peak_flux = QLabel("—")
+        self.info_peak_time = QLabel("—")
+        self.info_rise_time = QLabel("—")
+        self.info_decay_time = QLabel("—")     # NEW
+        self.info_flare_time = QLabel("—")     # NEW
+        self.info_class = QLabel("—")
         info_form.addRow("Selection window:", self.info_selection)
         info_form.addRow("Peak X-ray Flux (W/m²):", self.info_peak_flux)
         info_form.addRow("Peak Time (UTC):", self.info_peak_time)
         info_form.addRow("Rise Time:", self.info_rise_time)
+        info_form.addRow("Decay Time:", self.info_decay_time)       # NEW
+        info_form.addRow("Flare Duration:", self.info_flare_time)   # NEW
         info_form.addRow("GOES Class:", self.info_class)
         info_group.setLayout(info_form)
 
@@ -499,15 +517,30 @@ class MainWindow(QMainWindow):
         self.progress_report(98, "Rendering plot…")
         self.canvas.plot_xrs(times, xrsa, xrsb, self.current_start_dt, self.current_end_dt, goes_num)
         self.canvas.reset_selector()
+        # Clear flare info after new plot
         self.update_flare_info({"status": "Plotted", "t0": None, "t1": None, "n": None,
-                                "peak_flux": None, "peak_time": None, "rise_time": None, "class_label": None})
+                                "peak_flux": None, "peak_time": None,
+                                "rise_time": None, "decay_time": None, "flare_time": None,
+                                "class_label": None})
         self.finish_progress(f"Plotted {len(times)} points (GOES-{goes_num}). Source: {os.path.basename(local_path)}")
 
     @Slot(str)
+    @Slot(str)
     def _on_worker_failed(self, tb_str: str):
-        QMessageBox.critical(self, "Error", tb_str)
+        # Show a clean error message if it looks like a FileNotFoundError
+        if "FileNotFoundError" in tb_str:
+            QMessageBox.warning(
+                self,
+                "Data Not Available",
+                "The requested GOES XRS file could not be found on the NOAA archive.\n\n"
+                "Please check the selected date/time and spacecraft.\n\n"
+                "Details:\n" + tb_str.splitlines()[-1]
+            )
+            self.sb.showMessage("File not available.")
+        else:
+            QMessageBox.critical(self, "Error", tb_str)
+            self.sb.showMessage("Error.")
         self.progress.setVisible(False)
-        self.sb.showMessage("Error.")
 
     # ---- Save Plot ----
     def on_save_plot(self):
@@ -547,7 +580,9 @@ class MainWindow(QMainWindow):
     def on_reset(self):
         self.canvas.reset_selector()
         self.update_flare_info({"status": "Plotted", "t0": None, "t1": None, "n": None,
-                                "peak_flux": None, "peak_time": None, "rise_time": None, "class_label": None})
+                                "peak_flux": None, "peak_time": None,
+                                "rise_time": None, "decay_time": None, "flare_time": None,
+                                "class_label": None})
         self.sb.showMessage("Selection cleared.")
 
     # ---- Flare info updater ----
@@ -555,13 +590,20 @@ class MainWindow(QMainWindow):
         if info.get("status") != "OK":
             t0, t1, n = info.get("t0"), info.get("t1"), info.get("n")
             self.info_selection.setText(f"{t0} — {t1}  (n={n})" if (t0 and t1 and n is not None) else "—")
-            self.info_peak_flux.setText("—"); self.info_peak_time.setText("—")
-            self.info_rise_time.setText("—"); self.info_class.setText("—")
+            self.info_peak_flux.setText("—")
+            self.info_peak_time.setText("—")
+            self.info_rise_time.setText("—")
+            self.info_decay_time.setText("—")     # clear
+            self.info_flare_time.setText("—")     # clear
+            self.info_class.setText("—")
             return
+
         self.info_selection.setText(f"{info['t0']} — {info['t1']}  (n={info['n']})")
         self.info_peak_flux.setText(f"{info['peak_flux']:.3e}")
         self.info_peak_time.setText(str(info['peak_time']))
         self.info_rise_time.setText(info['rise_time'])
+        self.info_decay_time.setText(info.get('decay_time', "—"))
+        self.info_flare_time.setText(info.get('flare_time', "—"))
         self.info_class.setText(info['class_label'])
 
 # ------------------------------
