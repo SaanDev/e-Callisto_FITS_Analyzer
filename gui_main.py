@@ -7,6 +7,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtCore import QTimer
 from callisto_downloader import CallistoDownloaderApp
 from goes_xrs_gui import MainWindow as GoesXrsWindow
+from soho_lasco_viewer import CMEViewer as CMEViewerWindow
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.widgets import LassoSelector
 from matplotlib.path import Path
@@ -227,6 +228,12 @@ class MainWindow(QMainWindow):
         # Toggle logic
         self.xaxis_sec_action.triggered.connect(self.set_axis_to_seconds)
         self.xaxis_ut_action.triggered.connect(self.set_axis_to_utc)
+
+        #CMEs
+        cmes_menu = self.menuBar().addMenu("CME")
+        soho_lasco_action = QAction("SOHO/LASCO CME Catalog", self)
+        soho_lasco_action.triggered.connect(self.open_soho_lasco_window)
+        cmes_menu.addAction(soho_lasco_action)
 
         #Flares
         flares_menu = self.menuBar().addMenu("Flares")
@@ -693,6 +700,10 @@ class MainWindow(QMainWindow):
     def open_goes_xrs_window(self):
         self.goes_window = GoesXrsWindow()
         self.goes_window.show()
+
+    def open_soho_lasco_window(self):
+        self.soho_window = CMEViewerWindow()
+        self.soho_window.show()
 
 
 class MaxIntensityPlotDialog(QDialog):
