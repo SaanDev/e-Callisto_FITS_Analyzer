@@ -428,7 +428,7 @@ class MainWindow(QMainWindow):
         self.canvas.ax.legend(["Drift Segments"])
         self.canvas.draw()
 
-        self.statusBar().showMessage(f"Average Drift Rate: {avg_drift:.4f} MHz/s, Start Frequency: {y1: .3f}, End Frequency: {y2: .3f}",  0)
+        self.statusBar().showMessage(f"Average Drift Rate: {avg_drift:.4f} MHz/s, Start Frequency: {y1: .3f}, End Frequency: {y2: .3f}, Duration: {x2-x1: .3f} s",  0)
 
     def activate_lasso(self):
         if self.noise_reduced_data is None:
