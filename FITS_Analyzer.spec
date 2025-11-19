@@ -1,58 +1,68 @@
 # -*- mode: python ; coding: utf-8 -*-
-import sys
-from PyInstaller.utils.hooks import collect_submodules
 
-block_cipher = None
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
     datas=[
-        ('icon.ico', '.'),  # Include icon
-    ],
+    ('icon.icns', '.'),
+],
     hiddenimports=[
-        'matplotlib.backends.backend_qtagg',
-        'matplotlib.backends.backend_qt5agg',
-        *collect_submodules('PySide6'),
-        *collect_submodules('astropy'),
-        *collect_submodules('matplotlib'),
-        *collect_submodules('bs4'),
-        *collect_submodules('scipy'),
-        *collect_submodules('requests'),
-    ],
+    'PySide6',
+    'matplotlib.backends.backend_qtagg',
+    'matplotlib.backends.backend_qt5agg',
+    ' matplotlib',
+    'mpl_toolkits.axes_grid1',
+    'matplotlib.colors',
+    'matplotlib.widgets',
+    'matplotlib.path',
+    'astropy',
+    'bs4',
+    'requests',
+    'scipy',
+    'cftime',
+    'netCDF4',
+    'callisto_downloader',
+    'burst_processor',
+    'gui_main',
+    'matplotlib_widget',
+    'soho_lasco_viewer',
+    'goes_xrs_gui'
+],
     hookspath=[],
+    hooksconfig={},
     runtime_hooks=[],
     excludes=[],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=block_cipher,
     noarchive=False,
+    optimize=0,
 )
-
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure)
 
 exe = EXE(
     pyz,
     a.scripts,
     [],
     exclude_binaries=True,
-    name='e-CALLISTO_FITS_Analyzer',
+    name='e-Callisto FITS Analyzer',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,  # Set to True if you want console logs
-    icon='icon.icns'
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=['icon.icns'],
 )
-
 coll = COLLECT(
     exe,
     a.binaries,
-    a.zipfiles,
     a.datas,
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='e-CALLISTO_FITS_Analyzer'
+    name='e-Callisto FITS Analyzer',
 )

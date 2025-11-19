@@ -21,6 +21,7 @@ import matplotlib.pyplot as plt
 from openpyxl import load_workbook, Workbook
 import io
 import os
+import tempfile
 import re
 import gc
 
@@ -1586,7 +1587,8 @@ class CombineTimeDialog(QDialog):
             ax.set_title("Combined Time Plot")
             fig.tight_layout()
 
-            preview_path = "preview_combined_time.png"
+            temp_dir = tempfile.gettempdir()
+            preview_path = os.path.join(temp_dir, "preview_combined_time.png")
             fig.savefig(preview_path, dpi=100)
             plt.close(fig)
 
