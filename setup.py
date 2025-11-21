@@ -14,10 +14,15 @@ OPTIONS = {
         'sklearn',
         'requests',
         'bs4',
+        'netCDF4',
+        'cftime',
     ],
     'includes': [
         'PySide6',
+        'lzma',
         'importlib_metadata',
+        'backports.lzma',
+        '_lzma',
         'csv',
         'io',
         'os',
@@ -32,20 +37,22 @@ OPTIONS = {
         'matplotlib.widgets',
         'matplotlib.path',
         'matplotlib',
-        'callisto_downloader',  # your module
+        'callisto_downloader',
         'burst_processor',
         'gui_main',
         'matplotlib_widget',
     ],
+
     'iconfile': 'icon.icns',
-    'resources': [],  # If you include sounds/images/fonts, list them here
+    'resources': [],
     'plist': {
         'CFBundleName': 'e-Callisto FITS Analyzer',
-        'CFBundleShortVersionString': '1.5.1',
-        'CFBundleVersion': '1.5.1',
+        'CFBundleShortVersionString': '1.6.0',
+        'CFBundleVersion': '1.6.0',
         'CFBundleIdentifier': 'com.sahansliyanage.callisto.fitsanalyzer',
     }
 }
+
 
 setup(
     app=APP,

@@ -293,7 +293,13 @@ class MainWindow(QMainWindow):
         self.noise_reduced_original = None  # backup before lasso
 
     def load_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Open FITS File", "", "FITS files (*.fit.gz)")
+        initial_dir = os.path.dirname(self.filename) if self.filename else ""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open FITS File",
+            initial_dir,
+            "FITS files (*.fit *.fit.gz)"
+        )
         if file_path:
             self.filename = file_path.split("/")[-1]
             hdul = fits.open(file_path)
@@ -1358,7 +1364,12 @@ class CombineFrequencyDialog(QDialog):
         self.combined_filename = "Combined_Frequency"
 
     def load_files(self):
-        files, _ = QFileDialog.getOpenFileNames(self, "Select Two FITS Files", "", "FITS files (*.fit.gz)")
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select FITS Files to Combine",
+            "",
+            "FITS files (*.fit *.fit.gz)"
+        )
         if len(files) != 2:
             QMessageBox.warning(self, "Error", "Please select exactly TWO files.")
             return
@@ -1500,7 +1511,13 @@ class CombineTimeDialog(QDialog):
         self.setLayout(layout)
 
     def load_files(self):
-        files, _ = QFileDialog.getOpenFileNames(self, "Select FITS Files to Combine", "", "FITS files (*.fit.gz)")
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select FITS Files to Combine",
+            "",
+            "FITS files (*.fit *.fit.gz)"
+        )
+
         if len(files) < 2:
             QMessageBox.warning(self, "Error", "Please select at least 2 FITS files.")
             return
