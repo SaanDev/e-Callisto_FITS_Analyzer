@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (
-    QMainWindow, QSlider, QDialog, QMenuBar, QMessageBox, QLabel,
-    QFormLayout, QGroupBox, QStatusBar, QProgressBar, QApplication, QMenu, QCheckBox, QRadioButton, QButtonGroup
+    QMainWindow, QSlider, QDialog, QMenuBar, QMessageBox, QLabel, QFormLayout, QGroupBox, 
+    QStatusBar, QProgressBar, QApplication, QMenu, QCheckBox, QRadioButton, QButtonGroup, QComboBox
 )
 from PySide6.QtGui import QAction, QPixmap, QImage, QGuiApplication
 from PySide6.QtCore import Qt
@@ -38,12 +38,18 @@ class MplCanvas(FigureCanvas):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("e-CALLISTO FITS Analyzer 1.6.0")
+        self.setWindowTitle("e-CALLISTO FITS Analyzer 1.7.0")
         self.resize(1000, 700)
         self.setMinimumSize(1000, 700)
 
         self.use_utc = False
         self.ut_start_sec = None
+
+        self.current_cmap_name = "Custom"
+
+        self.noise_vmin = None
+        self.noise_vmax = None
+
 
         # Debounce timer for smooth slider updates
         self.noise_smooth_timer = QTimer()
@@ -87,6 +93,22 @@ class MainWindow(QMainWindow):
         lower_label = QLabel("Lower Threshold:")
         upper_label = QLabel("Upper Threshold:")
 
+        self.cmap_label = QLabel("Colormap")
+        self.cmap_combo = QComboBox()
+        self.cmap_combo.addItems([
+            "Custom" ,
+            "viridis",
+            "plasma",
+            "inferno",
+            "magma",
+            "cividis",
+            "turbo",
+            "RdYlBu",
+            "jet",
+            "cubehelix",
+            ])
+
+        
         # Buttons
         button_defs = [
             ("Load FITS File", "load_button"),
@@ -150,6 +172,17 @@ class MainWindow(QMainWindow):
         # Sidebar layout with thresholds and buttons
         side_panel = QVBoxLayout()
         side_panel.addWidget(slider_group)
+
+        cmap_layout = QFormLayout()
+        cmap_layout.addRow(self.cmap_label, self.cmap_combo)
+
+        cmap_group = QGroupBox("Colormap")
+        cmap_group.setLayout(cmap_layout)
+        cmap_group.setMaximumWidth(250)
+
+        side_panel.addWidget(cmap_group)
+        
+
         side_panel.addSpacing(10)
         side_panel.addLayout(button_layout)
 
@@ -253,6 +286,7 @@ class MainWindow(QMainWindow):
         self.load_button.clicked.connect(self.load_file)
         self.lower_slider.valueChanged.connect(self.schedule_noise_update)
         self.upper_slider.valueChanged.connect(self.schedule_noise_update)
+        self.cmap_combo.currentTextChanged.connect(self.change_cmap)
         self.drift_button.clicked.connect(self.activate_drift_tool)
         self.lasso_button.clicked.connect(self.activate_lasso)
         self.max_plot_button.clicked.connect(self.plot_max_intensities)
@@ -334,6 +368,10 @@ class MainWindow(QMainWindow):
         self.noise_reduced_data = data
         self.noise_reduced_original = data.copy()
 
+        self.noise_vmin = data.min()
+        self.noise_vmax = data.max()
+
+
         self.plot_data(data, title="Noise Reduced (Live)")
 
         # enable tools
@@ -370,8 +408,13 @@ class MainWindow(QMainWindow):
             print("Error removing previous colorbar:", e)
 
         # Define colormap
-        colors = [(0.0, 'blue'), (0.5, 'red'), (1.0, 'yellow')]
-        custom_cmap = mcolors.LinearSegmentedColormap.from_list('custom_RdYlBu', colors)
+        # Choose cmap
+        if self.current_cmap_name == "Custom":
+            colors = [(0.0, 'blue'), (0.5, 'red'), (1.0, 'yellow')]
+            cmap = mcolors.LinearSegmentedColormap.from_list('custom_RdYlBu', colors)
+        else:
+            cmap = plt.get_cmap(self.current_cmap_name)
+
 
         # x-axis always in seconds, UT formatting handled separately
         extent = [0, self.time[-1], self.freqs[-1], self.freqs[0]]
@@ -382,7 +425,7 @@ class MainWindow(QMainWindow):
         self.current_cax = cax
 
         # Show image
-        im = self.canvas.ax.imshow(data, aspect='auto', extent=extent, cmap=custom_cmap)
+        im = self.canvas.ax.imshow(data, aspect='auto', extent=extent, cmap=cmap)
         self.current_colorbar = self.canvas.figure.colorbar(im, cax=cax)
         self.current_colorbar.set_label("Intensity", fontsize=11)
 
@@ -396,6 +439,22 @@ class MainWindow(QMainWindow):
         self.noise_button.setEnabled(True)
         self.reset_all_button.setEnabled(True)
         self.statusBar().showMessage(f"Loaded: {self.filename}", 5000)
+
+    def change_cmap(self, name):
+        self.current_cmap_name = name
+        if self.raw_data is None:
+            return
+        # pick best available data
+        data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
+        self.plot_data(data, title=self.current_plot_type)
+
+    def get_current_cmap(self):
+        if self.current_cmap_name == "Custom":
+            colors = [(0.0, 'blue'), (0.5, 'red'), (1.0, 'yellow')]
+            return mcolors.LinearSegmentedColormap.from_list('custom_RdYlBu', colors)
+        else:
+            return plt.get_cmap(self.current_cmap_name)
+
 
     def activate_drift_tool(self):
         self.statusBar().showMessage("Click multiple points along the burst. Right-click or double-click to finish.",
@@ -486,51 +545,67 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, lambda: self._plot_isolated_burst(mask))
 
     def _plot_isolated_burst(self, mask):
+        # Build isolated data array
         burst_isolated = np.zeros_like(self.noise_reduced_data)
         burst_isolated[mask] = self.noise_reduced_data[mask]
 
+        # Clear figure
         self.canvas.ax.clear()
         self.canvas.figure.clf()
         self.canvas.ax = self.canvas.figure.add_subplot(111)
 
-        # Safely remove previous colorbar and colorbar axis
-        if self.current_colorbar:
-            try:
+        # Remove old colorbar safely
+        try:
+            if self.current_colorbar:
                 self.current_colorbar.remove()
-            except Exception:
-                pass
-            self.current_colorbar = None
+        except Exception:
+            pass
+        self.current_colorbar = None
 
-        if self.current_cax:
-            try:
+        try:
+            if self.current_cax:
                 self.current_cax.remove()
-            except Exception:
-                pass
-            self.current_cax = None
+        except Exception:
+            pass
+        self.current_cax = None
 
-        # Use your consistent colormap
-        colors = [(0.0, 'blue'), (0.5, 'red'), (1.0, 'yellow')]
-        custom_cmap = mcolors.LinearSegmentedColormap.from_list('custom_RdYlBu', colors)
-
+        # Restore extent
         extent = [0, self.time[-1], self.freqs[-1], self.freqs[0]]
 
-        # Add new colorbar
+        # Get SAME colormap user selected
+        cmap = self.get_current_cmap()
+
+        # === CREATE COLORBAR AXIS HERE (must exist before colorbar) ===
         divider = make_axes_locatable(self.canvas.ax)
         cax = divider.append_axes("right", size="5%", pad=0.1)
         self.current_cax = cax
 
-        im = self.canvas.ax.imshow(burst_isolated, aspect='auto', extent=extent, cmap=custom_cmap)
+        # Plot with fixed vmin/vmax from noise reduction
+        im = self.canvas.ax.imshow(
+            burst_isolated,
+            aspect='auto',
+            extent=extent,
+            cmap=cmap,
+            vmin=self.noise_vmin,
+            vmax=self.noise_vmax,
+        )
+
+        # Create new colorbar
         self.current_colorbar = self.canvas.figure.colorbar(im, cax=cax)
         self.current_colorbar.set_label("Intensity", fontsize=11)
 
+        # Labels
         self.canvas.ax.set_title("Isolated Burst")
         self.canvas.ax.set_xlabel("Time [s]")
         self.canvas.ax.set_ylabel("Frequency [MHz]")
+
         self.canvas.draw()
 
+        # Replace display data with isolated data
         self.noise_reduced_data = burst_isolated
 
         self.statusBar().showMessage("Burst isolated using lasso", 4000)
+
 
     def plot_max_intensities(self):
         # Ensure any active lasso from the main plot is fully disconnected
@@ -571,27 +646,58 @@ class MainWindow(QMainWindow):
 
 
     def export_figure(self):
-        from PySide6.QtWidgets import QFileDialog
+
 
         if not self.filename:
-            print("No file loaded.")
+            QMessageBox.warning(self, "No File Loaded", "Load a FITS file before exporting.")
             return
 
-        base_name = self.filename.split(".")[0]
-        suffix = self.current_plot_type.replace(" ", "")  # e.g. "NoiseReduced"
-        full_title = f"{base_name}_{suffix}"
+     # --- Available formats ---
+        formats = "PNG (*.png);;PDF (*.pdf);;EPS (*.eps);;SVG (*.svg);;TIFF (*.tiff)"
 
-        file_path, _ = QFileDialog.getSaveFileName(
+        base_name = self.filename.split(".")[0]
+        suffix = self.current_plot_type.replace(" ", "")
+        default_name = f"{base_name}_{suffix}"
+
+        file_path, selected_filter = QFileDialog.getSaveFileName(
             self,
-            "Export PNG",
-            f"{full_title}.png",
-            "PNG files (*.png)"
+            "Export Figure",
+            default_name,
+            formats
         )
+
         if not file_path:
             return
 
-        self.canvas.figure.savefig(file_path, dpi=300, bbox_inches="tight")
-        print(f"Saved image: {file_path}")
+        try:
+         # --- Ensure proper extension ---
+            if "." not in os.path.basename(file_path):
+                if "PNG" in selected_filter:
+                    file_path += ".png"
+                elif "PDF" in selected_filter:
+                    file_path += ".pdf"
+                elif "EPS" in selected_filter:
+                    file_path += ".eps"
+                elif "SVG" in selected_filter:
+                    file_path += ".svg"
+                elif "TIFF" in selected_filter:
+                    file_path += ".tiff"
+
+            ext = file_path.split(".")[-1].lower()
+
+            # --- Save the figure ---
+            self.canvas.figure.savefig(
+                file_path,
+                dpi=300,
+                bbox_inches="tight",
+                format=ext
+            )
+
+            QMessageBox.information(self, "Export Complete", f"Figure saved:\n{file_path}")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", f"An error occurred:\n{e}")
+
 
     def reset_all(self):
         # Safely remove colorbar
@@ -640,7 +746,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "About e-Callisto FITS Analyzer",
-            "e-CALLISTO FITS Analyzer version 1.6.0.\n\n"
+            "e-CALLISTO FITS Analyzer version 1.7.0.\n\n"
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"
@@ -725,6 +831,7 @@ class MaxIntensityPlotDialog(QDialog):
         self.setWindowTitle("Maximum Intensities for Each Time Channel")
         self.resize(1000, 700)
         self.filename = filename
+        self.current_plot_type = "MaxIntensityPlot"
 
         # Data
         self.time_channels = np.array(time_channels)
@@ -897,24 +1004,61 @@ class MaxIntensityPlotDialog(QDialog):
             self.status.showMessage(f"Error: {e}", 3000)
 
     def export_figure(self):
+        from PySide6.QtWidgets import QFileDialog
+
         if not self.filename:
-            self.status.showMessage("No base filename available", 3000)
+            QMessageBox.warning(self, "No File", "Load a FITS file before exporting.")
             return
 
+        # Available export formats
+        options = "PNG (*.png);;PDF (*.pdf);;EPS (*.eps);;SVG (*.svg);;TIFF (*.tiff)"
+
         base_name = self.filename.split(".")[0]
-        full_title = f"{base_name}_MaxIntensities"
-        file_path, _ = QFileDialog.getSaveFileName(self, "Export PNG", f"{full_title}.png", "PNG files (*.png)")
+        suffix = self.current_plot_type.replace(" ", "")
+        default_name = f"{base_name}_{suffix}"
+
+        file_path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export Figure",
+            f"{default_name}",
+            options,
+        )
+
         if not file_path:
             return
 
-        self.canvas.fig.savefig(file_path, dpi=300, bbox_inches="tight")
-        self.status.showMessage(f"Image saved: {file_path}", 3000)
+        try:
+            # Ensure correct extension is added when user forgets
+            if "." not in os.path.basename(file_path):
+                if "PNG" in selected_filter:
+                    file_path += ".png"
+                elif "PDF" in selected_filter:
+                    file_path += ".pdf"
+                elif "EPS" in selected_filter:
+                    file_path += ".eps"
+                elif "SVG" in selected_filter:
+                    file_path += ".svg"
+                elif "TIFF" in selected_filter:
+                    file_path += ".tiff"
+
+            self.canvas.figure.savefig(
+                file_path,
+                dpi=300,
+                bbox_inches="tight",
+                format=file_path.split(".")[-1]
+            )
+
+            QMessageBox.information(self, "Success", f"Saved plot as:\n{file_path}")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to export figure:\n{e}")
+
 
     def show_about_dialog(self):
         QMessageBox.information(
             self,
             "About e-Callisto FITS Analyzer",
-            "e-CALLISTO FITS Analyzer version 1.6.0.\n\n"
+            "e-CALLISTO FITS Analyzer version 1.7.0.\n\n"
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"
@@ -1172,10 +1316,56 @@ class AnalyzeDialog(QDialog):
         self.avg_shock_height_display.setText(f"Average Shock Height: <b>{avg_height:.3f} ± {avg_height_err:.3f}</b> Rₛ")
 
     def save_graph(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Save Plot", f"{self.current_plot_title}.png", "PNG Files (*.png)")
-        if path:
-            self.canvas.figure.savefig(path, dpi=300, bbox_inches='tight')
-        self.status.showMessage("Graph saved successfully!.", 3000)
+
+        if not hasattr(self, "current_plot_title"):
+            plot_name = "AnalyzePlot"
+        else:
+            plot_name = self.current_plot_title
+
+        # Supported formats
+        formats = "PNG (*.png);;PDF (*.pdf);;EPS (*.eps);;SVG (*.svg);;TIFF (*.tiff)"
+
+        file_path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export Plot",
+            plot_name,
+            formats
+        )
+
+        if not file_path:
+            return
+
+        try:
+            # Add extension automatically if missing
+            if "." not in os.path.basename(file_path):
+                if "PNG" in selected_filter:
+                    file_path += ".png"
+                elif "PDF" in selected_filter:
+                    file_path += ".pdf"
+                elif "EPS" in selected_filter:
+                    file_path += ".eps"
+                elif "SVG" in selected_filter:
+                    file_path += ".svg"
+                elif "TIFF" in selected_filter:
+                    file_path += ".tiff"
+
+            ext = file_path.split(".")[-1].lower()
+
+            # Save figure
+            self.canvas.figure.savefig(
+                file_path,
+                dpi=300,
+                bbox_inches="tight",
+                format=ext
+            )
+
+            QMessageBox.information(self, "Export Complete", f"Plot saved:\n{file_path}")
+            self.status.showMessage("Export successful!", 3000)
+
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", f"Could not save file:\n{e}")
+            self.status.showMessage("Export failed!", 3000)
+
 
     def save_data(self):
 
