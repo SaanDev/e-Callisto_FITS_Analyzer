@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import (
-    QMainWindow, QLineEdit, QDialog, QMenuBar, QMessageBox, QDoubleSpinBox,
+    QMainWindow, QSlider, QDialog, QMenuBar, QMessageBox, QLabel,
     QFormLayout, QGroupBox, QStatusBar, QProgressBar, QApplication, QMenu, QCheckBox, QRadioButton, QButtonGroup
 )
 from PySide6.QtGui import QAction, QPixmap, QImage, QGuiApplication
@@ -45,6 +45,12 @@ class MainWindow(QMainWindow):
         self.use_utc = False
         self.ut_start_sec = None
 
+        # Debounce timer for smooth slider updates
+        self.noise_smooth_timer = QTimer()
+        self.noise_smooth_timer.setInterval(40)  # 40 ms refresh is perfect
+        self.noise_smooth_timer.setSingleShot(True)
+        self.noise_smooth_timer.timeout.connect(self.update_noise_live)
+
         # Canvas
         self.canvas = MplCanvas(self, width=10, height=6)
         self.canvas.figure.clf()
@@ -57,11 +63,25 @@ class MainWindow(QMainWindow):
         #Statusbar
         self.setStatusBar(QStatusBar())
 
-        # Threshold input fields
-        self.lower_thresh_input = QLineEdit("-5")
-        self.lower_thresh_input.setMaximumWidth(80)
-        self.upper_thresh_input = QLineEdit("20")
-        self.upper_thresh_input.setMaximumWidth(80)
+        #Sliders for noise clipping
+        self.lower_slider = QSlider(Qt.Horizontal)
+        self.lower_slider.setRange(-50, 50)
+        self.lower_slider.setValue(-5)
+
+        self.upper_slider = QSlider(Qt.Horizontal)
+        self.upper_slider.setRange(-50, 50)
+        self.upper_slider.setValue(20)
+
+        lower_label = QLabel("Lower Threshold")
+        upper_label = QLabel("Upper Threshold")
+
+        slider_layout = QFormLayout()
+        slider_layout.addRow(lower_label, self.lower_slider)
+        slider_layout.addRow(upper_label, self.upper_slider)
+
+        slider_group = QGroupBox("Noise Clipping Thresholds")
+        slider_group.setLayout(slider_layout)
+        slider_group.setMaximumWidth(250)
 
         # Labels
         lower_label = QLabel("Lower Threshold:")
@@ -85,36 +105,10 @@ class MainWindow(QMainWindow):
             btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             setattr(self, attr, btn)
 
-        # Threshold input fields using QDoubleSpinBox
-        self.lower_thresh_input = QDoubleSpinBox()
-        self.lower_thresh_input.setRange(-1000, 1000)
-        self.lower_thresh_input.setValue(0)
-        self.lower_thresh_input.setDecimals(0)
-        self.lower_thresh_input.setSingleStep(1)
-        self.lower_thresh_input.setFixedWidth(100)
-
-        self.upper_thresh_input = QDoubleSpinBox()
-        self.upper_thresh_input.setRange(-1000, 1000)
-        self.upper_thresh_input.setValue(0)
-        self.upper_thresh_input.setDecimals(0)
-        self.upper_thresh_input.setSingleStep(1)
-        self.upper_thresh_input.setFixedWidth(100)
 
         # Labels
         lower_label = QLabel("Lower Threshold:")
         upper_label = QLabel("Upper Threshold:")
-
-        # Group thresholds into a small form layout
-        thresh_form_layout = QFormLayout()
-        thresh_form_layout.addRow(lower_label, self.lower_thresh_input)
-        thresh_form_layout.addRow(upper_label, self.upper_thresh_input)
-
-        thresh_group = QGroupBox("Noise Clipping Thresholds")
-        thresh_group.setLayout(thresh_form_layout)
-        thresh_group.setMaximumWidth(250)
-
-        self.lower_thresh_input.setToolTip("Lower clipping threshold for pixel intensity.\nRecommended: -5")
-        self.upper_thresh_input.setToolTip("Upper clipping threshold for pixel intensity.\nRecommended: 20")
 
         # Buttons
         self.load_button = QPushButton("Load FITS File")
@@ -144,6 +138,7 @@ class MainWindow(QMainWindow):
         button_layout.addWidget(self.reset_all_button)
         button_layout.addWidget(self.close_button)
 
+        self.noise_button.hide()
         self.noise_button.setEnabled(False)
         self.drift_button.setEnabled(False)
         self.lasso_button.setEnabled(False)
@@ -154,7 +149,7 @@ class MainWindow(QMainWindow):
 
         # Sidebar layout with thresholds and buttons
         side_panel = QVBoxLayout()
-        side_panel.addWidget(thresh_group)
+        side_panel.addWidget(slider_group)
         side_panel.addSpacing(10)
         side_panel.addLayout(button_layout)
 
@@ -256,7 +251,8 @@ class MainWindow(QMainWindow):
 
         # Signals
         self.load_button.clicked.connect(self.load_file)
-        self.noise_button.clicked.connect(self.apply_noise)
+        self.lower_slider.valueChanged.connect(self.schedule_noise_update)
+        self.upper_slider.valueChanged.connect(self.schedule_noise_update)
         self.drift_button.clicked.connect(self.activate_drift_tool)
         self.lasso_button.clicked.connect(self.activate_lasso)
         self.max_plot_button.clicked.connect(self.plot_max_intensities)
@@ -318,28 +314,33 @@ class MainWindow(QMainWindow):
             hdul.close()
             self.plot_data(self.raw_data, title="Raw Data")
 
-    def apply_noise(self):
-        if self.raw_data is not None:
-            try:
-                clip_low = float(self.lower_thresh_input.text())
-                clip_high = float(self.upper_thresh_input.text())
-            except ValueError:
-                print("Invalid threshold values")
-                return
+    def schedule_noise_update(self):
+        if self.raw_data is None:
+            return
+        self.noise_smooth_timer.start()
 
-            data = self.raw_data.copy()
-            data = data - data.mean(axis=1, keepdims=True)
-            data = np.clip(data, clip_low, clip_high)
-            data = data * 2500.0 / 255.0 / 25.4
-            self.noise_reduced_data = data
-            self.noise_reduced_original = data.copy()  # backup
-            self.plot_data(data, title="Noise Reduced")
-            self.drift_button.setEnabled(True)
-            self.lasso_button.setEnabled(True)
-            self.max_plot_button.setEnabled(True)
-            self.reset_selection_button.setEnabled(True)
-            self.statusBar().showMessage("Noise reduction applied", 5000)
+    def update_noise_live(self):
+        if self.raw_data is None:
+            return
 
+        low = self.lower_slider.value()
+        high = self.upper_slider.value()
+
+        data = self.raw_data.copy()
+        data = data - data.mean(axis=1, keepdims=True)
+        data = np.clip(data, low, high)
+        data = data * 2500.0 / 255.0 / 25.4
+
+        self.noise_reduced_data = data
+        self.noise_reduced_original = data.copy()
+
+        self.plot_data(data, title="Noise Reduced (Live)")
+
+        # enable tools
+        self.drift_button.setEnabled(True)
+        self.lasso_button.setEnabled(True)
+        self.max_plot_button.setEnabled(True)
+        self.reset_selection_button.setEnabled(True)
 
     def plot_data(self, data, title="Dynamic Spectrum"):
         QTimer.singleShot(0, lambda: self._plot_data_internal(data, title))
@@ -623,8 +624,6 @@ class MainWindow(QMainWindow):
         self.current_plot_type = "Raw"
 
         # Reset GUI
-        self.lower_thresh_input.setValue(0.0)
-        self.upper_thresh_input.setValue(0.0)
         self.statusBar().showMessage("All reset", 4000)
 
         # Disable buttons
@@ -668,19 +667,26 @@ class MainWindow(QMainWindow):
         dialog = CombineTimeDialog(self)
         dialog.exec()
 
+    #Graph axis-problem resolved.
     def set_axis_to_seconds(self):
         self.use_utc = False
         self.xaxis_sec_action.setChecked(True)
         self.xaxis_ut_action.setChecked(False)
+
         if self.raw_data is not None:
-            self.plot_data(self.raw_data, title=self.current_plot_type)
+            data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
+            self.plot_data(data, title=self.current_plot_type)
+
 
     def set_axis_to_utc(self):
         self.use_utc = True
         self.xaxis_sec_action.setChecked(False)
         self.xaxis_ut_action.setChecked(True)
+
         if self.raw_data is not None:
-            self.plot_data(self.raw_data, title=self.current_plot_type)
+            data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
+            self.plot_data(data, title=self.current_plot_type)
+
 
     def format_axes(self):
         if self.use_utc and self.ut_start_sec is not None:
@@ -870,9 +876,6 @@ class MaxIntensityPlotDialog(QDialog):
         self.lasso_mask = None
         self.current_plot_type = "Raw"
 
-        # Reset text boxes
-        self.lower_thresh_input.setValue(0.0)
-        self.upper_thresh_input.setValue(0.0)
 
         self.statusBar().showMessage("All reset", 4000)
 
