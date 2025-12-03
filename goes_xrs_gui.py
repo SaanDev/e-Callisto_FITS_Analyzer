@@ -29,17 +29,11 @@ from PySide6.QtWidgets import (
     QGroupBox, QFormLayout, QFileDialog, QProgressBar
 )
 
-# ---------- TEMP CACHE: make a temp folder and remove it on exit ----------
 import tempfile, atexit, shutil
 CACHE_DIR = tempfile.mkdtemp(prefix="goes_xrs_cache_")
 @atexit.register
 def _cleanup_cache_dir():
     shutil.rmtree(CACHE_DIR, ignore_errors=True)
-# -------------------------------------------------------------------------
-
-# ------------------------------
-# Data helpers (download/read/slice)
-# ------------------------------
 
 BASE_URL_TMPL = (
     "https://data.ngdc.noaa.gov/platforms/solar-space-observing-satellites/"
@@ -83,7 +77,7 @@ def download_file(goes_num: int, year: int, month: int, day: int, progress_cb=No
                     if not chunk: continue
                     f.write(chunk); downloaded += len(chunk)
                     if total and progress_cb:
-                        pct = 5 + int(65 * downloaded / total)  # 5→70%
+                        pct = 5 + int(65 * downloaded / total)
                         progress_cb(pct, f"Downloading… {downloaded//1024} KB")
             if progress_cb: progress_cb(75, "Download complete.")
             return local
@@ -114,10 +108,6 @@ def load_and_slice(local_nc_path: str, start_dt: datetime, end_dt: datetime, pro
     mask = (times_np >= start_dt) & (times_np <= end_dt)
     return times_np[mask], xrsa[mask], xrsb[mask]
 
-# ------------------------------
-# Flare helpers
-# ------------------------------
-
 def classify_goes_flux(peak_flux_wm2: float) -> str:
     if peak_flux_wm2 < 1e-7:
         base, letter = 1e-8, "A"
@@ -135,10 +125,6 @@ def fmt_timedelta_seconds(seconds: float) -> str:
     seconds = int(round(seconds))
     m, s = divmod(seconds, 60); h, m = divmod(m, 60)
     return f"{h:d}h {m:02d}m {s:02d}s" if h else f"{m:d}m {s:02d}s"
-
-# ------------------------------
-# Worker thread
-# ------------------------------
 
 from PySide6.QtCore import QObject, Signal, Slot, QThread
 
@@ -165,10 +151,6 @@ class DataWorker(QObject):
         except Exception:
             self.failed.emit(traceback.format_exc())
 
-# ------------------------------
-# Matplotlib canvas + selector
-# ------------------------------
-
 class PlotCanvas(FigureCanvas):
     def __init__(self, parent: Optional[QWidget] = None):
         self.fig = Figure(figsize=(8, 5), tight_layout=True)
@@ -181,7 +163,7 @@ class PlotCanvas(FigureCanvas):
         self._xrsa: Optional[np.ndarray] = None
         self._xrsb: Optional[np.ndarray] = None
 
-        self.on_flare_info = None  # set by MainWindow
+        self.on_flare_info = None
 
         self.selector: Optional[RectangleSelector] = None
         self.enable_selector(True)
@@ -289,9 +271,6 @@ class PlotCanvas(FigureCanvas):
                 "class_label": classify_goes_flux(peak_flux)
             })
 
-# ------------------------------
-# Small UI helpers
-# ------------------------------
 
 def _build_time_combo(minute_step: int = 1) -> Tuple[QComboBox, QComboBox]:
     hour_cb = QComboBox()
@@ -304,10 +283,6 @@ def _build_time_combo(minute_step: int = 1) -> Tuple[QComboBox, QComboBox]:
 def _get_dt(date_edit: QDateEdit, hour_cb: QComboBox, minute_cb: QComboBox) -> datetime:
     qd: QDate = date_edit.date()
     return datetime(qd.year(), qd.month(), qd.day(), int(hour_cb.currentData()), int(minute_cb.currentData()), 0)
-
-# ------------------------------
-# Main Window
-# ------------------------------
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -324,13 +299,11 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         root = QVBoxLayout(central); root.setSpacing(0)
 
-        # ======== TOP PANEL: Controls + Flare Info ========
         top_panel = QWidget(objectName="top_panel")
         top_panel_layout = QHBoxLayout(top_panel)
         top_panel_layout.setContentsMargins(12, 12, 12, 12)
         top_panel_layout.setSpacing(16)
 
-        # -- Controls
         controls_col = QVBoxLayout(); controls_col.setSpacing(8)
         title_lbl = QLabel("Select the time range to plot")
         title_lbl.setStyleSheet("font-size: 16px; font-weight: 600;")
@@ -343,7 +316,6 @@ class MainWindow(QMainWindow):
         grid.addWidget(QLabel("Minute"), 0, 3)
         grid.addWidget(QLabel("Spacecraft"), 0, 4)
 
-        # Start/End
         start_hdr = QLabel("Start:"); start_hdr.setStyleSheet("font-weight: 600;")
         self.start_date = QDateEdit(); self.start_date.setCalendarPopup(True); self.start_date.setDisplayFormat("yyyy-MM-dd")
         self.start_hour, self.start_min = _build_time_combo(1)
@@ -352,30 +324,25 @@ class MainWindow(QMainWindow):
         self.end_date = QDateEdit(); self.end_date.setCalendarPopup(True); self.end_date.setDisplayFormat("yyyy-MM-dd")
         self.end_hour, self.end_min = _build_time_combo(1)
 
-        # Spacecraft dropdown
         self.spacecraft_cb = QComboBox()
         for n in (16, 17, 18, 19):
             self.spacecraft_cb.addItem(f"GOES-{n}", n)
         self.spacecraft_cb.setCurrentIndex(0)
 
-        # Defaults
         self.start_date.setDate(QDate.currentDate()); self.end_date.setDate(QDate.currentDate())
         self.start_hour.setCurrentIndex(0); self.start_min.setCurrentIndex(0)
         self.end_hour.setCurrentIndex(23); self.end_min.setCurrentIndex(59)
 
-        # Place in grid
         grid.addWidget(start_hdr, 1, 0); grid.addWidget(self.start_date, 1, 1); grid.addWidget(self.start_hour, 1, 2); grid.addWidget(self.start_min, 1, 3)
         grid.addWidget(end_hdr,   2, 0); grid.addWidget(self.end_date,   2, 1); grid.addWidget(self.end_hour,   2, 2); grid.addWidget(self.end_min,   2, 3)
         grid.addWidget(QLabel("Use:"), 1, 4, alignment=Qt.AlignRight); grid.addWidget(self.spacecraft_cb, 1, 5)
 
-        # Preset row
         preset_row = QHBoxLayout()
         preset_lbl = QLabel("Preset:")
         self.preset_cb = QComboBox(); self.preset_cb.addItem("Whole day (00:00–23:59)")
         apply_preset_btn = QPushButton("Apply"); apply_preset_btn.clicked.connect(self.apply_preset)
         preset_row.addWidget(preset_lbl); preset_row.addWidget(self.preset_cb, 1); preset_row.addWidget(apply_preset_btn)
 
-        # Buttons row
         btn_row = QHBoxLayout()
         self.plot_btn = QPushButton("Plot XRS Data"); self.plot_btn.setFixedHeight(32); self.plot_btn.clicked.connect(self.on_plot_clicked)
         self.save_plot_btn = QPushButton("Save Plot"); self.save_plot_btn.setFixedHeight(32); self.save_plot_btn.clicked.connect(self.on_save_plot)
@@ -387,22 +354,21 @@ class MainWindow(QMainWindow):
 
         controls_col.addLayout(grid); controls_col.addLayout(preset_row); controls_col.addLayout(btn_row)
 
-        # -- Flare info
         info_group = QGroupBox("Flare Information")
         info_form = QFormLayout(); info_form.setLabelAlignment(Qt.AlignLeft)
         self.info_selection = QLabel("—")
         self.info_peak_flux = QLabel("—")
         self.info_peak_time = QLabel("—")
         self.info_rise_time = QLabel("—")
-        self.info_decay_time = QLabel("—")     # NEW
-        self.info_flare_time = QLabel("—")     # NEW
+        self.info_decay_time = QLabel("—")
+        self.info_flare_time = QLabel("—")
         self.info_class = QLabel("—")
         info_form.addRow("Selection window:", self.info_selection)
         info_form.addRow("Peak X-ray Flux (W/m²):", self.info_peak_flux)
         info_form.addRow("Peak Time (UTC):", self.info_peak_time)
         info_form.addRow("Rise Time:", self.info_rise_time)
-        info_form.addRow("Decay Time:", self.info_decay_time)       # NEW
-        info_form.addRow("Flare Duration:", self.info_flare_time)   # NEW
+        info_form.addRow("Decay Time:", self.info_decay_time)
+        info_form.addRow("Flare Duration:", self.info_flare_time)
         info_form.addRow("GOES Class:", self.info_class)
         info_group.setLayout(info_form)
 
@@ -410,17 +376,14 @@ class MainWindow(QMainWindow):
         top_panel_layout.addWidget(info_group, 2)
         root.addWidget(top_panel, 0)
 
-        # Divider
         divider = QFrame(); divider.setFrameShape(QFrame.HLine); divider.setFrameShadow(QFrame.Plain)
         divider.setStyleSheet("background:#ffffff; min-height:2px; max-height:2px;"); root.addWidget(divider)
 
-        # Bottom: plot area
         bottom = QWidget(); bottom_layout = QVBoxLayout(bottom)
         bottom_layout.setContentsMargins(12, 12, 12, 12); bottom_layout.setSpacing(8)
         self.canvas = PlotCanvas(self); bottom_layout.addWidget(self.canvas, 1)
         root.addWidget(bottom, 1)
 
-        # Status bar with progress
         self.sb = self.statusBar()
         self.sb.showMessage("Ready")
         self.progress = QProgressBar()
@@ -431,11 +394,9 @@ class MainWindow(QMainWindow):
         self.setStyleSheet("#top_panel { background: #f7f7f7; }")
         self.canvas.on_flare_info = self.update_flare_info
 
-        # Thread/worker placeholders
         self.thread: Optional[QThread] = None
         self.worker: Optional[DataWorker] = None
 
-    # ---- Progress helpers (UI thread) ----
     def start_progress(self, text: str = "", indeterminate: bool = True):
         self.sb.showMessage(text)
         self.progress.setVisible(True)
@@ -458,7 +419,6 @@ class MainWindow(QMainWindow):
         self.sb.showMessage(text)
         QTimer.singleShot(600, lambda: self.progress.setVisible(False))
 
-    # ---- Preset ----
     def apply_preset(self):
         date = self.start_date.date()
         self.end_date.setDate(date)
@@ -466,7 +426,6 @@ class MainWindow(QMainWindow):
         self.end_hour.setCurrentIndex(23);  self.end_min.setCurrentIndex(59)
         self.sb.showMessage("Preset applied: Whole day 00:00–23:59")
 
-    # ---- Plot (background thread) ----
     def on_plot_clicked(self):
         try:
             start_dt = _get_dt(self.start_date, self.start_hour, self.start_min)
@@ -545,7 +504,6 @@ class MainWindow(QMainWindow):
             self.sb.showMessage("Error.")
         self.progress.setVisible(False)
 
-    # ---- Save Plot ----
     def on_save_plot(self):
         if self.canvas.fig is None or self.canvas._times is None or len(self.canvas._times) == 0:
             QMessageBox.information(self, "Nothing to Save", "Please plot some data first."); return
@@ -560,7 +518,6 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Save Error", str(e))
 
-    # ---- Save Data ----
     def on_save_data(self):
         t = self.canvas._times; a = self.canvas._xrsa; b = self.canvas._xrsb
         if t is None or a is None or b is None or len(t) == 0:
@@ -579,7 +536,6 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Save Error", str(e))
 
-    # ---- Reset selection ----
     def on_reset(self):
         self.canvas.reset_selector()
         self.update_flare_info({"status": "Plotted", "t0": None, "t1": None, "n": None,
@@ -588,7 +544,6 @@ class MainWindow(QMainWindow):
                                 "class_label": None})
         self.sb.showMessage("Selection cleared.")
 
-    # ---- Flare info updater ----
     def update_flare_info(self, info: dict):
         if info.get("status") != "OK":
             t0, t1, n = info.get("t0"), info.get("t1"), info.get("n")
@@ -608,10 +563,6 @@ class MainWindow(QMainWindow):
         self.info_decay_time.setText(info.get('decay_time', "—"))
         self.info_flare_time.setText(info.get('flare_time', "—"))
         self.info_class.setText(info['class_label'])
-
-# ------------------------------
-# Entrypoint
-# ------------------------------
 
 def main():
     app = QApplication(sys.argv)
