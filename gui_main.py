@@ -1,5 +1,12 @@
+"""
+e-CALLISTO FITS Analyzer
+Version 1.7.1
+Sahan S Liyanage (sahanslst@gmail.com)
+Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
+"""
+
 from PySide6.QtWidgets import (
-    QMainWindow, QSlider, QDialog, QMenuBar, QMessageBox, QLabel, QFormLayout, QGroupBox, 
+    QMainWindow, QSlider, QDialog, QMenuBar, QMessageBox, QLabel, QFormLayout, QGroupBox,
     QStatusBar, QProgressBar, QApplication, QMenu, QCheckBox, QRadioButton, QButtonGroup, QComboBox
 )
 from PySide6.QtGui import QAction, QPixmap, QImage, QGuiApplication
@@ -24,9 +31,12 @@ import os
 import tempfile
 import re
 import gc
+import requests
+
 
 def start_combine(self):
     QTimer.singleShot(100, self.combine_files)  # delays execution and avoids UI freeze
+
 
 class MplCanvas(FigureCanvas):
     def __init__(self, parent=None, width=10, height=6, dpi=100):
@@ -38,7 +48,7 @@ class MplCanvas(FigureCanvas):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("e-CALLISTO FITS Analyzer 1.7.0")
+        self.setWindowTitle("e-CALLISTO FITS Analyzer 1.7.1")
         self.resize(1000, 700)
         self.setMinimumSize(1000, 700)
 
@@ -50,10 +60,9 @@ class MainWindow(QMainWindow):
         self.noise_vmin = None
         self.noise_vmax = None
 
-
         # Debounce timer for smooth slider updates
         self.noise_smooth_timer = QTimer()
-        self.noise_smooth_timer.setInterval(40)  # 40 ms refresh is perfect
+        self.noise_smooth_timer.setInterval(20)
         self.noise_smooth_timer.setSingleShot(True)
         self.noise_smooth_timer.timeout.connect(self.update_noise_live)
 
@@ -66,10 +75,10 @@ class MainWindow(QMainWindow):
         self.current_colorbar = None
         self.current_cax = None
 
-        #Statusbar
+        # Statusbar
         self.setStatusBar(QStatusBar())
 
-        #Sliders for noise clipping
+        # Sliders for noise clipping
         self.lower_slider = QSlider(Qt.Horizontal)
         self.lower_slider.setRange(-50, 50)
         self.lower_slider.setValue(-5)
@@ -96,7 +105,7 @@ class MainWindow(QMainWindow):
         self.cmap_label = QLabel("Colormap")
         self.cmap_combo = QComboBox()
         self.cmap_combo.addItems([
-            "Custom" ,
+            "Custom",
             "viridis",
             "plasma",
             "inferno",
@@ -106,9 +115,8 @@ class MainWindow(QMainWindow):
             "RdYlBu",
             "jet",
             "cubehelix",
-            ])
+        ])
 
-        
         # Buttons
         button_defs = [
             ("Load FITS File", "load_button"),
@@ -126,7 +134,6 @@ class MainWindow(QMainWindow):
             btn.setMinimumWidth(180)
             btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             setattr(self, attr, btn)
-
 
         # Labels
         lower_label = QLabel("Lower Threshold:")
@@ -168,7 +175,6 @@ class MainWindow(QMainWindow):
         self.reset_selection_button.setEnabled(False)
         self.reset_all_button.setEnabled(False)
 
-
         # Sidebar layout with thresholds and buttons
         side_panel = QVBoxLayout()
         side_panel.addWidget(slider_group)
@@ -181,7 +187,6 @@ class MainWindow(QMainWindow):
         cmap_group.setMaximumWidth(250)
 
         side_panel.addWidget(cmap_group)
-        
 
         side_panel.addSpacing(10)
         side_panel.addLayout(button_layout)
@@ -258,13 +263,13 @@ class MainWindow(QMainWindow):
         self.xaxis_sec_action.triggered.connect(self.set_axis_to_seconds)
         self.xaxis_ut_action.triggered.connect(self.set_axis_to_utc)
 
-        #CMEs
+        # CMEs
         cmes_menu = self.menuBar().addMenu("CME")
         soho_lasco_action = QAction("SOHO/LASCO CME Catalog", self)
         soho_lasco_action.triggered.connect(self.open_soho_lasco_window)
         cmes_menu.addAction(soho_lasco_action)
 
-        #Flares
+        # Flares
         flares_menu = self.menuBar().addMenu("Flares")
         goes_flux_action = QAction("GOES X-Ray Flux", self)
         goes_flux_action.triggered.connect(self.open_goes_xrs_window)
@@ -348,6 +353,36 @@ class MainWindow(QMainWindow):
             hdul.close()
             self.plot_data(self.raw_data, title="Raw Data")
 
+    def load_fits_into_main(self, file_path):
+        hdul = fits.open(file_path)
+        self.raw_data = hdul[0].data
+        self.freqs = hdul[1].data['frequency'][0]
+        self.time = hdul[1].data['time'][0]
+        self.filename = os.path.basename(file_path)
+
+        # Try to set UT start time from header (if available)
+        try:
+            hdr = hdul[0].header
+            hh, mm, ss = hdr['TIME-OBS'].split(":")
+            hh = int(hh)
+            mm = int(mm)
+            ss = float(ss)
+            self.ut_start_sec = hh * 3600 + mm * 60 + ss
+        except Exception:
+            self.ut_start_sec = None
+
+        hdul.close()
+
+        self.plot_data(self.raw_data, title="Raw Data")
+
+    def load_combined_into_main(self, combined):
+        self.raw_data = combined["data"]
+        self.freqs = combined["freqs"]
+        self.time = combined["time"]
+        self.filename = combined.get("filename", "Combined")
+        self.ut_start_sec = combined.get("ut_start_sec", None)
+        self.plot_data(self.raw_data, title="Combined Data")
+
     def schedule_noise_update(self):
         if self.raw_data is None:
             return
@@ -370,7 +405,6 @@ class MainWindow(QMainWindow):
 
         self.noise_vmin = data.min()
         self.noise_vmax = data.max()
-
 
         self.plot_data(data, title="Noise Reduced (Live)")
 
@@ -415,7 +449,6 @@ class MainWindow(QMainWindow):
         else:
             cmap = plt.get_cmap(self.current_cmap_name)
 
-
         # x-axis always in seconds, UT formatting handled separately
         extent = [0, self.time[-1], self.freqs[-1], self.freqs[0]]
 
@@ -454,7 +487,6 @@ class MainWindow(QMainWindow):
             return mcolors.LinearSegmentedColormap.from_list('custom_RdYlBu', colors)
         else:
             return plt.get_cmap(self.current_cmap_name)
-
 
     def activate_drift_tool(self):
         self.statusBar().showMessage("Click multiple points along the burst. Right-click or double-click to finish.",
@@ -495,7 +527,9 @@ class MainWindow(QMainWindow):
         self.canvas.ax.legend(["Drift Segments"])
         self.canvas.draw()
 
-        self.statusBar().showMessage(f"Average Drift Rate: {avg_drift:.4f} MHz/s, Start Frequency: {y1: .3f}, End Frequency: {y2: .3f}, Duration: {x2-x1: .3f} s",  0)
+        self.statusBar().showMessage(
+            f"Average Drift Rate: {avg_drift:.4f} MHz/s, Start Frequency: {y1: .3f}, End Frequency: {y2: .3f}, Duration: {x2 - x1: .3f} s",
+            0)
 
     def activate_lasso(self):
         if self.noise_reduced_data is None:
@@ -606,7 +640,6 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage("Burst isolated using lasso", 4000)
 
-
     def plot_max_intensities(self):
         # Ensure any active lasso from the main plot is fully disconnected
         if getattr(self, "lasso", None):
@@ -643,16 +676,13 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"❌ Error showing MaxIntensityPlotDialog: {e}")
 
-
-
     def export_figure(self):
-
 
         if not self.filename:
             QMessageBox.warning(self, "No File Loaded", "Load a FITS file before exporting.")
             return
 
-     # --- Available formats ---
+        # --- Available formats ---
         formats = "PNG (*.png);;PDF (*.pdf);;EPS (*.eps);;SVG (*.svg);;TIFF (*.tiff)"
 
         base_name = self.filename.split(".")[0]
@@ -670,7 +700,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
-         # --- Ensure proper extension ---
+            # --- Ensure proper extension ---
             if "." not in os.path.basename(file_path):
                 if "PNG" in selected_filter:
                     file_path += ".png"
@@ -697,7 +727,6 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             QMessageBox.critical(self, "Export Failed", f"An error occurred:\n{e}")
-
 
     def reset_all(self):
         # Safely remove colorbar
@@ -746,7 +775,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "About e-Callisto FITS Analyzer",
-            "e-CALLISTO FITS Analyzer version 1.7.0.\n\n"
+            "e-CALLISTO FITS Analyzer version 1.7.1.\n\n"
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"
@@ -773,7 +802,6 @@ class MainWindow(QMainWindow):
         dialog = CombineTimeDialog(self)
         dialog.exec()
 
-    #Graph axis-problem resolved.
     def set_axis_to_seconds(self):
         self.use_utc = False
         self.xaxis_sec_action.setChecked(True)
@@ -783,7 +811,6 @@ class MainWindow(QMainWindow):
             data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
             self.plot_data(data, title=self.current_plot_type)
 
-
     def set_axis_to_utc(self):
         self.use_utc = True
         self.xaxis_sec_action.setChecked(False)
@@ -792,7 +819,6 @@ class MainWindow(QMainWindow):
         if self.raw_data is not None:
             data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
             self.plot_data(data, title=self.current_plot_type)
-
 
     def format_axes(self):
         if self.use_utc and self.ut_start_sec is not None:
@@ -811,9 +837,76 @@ class MainWindow(QMainWindow):
 
         self.canvas.ax.figure.canvas.draw()
 
+    def process_imported_files(self, urls):
+        if not urls:
+            QMessageBox.warning(self, "No Files", "No files were received from the downloader.")
+            return
+
+        local_files = []
+
+        try:
+            for url in urls:
+                r = requests.get(url, timeout=20)
+                r.raise_for_status()
+
+                original_name = url.split("/")[-1]
+
+                temp_dir = tempfile.gettempdir()
+                local_path = os.path.join(temp_dir, original_name)
+
+                with open(local_path, "wb") as f:
+                    f.write(r.content)
+
+                local_files.append(local_path)
+
+        except Exception as e:
+            QMessageBox.critical(self, "Download Error",
+                                 f"Failed to download one or more FITS files:\n{e}")
+            return
+
+        if len(local_files) == 1:
+            self.load_fits_into_main(local_files[0])
+            self.downloader_dialog.import_success.emit()
+            return
+
+        from burst_processor import (
+            are_time_combinable,
+            are_frequency_combinable,
+            combine_time,
+            combine_frequency,
+        )
+
+        try:
+            if are_time_combinable(local_files):
+                combined = combine_time(local_files)
+                self.load_combined_into_main(combined)
+                self.downloader_dialog.import_success.emit()
+                return
+
+            if are_frequency_combinable(local_files):
+                combined = combine_frequency(local_files)
+                self.load_combined_into_main(combined)
+                self.downloader_dialog.import_success.emit()
+                return
+
+        except Exception as e:
+            QMessageBox.critical(self, "Combine Error", f"An error occurred while combining files:\n{e}")
+            return
+
+        QMessageBox.warning(
+            self,
+            "Invalid Selection",
+            "Selected files cannot be time-combined or frequency-combined.\n"
+            "Please ensure they are consecutive in time or adjacent in frequency."
+        )
+
     def launch_downloader(self):
         self.downloader_dialog = CallistoDownloaderApp()
-        self.downloader_dialog.setModal(True)
+        self.downloader_dialog.import_request.connect(self.process_imported_files)
+
+        self.import_success_signal = lambda: self.downloader_dialog.accept()
+        self.downloader_dialog.import_success.connect(self.import_success_signal)
+
         self.downloader_dialog.exec()
 
     def open_goes_xrs_window(self):
@@ -838,8 +931,6 @@ class MaxIntensityPlotDialog(QDialog):
         self.freqs = np.array(max_freqs)
         self.selected_mask = np.zeros_like(self.time_channels, dtype=bool)
         self.lasso = None
-
-
 
         # Canvas
         self.canvas = MplCanvas(self, width=10, height=6)
@@ -983,7 +1074,6 @@ class MaxIntensityPlotDialog(QDialog):
         self.lasso_mask = None
         self.current_plot_type = "Raw"
 
-
         self.statusBar().showMessage("All reset", 4000)
 
         print("Application reset to initial state.")
@@ -1053,12 +1143,11 @@ class MaxIntensityPlotDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to export figure:\n{e}")
 
-
     def show_about_dialog(self):
         QMessageBox.information(
             self,
             "About e-Callisto FITS Analyzer",
-            "e-CALLISTO FITS Analyzer version 1.7.0.\n\n"
+            "e-CALLISTO FITS Analyzer version 1.7.1.\n\n"
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"
@@ -1066,7 +1155,8 @@ class MaxIntensityPlotDialog(QDialog):
         )
 
     def open_analyze_window(self, fundamental=True, harmonic=False):
-        dialog = AnalyzeDialog(self.time_channels, self.freqs, self.filename, fundamental=fundamental, harmonic=harmonic, parent=self)
+        dialog = AnalyzeDialog(self.time_channels, self.freqs, self.filename, fundamental=fundamental,
+                               harmonic=harmonic, parent=self)
         dialog.exec()
 
     def closeEvent(self, event):
@@ -1094,6 +1184,7 @@ import numpy as np
 from scipy.optimize import curve_fit
 from sklearn.metrics import r2_score, mean_squared_error
 
+
 class MplCanvas(FigureCanvas):
     def __init__(self, parent=None, width=10, height=6, dpi=100):
         self.fig = Figure(figsize=(width, height), dpi=dpi)
@@ -1101,6 +1192,7 @@ class MplCanvas(FigureCanvas):
         super().__init__(self.fig)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.updateGeometry()
+
 
 class AnalyzeDialog(QDialog):
     def __init__(self, time_channels, freqs, filename, fundamental=True, harmonic=False, parent=None):
@@ -1178,7 +1270,7 @@ class AnalyzeDialog(QDialog):
             self.avg_freq_display, self.drift_display, self.start_freq_display,
             self.initial_shock_speed_display, self.initial_shock_height_display,
             self.avg_shock_speed_display, self.avg_shock_height_display,
-            self.save_plot_button, self.save_data_button,self.existing_excel_checkbox,
+            self.save_plot_button, self.save_data_button, self.existing_excel_checkbox,
             self.extra_plot_label, self.extra_plot_combo, self.extra_plot_button
         ]
 
@@ -1233,6 +1325,7 @@ class AnalyzeDialog(QDialog):
 
     def plot_fit(self):
         def model_func(t, a, b): return a * t ** (b)
+
         def drift_rate(t, a_, b_): return a_ * b_ * t ** (b_ - 1)
 
         params, cov = curve_fit(model_func, self.time, self.freq, maxfev=10000)
@@ -1267,7 +1360,7 @@ class AnalyzeDialog(QDialog):
         drift_vals = drift_rate(self.time, a, b)
         residuals = self.freq - predicted
         freq_err = np.std(residuals)
-        drift_errs = np.abs(drift_vals) * np.sqrt((std_errs[0]/a)**2 + (std_errs[1]/b)**2)
+        drift_errs = np.abs(drift_vals) * np.sqrt((std_errs[0] / a) ** 2 + (std_errs[1] / b) ** 2)
 
         shock_speed = (13853221.38 * np.abs(drift_vals)) / (self.freq * (np.log(self.freq ** 2 / 3.385)) ** 2)
         R_p = 4.32 * np.log(10) / np.log(self.freq ** 2 / 3.385)
@@ -1290,7 +1383,7 @@ class AnalyzeDialog(QDialog):
         Rp_err = np.abs(dRp_df * freq_err)
 
         avg_freq = np.mean(self.freq)
-        avg_freq_err = np.std(self.freq)/np.sqrt(len(self.freq))
+        avg_freq_err = np.std(self.freq) / np.sqrt(len(self.freq))
         avg_drift = np.mean(drift_vals)
         avg_drift_err = np.std(drift_vals) / np.sqrt(len(drift_vals))
         avg_speed = np.mean(shock_speed)
@@ -1310,10 +1403,12 @@ class AnalyzeDialog(QDialog):
         self.avg_freq_display.setText(f"Average Frequency: <b>{avg_freq:.2f} ± {avg_freq_err:.2f}</b> MHz")
         self.drift_display.setText(f"Average Drift Rate: <b>{avg_drift:.4f} ± {avg_drift_err:.4f}</b> MHz/s")
         self.start_freq_display.setText(f"Starting Frequency: <b>{start_freq:.2f} ± {freq_err:.2f}</b> MHz")
-        self.initial_shock_speed_display.setText(f"Initial Shock Speed: <b>{start_shock_speed:.2f} ± {shock_speed_err:.2f}</b> km/s")
+        self.initial_shock_speed_display.setText(
+            f"Initial Shock Speed: <b>{start_shock_speed:.2f} ± {shock_speed_err:.2f}</b> km/s")
         self.initial_shock_height_display.setText(f"Initial Shock Height: <b>{start_height:.3f} ± {Rp_err:.3f}</b> Rₛ")
         self.avg_shock_speed_display.setText(f"Average Shock Speed: <b>{avg_speed:.2f} ± {avg_speed_err:.2f}</b> km/s")
-        self.avg_shock_height_display.setText(f"Average Shock Height: <b>{avg_height:.3f} ± {avg_height_err:.3f}</b> Rₛ")
+        self.avg_shock_height_display.setText(
+            f"Average Shock Height: <b>{avg_height:.3f} ± {avg_height_err:.3f}</b> Rₛ")
 
     def save_graph(self):
 
@@ -1365,7 +1460,6 @@ class AnalyzeDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "Export Failed", f"Could not save file:\n{e}")
             self.status.showMessage("Export failed!", 3000)
-
 
     def save_data(self):
 
@@ -1475,7 +1569,7 @@ class AnalyzeDialog(QDialog):
                 avg_freq, avg_freq_err, avg_drift, avg_drift_err,
                 start_freq, start_freq_err, init_speed, init_speed_err,
                 init_height, init_height_err, avg_speed, avg_speed_err,
-                avg_height, avg_height_err,avg_drift_abs
+                avg_height, avg_height_err, avg_drift_abs
             ]
 
             ws.append(row)
@@ -1514,6 +1608,7 @@ class AnalyzeDialog(QDialog):
             self.status.showMessage("Shock Height vs Frequency plotted successfully!", 3000)
         self.canvas.ax.grid(True)
         self.canvas.draw()
+
 
 class CombineFrequencyDialog(QDialog):
     def __init__(self, main_window, parent=None):
@@ -1571,7 +1666,8 @@ class CombineFrequencyDialog(QDialog):
         station2 = files[1].split("/")[-1].split("_")[0]
 
         if station1 != station2:
-            QMessageBox.critical(self, "Error", "You must select consecutive frequency data files from the same station!")
+            QMessageBox.critical(self, "Error",
+                                 "You must select consecutive frequency data files from the same station!")
             return
 
         self.file_paths = files
@@ -1662,6 +1758,7 @@ class CombineFrequencyDialog(QDialog):
         self.main_window.filename = self.combined_title  # ✅ update filename as the title
         self.main_window.plot_data(self.combined_data, title="Raw Data (Combined Frequency)")
         self.close()
+
 
 class CombineTimeDialog(QDialog):
     def __init__(self, main_window, parent=None):

@@ -1,3 +1,10 @@
+"""
+e-CALLISTO FITS Analyzer
+Version 1.7.1
+Sahan S Liyanage (sahanslst@gmail.com)
+Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
+"""
+
 from setuptools import setup
 
 APP = ['main.py']  # Entry point
@@ -19,6 +26,12 @@ OPTIONS = {
     ],
     'includes': [
         'PySide6',
+        'PySide6.QtWebEngineCore',
+        'PySide6.QtWebEngineWidgets',
+        'PySide6.QtWebChannel',
+        'PySide6.QtNetwork',
+        'charset_normalizer',
+        'chardet',
         'lzma',
         'importlib_metadata',
         'backports.lzma',
@@ -41,14 +54,17 @@ OPTIONS = {
         'burst_processor',
         'gui_main',
         'matplotlib_widget',
+        'chardet',
+        'charset_normalizer',
     ],
+
 
     'iconfile': 'icon.icns',
     'resources': [],
     'plist': {
         'CFBundleName': 'e-Callisto FITS Analyzer',
-        'CFBundleShortVersionString': '1.6.0',
-        'CFBundleVersion': '1.6.0',
+        'CFBundleShortVersionString': '1.7.1',
+        'CFBundleVersion': '1.7.1',
         'CFBundleIdentifier': 'com.sahansliyanage.callisto.fitsanalyzer',
     }
 }
@@ -60,4 +76,6 @@ setup(
     data_files=DATA_FILES,
     options={'py2app': OPTIONS},
     setup_requires=['py2app'],
+    scripts=[],
+    package_dir={'': '.'},
 )

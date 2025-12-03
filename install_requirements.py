@@ -1,3 +1,10 @@
+"""
+e-CALLISTO FITS Analyzer
+Version 1.7.1
+Sahan S Liyanage (sahanslst@gmail.com)
+Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
+"""
+
 import subprocess
 import sys
 
@@ -15,7 +22,8 @@ packages = [
     "requests",
     "beautifulsoup4",
     "netCDF4",
-    "cftime"
+    "cftime",
+    "setuptools"
 ]
 
 def install(pkg):

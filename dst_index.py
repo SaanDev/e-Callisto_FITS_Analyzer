@@ -1,3 +1,10 @@
+"""
+e-CALLISTO FITS Analyzer
+Version 1.7.1
+Sahan S Liyanage (sahanslst@gmail.com)
+Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
+"""
+
 import sys
 import pandas as pd
 from PySide6.QtWidgets import (

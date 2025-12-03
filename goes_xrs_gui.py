@@ -1,6 +1,9 @@
-# This enables to view and download GOES X-Ray Flux with spacecraft selection (GOES-16..19),
-# stores downloaded NetCDFs in a TEMPORARY cache removed on exit, and shows rise/decay/duration
-# for a user-selected flare window.
+"""
+e-CALLISTO FITS Analyzer
+Version 1.7.1
+Sahan S Liyanage (sahanslst@gmail.com)
+Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
+"""
 
 import os
 import sys

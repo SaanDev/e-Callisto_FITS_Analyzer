@@ -1,3 +1,10 @@
+"""
+e-CALLISTO FITS Analyzer
+Version 1.7.1
+Sahan S Liyanage (sahanslst@gmail.com)
+Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
+"""
+
 from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QComboBox, QVBoxLayout,
     QHBoxLayout, QDateEdit, QListWidget, QFileDialog, QMessageBox,
@@ -14,8 +21,8 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 import tempfile, os
 
-
 BASE_URL = 'http://soleil80.cs.technik.fhnw.ch/solarradio/data/2002-20yy_Callisto/'
+
 
 class FetchWorker(QObject):
     finished = Signal(list)
@@ -79,6 +86,7 @@ class DownloadTask(QRunnable):
         except Exception:
             self.callback(False)
 
+
 class PreviewWindow(QDialog):
     def __init__(self, file_path, title, parent=None):
         super().__init__(parent)
@@ -111,8 +119,12 @@ class PreviewWindow(QDialog):
 
 
 class CallistoDownloaderApp(QDialog):
+    import_request = Signal(list)
+    import_success = Signal()
+
     def __init__(self):
         super().__init__()
+        self.selected_files = []
         self.setWindowTitle("e-CALLISTO FITS Downloader")
         self.resize(900, 600)
         self.threadpool = QThreadPool()
@@ -237,11 +249,14 @@ class CallistoDownloaderApp(QDialog):
         self.deselect_all_btn = QPushButton("Deselect All")
         self.download_btn = QPushButton("Download Selected")
         self.preview_btn = QPushButton("Preview Selected")
+        self.import_button = QPushButton("Import")
+
         self.select_all_btn.clicked.connect(self.select_all_files)
         self.deselect_all_btn.clicked.connect(self.deselect_all_files)
         self.download_btn.clicked.connect(self.download_selected_files)
         self.preview_btn.clicked.connect(self.preview_selected_files)
-        for b in [self.select_all_btn, self.deselect_all_btn, self.download_btn, self.preview_btn]:
+        self.import_button.clicked.connect(self.handle_import)
+        for b in [self.select_all_btn, self.deselect_all_btn, self.download_btn, self.preview_btn, self.import_button]:
             action_layout.addWidget(b)
         action_group.setLayout(action_layout)
 
@@ -271,7 +286,9 @@ class CallistoDownloaderApp(QDialog):
         self.worker = FetchWorker(date, hour, station)
         self.worker.moveToThread(self.thread)
 
-        self.worker.progressMax.connect(lambda maxval: QMetaObject.invokeMethod(self.progress_bar, "setMaximum", Qt.QueuedConnection, Q_ARG(int, maxval)))
+        self.worker.progressMax.connect(
+            lambda maxval: QMetaObject.invokeMethod(self.progress_bar, "setMaximum", Qt.QueuedConnection,
+                                                    Q_ARG(int, maxval)))
         self.worker.progressStep.connect(self.update_fetch_progress)
         self.worker.finished.connect(self.display_fetched_files)
         self.worker.finished.connect(self.thread.quit)
@@ -322,7 +339,8 @@ class CallistoDownloaderApp(QDialog):
         output_dir = QFileDialog.getExistingDirectory(self, "Select Download Folder")
         if not output_dir:
             return
-        selected = [self.file_list.item(i) for i in range(self.file_list.count()) if self.file_list.item(i).checkState() == Qt.Checked]
+        selected = [self.file_list.item(i) for i in range(self.file_list.count()) if
+                    self.file_list.item(i).checkState() == Qt.Checked]
         if not selected:
             QMessageBox.warning(self, "No Selection", "Please select files to download.")
             return
@@ -336,6 +354,24 @@ class CallistoDownloaderApp(QDialog):
             if url:
                 task = DownloadTask(url, name, output_dir, self.update_download_progress)
                 self.threadpool.start(task)
+
+    def handle_import(self):
+        self.selected_files = []
+
+        # Collect selected files
+        for i in range(self.file_list.count()):
+            item = self.file_list.item(i)
+            if item.checkState() == Qt.Checked:
+                name = item.text()
+                url = self.file_url_map.get(name)
+                if url:
+                    self.selected_files.append(url)
+
+        if not self.selected_files:
+            QMessageBox.warning(self, "No Selection", "Please select at least one .fit.gz file.")
+            return
+
+        self.import_request.emit(self.selected_files)
 
     def update_download_progress(self, success):
         self.downloaded_count += 1
