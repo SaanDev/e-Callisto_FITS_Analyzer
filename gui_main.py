@@ -62,7 +62,7 @@ class MainWindow(QMainWindow):
 
         # Debounce timer for smooth slider updates
         self.noise_smooth_timer = QTimer()
-        self.noise_smooth_timer.setInterval(20)
+        self.noise_smooth_timer.setInterval(40)
         self.noise_smooth_timer.setSingleShot(True)
         self.noise_smooth_timer.timeout.connect(self.update_noise_live)
 
@@ -537,7 +537,7 @@ class MainWindow(QMainWindow):
         self.noise_vmin = data.min()
         self.noise_vmax = data.max()
 
-        self.plot_data(data, title="Noise Reduced (Live)")
+        self.plot_data(data, title="Noise Reduced")
 
         # enable tools
         self.drift_button.setEnabled(True)
