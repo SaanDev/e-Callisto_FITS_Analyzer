@@ -937,7 +937,7 @@ class MaxIntensityPlotDialog(QDialog):
         self.canvas.figure.clf()
         self.canvas.ax = self.canvas.figure.add_subplot(111)
         self.canvas.ax.scatter(self.time_channels, self.freqs, marker="o", s=5, color='red')
-        self.canvas.ax.set_xlabel("Time (s)")
+        self.canvas.ax.set_xlabel("Time Channel Number")
         self.canvas.ax.set_ylabel("Frequency (MHz)")
         self.canvas.ax.set_title("Maximum Intensity for Each Time Channel")
         self.canvas.draw()
