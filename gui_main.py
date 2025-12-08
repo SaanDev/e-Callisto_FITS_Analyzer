@@ -49,7 +49,6 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("e-CALLISTO FITS Analyzer 1.7.2")
-        self.showMaximized()
         #self.resize(1000, 700)
         self.setMinimumSize(1000, 700)
 
