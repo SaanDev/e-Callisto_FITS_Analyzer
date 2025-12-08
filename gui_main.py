@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 1.7.1
+Version 1.7.2
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -48,7 +48,7 @@ class MplCanvas(FigureCanvas):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("e-CALLISTO FITS Analyzer 1.7.1")
+        self.setWindowTitle("e-CALLISTO FITS Analyzer 1.7.2")
         self.resize(1000, 700)
         self.setMinimumSize(1000, 700)
 
@@ -329,29 +329,161 @@ class MainWindow(QMainWindow):
 
     def load_file(self):
         initial_dir = os.path.dirname(self.filename) if self.filename else ""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open FITS File",
-            initial_dir,
-            "FITS files (*.fit *.fit.gz)"
-        )
-        if file_path:
-            self.filename = file_path.split("/")[-1]
+        dialog = QFileDialog(self)
+        dialog.setFileMode(QFileDialog.ExistingFiles)
+        dialog.setNameFilter("FITS files (*.fit *.fit.gz)")
+        dialog.setOption(QFileDialog.DontUseNativeDialog, True)
+
+        if dialog.exec():
+            file_paths = dialog.selectedFiles()
+        else:
+            return
+
+        if not file_paths:
+            return
+
+        if len(file_paths) == 1:
+            file_path = file_paths[0]
+            self.filename = os.path.basename(file_path)
+
             hdul = fits.open(file_path)
             self.raw_data = hdul[0].data
             self.freqs = hdul[1].data['frequency'][0]
             self.time = hdul[1].data['time'][0]
+
+            # UT start
             hdr = hdul[0].header
             hh, mm, ss = hdr['TIME-OBS'].split(":")
-            hh = int(hh)
-            mm = int(mm)
-            ss = float(ss)  # allow fractional seconds
-            self.ut_start_sec = hh * 3600 + mm * 60 + ss
-
-            self.ut_start_sec = hh * 3600 + mm * 60 + ss
-
+            self.ut_start_sec = int(hh) * 3600 + int(mm) * 60 + float(ss)
             hdul.close()
+
             self.plot_data(self.raw_data, title="Raw Data")
+            return
+
+        basenames = [os.path.basename(p) for p in file_paths]
+
+        pattern = r"(.*)_(\d{8})_(\d{6})_(\d+)\.fit(?:\.gz)?"
+
+        meta = []
+        for name in basenames:
+            m = re.match(pattern, name)
+            if not m:
+                QMessageBox.warning(self, "Invalid File",
+                                    f"Invalid CALLISTO filename format:\n{name}")
+                return
+            meta.append(m.groups())
+
+        stations = [m[0] for m in meta]
+        dates = [m[1] for m in meta]
+        times = [m[2] for m in meta]
+        ids = [int(m[3]) for m in meta]
+
+        same_station = len(set(stations)) == 1
+        same_date = len(set(dates)) == 1
+        same_time = len(set(times)) == 1
+
+        if same_station and same_date and same_time:
+            combine_type = "frequency"
+
+        elif same_station and len(set(ids)) == 1:
+            combine_type = "time"
+        else:
+            error_msg = (
+
+                "The selected FITS files cannot be combined.\n\n"
+
+                "Valid combinations are:\n"
+
+                "1. Frequency Combine:\n"
+
+                "   • Same station\n"
+
+                "   • Same date\n"
+
+                "   • Same timestamp (HHMMSS)\n"
+
+                "   • Different receiver IDs\n\n"
+
+                "2. Time Combine:\n"
+
+                "   • Same station\n"
+
+                "   • Same receiver ID\n"
+
+                "   • Same date\n"
+
+                "   • Different timestamps (continuous time segments)\n\n"
+
+                "Your selection does not match either rule.\n"
+
+                "Please choose files that follow one of the above patterns."
+
+            )
+
+            QMessageBox.warning(self, "Invalid Combination Selection", error_msg)
+
+            return
+
+        if combine_type == "frequency":
+            combined_data, combined_freqs, combined_time = self.combine_frequency_files(file_paths)
+
+        elif combine_type == "time":
+            combined_data, combined_freqs, combined_time = self.combine_time_files(file_paths)
+
+        self.raw_data = combined_data
+        self.freqs = combined_freqs
+        self.time = combined_time
+
+        original_name = os.path.basename(file_paths[0])
+        self.filename = original_name
+
+        self.plot_data(self.raw_data, title="Raw Data")
+        self.statusBar().showMessage(f"Loaded {len(file_paths)} files (combined)", 5000)
+
+    def combine_frequency_files(self, file_paths):
+        file_paths = sorted(file_paths)
+        data_list = []
+        freq_list = []
+
+        for path in file_paths:
+            hdul = fits.open(path)
+            data_list.append(hdul[0].data)
+            freq_list.append(hdul[1].data['frequency'][0])
+            time_array = hdul[1].data['time'][0]
+            hdul.close()
+
+        combined_data = np.concatenate(data_list, axis=0)
+        combined_freqs = np.concatenate(freq_list)
+        combined_time = time_array
+
+        return combined_data, combined_freqs, combined_time
+
+    def combine_time_files(self, file_paths):
+        file_paths = sorted(file_paths)
+        data_list = []
+        time_list = []
+
+        for path in file_paths:
+            hdul = fits.open(path)
+            data_list.append(hdul[0].data)
+            time_list.append(hdul[1].data['time'][0])
+            freqs = hdul[1].data['frequency'][0]
+            hdul.close()
+
+        combined_data = np.concatenate(data_list, axis=1)
+
+        fixed_time = []
+        offset = 0
+
+        for t in time_list:
+            t = np.array(t)
+            fixed_time.append(t + offset)
+            offset += t[-1]
+
+        combined_time = np.concatenate(fixed_time)
+
+        combined_freqs = freqs
+        return combined_data, combined_freqs, combined_time
 
     def load_fits_into_main(self, file_path):
         hdul = fits.open(file_path)
@@ -360,7 +492,6 @@ class MainWindow(QMainWindow):
         self.time = hdul[1].data['time'][0]
         self.filename = os.path.basename(file_path)
 
-        # Try to set UT start time from header (if available)
         try:
             hdr = hdul[0].header
             hh, mm, ss = hdr['TIME-OBS'].split(":")
@@ -775,7 +906,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "About e-Callisto FITS Analyzer",
-            "e-CALLISTO FITS Analyzer version 1.7.1.\n\n"
+            "e-CALLISTO FITS Analyzer version 1.7.2.\n\n"
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"
@@ -1147,7 +1278,7 @@ class MaxIntensityPlotDialog(QDialog):
         QMessageBox.information(
             self,
             "About e-Callisto FITS Analyzer",
-            "e-CALLISTO FITS Analyzer version 1.7.1.\n\n"
+            "e-CALLISTO FITS Analyzer version 1.7.2.\n\n"
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"
