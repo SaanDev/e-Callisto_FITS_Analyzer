@@ -4,10 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="22c2ea24-4065-4bfd-8ffe-617e0297cf9a" name="Changes" comment="SOHO/LASCO CME Viewer tool added.">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/gui_main.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui_main.py" afterDir="false" />
-    </list>
+    <list default="true" id="22c2ea24-4065-4bfd-8ffe-617e0297cf9a" name="Changes" comment="Minor bugs were fixed." />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -178,7 +175,7 @@
       <workItem from="1755503775926" duration="1843000" />
       <workItem from="1755845178845" duration="879000" />
       <workItem from="1755916836823" duration="7538000" />
-      <workItem from="1765136237960" duration="965000" />
+      <workItem from="1765136237960" duration="1072000" />
     </task>
     <task id="LOCAL-00001" summary="Initial commit">
       <option name="closed" value="true" />
@@ -388,7 +385,15 @@
       <option name="project" value="LOCAL" />
       <updated>1755979024766</updated>
     </task>
-    <option name="localTasksCounter" value="27" />
+    <task id="LOCAL-00027" summary="Minor bugs were fixed.">
+      <option name="closed" value="true" />
+      <created>1765137279203</created>
+      <option name="number" value="00027" />
+      <option name="presentableId" value="LOCAL-00027" />
+      <option name="project" value="LOCAL" />
+      <updated>1765137279204</updated>
+    </task>
+    <option name="localTasksCounter" value="28" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -436,7 +441,8 @@
     <MESSAGE value="Downloader preview bugs were fixed." />
     <MESSAGE value="GUI crashing bugs were fixed." />
     <MESSAGE value="SOHO/LASCO CME Viewer tool added." />
-    <option name="LAST_COMMIT_MESSAGE" value="SOHO/LASCO CME Viewer tool added." />
+    <MESSAGE value="Minor bugs were fixed." />
+    <option name="LAST_COMMIT_MESSAGE" value="Minor bugs were fixed." />
   </component>
   <component name="XDebuggerManager">
     <breakpoint-manager>
