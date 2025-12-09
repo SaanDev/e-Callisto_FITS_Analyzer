@@ -1,6 +1,4 @@
 # -*- mode: python ; coding: utf-8 -*-
-
-# Import necessary matplotlib backend modules so their files can be bundled
 from matplotlib.backends import backend_pdf, backend_svg, backend_ps, backend_pgf, backend_eps
 
 a = Analysis(
