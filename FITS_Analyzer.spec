@@ -1,26 +1,24 @@
 # -*- mode: python ; coding: utf-8 -*-
-from matplotlib.backends import backend_pdf, backend_svg, backend_ps, backend_pgf, backend_eps
+
+# Import backend modules that exist on Windows
+from matplotlib.backends import backend_pdf, backend_svg, backend_ps, backend_pgf
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
 
-    # All data files bundled inside the app
     datas=[
         ('icon.icns', '.'),
 
-        # Required Matplotlib backend files for export features
+        # Required backend files for exporting
         (backend_pdf.__file__, 'matplotlib/backends'),
         (backend_svg.__file__, 'matplotlib/backends'),
         (backend_ps.__file__, 'matplotlib/backends'),
         (backend_pgf.__file__, 'matplotlib/backends'),
-        (backend_eps.__file__, 'matplotlib/backends'),
     ],
 
-    # Dynamic imports that PyInstaller cannot detect automatically
     hiddenimports=[
-        # Core dependencies
         'PySide6',
         'matplotlib',
 
@@ -28,14 +26,12 @@ a = Analysis(
         'matplotlib.backends.backend_qtagg',
         'matplotlib.backends.backend_qt5agg',
 
-        # Export backends (required!)
+        # Export backends (NO backend_eps!)
         'matplotlib.backends.backend_pdf',
         'matplotlib.backends.backend_svg',
         'matplotlib.backends.backend_ps',
-        'matplotlib.backends.backend_eps',
         'matplotlib.backends.backend_pgf',
 
-        # Matplotlib utilities
         'matplotlib.figure',
         'matplotlib.ticker',
         'matplotlib.colors',
@@ -43,7 +39,6 @@ a = Analysis(
         'matplotlib.path',
         'mpl_toolkits.axes_grid1',
 
-        # Scientific libraries
         'astropy',
         'bs4',
         'requests',
@@ -51,7 +46,6 @@ a = Analysis(
         'cftime',
         'netCDF4',
 
-        # Your project modules
         'callisto_downloader',
         'burst_processor',
         'gui_main',

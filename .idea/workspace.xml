@@ -5,9 +5,7 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="22c2ea24-4065-4bfd-8ffe-617e0297cf9a" name="Changes" comment="PDF, EPS, and SVG export error fixed.">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/FITS_Analyzer.spec" beforeDir="false" afterPath="$PROJECT_DIR$/FITS_Analyzer.spec" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/gui_main.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui_main.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -194,7 +192,7 @@
       <workItem from="1764864393652" duration="2514000" />
       <workItem from="1765126810863" duration="268000" />
       <workItem from="1765177077569" duration="2219000" />
-      <workItem from="1765305597505" duration="2749000" />
+      <workItem from="1765305597505" duration="3002000" />
     </task>
     <task id="LOCAL-00001" summary="Initial commit">
       <option name="closed" value="true" />
@@ -468,7 +466,23 @@
       <option name="project" value="LOCAL" />
       <updated>1765307552694</updated>
     </task>
-    <option name="localTasksCounter" value="35" />
+    <task id="LOCAL-00035" summary="PDF, EPS, and SVG export error fixed.">
+      <option name="closed" value="true" />
+      <created>1765308406143</created>
+      <option name="number" value="00035" />
+      <option name="presentableId" value="LOCAL-00035" />
+      <option name="project" value="LOCAL" />
+      <updated>1765308406143</updated>
+    </task>
+    <task id="LOCAL-00036" summary="PDF, EPS, and SVG export error fixed.">
+      <option name="closed" value="true" />
+      <created>1765308512032</created>
+      <option name="number" value="00036" />
+      <option name="presentableId" value="LOCAL-00036" />
+      <option name="project" value="LOCAL" />
+      <updated>1765308512032</updated>
+    </task>
+    <option name="localTasksCounter" value="37" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
