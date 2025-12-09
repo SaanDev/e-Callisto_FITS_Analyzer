@@ -1,17 +1,19 @@
 # e-CALLISTO FITS Analyzer  
 A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data.
 
+Version **1.7.2**
+
 ---
 
 ## 📘 User Guide
 
-This guide explains how to use the main features of the **e-CALLISTO FITS Analyzer**, including dynamic spectrum visualization, noise reduction, burst isolation, drift estimation, maximum intensity extraction, best-fit analysis, and the built-in CME and GOES modules.
+This guide explains how to use the main features of the **e-CALLISTO FITS Analyzer**, including dynamic spectrum visualization, live noise reduction, burst isolation, drift estimation, maximum intensity extraction, best-fit analysis, the FITS downloader, and the built-in CME and GOES modules.
 
 ---
 
 # 1. Main Interface
 
-After launching the application, the main window appears with controls for loading FITS files, noise thresholds, colormaps, and analysis tools.
+After launching the application, the main window opens with tools for loading FITS files, adjusting thresholds, selecting colormaps, isolating bursts, and performing scientific analysis.
 
 ### **Main Window**
 ![Main Window](assets/main_window.png)
@@ -20,119 +22,165 @@ After launching the application, the main window appears with controls for loadi
 
 # 2. Loading a FITS File
 
-Choose **File → Open** or click **Load FITS File** on the sidebar.  
-The selected FITS file is displayed as a dynamic spectrum.
+You can load:
+
+- **Compressed FITS:** `*.fit.gz`  
+- **Uncompressed FITS:** `*.fit`
+
+This supports observers who work directly with uncompressed raw data.
+
+Choose **File → Open** or click **Load FITS File**.  
+The dynamic spectrum appears immediately.
 
 ---
 
-# 3. Noise Reduction
+# 3. Noise Reduction (Live Sliders)
 
-Use the **Lower Threshold** and **Upper Threshold** sliders to remove background noise or intensity extremes.
+Noise reduction now updates **live** without pressing Apply.
 
-Press **Apply Noise Reduction** to update the plot.
+Features:
+
+- Two horizontal sliders adjust lower and upper clipping thresholds  
+- Dynamic spectrum refreshes automatically  
+- No data are lost when switching x-axis units (seconds ↔ UT)
 
 ### Example: Noise Reduction  
 ![Noise Reduction](assets/noise_reduction.png)
 
 ---
 
-# 4. Burst Isolation (Lasso Tool)
+# 4. Colormap Selection
 
-Click **Isolate Burst** and draw a free-form shape around the burst.  
-Only the selected region is retained.
+A new **Colormap** panel allows choosing from several scientifically useful palettes:
+
+- Custom (blue-red-yellow)
+- Viridis  
+- Plasma  
+- Inferno  
+- Magma  
+- Cividis  
+- Turbo  
+- RdYlBu  
+- Jet  
+- Cubehelix  
+
+The plot updates as soon as a colormap is selected.
+
+---
+
+# 5. Burst Isolation (Lasso Tool)
+
+Click **Isolate Burst** and draw around the emission region.  
+Only the selected region is retained for further analysis.
 
 ### Example: Isolated Burst  
 ![Isolated Burst](assets/burst_isolation.png)
 
 ---
 
-# 5. Maximum Intensities Extraction
+# 6. Maximum Intensities Extraction
 
-After noise reduction or burst isolation, click **Plot Maximum Intensities**.  
-This computes the maximum frequency value for each time channel.
+Click **Plot Maximum Intensities** to compute the maximum frequency for each time channel after noise reduction or burst isolation.
 
 ### Example: Maximum Intensities  
 ![Maximum Intensities](assets/maximum_intensity.png)
 
 ---
 
-# 6. Outlier Removal
+# 7. Outlier Removal
 
-Within the Maximum Intensities window:
+Inside the Maximum Intensities window:
 
-- Click **Select Outliers**  
-- Draw a lasso around unwanted points  
-- Click **Remove Outliers**
-
-This helps clean the dataset before fitting.
+- Draw a lasso to select outliers  
+- Remove them instantly  
+- Prepare the cleaned curve for fitting
 
 ---
 
-# 7. Burst Analyzer (Best Fit)
+# 8. Burst Analyzer (Best Fit & Shock Parameters)
 
-Click **Analyze Burst** to open the Analyzer window.  
-The tool performs:
+The Analyzer window performs:
 
-- Power-law fitting  
-- Drift rate estimation  
-- Shock speed calculation  
-- Shock height calculation  
-- R² and RMSE metrics  
-- Optional extra plots
+- Power-law fitting of the Type II backbone  
+- Drift-rate evaluation  
+- Shock speed  
+- Shock height  
+- R² and RMSE  
+- Optional additional plots:
+  - Shock speed vs height  
+  - Shock speed vs frequency  
+  - Height vs frequency  
 
-### Example: Analyzer Window  
+### Example: Analyzer  
 ![Analyzer](assets/analysis.png)
 
-You may export:
+Export options:
 
-- Best-fit plot (PNG)  
-- Data summary (Excel)  
-- Shock parameter plots  
+- Best-fit graph (PNG, PDF, EPS, SVG, TIFF)  
+- Data summary to Excel  
+- Multiple additional plots  
 
 ---
 
-# 8. FITS Downloader
+# 9. FITS Downloader (Updated)
 
-Access via the **Download** menu → **FITS Downloader**.
+Open via **Download → FITS Downloader**.
 
 Features:
 
-- Select date, hour, and station  
-- Show available FITS files on the e-CALLISTO server  
+- Select station, date, hour  
+- Fetch available files from server  
 - Preview selected files  
-- Download multiple files simultaneously  
+- Download multiple FITS files  
+- **New:** Import button to send selected FITS files directly into the Analyzer  
+- Detects whether files match frequency or time stitching requirements  
+- Shows an error message if selected files cannot be combined  
 
-### Example: FITS Downloader  
+### Example: Downloader  
 ![Downloader](assets/callisto_downloader.png)
 
 ---
 
-# 9. Combine FITS Files
+# 10. Combine FITS Files
 
-Two modes:
+Two combination modes:
 
 ### **Combine Frequency**
-Merge consecutive frequency-band FITS files from the same station.
+Merge consecutive frequency bands when time bases match.
 
 ### **Combine Time**
-Merge back-to-back time segments.
+Merge consecutive time segments from the same station and date.
+
+If files do not meet the expected criteria, a message box alerts the user.
 
 ### Example: Combined Time Plot  
 ![Combine Time](assets/combine_time.png)
 
-The combined file can then be loaded directly into the analyzer.
+Combined data can be imported directly to the Analyzer.
 
 ---
 
-# 10. CME Catalog Viewer (SOHO/LASCO)
+# 11. Saving Plots (New Formats)
 
-Access via the **CME** menu.
+All figures across the application can be exported in:
+
+- PNG  
+- PDF  
+- EPS  
+- SVG  
+- TIFF  
+
+This makes the tool ready for scientific publication workflows.
+
+---
+
+# 12. CME Catalog Viewer (SOHO/LASCO)
 
 Features:
 
-- Retrieve CME catalog for selected date  
-- Table of CME parameters  
-- Embedded LASCO movie preview  
+- Retrieve daily CME list  
+- Display CME parameters in a structured table  
+- Show associated LASCO movie  
 - Event metadata panel  
 
 ### Example: CME Viewer  
@@ -140,36 +188,33 @@ Features:
 
 ---
 
-# 11. GOES X-Ray Flux Viewer
-
-Access via the **Flares** menu.
+# 13. GOES X-Ray Flux Viewer
 
 Features:
 
-- View GOES-16 / GOES-18 short and long channel X-ray flux  
-- Adjustable time range  
-- Automatic flare parameter extraction  
-- Exportable plots and data files  
+- View GOES-16 / GOES-18 light curves  
+- Select short or long channels  
+- Adjust time windows  
+- Extract flare parameters  
+- Export plots and data  
 
 ### Example: GOES X-Ray Viewer  
 ![GOES X-Ray](assets/goes_xray.png)
 
 ---
 
-# 12. Live Noise-Reduced View
+# 14. Live Noise-Reduced View
 
-When new thresholds are applied, the dynamic spectrum updates automatically.
-
-### Example: Live Noise-Reduced View  
-![Noise Reduced Live](assets/noise_reduction.png)
+When thresholds are changed, the spectrum updates live while keeping the chosen axis format (seconds or UT).
 
 ---
 
 ## 📄 Notes
 
-- Most tools support exporting PNG images.  
-- Maximum intensity and analyzer windows allow Excel export.  
-- CME viewer and GOES viewer are non-blocking separate windows.
+- Supports both `.fit` and `.fit.gz` files.  
+- Noise reduction is preserved when switching x-axis units.  
+- All major plots allow exporting in publication-ready formats.  
+- Analyzer now includes improved shock parameter calculations and Excel export.
 
 ---
 
@@ -178,6 +223,3 @@ When new thresholds are applied, the dynamic spectrum updates automatically.
 Developed by **Sahan S. Liyanage**  
 Astronomical and Space Science Unit  
 University of Colombo, Sri Lanka
-
----
-
