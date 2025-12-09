@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-# Import backend modules that exist on Windows
+# Import the Matplotlib backends that actually exist on Windows
 from matplotlib.backends import backend_pdf, backend_svg, backend_ps, backend_pgf
 
 a = Analysis(
@@ -9,9 +9,10 @@ a = Analysis(
     binaries=[],
 
     datas=[
+        # Bundle icon
         ('icon.icns', '.'),
 
-        # Required backend files for exporting
+        # Bundle Matplotlib export backend source files
         (backend_pdf.__file__, 'matplotlib/backends'),
         (backend_svg.__file__, 'matplotlib/backends'),
         (backend_ps.__file__, 'matplotlib/backends'),
@@ -19,39 +20,44 @@ a = Analysis(
     ],
 
     hiddenimports=[
+        # PySide
         'PySide6',
+
+        # Matplotlib and required components
         'matplotlib',
-
-        # Canvas backends
-        'matplotlib.backends.backend_qtagg',
         'matplotlib.backends.backend_qt5agg',
+        'matplotlib.backends.backend_qtagg',
 
-        # Export backends (NO backend_eps!)
+        # Export backends that DO exist
         'matplotlib.backends.backend_pdf',
         'matplotlib.backends.backend_svg',
         'matplotlib.backends.backend_ps',
         'matplotlib.backends.backend_pgf',
 
+        # Matplotlib utilities
         'matplotlib.figure',
         'matplotlib.ticker',
         'matplotlib.colors',
-        'matplotlib.widgets',
         'matplotlib.path',
+        'matplotlib.widgets',
         'mpl_toolkits.axes_grid1',
 
-        'astropy',
-        'bs4',
-        'requests',
+        # Scientific libs
+        'numpy',
         'scipy',
+        'astropy',
+        'requests',
+        'bs4',
         'cftime',
         'netCDF4',
 
+        # Your project modules
         'callisto_downloader',
         'burst_processor',
         'gui_main',
         'matplotlib_widget',
-        'soho_lasco_viewer',
         'goes_xrs_gui',
+        'soho_lasco_viewer',
     ],
 
     hookspath=[],
@@ -69,7 +75,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='e-Callisto FITS Analyzer',
+    name='e-CALLISTO FITS Analyzer',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -90,5 +96,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='e-Callisto FITS Analyzer',
+    name='e-CALLISTO FITS Analyzer',
 )

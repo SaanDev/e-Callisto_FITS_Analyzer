@@ -192,7 +192,7 @@
       <workItem from="1764864393652" duration="2514000" />
       <workItem from="1765126810863" duration="268000" />
       <workItem from="1765177077569" duration="2219000" />
-      <workItem from="1765305597505" duration="3002000" />
+      <workItem from="1765305597505" duration="3381000" />
     </task>
     <task id="LOCAL-00001" summary="Initial commit">
       <option name="closed" value="true" />
@@ -482,7 +482,15 @@
       <option name="project" value="LOCAL" />
       <updated>1765308512032</updated>
     </task>
-    <option name="localTasksCounter" value="37" />
+    <task id="LOCAL-00037" summary="PDF, EPS, and SVG export error fixed.">
+      <option name="closed" value="true" />
+      <created>1765308655927</created>
+      <option name="number" value="00037" />
+      <option name="presentableId" value="LOCAL-00037" />
+      <option name="project" value="LOCAL" />
+      <updated>1765308655927</updated>
+    </task>
+    <option name="localTasksCounter" value="38" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
