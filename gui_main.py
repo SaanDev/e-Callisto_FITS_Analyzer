@@ -81,12 +81,12 @@ class MainWindow(QMainWindow):
 
         # Sliders for noise clipping
         self.lower_slider = QSlider(Qt.Horizontal)
-        self.lower_slider.setRange(-50, 50)
-        self.lower_slider.setValue(-5)
+        self.lower_slider.setRange(-100, 100)
+        self.lower_slider.setValue(0)
 
         self.upper_slider = QSlider(Qt.Horizontal)
-        self.upper_slider.setRange(-50, 50)
-        self.upper_slider.setValue(20)
+        self.upper_slider.setRange(-100, 100)
+        self.upper_slider.setValue(0)
 
         lower_label = QLabel("Lower Threshold")
         upper_label = QLabel("Upper Threshold")

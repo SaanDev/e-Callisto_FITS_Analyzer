@@ -1,58 +1,67 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+# Import necessary matplotlib backend modules so their files can be bundled
+from matplotlib.backends import backend_pdf, backend_svg, backend_ps, backend_pgf, backend_eps
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
+
+    # All data files bundled inside the app
     datas=[
-    ('icon.icns', '.'),
+        ('icon.icns', '.'),
 
-    # Add required Matplotlib backends for exporting PDF/SVG/EPS
-    (backend_pdf.__file__, 'matplotlib/backends'),
-    (backend_svg.__file__, 'matplotlib/backends'),
-    (backend_ps.__file__, 'matplotlib/backends'),
-    (backend_pgf.__file__, 'matplotlib/backends'),
-    (backend_eps.__file__, 'matplotlib/backends'),
-],
+        # Required Matplotlib backend files for export features
+        (backend_pdf.__file__, 'matplotlib/backends'),
+        (backend_svg.__file__, 'matplotlib/backends'),
+        (backend_ps.__file__, 'matplotlib/backends'),
+        (backend_pgf.__file__, 'matplotlib/backends'),
+        (backend_eps.__file__, 'matplotlib/backends'),
+    ],
 
-hiddenimports=[
-    'PySide6',
-    'matplotlib',
+    # Dynamic imports that PyInstaller cannot detect automatically
+    hiddenimports=[
+        # Core dependencies
+        'PySide6',
+        'matplotlib',
 
-    # Main Matplotlib backends
-    'matplotlib.backends.backend_qtagg',
-    'matplotlib.backends.backend_qt5agg',
+        # Canvas backends
+        'matplotlib.backends.backend_qtagg',
+        'matplotlib.backends.backend_qt5agg',
 
-    # REQUIRED for export (Windows needs explicit bundling)
-    'matplotlib.backends.backend_pdf',
-    'matplotlib.backends.backend_pgf',
-    'matplotlib.backends.backend_ps',
-    'matplotlib.backends.backend_svg',
-    'matplotlib.backends.backend_eps',
+        # Export backends (required!)
+        'matplotlib.backends.backend_pdf',
+        'matplotlib.backends.backend_svg',
+        'matplotlib.backends.backend_ps',
+        'matplotlib.backends.backend_eps',
+        'matplotlib.backends.backend_pgf',
 
-    # Matplotlib utilities
-    'matplotlib.figure',
-    'matplotlib.ticker',
-    'matplotlib.colors',
-    'matplotlib.widgets',
-    'matplotlib.path',
-    'mpl_toolkits.axes_grid1',
+        # Matplotlib utilities
+        'matplotlib.figure',
+        'matplotlib.ticker',
+        'matplotlib.colors',
+        'matplotlib.widgets',
+        'matplotlib.path',
+        'mpl_toolkits.axes_grid1',
 
-    # App libraries
-    'astropy',
-    'bs4',
-    'requests',
-    'scipy',
-    'cftime',
-    'netCDF4',
-    'callisto_downloader',
-    'burst_processor',
-    'gui_main',
-    'matplotlib_widget',
-    'soho_lasco_viewer',
-    'goes_xrs_gui'
-]
+        # Scientific libraries
+        'astropy',
+        'bs4',
+        'requests',
+        'scipy',
+        'cftime',
+        'netCDF4',
+
+        # Your project modules
+        'callisto_downloader',
+        'burst_processor',
+        'gui_main',
+        'matplotlib_widget',
+        'soho_lasco_viewer',
+        'goes_xrs_gui',
+    ],
+
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -60,6 +69,7 @@ hiddenimports=[
     noarchive=False,
     optimize=0,
 )
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
@@ -80,6 +90,7 @@ exe = EXE(
     entitlements_file=None,
     icon=['icon.icns'],
 )
+
 coll = COLLECT(
     exe,
     a.binaries,
