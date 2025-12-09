@@ -7,8 +7,8 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
 from setuptools import setup
 
-APP = ['main.py']  # Entry point
-DATA_FILES = ['icon.icns']  # Add any other static resources if needed (images, etc.)
+APP = ['main.py']
+DATA_FILES = ['icon.icns']
 
 OPTIONS = {
     'packages': [
@@ -24,51 +24,66 @@ OPTIONS = {
         'netCDF4',
         'cftime',
     ],
+
     'includes': [
+        # PySide6
         'PySide6',
         'PySide6.QtWebEngineCore',
         'PySide6.QtWebEngineWidgets',
         'PySide6.QtWebChannel',
         'PySide6.QtNetwork',
-        'charset_normalizer',
-        'chardet',
-        'lzma',
-        'importlib_metadata',
-        'backports.lzma',
-        '_lzma',
+
+        # Standard libs used dynamically
         'csv',
         'io',
         'os',
         're',
         'gc',
         'tempfile',
-        'matplotlib.backends.backend_qt5agg',
+        'lzma',
+        'backports.lzma',
+        'importlib_metadata',
+
+        # Matplotlib core
+        'matplotlib',
         'matplotlib.figure',
         'matplotlib.ticker',
         'matplotlib.colors',
-        'mpl_toolkits.axes_grid1',
         'matplotlib.widgets',
         'matplotlib.path',
-        'matplotlib',
+        'matplotlib.backends.backend_qt5agg',
+        'mpl_toolkits.axes_grid1',
+
+        # REQUIRED FOR EXPORTING PDF / SVG / EPS
+        'matplotlib.backends.backend_pdf',
+        'matplotlib.backends.backend_svg',
+        'matplotlib.backends.backend_ps',
+        'matplotlib.backends.backend_eps',
+
+        # Project modules
         'callisto_downloader',
         'burst_processor',
         'gui_main',
         'matplotlib_widget',
-        'chardet',
+        'soho_lasco_viewer',
+        'goes_xrs_gui',
+
+        # Encoding libraries
         'charset_normalizer',
+        'chardet',
     ],
 
-
     'iconfile': 'icon.icns',
+
     'resources': [],
+
     'plist': {
         'CFBundleName': 'e-Callisto FITS Analyzer',
-        'CFBundleShortVersionString': '1.7.1',
-        'CFBundleVersion': '1.7.1',
+        'CFBundleShortVersionString': '1.7.2',
+        'CFBundleVersion': '1.7.2',
         'CFBundleIdentifier': 'com.sahansliyanage.callisto.fitsanalyzer',
-    }
+    },
 }
-
 
 setup(
     app=APP,

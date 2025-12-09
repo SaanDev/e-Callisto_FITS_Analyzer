@@ -6,8 +6,8 @@
   <component name="ChangeListManager">
     <list default="true" id="22c2ea24-4065-4bfd-8ffe-617e0297cf9a" name="Changes" comment="Application start in full screen.">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/gui_main.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui_main.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/FITS_Analyzer.spec" beforeDir="false" afterPath="$PROJECT_DIR$/FITS_Analyzer.spec" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/setup.py" beforeDir="false" afterPath="$PROJECT_DIR$/setup.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -194,6 +194,7 @@
       <workItem from="1764864393652" duration="2514000" />
       <workItem from="1765126810863" duration="268000" />
       <workItem from="1765177077569" duration="2219000" />
+      <workItem from="1765305597505" duration="242000" />
     </task>
     <task id="LOCAL-00001" summary="Initial commit">
       <option name="closed" value="true" />
@@ -435,7 +436,23 @@
       <option name="project" value="LOCAL" />
       <updated>1765218387688</updated>
     </task>
-    <option name="localTasksCounter" value="31" />
+    <task id="LOCAL-00031" summary="Application start in full screen.">
+      <option name="closed" value="true" />
+      <created>1765218602707</created>
+      <option name="number" value="00031" />
+      <option name="presentableId" value="LOCAL-00031" />
+      <option name="project" value="LOCAL" />
+      <updated>1765218602707</updated>
+    </task>
+    <task id="LOCAL-00032" summary="Application start in full screen.">
+      <option name="closed" value="true" />
+      <created>1765218649567</created>
+      <option name="number" value="00032" />
+      <option name="presentableId" value="LOCAL-00032" />
+      <option name="project" value="LOCAL" />
+      <updated>1765218649567</updated>
+    </task>
+    <option name="localTasksCounter" value="33" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -501,7 +518,7 @@
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
     <SUITE FILE_PATH="coverage/e_Callisto_FITS_Analyzer$soho_lasco_viewer.coverage" NAME="soho_lasco_viewer Coverage Results" MODIFIED="1755979412305" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/e_Callisto_FITS_Analyzer$FITplotWithAxes.coverage" NAME="FITplotWithAxes Coverage Results" MODIFIED="1753211940146" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
-    <SUITE FILE_PATH="coverage/e_Callisto_FITS_Analyzer$main.coverage" NAME="main Coverage Results" MODIFIED="1765218345241" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/e_Callisto_FITS_Analyzer$main.coverage" NAME="main Coverage Results" MODIFIED="1765218590583" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/e_Callisto_FITS_Analyzer$gui_main.coverage" NAME="gui_main Coverage Results" MODIFIED="1753965829358" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/e_Callisto_FITS_Analyzer$Plott_FIT.coverage" NAME="Plott_FIT Coverage Results" MODIFIED="1753212063682" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/e_Callisto_FITS_Analyzer$goes_xrs_gui.coverage" NAME="goes_xrs_gui Coverage Results" MODIFIED="1755917032537" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />

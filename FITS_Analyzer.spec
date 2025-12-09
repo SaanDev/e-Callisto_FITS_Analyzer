@@ -6,30 +6,39 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[
-    ('icon.icns', '.'),
-],
+        ('icon.icns', '.'),
+    ],
     hiddenimports=[
-    'PySide6',
-    'matplotlib.backends.backend_qtagg',
-    'matplotlib.backends.backend_qt5agg',
-    ' matplotlib',
-    'mpl_toolkits.axes_grid1',
-    'matplotlib.colors',
-    'matplotlib.widgets',
-    'matplotlib.path',
-    'astropy',
-    'bs4',
-    'requests',
-    'scipy',
-    'cftime',
-    'netCDF4',
-    'callisto_downloader',
-    'burst_processor',
-    'gui_main',
-    'matplotlib_widget',
-    'soho_lasco_viewer',
-    'goes_xrs_gui'
-],
+        'PySide6',
+        'matplotlib',
+        'matplotlib.backends.backend_qtagg',
+        'matplotlib.backends.backend_qt5agg',
+
+        # Required for exporting PDF, SVG, EPS
+        'matplotlib.backends.backend_pdf',
+        'matplotlib.backends.backend_svg',
+        'matplotlib.backends.backend_ps',
+        'matplotlib.backends.backend_eps',
+
+        'mpl_toolkits.axes_grid1',
+        'matplotlib.colors',
+        'matplotlib.widgets',
+        'matplotlib.path',
+
+        'astropy',
+        'bs4',
+        'requests',
+        'scipy',
+        'cftime',
+        'netCDF4',
+
+        'callisto_downloader',
+        'burst_processor',
+        'gui_main',
+        'matplotlib_widget',
+        'soho_lasco_viewer',
+        'goes_xrs_gui',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -37,6 +46,7 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
@@ -57,6 +67,7 @@ exe = EXE(
     entitlements_file=None,
     icon=['icon.icns'],
 )
+
 coll = COLLECT(
     exe,
     a.binaries,
