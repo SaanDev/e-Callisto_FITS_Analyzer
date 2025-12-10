@@ -43,6 +43,8 @@ class MplCanvas(FigureCanvas):
         self.fig = Figure(figsize=(width, height), dpi=dpi)
         self.ax = self.fig.add_subplot(111)
         super().__init__(self.fig)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.updateGeometry()
 
 
 class MainWindow(QMainWindow):
@@ -55,6 +57,7 @@ class MainWindow(QMainWindow):
 
         self.use_utc = False
         self.ut_start_sec = None
+        self.use_db = False  # False = Digits (default), True = dB
 
         self.current_cmap_name = "Custom"
 
@@ -80,28 +83,35 @@ class MainWindow(QMainWindow):
         self.setStatusBar(QStatusBar())
 
         # Sliders for noise clipping
+        lower_label = QLabel("Lower Threshold")
         self.lower_slider = QSlider(Qt.Horizontal)
         self.lower_slider.setRange(-100, 100)
         self.lower_slider.setValue(0)
 
+        upper_label = QLabel("Upper Threshold")
         self.upper_slider = QSlider(Qt.Horizontal)
         self.upper_slider.setRange(-100, 100)
         self.upper_slider.setValue(0)
 
-        lower_label = QLabel("Lower Threshold")
-        upper_label = QLabel("Upper Threshold")
-
-        slider_layout = QFormLayout()
-        slider_layout.addRow(lower_label, self.lower_slider)
-        slider_layout.addRow(upper_label, self.upper_slider)
+        # === Noise Threshold Controls ===
 
         slider_group = QGroupBox("Noise Clipping Thresholds")
+        slider_layout = QVBoxLayout()
+
+        # Lower Threshold
+        lower_label = QLabel("Lower Threshold")
+        lower_label.setAlignment(Qt.AlignLeft)
+        slider_layout.addWidget(lower_label)
+        slider_layout.addWidget(self.lower_slider)
+
+        # Upper Threshold
+        upper_label = QLabel("Upper Threshold")
+        upper_label.setAlignment(Qt.AlignLeft)
+        slider_layout.addWidget(upper_label)
+        slider_layout.addWidget(self.upper_slider)
+
         slider_group.setLayout(slider_layout)
         slider_group.setMaximumWidth(250)
-
-        # Labels
-        lower_label = QLabel("Lower Threshold:")
-        upper_label = QLabel("Upper Threshold:")
 
         self.cmap_label = QLabel("Colormap")
         self.cmap_combo = QComboBox()
@@ -179,6 +189,28 @@ class MainWindow(QMainWindow):
         # Sidebar layout with thresholds and buttons
         side_panel = QVBoxLayout()
         side_panel.addWidget(slider_group)
+
+        # === Z-axis units selection ===
+        self.units_label = QLabel("Z-Axis Units")
+
+        self.units_digits_radio = QRadioButton("Digits")
+        self.units_db_radio = QRadioButton("dB")
+
+        self.units_digits_radio.setChecked(True)  # Default
+
+        self.units_group = QButtonGroup(self)
+        self.units_group.addButton(self.units_digits_radio)
+        self.units_group.addButton(self.units_db_radio)
+
+        units_box = QGroupBox("Intensity Units")
+        units_layout = QVBoxLayout()
+        units_layout.addWidget(self.units_digits_radio)
+        units_layout.addWidget(self.units_db_radio)
+        units_box.setLayout(units_layout)
+        units_box.setMaximumWidth(250)
+
+        # Add to side panel
+        side_panel.addWidget(units_box)
 
         cmap_layout = QFormLayout()
         cmap_layout.addRow(self.cmap_label, self.cmap_combo)
@@ -300,6 +332,8 @@ class MainWindow(QMainWindow):
         self.reset_selection_button.clicked.connect(self.reset_selection)
         self.reset_all_button.clicked.connect(self.reset_all)
         self.close_button.clicked.connect(self.close)
+        self.units_digits_radio.toggled.connect(self.update_units)
+        self.units_db_radio.toggled.connect(self.update_units)
 
         # Data placeholders
         self.raw_data = None
@@ -435,11 +469,37 @@ class MainWindow(QMainWindow):
         self.freqs = combined_freqs
         self.time = combined_time
 
+        # Extract UT start from FIRST FITS file
+        try:
+            hdul = fits.open(file_paths[0])
+            hdr = hdul[0].header
+            hh, mm, ss = hdr["TIME-OBS"].split(":")
+            self.ut_start_sec = int(hh) * 3600 + int(mm) * 60 + float(ss)
+            hdul.close()
+        except Exception as e:
+            print("⚠️ UT extraction failed:", e)
+            self.ut_start_sec = None
+
         original_name = os.path.basename(file_paths[0])
         self.filename = original_name
 
         self.plot_data(self.raw_data, title="Raw Data")
         self.statusBar().showMessage(f"Loaded {len(file_paths)} files (combined)", 5000)
+
+    def update_units(self):
+        if self.units_db_radio.isChecked():
+            self.use_db = True
+        else:
+            self.use_db = False
+
+        if self.raw_data is None:
+            return
+
+        # Choose which data to replot
+        data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
+
+        # Replot with new unit selection
+        self.plot_data(data, title=self.current_plot_type)
 
     def combine_frequency_files(self, file_paths):
         file_paths = sorted(file_paths)
@@ -590,9 +650,17 @@ class MainWindow(QMainWindow):
         self.current_cax = cax
 
         # Show image
-        im = self.canvas.ax.imshow(data, aspect='auto', extent=extent, cmap=cmap)
+        # Convert units if needed
+        if self.use_db:
+            display_data = data * 2500.0 / 255.0 / 25.4
+        else:
+            display_data = data
+
+        im = self.canvas.ax.imshow(display_data, aspect='auto', extent=extent, cmap=cmap)
+
         self.current_colorbar = self.canvas.figure.colorbar(im, cax=cax)
-        self.current_colorbar.set_label("Intensity", fontsize=11)
+        label = "Intensity [Digits]" if not self.use_db else "Intensity [dB]"
+        self.current_colorbar.set_label(label, fontsize=11)
 
         self.canvas.ax.set_ylabel("Frequency [MHz]")
         self.canvas.ax.set_title(f"{self.filename} - {title}", fontsize=14)
@@ -762,8 +830,8 @@ class MainWindow(QMainWindow):
 
         # Labels
         self.canvas.ax.set_title("Isolated Burst")
-        self.canvas.ax.set_xlabel("Time [s]")
         self.canvas.ax.set_ylabel("Frequency [MHz]")
+        self.format_axes()
 
         self.canvas.draw()
 
@@ -1020,6 +1088,17 @@ class MainWindow(QMainWindow):
                 self.load_combined_into_main(combined)
                 self.downloader_dialog.import_success.emit()
                 return
+
+            # Extract UT from first downloaded file
+            try:
+                hdul = fits.open(local_files[0])
+                hdr = hdul[0].header
+                hh, mm, ss = hdr["TIME-OBS"].split(":")
+                self.ut_start_sec = int(hh) * 3600 + int(mm) * 60 + float(ss)
+                hdul.close()
+            except Exception:
+                self.ut_start_sec = None
+
 
         except Exception as e:
             QMessageBox.critical(self, "Combine Error", f"An error occurred while combining files:\n{e}")
@@ -1310,20 +1389,12 @@ from PySide6.QtWidgets import (
     QDialog, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
     QFileDialog, QComboBox, QScrollArea, QWidget, QSizePolicy
 )
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+
 from matplotlib.figure import Figure
 import numpy as np
 from scipy.optimize import curve_fit
 from sklearn.metrics import r2_score, mean_squared_error
 
-
-class MplCanvas(FigureCanvas):
-    def __init__(self, parent=None, width=10, height=6, dpi=100):
-        self.fig = Figure(figsize=(width, height), dpi=dpi)
-        self.ax = self.fig.add_subplot(111)
-        super().__init__(self.fig)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.updateGeometry()
 
 
 class AnalyzeDialog(QDialog):
