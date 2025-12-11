@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 1.7.2
+Version 1.7.3
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -50,8 +50,7 @@ class MplCanvas(FigureCanvas):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("e-CALLISTO FITS Analyzer 1.7.2")
-
+        self.setWindowTitle("e-CALLISTO FITS Analyzer 1.7.3")
         #self.resize(1000, 700)
         self.setMinimumSize(1000, 700)
 
@@ -60,9 +59,12 @@ class MainWindow(QMainWindow):
         self.use_db = False  # False = Digits (default), True = dB
 
         self.current_cmap_name = "Custom"
+        self.lasso_active = False
 
         self.noise_vmin = None
         self.noise_vmax = None
+
+        self.current_display_data = None
 
         # Debounce timer for smooth slider updates
         self.noise_smooth_timer = QTimer()
@@ -75,12 +77,25 @@ class MainWindow(QMainWindow):
         self.canvas.figure.clf()
         self.canvas.ax = self.canvas.figure.add_subplot(111)
 
+        self.canvas.mpl_connect("scroll_event", self.on_scroll_zoom)
+        self._cid_press = self.canvas.mpl_connect("button_press_event", self.on_mouse_press)
+        self._cid_release = self.canvas.mpl_connect("button_release_event", self.on_mouse_release)
+        self._cid_motion = self.canvas.mpl_connect("motion_notify_event", self.on_mouse_move)
+        self._cid_motion_status = self.canvas.mpl_connect("motion_notify_event", self.on_mouse_motion_status)
+
+        self._panning = False
+        self._last_pan_xy = None
+
         # Colorbar
         self.current_colorbar = None
         self.current_cax = None
 
         # Statusbar
         self.setStatusBar(QStatusBar())
+        # Permanent label on right side for cursor coordinates
+        self.cursor_label = QLabel("")
+        self.cursor_label.setStyleSheet("padding-right: 8px;")
+        self.statusBar().addPermanentWidget(self.cursor_label)
 
         # Sliders for noise clipping
         lower_label = QLabel("Lower Threshold")
@@ -656,6 +671,8 @@ class MainWindow(QMainWindow):
         else:
             display_data = data
 
+        self.current_display_data = display_data
+
         im = self.canvas.ax.imshow(display_data, aspect='auto', extent=extent, cmap=cmap)
 
         self.current_colorbar = self.canvas.figure.colorbar(im, cax=cax)
@@ -673,6 +690,61 @@ class MainWindow(QMainWindow):
         self.reset_all_button.setEnabled(True)
         self.statusBar().showMessage(f"Loaded: {self.filename}", 5000)
 
+    def on_mouse_motion_status(self, event):
+        """Show time, frequency and intensity under cursor in status bar."""
+        # Cursor not over axes or no data
+        if event.inaxes != self.canvas.ax:
+            # Cursor outside plot → show zeros
+            self.cursor_label.setText("t = 0.00   |   f = 0.00 MHz   |   I = 0.00")
+            return
+
+        if self.current_display_data is None or self.time is None or self.freqs is None:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+
+        x = float(event.xdata)
+        y = float(event.ydata)
+
+        # Convert x to nearest time index
+        time_arr = np.array(self.time)
+        freq_arr = np.array(self.freqs)
+
+        # Safety guard
+        if time_arr.size == 0 or freq_arr.size == 0:
+            return
+
+        # Find nearest indices in time and frequency
+        idx_x = int(np.argmin(np.abs(time_arr - x)))
+        idx_y = int(np.argmin(np.abs(freq_arr - y)))
+
+        ny, nx = self.current_display_data.shape
+        if idx_x < 0 or idx_x >= nx or idx_y < 0 or idx_y >= ny:
+            return
+
+        t_val = time_arr[idx_x]
+        f_val = freq_arr[idx_y]
+        intensity = self.current_display_data[idx_y, idx_x]
+
+        # Format time string in seconds or UT
+        if self.use_utc and self.ut_start_sec is not None:
+            total_seconds = self.ut_start_sec + t_val
+            hours = int(total_seconds // 3600) % 24
+            minutes = int((total_seconds % 3600) // 60)
+            seconds = int(total_seconds % 60)
+            time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d} UT"
+        else:
+            time_str = f"{t_val:.2f} s"
+
+        unit_label = "dB" if self.use_db else "Digits"
+
+        msg = (
+            f"t = {time_str}   |   "
+            f"f = {f_val:.2f} MHz   |   "
+            f"I = {intensity:.2f} {unit_label}"
+        )
+        self.cursor_label.setText(msg)
+
     def change_cmap(self, name):
         self.current_cmap_name = name
         if self.raw_data is None:
@@ -687,6 +759,121 @@ class MainWindow(QMainWindow):
             return mcolors.LinearSegmentedColormap.from_list('custom_RdYlBu', colors)
         else:
             return plt.get_cmap(self.current_cmap_name)
+
+    def on_scroll_zoom(self, event):
+        """Smooth zoom using mouse scroll wheel."""
+        if self.lasso_active:
+            return
+
+        ax = self.canvas.ax
+
+        # Mouse pointer must be inside the plot
+        if event.inaxes != ax:
+            return
+
+        # Zoom factor
+        base_scale = 1.15  # smooth and gentle zoom
+
+        # Zoom IN
+        if event.button == "up":
+            scale_factor = 1 / base_scale
+        # Zoom OUT
+        elif event.button == "down":
+            scale_factor = base_scale
+        else:
+            return
+
+        # Current axis limits
+        x_min, x_max = ax.get_xlim()
+        y_min, y_max = ax.get_ylim()
+
+        x_range = (x_max - x_min)
+        y_range = (y_max - y_min)
+
+        # Mouse location in data coords
+        xdata = event.xdata
+        ydata = event.ydata
+
+        # Compute new ranges
+        new_x_range = x_range * scale_factor
+        new_y_range = y_range * scale_factor
+
+        # Shift around mouse cursor
+        x_shift = (xdata - x_min) * (1 - scale_factor)
+        y_shift = (ydata - y_min) * (1 - scale_factor)
+
+        new_x_min = x_min + x_shift
+        new_x_max = new_x_min + new_x_range
+
+        new_y_min = y_min + y_shift
+        new_y_max = new_y_min + new_y_range
+
+        # Apply limits
+        ax.set_xlim(new_x_min, new_x_max)
+        ax.set_ylim(new_y_min, new_y_max)
+
+        self.canvas.draw_idle()
+
+    def on_mouse_press(self, event):
+        """
+        Start panning with LEFT mouse button inside the main axes.
+        (No modifier keys needed.)
+        """
+        if self.lasso_active:
+            return
+
+        # Only react if we click inside the image axes
+        if event.inaxes != self.canvas.ax:
+            return
+
+        # Left button = start pan
+        if event.button == 1 and event.xdata is not None and event.ydata is not None:
+            self._panning = True
+            self._last_pan_xy = (event.xdata, event.ydata)
+
+    def on_mouse_move(self, event):
+        """
+        Perform the pan movement while the left mouse button is held.
+        """
+        if self.lasso_active:
+            return
+
+        # Only act if we are in panning mode and pointer is on data
+        if not self._panning or event.xdata is None or event.ydata is None:
+            return
+
+        ax = self.canvas.ax
+
+        # Previous mouse position in data coordinates
+        x_prev, y_prev = self._last_pan_xy
+
+        # Current mouse position
+        x_curr, y_curr = event.xdata, event.ydata
+
+        # Difference
+        dx = x_prev - x_curr
+        dy = y_prev - y_curr
+
+        # Current limits
+        x_min, x_max = ax.get_xlim()
+        y_min, y_max = ax.get_ylim()
+
+        # Shift both axes
+        ax.set_xlim(x_min + dx, x_max + dx)
+        ax.set_ylim(y_min + dy, y_max + dy)
+
+        self.canvas.draw_idle()
+
+        # Update last mouse position
+        self._last_pan_xy = (x_curr, y_curr)
+
+    def on_mouse_release(self, event):
+        """
+        Stop panning when the mouse button is released.
+        """
+        self._panning = False
+        self._last_pan_xy = None
+
 
     def activate_drift_tool(self):
         self.statusBar().showMessage("Click multiple points along the burst. Right-click or double-click to finish.",
@@ -736,6 +923,12 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Error", "Please apply noise reduction before isolating a burst.")
             return
 
+        self.canvas.mpl_disconnect(self._cid_press)
+        self.canvas.mpl_disconnect(self._cid_motion)
+        self.canvas.mpl_disconnect(self._cid_release)
+
+        self.lasso_active = True
+
         # Disconnect old lasso
         if self.lasso:
             try:
@@ -775,6 +968,10 @@ class MainWindow(QMainWindow):
                 pass
             self.lasso = None
 
+        self._cid_press = self.canvas.mpl_connect("button_press_event", self.on_mouse_press)
+        self._cid_motion = self.canvas.mpl_connect("motion_notify_event", self.on_mouse_move)
+        self._cid_release = self.canvas.mpl_connect("button_release_event", self.on_mouse_release)
+        self.lasso_active = False
         # Defer drawing to avoid crash during event handling
         QTimer.singleShot(0, lambda: self._plot_isolated_burst(mask))
 
@@ -823,6 +1020,8 @@ class MainWindow(QMainWindow):
             vmin=self.noise_vmin,
             vmax=self.noise_vmax,
         )
+
+        self.current_display_data = burst_isolated
 
         # Create new colorbar
         self.current_colorbar = self.canvas.figure.colorbar(im, cax=cax)
@@ -969,13 +1168,17 @@ class MainWindow(QMainWindow):
         self.reset_selection_button.setEnabled(False)
         self.reset_all_button.setEnabled(False)
 
+        if self.canvas.ax:
+            self.canvas.ax.set_xlim(0, 1)
+            self.canvas.ax.set_ylim(1, 0)
+
         print("Application reset to initial state.")
 
     def show_about_dialog(self):
         QMessageBox.information(
             self,
             "About e-Callisto FITS Analyzer",
-            "e-CALLISTO FITS Analyzer version 1.7.2.\n\n"
+            "e-CALLISTO FITS Analyzer version 1.7.3.\n\n"
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"
@@ -1358,7 +1561,7 @@ class MaxIntensityPlotDialog(QDialog):
         QMessageBox.information(
             self,
             "About e-Callisto FITS Analyzer",
-            "e-CALLISTO FITS Analyzer version 1.7.2.\n\n"
+            "e-CALLISTO FITS Analyzer version 1.7.3.\n\n"
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"

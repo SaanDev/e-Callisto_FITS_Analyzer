@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 1.7.2
+Version 1.7.3
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -79,8 +79,8 @@ OPTIONS = {
 
     'plist': {
         'CFBundleName': 'e-Callisto FITS Analyzer',
-        'CFBundleShortVersionString': '1.7.2',
-        'CFBundleVersion': '1.7.2',
+        'CFBundleShortVersionString': '1.7.3',
+        'CFBundleVersion': '1.7.3',
         'CFBundleIdentifier': 'com.sahansliyanage.callisto.fitsanalyzer',
     },
 }

@@ -4,9 +4,19 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="22c2ea24-4065-4bfd-8ffe-617e0297cf9a" name="Changes" comment="PDF, EPS, and SVG export error fixed.">
+    <list default="true" id="22c2ea24-4065-4bfd-8ffe-617e0297cf9a" name="Changes" comment="Bugs fixed.">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/burst_processor.py" beforeDir="false" afterPath="$PROJECT_DIR$/burst_processor.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/callisto_downloader.py" beforeDir="false" afterPath="$PROJECT_DIR$/callisto_downloader.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/dst_index.py" beforeDir="false" afterPath="$PROJECT_DIR$/dst_index.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/goes_xrs_gui.py" beforeDir="false" afterPath="$PROJECT_DIR$/goes_xrs_gui.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/gui_main.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui_main.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/install_requirements.py" beforeDir="false" afterPath="$PROJECT_DIR$/install_requirements.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/matplotlib_widget.py" beforeDir="false" afterPath="$PROJECT_DIR$/matplotlib_widget.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/settings.py" beforeDir="false" afterPath="$PROJECT_DIR$/settings.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/setup.py" beforeDir="false" afterPath="$PROJECT_DIR$/setup.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/soho_lasco_viewer.py" beforeDir="false" afterPath="$PROJECT_DIR$/soho_lasco_viewer.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -193,7 +203,8 @@
       <workItem from="1764864393652" duration="2514000" />
       <workItem from="1765126810863" duration="268000" />
       <workItem from="1765177077569" duration="2219000" />
-      <workItem from="1765305597505" duration="10628000" />
+      <workItem from="1765305597505" duration="11100000" />
+      <workItem from="1765458179760" duration="3874000" />
     </task>
     <task id="LOCAL-00001" summary="Initial commit">
       <option name="closed" value="true" />
@@ -499,7 +510,15 @@
       <option name="project" value="LOCAL" />
       <updated>1765309033247</updated>
     </task>
-    <option name="localTasksCounter" value="39" />
+    <task id="LOCAL-00039" summary="Bugs fixed.">
+      <option name="closed" value="true" />
+      <created>1765385004986</created>
+      <option name="number" value="00039" />
+      <option name="presentableId" value="LOCAL-00039" />
+      <option name="project" value="LOCAL" />
+      <updated>1765385004986</updated>
+    </task>
+    <option name="localTasksCounter" value="40" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -550,7 +569,8 @@
     <MESSAGE value="1. FITS files directly import from the online database implemented.&#10;2. Bugs fixed.&#10;3. Version number updated." />
     <MESSAGE value="Application start in full screen." />
     <MESSAGE value="PDF, EPS, and SVG export error fixed." />
-    <option name="LAST_COMMIT_MESSAGE" value="PDF, EPS, and SVG export error fixed." />
+    <MESSAGE value="Bugs fixed." />
+    <option name="LAST_COMMIT_MESSAGE" value="Bugs fixed." />
   </component>
   <component name="XDebuggerManager">
     <breakpoint-manager>
@@ -566,7 +586,7 @@
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
     <SUITE FILE_PATH="coverage/e_Callisto_FITS_Analyzer$soho_lasco_viewer.coverage" NAME="soho_lasco_viewer Coverage Results" MODIFIED="1755979412305" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/e_Callisto_FITS_Analyzer$FITplotWithAxes.coverage" NAME="FITplotWithAxes Coverage Results" MODIFIED="1753211940146" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
-    <SUITE FILE_PATH="coverage/e_Callisto_FITS_Analyzer$main.coverage" NAME="main Coverage Results" MODIFIED="1765360870548" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/e_Callisto_FITS_Analyzer$main.coverage" NAME="main Coverage Results" MODIFIED="1765461867065" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/e_Callisto_FITS_Analyzer$gui_main.coverage" NAME="gui_main Coverage Results" MODIFIED="1753965829358" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/e_Callisto_FITS_Analyzer$Plott_FIT.coverage" NAME="Plott_FIT Coverage Results" MODIFIED="1753212063682" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/e_Callisto_FITS_Analyzer$goes_xrs_gui.coverage" NAME="goes_xrs_gui Coverage Results" MODIFIED="1755917032537" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
