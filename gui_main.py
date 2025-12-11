@@ -1098,6 +1098,15 @@ class MainWindow(QMainWindow):
         if not file_path:
             return
 
+        if file_path.lower().startswith("c:\\program files"):
+            QMessageBox.warning(
+                self,
+                "Permission Denied",
+                "Windows does not allow saving files inside Program Files.\n"
+                "Please choose another folder such as Documents or Desktop."
+            )
+            return
+
         try:
             # --- Ensure proper extension ---
             if "." not in os.path.basename(file_path):
@@ -1529,6 +1538,15 @@ class MaxIntensityPlotDialog(QDialog):
         )
 
         if not file_path:
+            return
+
+        if file_path.lower().startswith("c:\\program files"):
+            QMessageBox.warning(
+                self,
+                "Permission Denied",
+                "Windows does not allow saving files inside Program Files.\n"
+                "Please choose another folder such as Documents or Desktop."
+            )
             return
 
         try:

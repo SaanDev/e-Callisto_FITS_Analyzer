@@ -6,17 +6,18 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
 
 import sys
+import platform
 from PySide6.QtWidgets import QApplication
 from gui_main import MainWindow
 import faulthandler
 
-if sys.stderr:
+if platform.system() != "Windows":
     faulthandler.enable()
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = MainWindow()
-    window.show()
-    #maximize the start window
     window.showMaximized()
+    #window.show()
     sys.exit(app.exec())
