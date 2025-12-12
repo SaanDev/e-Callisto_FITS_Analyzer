@@ -184,6 +184,8 @@ Features:
 ### Example: Downloader  
 ![Downloader](assets/callisto_downloader.png)
 
+![Downloader](assets/callisto_downloader_preview.png)
+
 ---
 
 # 13. Combine FITS Files
@@ -197,9 +199,6 @@ Merge consecutive frequency bands when time bases match.
 Merge consecutive time segments from the same station and date.
 
 If files do not meet the required criteria, a message box alerts the user.
-
-### Example: Combined Time Plot  
-![Combine Time](assets/combine_time.png)
 
 Combined data can be imported directly into the Analyzer.
 
