@@ -1,7 +1,7 @@
 # e-CALLISTO FITS Analyzer  
 A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data.
 
-Version **1.7.2**
+Version **1.7.3**
 
 ---
 
@@ -13,7 +13,7 @@ This guide explains how to use the main features of the **e-CALLISTO FITS Analyz
 
 # 1. Main Interface
 
-After launching the application, the main window opens with tools for loading FITS files, adjusting thresholds, selecting colormaps, isolating bursts, and performing scientific analysis.
+After launching the application, the main window opens with tools for loading FITS files, adjusting thresholds, selecting colormaps, isolating bursts, navigating the spectrum, and performing scientific analysis.
 
 ### **Main Window**
 ![Main Window](assets/main_window.png)
@@ -34,13 +34,14 @@ The dynamic spectrum appears immediately.
 
 ---
 
-# 3. Noise Reduction (Live Sliders)
+# 3. Noise Reduction (Live Threshold Scrollbars)
 
-Noise reduction now updates **live** without pressing Apply.
+Noise reduction updates **live** without pressing Apply.
 
 Features:
 
-- Two horizontal sliders adjust lower and upper clipping thresholds  
+- Two wide horizontal scrollbars for lower and upper clipping thresholds (Vmin / Vmax)  
+- Labels repositioned for clearer visual feedback  
 - Dynamic spectrum refreshes automatically  
 - No data are lost when switching x-axis units (seconds ↔ UT)
 
@@ -49,11 +50,27 @@ Features:
 
 ---
 
-# 4. Colormap Selection
+# 4. Intensity Scale and Units
 
-A new **Colormap** panel allows choosing from several scientifically useful palettes:
+The color-bar (z-axis) now provides clearer physical meaning.
 
-- Custom (blue-red-yellow)
+Features:
+
+- Explicit intensity labeling on the color-bar  
+- Unit selector for:
+  - **Digits / ADU**
+  - **Optional dB scaling**
+- Unit changes update the display immediately
+
+This improves interpretability across different observing stations.
+
+---
+
+# 5. Colormap Selection
+
+The **Colormap** panel allows choosing from several scientifically useful palettes:
+
+- Custom (blue–red–yellow)
 - Viridis  
 - Plasma  
 - Inferno  
@@ -68,7 +85,33 @@ The plot updates as soon as a colormap is selected.
 
 ---
 
-# 5. Burst Isolation (Lasso Tool)
+# 6. Navigation: Zoom and Pan
+
+Interactive navigation has been added to the dynamic spectrum.
+
+Features:
+
+- **Scroll wheel:** Zoom in and out  
+- **Click + drag:** Pan across time and frequency  
+- Navigation works alongside noise reduction and colormap changes
+
+This allows precise inspection of fine spectral structures.
+
+---
+
+# 7. Cursor Data Display
+
+When moving the mouse cursor over the plot area, the status bar displays:
+
+- Time  
+- Frequency  
+- Intensity value (in selected units)
+
+This enables quick quantitative inspection without additional clicks.
+
+---
+
+# 8. Burst Isolation (Lasso Tool)
 
 Click **Isolate Burst** and draw around the emission region.  
 Only the selected region is retained for further analysis.
@@ -78,7 +121,7 @@ Only the selected region is retained for further analysis.
 
 ---
 
-# 6. Maximum Intensities Extraction
+# 9. Maximum Intensities Extraction
 
 Click **Plot Maximum Intensities** to compute the maximum frequency for each time channel after noise reduction or burst isolation.
 
@@ -87,7 +130,7 @@ Click **Plot Maximum Intensities** to compute the maximum frequency for each tim
 
 ---
 
-# 7. Outlier Removal
+# 10. Outlier Removal
 
 Inside the Maximum Intensities window:
 
@@ -97,7 +140,7 @@ Inside the Maximum Intensities window:
 
 ---
 
-# 8. Burst Analyzer (Best Fit & Shock Parameters)
+# 11. Burst Analyzer (Best Fit & Shock Parameters)
 
 The Analyzer window performs:
 
@@ -106,10 +149,12 @@ The Analyzer window performs:
 - Shock speed  
 - Shock height  
 - R² and RMSE  
-- Optional additional plots:
-  - Shock speed vs height  
-  - Shock speed vs frequency  
-  - Height vs frequency  
+
+Optional additional plots:
+
+- Shock speed vs height  
+- Shock speed vs frequency  
+- Height vs frequency  
 
 ### Example: Analyzer  
 ![Analyzer](assets/analysis.png)
@@ -122,28 +167,28 @@ Export options:
 
 ---
 
-# 9. FITS Downloader (Updated)
+# 12. FITS Downloader
 
 Open via **Download → FITS Downloader**.
 
 Features:
 
-- Select station, date, hour  
-- Fetch available files from server  
+- Select station, date, and hour  
+- Fetch available files from the server  
 - Preview selected files  
 - Download multiple FITS files  
-- **New:** Import button to send selected FITS files directly into the Analyzer  
-- Detects whether files match frequency or time stitching requirements  
-- Shows an error message if selected files cannot be combined  
+- Import selected FITS files directly into the Analyzer  
+- Automatic detection of frequency or time stitching compatibility  
+- Clear error messages when selected files cannot be combined
 
 ### Example: Downloader  
 ![Downloader](assets/callisto_downloader.png)
 
 ---
 
-# 10. Combine FITS Files
+# 13. Combine FITS Files
 
-Two combination modes:
+Two combination modes are supported.
 
 ### **Combine Frequency**
 Merge consecutive frequency bands when time bases match.
@@ -151,16 +196,16 @@ Merge consecutive frequency bands when time bases match.
 ### **Combine Time**
 Merge consecutive time segments from the same station and date.
 
-If files do not meet the expected criteria, a message box alerts the user.
+If files do not meet the required criteria, a message box alerts the user.
 
 ### Example: Combined Time Plot  
 ![Combine Time](assets/combine_time.png)
 
-Combined data can be imported directly to the Analyzer.
+Combined data can be imported directly into the Analyzer.
 
 ---
 
-# 11. Saving Plots (New Formats)
+# 14. Saving and Exporting Plots
 
 All figures across the application can be exported in:
 
@@ -170,17 +215,22 @@ All figures across the application can be exported in:
 - SVG  
 - TIFF  
 
-This makes the tool ready for scientific publication workflows.
+Export handling improvements:
+
+- Export errors for PDF, EPS, and SVG formats have been resolved  
+- On Windows, if the default save location is restricted (e.g., `C:\Program Files`), the user is prompted to select an alternate folder
+
+This ensures smooth operation across operating systems and publication workflows.
 
 ---
 
-# 12. CME Catalog Viewer (SOHO/LASCO)
+# 15. CME Catalog Viewer (SOHO/LASCO)
 
 Features:
 
-- Retrieve daily CME list  
+- Retrieve daily CME lists  
 - Display CME parameters in a structured table  
-- Show associated LASCO movie  
+- Show associated LASCO movies  
 - Event metadata panel  
 
 ### Example: CME Viewer  
@@ -188,11 +238,11 @@ Features:
 
 ---
 
-# 13. GOES X-Ray Flux Viewer
+# 16. GOES X-Ray Flux Viewer
 
 Features:
 
-- View GOES-16 / GOES-18 light curves  
+- View GOES-16 / GOES-18 X-ray light curves  
 - Select short or long channels  
 - Adjust time windows  
 - Extract flare parameters  
@@ -203,18 +253,13 @@ Features:
 
 ---
 
-# 14. Live Noise-Reduced View
-
-When thresholds are changed, the spectrum updates live while keeping the chosen axis format (seconds or UT).
-
----
-
 ## 📄 Notes
 
-- Supports both `.fit` and `.fit.gz` files.  
-- Noise reduction is preserved when switching x-axis units.  
-- All major plots allow exporting in publication-ready formats.  
-- Analyzer now includes improved shock parameter calculations and Excel export.
+- Supports both `.fit` and `.fit.gz` files  
+- Live noise reduction with preserved zoom, pan, and axis format  
+- Cursor-based data readout for time, frequency, and intensity  
+- Robust export system with OS-aware save handling  
+- All major plots are publication ready
 
 ---
 
