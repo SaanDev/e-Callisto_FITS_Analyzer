@@ -514,7 +514,7 @@ class MainWindow(QMainWindow):
         data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
 
         # Replot with new unit selection
-        self.plot_data(data, title=self.current_plot_type)
+        self.plot_data(data, title=self.current_plot_type, keep_view=True)
 
     def combine_frequency_files(self, file_paths):
         file_paths = sorted(file_paths)
@@ -621,10 +621,35 @@ class MainWindow(QMainWindow):
         self.max_plot_button.setEnabled(True)
         self.reset_selection_button.setEnabled(True)
 
-    def plot_data(self, data, title="Dynamic Spectrum"):
-        QTimer.singleShot(0, lambda: self._plot_data_internal(data, title))
+    def plot_data(self, data, title="Dynamic Spectrum", keep_view=False):
+        view = self._capture_view() if keep_view else None
+        QTimer.singleShot(0, lambda: self._plot_data_internal(data, title, view))
 
-    def _plot_data_internal(self, data, title="Dynamic Spectrum"):
+    def _capture_view(self):
+        """Save current zoom/pan limits (only if a plot exists)."""
+        try:
+            ax = self.canvas.ax
+            if ax is None or ax.images is None or len(ax.images) == 0:
+                return None
+            return {
+                "xlim": ax.get_xlim(),
+                "ylim": ax.get_ylim(),
+            }
+        except Exception:
+            return None
+
+    def _restore_view(self, view):
+        """Restore zoom/pan limits safely."""
+        if not view:
+            return
+        try:
+            ax = self.canvas.ax
+            ax.set_xlim(view["xlim"])
+            ax.set_ylim(view["ylim"])
+        except Exception:
+            pass
+
+    def _plot_data_internal(self, data, title="Dynamic Spectrum", view=None):
         if self.time is None or self.freqs is None:
             print("Time or frequency data not loaded. Skipping plot.")
             return
@@ -683,6 +708,7 @@ class MainWindow(QMainWindow):
         self.canvas.ax.set_title(f"{self.filename} - {title}", fontsize=14)
 
         self.format_axes()  # Format x-axis based on user selection (seconds/UT)
+        self._restore_view(view)
         self.canvas.draw()
 
         self.current_plot_type = title
@@ -749,9 +775,8 @@ class MainWindow(QMainWindow):
         self.current_cmap_name = name
         if self.raw_data is None:
             return
-        # pick best available data
         data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
-        self.plot_data(data, title=self.current_plot_type)
+        self.plot_data(data, title=self.current_plot_type, keep_view=True)
 
     def get_current_cmap(self):
         if self.current_cmap_name == "Custom":
@@ -1221,7 +1246,7 @@ class MainWindow(QMainWindow):
 
         if self.raw_data is not None:
             data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
-            self.plot_data(data, title=self.current_plot_type)
+            self.plot_data(data, title=self.current_plot_type, keep_view=True)
 
     def set_axis_to_utc(self):
         self.use_utc = True
@@ -1230,7 +1255,7 @@ class MainWindow(QMainWindow):
 
         if self.raw_data is not None:
             data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
-            self.plot_data(data, title=self.current_plot_type)
+            self.plot_data(data, title=self.current_plot_type, keep_view=True)
 
     def format_axes(self):
         if self.use_utc and self.ut_start_sec is not None:

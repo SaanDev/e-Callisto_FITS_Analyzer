@@ -21,6 +21,6 @@ symlinks = {
 
 # Icon positions inside the DMG window
 icon_locations = {
-    "e-Callisto FITS Analyzer.app": (130, 240),
-    "Applications": (500, 240),
+    "e-Callisto FITS Analyzer.app": (130, 120),
+    "Applications": (500, 120),
 }
