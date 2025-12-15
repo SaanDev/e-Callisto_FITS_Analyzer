@@ -3,6 +3,10 @@ A desktop application for visualizing, processing, and analyzing e-CALLISTO sola
 
 Version **1.7.3**
 
+## Download
+### [Windows version 1.7.3 (.exe) (196 MB)](https://github.com/SaanDev/e-Callisto_FITS_Analyzer/releases/download/v1.7.3(Windows)/e-CALLISTO_FITS_Analyzer_Setup_v1.7.3.exe)
+### [MacOS version 1.7.3 (.dmg) (591 MB)](https://github.com/SaanDev/e-Callisto_FITS_Analyzer/releases/download/v1.7.3(MacOS)/e-CALLISTO_FITS_Analyzer_v1.7.3.dmg)
+
 ---
 
 ## 📘 User Guide
