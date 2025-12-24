@@ -263,7 +263,7 @@ class MainWindow(QMainWindow):
 
         def _spin_row(label_text: str, spin: QSpinBox) -> QHBoxLayout:
             row = QHBoxLayout()
-            row.setSpacing(8)
+            row.setSpacing(15)
 
             label = QLabel(label_text)
             row.addWidget(label)
@@ -274,7 +274,7 @@ class MainWindow(QMainWindow):
 
         def _style_row(label_text: str, cb_bold: QCheckBox, cb_italic: QCheckBox) -> QHBoxLayout:
             row = QHBoxLayout()
-            row.setSpacing(15)
+            row.setSpacing(6)
             row.addWidget(QLabel(label_text))
             row.addStretch(1)
             row.addWidget(cb_bold)
@@ -284,7 +284,7 @@ class MainWindow(QMainWindow):
         self.graph_group = QGroupBox("Graph Properties")
 
         graph_layout = QVBoxLayout()
-        graph_layout.setSpacing(8)
+        graph_layout.setSpacing(4)
         graph_layout.setContentsMargins(8, 8, 8, 8)
 
         # --- Appearance ---
@@ -373,18 +373,18 @@ class MainWindow(QMainWindow):
                 font-size: 12px;
             }
             QSpinBox {
-                min-height: 10px;
-                padding: 4px 2px;
+                max-height: 10px;
+                padding: 1px 1px;
                 font-size: 11px;
             }
             QComboBox {
                 min-height: 10px;
-                padding: 4px 2px;
+                padding: 1px 1px;
                 font-size: 11px;
             }    
             QLineEdit {
                 min-height: 10px;
-                padding: 3x 3px;
+                padding: 1x 1px;
                 font-size: 11px;
             }
             QCheckBox {
