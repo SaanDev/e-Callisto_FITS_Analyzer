@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 1.7.3
+Version 1.7.4
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -8,7 +8,20 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 from setuptools import setup
 
 APP = ['main.py']
-DATA_FILES = ['icon.icns']
+DATA_FILES = ['icon.icns',
+    ('assets/icons', [
+        'assets/icons/open.svg',
+        'assets/icons/export.svg',
+        'assets/icons/undo.svg',
+        'assets/icons/redo.svg',
+        'assets/icons/download.svg',
+        'assets/icons/drift.svg',
+        'assets/icons/isolate.svg',
+        'assets/icons/max.svg',
+        'assets/icons/reset_selection.svg',
+        'assets/icons/reset_all.svg',
+    ])
+]
 
 OPTIONS = {
     'packages': [
@@ -32,6 +45,10 @@ OPTIONS = {
         'PySide6.QtWebEngineWidgets',
         'PySide6.QtWebChannel',
         'PySide6.QtNetwork',
+        "PySide6.QtSvg",
+        "PySide6.QtSvgWidgets",
+        "matplotlib.backends.backend_qtagg",
+
 
         # Standard libs used dynamically
         'csv',
@@ -73,14 +90,17 @@ OPTIONS = {
         'chardet',
     ],
 
+    "qt_plugins": ["platforms", "imageformats", "iconengines", "styles"],
+
+
     'iconfile': 'icon.icns',
 
     'resources': [],
 
     'plist': {
         'CFBundleName': 'e-Callisto FITS Analyzer',
-        'CFBundleShortVersionString': '1.7.3',
-        'CFBundleVersion': '1.7.3',
+        'CFBundleShortVersionString': '1.7.4',
+        'CFBundleVersion': '1.7.4',
         'CFBundleIdentifier': 'com.sahansliyanage.callisto.fitsanalyzer',
     },
 }

@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 1.7.3
+Version 1.7.4
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -21,3 +21,5 @@ if __name__ == "__main__":
     window.showMaximized()
     #window.show()
     sys.exit(app.exec())
+
+

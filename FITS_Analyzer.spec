@@ -10,7 +10,7 @@ a = Analysis(
 
     datas=[
         ('icon.icns', '.'),
-
+        ('assets/icons', 'assets/icons'),
         # Required backend files for exporting
         (backend_pdf.__file__, 'matplotlib/backends'),
         (backend_svg.__file__, 'matplotlib/backends'),

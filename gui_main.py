@@ -1,21 +1,29 @@
 """
 e-CALLISTO FITS Analyzer
-Version 1.7.3
+Version 1.7.4
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
-
+import sys
+import io
+import os
+import tempfile
+import re
+import gc
+import requests
 from PySide6.QtWidgets import (
     QMainWindow, QSlider, QDialog, QMenuBar, QMessageBox, QLabel, QFormLayout, QGroupBox,
-    QStatusBar, QProgressBar, QApplication, QMenu, QCheckBox, QRadioButton, QButtonGroup, QComboBox
+    QStatusBar, QProgressBar, QApplication, QMenu, QCheckBox, QRadioButton, QButtonGroup, QComboBox, QToolBar,
+    QLineEdit, QSpinBox, QPushButton, QVBoxLayout, QWidget, QFileDialog, QHBoxLayout, QSizePolicy
 )
-from PySide6.QtGui import QAction, QPixmap, QImage, QGuiApplication
+from PySide6.QtGui import QAction, QPixmap, QImage, QGuiApplication, QIcon, QFontDatabase
 from PySide6.QtCore import Qt
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, QSize
 from callisto_downloader import CallistoDownloaderApp
 from goes_xrs_gui import MainWindow as GoesXrsWindow
 from soho_lasco_viewer import CMEViewer as CMEViewerWindow
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
 from matplotlib.widgets import LassoSelector
 from matplotlib.path import Path
 from astropy.io import fits
@@ -26,16 +34,31 @@ from matplotlib.ticker import FuncFormatter, ScalarFormatter
 import csv
 import matplotlib.pyplot as plt
 from openpyxl import load_workbook, Workbook
-import io
-import os
-import tempfile
-import re
-import gc
-import requests
+
 
 
 def start_combine(self):
     QTimer.singleShot(100, self.combine_files)  # delays execution and avoids UI freeze
+
+def resource_path(relative_path: str) -> str:
+    if hasattr(sys, "_MEIPASS"):
+        # Packaged app
+        return os.path.join(sys._MEIPASS, relative_path)
+    # Development mode
+    base_path = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_path, relative_path)
+
+#def resource_path(relative_path: str) -> str:
+   ## py2app
+    #if getattr(sys, "frozen", False):
+        #base_path = os.path.abspath(
+            #os.path.join(os.path.dirname(sys.executable), "..", "Resources")
+        #)
+        #return os.path.join(base_path, relative_path)
+
+    ## Development
+    #return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path)
+
 
 
 class MplCanvas(FigureCanvas):
@@ -50,13 +73,28 @@ class MplCanvas(FigureCanvas):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("e-CALLISTO FITS Analyzer 1.7.3")
+        self.setWindowTitle("e-CALLISTO FITS Analyzer 1.7.4")
         #self.resize(1000, 700)
         self.setMinimumSize(1000, 700)
 
         self.use_utc = False
         self.ut_start_sec = None
         self.use_db = False  # False = Digits (default), True = dB
+
+        # --- Undo / Redo ---
+        self._undo_stack = []
+        self._redo_stack = []
+        self._max_undo = 30  # prevent memory blow-up
+
+        # --- Graph Properties (non-colormap) ---
+        self.graph_title_override = ""  # empty = use default "{filename} - {title}"
+        self.graph_font_family = ""  # empty = use Matplotlib default
+
+        self.tick_font_px = 11
+        self.axis_label_font_px = 12
+        self.title_font_px = 14
+
+        self._colorbar_label_text = ""
 
         self.current_cmap_name = "Custom"
         self.lasso_active = False
@@ -65,6 +103,20 @@ class MainWindow(QMainWindow):
         self.noise_vmax = None
 
         self.current_display_data = None
+
+        # --- Graph Properties: style flags ---
+        self.title_bold = False
+        self.title_italic = False
+
+        self.axis_bold = False
+        self.axis_italic = False
+
+        self.ticks_bold = False
+        self.ticks_italic = False
+
+        self.remove_titles = False
+
+        self._build_toolbar()
 
         # Debounce timer for smooth slider updates
         self.noise_smooth_timer = QTimer()
@@ -127,117 +179,216 @@ class MainWindow(QMainWindow):
 
         slider_group.setLayout(slider_layout)
         slider_group.setMaximumWidth(250)
-
-        self.cmap_label = QLabel("Colormap")
-        self.cmap_combo = QComboBox()
-        self.cmap_combo.addItems([
-            "Custom",
-            "viridis",
-            "plasma",
-            "inferno",
-            "magma",
-            "cividis",
-            "turbo",
-            "RdYlBu",
-            "jet",
-            "cubehelix",
-        ])
-
-        # Buttons
-        button_defs = [
-            ("Load FITS File", "load_button"),
-            ("Apply Noise Reduction", "noise_button"),
-            ("Estimate Drift Rate", "drift_button"),
-            ("Isolate Burst", "lasso_button"),
-            ("Plot Maximum Intensities", "max_plot_button"),
-            ("Reset Selection", "reset_selection_button"),
-            ("Reset All", "reset_all_button"),
-            ("Close Application", "close_button")
-        ]
-
-        for label, attr in button_defs:
-            btn = QPushButton(label)
-            btn.setMinimumWidth(180)
-            btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-            setattr(self, attr, btn)
+        slider_group.setMaximumHeight(200)
 
         # Labels
         lower_label = QLabel("Lower Threshold:")
         upper_label = QLabel("Upper Threshold:")
 
-        # Buttons
-        self.load_button = QPushButton("Load FITS File")
-        self.noise_button = QPushButton("Apply Noise Reduction")
-        self.lasso_button = QPushButton("Isolate Burst")
-        self.max_plot_button = QPushButton("Plot Maximum Intensities")
-
-        self.reset_selection_button = QPushButton("Reset Selection")
-        self.reset_all_button = QPushButton("Reset All")
-        self.close_button = QPushButton("Close Application")
-
-        for btn in [self.reset_selection_button, self.reset_all_button, self.close_button]:
-            btn.setMinimumWidth(180)
-
-        for btn in [self.load_button, self.noise_button, self.lasso_button, self.max_plot_button]:
-            btn.setMinimumWidth(180)
-            btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-
-        # Layouts
-        button_layout = QVBoxLayout()
-        button_layout.addWidget(self.load_button)
-        button_layout.addWidget(self.noise_button)
-        button_layout.addWidget(self.drift_button)
-        button_layout.addWidget(self.lasso_button)
-        button_layout.addWidget(self.max_plot_button)
-        button_layout.addWidget(self.reset_selection_button)
-        button_layout.addWidget(self.reset_all_button)
-        button_layout.addWidget(self.close_button)
-
-        self.noise_button.hide()
-        self.noise_button.setEnabled(False)
-        self.drift_button.setEnabled(False)
-        self.lasso_button.setEnabled(False)
-        self.max_plot_button.setEnabled(False)
-        self.reset_selection_button.setEnabled(False)
-        self.reset_all_button.setEnabled(False)
-
         # Sidebar layout with thresholds and buttons
         side_panel = QVBoxLayout()
         side_panel.addWidget(slider_group)
 
-        # === Z-axis units selection ===
-        self.units_label = QLabel("Z-Axis Units")
+        # ===== Units Group =====
+
+        self.units_group_box = QGroupBox("Units")
+        self.units_group_box.setMaximumWidth(250)
+
+        units_layout = QVBoxLayout()
+        units_layout.setSpacing(6)
+        units_layout.setContentsMargins(8, 8, 8, 8)
+
+        # --- Intensity subsection ---
+        intensity_label = QLabel("Intensity")
+        intensity_label.setAlignment(Qt.AlignLeft)
+        intensity_label.setStyleSheet("font-weight: bold;")
 
         self.units_digits_radio = QRadioButton("Digits")
         self.units_db_radio = QRadioButton("dB")
-
-        self.units_digits_radio.setChecked(True)  # Default
+        self.units_digits_radio.setChecked(True)
 
         self.units_group = QButtonGroup(self)
         self.units_group.addButton(self.units_digits_radio)
         self.units_group.addButton(self.units_db_radio)
 
-        units_box = QGroupBox("Intensity Units")
-        units_layout = QVBoxLayout()
+        units_layout.addWidget(intensity_label)
         units_layout.addWidget(self.units_digits_radio)
         units_layout.addWidget(self.units_db_radio)
-        units_box.setLayout(units_layout)
-        units_box.setMaximumWidth(250)
 
-        # Add to side panel
-        side_panel.addWidget(units_box)
+        # --- Time subsection ---
+        time_label = QLabel("Time")
+        time_label.setAlignment(Qt.AlignLeft)
+        time_label.setStyleSheet("font-weight: bold;")
 
-        cmap_layout = QFormLayout()
-        cmap_layout.addRow(self.cmap_label, self.cmap_combo)
+        self.time_sec_radio = QRadioButton("Seconds")
+        self.time_ut_radio = QRadioButton("UT")
+        self.time_sec_radio.setChecked(True)
 
-        cmap_group = QGroupBox("Colormap")
-        cmap_group.setLayout(cmap_layout)
-        cmap_group.setMaximumWidth(250)
+        self.time_group = QButtonGroup(self)
+        self.time_group.addButton(self.time_sec_radio)
+        self.time_group.addButton(self.time_ut_radio)
 
-        side_panel.addWidget(cmap_group)
+        units_layout.addSpacing(6)
+        units_layout.addWidget(time_label)
+        units_layout.addWidget(self.time_sec_radio)
+        units_layout.addWidget(self.time_ut_radio)
 
-        side_panel.addSpacing(10)
-        side_panel.addLayout(button_layout)
+        # Single stretch at the end
+        units_layout.addStretch(1)
+
+        self.units_group_box.setLayout(units_layout)
+        self.units_group_box.setSizePolicy(
+            QSizePolicy.Preferred,
+            QSizePolicy.Maximum
+        )
+
+        side_panel.addWidget(self.units_group_box)
+
+        # ===== Graph Properties Group =====
+
+        def _section_label(text: str) -> QLabel:
+            lbl = QLabel(text)
+            lbl.setStyleSheet("""
+                QLabel {
+                    font-weight: bold;
+                    color: #555;
+                    margin-top: 2px;
+                    margin-bottom: 3px;
+                }
+            """)
+            return lbl
+
+        def _spin_row(label_text: str, spin: QSpinBox) -> QHBoxLayout:
+            row = QHBoxLayout()
+            row.setSpacing(6)
+
+            label = QLabel(label_text)
+            row.addWidget(label)
+            row.addStretch(1)
+            row.addWidget(spin)
+
+            return row
+
+        def _style_row(label_text: str, cb_bold: QCheckBox, cb_italic: QCheckBox) -> QHBoxLayout:
+            row = QHBoxLayout()
+            row.setSpacing(15)
+            row.addWidget(QLabel(label_text))
+            row.addStretch(1)
+            row.addWidget(cb_bold)
+            row.addWidget(cb_italic)
+            return row
+
+        self.graph_group = QGroupBox("Graph Properties")
+
+        graph_layout = QVBoxLayout()
+        graph_layout.setSpacing(6)
+        graph_layout.setContentsMargins(8, 8, 8, 8)
+
+        # --- Appearance ---
+        graph_layout.addWidget(_section_label("Appearance"))
+
+        self.cmap_combo = QComboBox()
+        self.cmap_combo.addItems([
+            "Custom", "viridis", "plasma", "inferno", "magma",
+            "cividis", "turbo", "RdYlBu", "jet", "cubehelix",
+        ])
+        graph_layout.addWidget(QLabel("Colormap"))
+        graph_layout.addWidget(self.cmap_combo)
+
+        self.font_combo = QComboBox()
+        self.font_combo.addItem("Default")
+        for f in sorted(QFontDatabase.families()):
+            self.font_combo.addItem(f)
+
+        graph_layout.addWidget(QLabel("Font family"))
+        graph_layout.addWidget(self.font_combo)
+
+        # --- Text ---
+        graph_layout.addWidget(_section_label("Text"))
+
+        self.title_edit = QLineEdit()
+        self.title_edit.setPlaceholderText("Custom title (leave empty for default)")
+        graph_layout.addWidget(QLabel("Graph title"))
+        graph_layout.addWidget(self.title_edit)
+
+        self.remove_titles_chk = QCheckBox("Remove Titles")
+        self.remove_titles_chk.setStyleSheet("margin-top: 5px; font-weight: bold;")
+        graph_layout.addWidget(self.remove_titles_chk)
+
+        # --- Font sizes ---
+        graph_layout.addWidget(_section_label("Font sizes"))
+
+        self.tick_font_spin = QSpinBox()
+        self.tick_font_spin.setRange(6, 60)
+        self.tick_font_spin.setValue(self.tick_font_px)
+        self.tick_font_spin.setFixedWidth(100)
+        graph_layout.addLayout(
+            _spin_row("Tick labels (px)", self.tick_font_spin)
+        )
+
+        self.axis_font_spin = QSpinBox()
+        self.axis_font_spin.setRange(6, 60)
+        self.axis_font_spin.setValue(self.axis_label_font_px)
+        self.axis_font_spin.setFixedWidth(100)
+        graph_layout.addLayout(
+            _spin_row("Axis labels (px)", self.axis_font_spin)
+        )
+
+        self.title_font_spin = QSpinBox()
+        self.title_font_spin.setRange(6, 80)
+        self.title_font_spin.setValue(self.title_font_px)
+        self.title_font_spin.setFixedWidth(100)
+        graph_layout.addLayout(
+            _spin_row("Title (px)", self.title_font_spin)
+        )
+
+        # --- Text style ---
+        graph_layout.addWidget(_section_label("Text style"))
+
+        self.title_bold_chk = QCheckBox("Bold")
+        self.title_italic_chk = QCheckBox("Italic")
+        graph_layout.addLayout(_style_row("Title", self.title_bold_chk, self.title_italic_chk))
+
+        self.axis_bold_chk = QCheckBox("Bold")
+        self.axis_italic_chk = QCheckBox("Italic")
+        graph_layout.addLayout(_style_row("Axis labels", self.axis_bold_chk, self.axis_italic_chk))
+
+        self.ticks_bold_chk = QCheckBox("Bold")
+        self.ticks_italic_chk = QCheckBox("Italic")
+        graph_layout.addLayout(_style_row("Tick labels", self.ticks_bold_chk, self.ticks_italic_chk))
+
+        graph_layout.addStretch(1)
+
+        self.graph_group.setLayout(graph_layout)
+        self.graph_group.setMaximumWidth(300)
+        self.graph_group.setEnabled(False)
+
+        side_panel.addWidget(self.graph_group)
+
+        self.graph_group.setStyleSheet("""
+            QLabel {
+                font-size: 12px;
+            }
+            QSpinBox {
+                min-height: 10px;
+                padding: 2px 1px;
+                font-size: 11px;
+            }
+            QComboBox {
+                min-height: 10px;
+                padding: 2px 1px;
+                font-size: 11px;
+            }    
+            QLineEdit {
+                min-height: 10px;
+                padding: 1px 1px;
+                font-size: 11px;
+            }
+            QCheckBox {
+                spacing: 8px;
+                font-size: 10px;
+            }
+        """)
 
         # Main layout with side panel and canvas
         main_layout = QHBoxLayout()
@@ -270,9 +421,23 @@ class MainWindow(QMainWindow):
 
         # Edit Menu
         edit_menu = menubar.addMenu("Edit")
+
+        self.undo_action = QAction("Undo", self)
+        self.undo_action.setShortcut("Ctrl+Z")
+        edit_menu.addAction(self.undo_action)
+
+        self.redo_action = QAction("Redo", self)
+        self.redo_action.setShortcut("Ctrl+Shift+Z")
+        edit_menu.addAction(self.redo_action)
+
+        edit_menu.addSeparator()
+
         reset_action = QAction("Reset All", self)
         edit_menu.addAction(reset_action)
         reset_action.triggered.connect(self.reset_all)
+
+        self.undo_action.triggered.connect(self.undo)
+        self.redo_action.triggered.connect(self.redo)
 
         # Download Menu
         download_menu = menubar.addMenu("Download")
@@ -336,19 +501,41 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(container)
 
         # Signals
-        self.load_button.clicked.connect(self.load_file)
         self.lower_slider.valueChanged.connect(self.schedule_noise_update)
         self.upper_slider.valueChanged.connect(self.schedule_noise_update)
         self.cmap_combo.currentTextChanged.connect(self.change_cmap)
-        self.drift_button.clicked.connect(self.activate_drift_tool)
-        self.lasso_button.clicked.connect(self.activate_lasso)
-        self.max_plot_button.clicked.connect(self.plot_max_intensities)
         self.open_action.triggered.connect(self.load_file)
-        self.reset_selection_button.clicked.connect(self.reset_selection)
-        self.reset_all_button.clicked.connect(self.reset_all)
-        self.close_button.clicked.connect(self.close)
         self.units_digits_radio.toggled.connect(self.update_units)
         self.units_db_radio.toggled.connect(self.update_units)
+
+        self.time_sec_radio.toggled.connect(
+            lambda checked: checked and self.set_axis_to_seconds()
+        )
+        self.time_ut_radio.toggled.connect(
+            lambda checked: checked and self.set_axis_to_utc()
+        )
+
+        # Keep existing colormap live behavior
+        self.cmap_combo.currentTextChanged.connect(self.change_cmap)
+
+        # Real-time graph properties (non-colormap)
+        self.title_edit.textChanged.connect(self.apply_graph_properties_live)
+        self.font_combo.currentTextChanged.connect(self.apply_graph_properties_live)
+        self.tick_font_spin.valueChanged.connect(self.apply_graph_properties_live)
+        self.axis_font_spin.valueChanged.connect(self.apply_graph_properties_live)
+        self.title_font_spin.valueChanged.connect(self.apply_graph_properties_live)
+
+        # Real-time style toggles
+        self.remove_titles_chk.toggled.connect(self.apply_graph_properties_live)
+
+        self.title_bold_chk.toggled.connect(self.apply_graph_properties_live)
+        self.title_italic_chk.toggled.connect(self.apply_graph_properties_live)
+
+        self.axis_bold_chk.toggled.connect(self.apply_graph_properties_live)
+        self.axis_italic_chk.toggled.connect(self.apply_graph_properties_live)
+
+        self.ticks_bold_chk.toggled.connect(self.apply_graph_properties_live)
+        self.ticks_italic_chk.toggled.connect(self.apply_graph_properties_live)
 
         # Data placeholders
         self.raw_data = None
@@ -365,10 +552,6 @@ class MainWindow(QMainWindow):
             QLabel {
                 font-size: 13px;
             }
-            QPushButton {
-                font-size: 13px;
-                padding: 6px 10px;
-            }
             QGroupBox {
                 font-weight: bold;
                 font-size: 14px;
@@ -376,6 +559,261 @@ class MainWindow(QMainWindow):
         """)
 
         self.noise_reduced_original = None  # backup before lasso
+
+    def _icon(self, filename: str) -> QIcon:
+        icon_path = resource_path(os.path.join("assets", "icons", filename))
+
+        if os.path.exists(icon_path):
+            return QIcon(icon_path)
+
+        print(f"⚠️ Icon not found: {icon_path}")
+        return QIcon()
+
+    def _build_toolbar(self):
+        tb = QToolBar("Main Toolbar", self)
+        tb.setMovable(False)
+        tb.setIconSize(QSize(36, 36))
+        self.addToolBar(tb)
+
+        # --- Actions (toolbar) ---
+        self.tb_open = QAction(self._icon("open.svg"), "Open / Load", self)
+        self.tb_open.setShortcut("Ctrl+O")
+        self.tb_open.triggered.connect(self.load_file)
+        tb.addAction(self.tb_open)
+
+        self.tb_export = QAction(self._icon("export.svg"), "Export", self)
+        self.tb_export.setShortcut("Ctrl+E")
+        self.tb_export.triggered.connect(self.export_figure)
+        tb.addAction(self.tb_export)
+
+        tb.addSeparator()
+
+        self.tb_undo = QAction(self._icon("undo.svg"), "Undo", self)
+        self.tb_undo.setShortcut("Ctrl+Z")
+        self.tb_undo.triggered.connect(self.undo)
+        tb.addAction(self.tb_undo)
+
+        self.tb_redo = QAction(self._icon("redo.svg"), "Redo", self)
+        self.tb_redo.setShortcut("Ctrl+Shift+Z")
+        self.tb_redo.triggered.connect(self.redo)
+        tb.addAction(self.tb_redo)
+
+        tb.addSeparator()
+
+        self.tb_download = QAction(self._icon("download.svg"), "Download", self)
+        self.tb_download.triggered.connect(self.launch_downloader)
+        tb.addAction(self.tb_download)
+
+        tb.addSeparator()
+
+        self.tb_drift = QAction(self._icon("drift.svg"), "Estimate Drift Rate", self)
+        self.tb_drift.triggered.connect(self.activate_drift_tool)
+        tb.addAction(self.tb_drift)
+
+        self.tb_isolate = QAction(self._icon("isolate.svg"), "Isolate Burst", self)
+        self.tb_isolate.triggered.connect(self.activate_lasso)
+        tb.addAction(self.tb_isolate)
+
+        self.tb_max = QAction(self._icon("max.svg"), "Plot Maximum Intensities", self)
+        self.tb_max.triggered.connect(self.plot_max_intensities)
+        tb.addAction(self.tb_max)
+
+        tb.addSeparator()
+
+        self.tb_reset_sel = QAction(self._icon("reset_selection.svg"), "Reset Selection", self)
+        self.tb_reset_sel.triggered.connect(self.reset_selection)
+        tb.addAction(self.tb_reset_sel)
+
+        self.tb_reset_all = QAction(self._icon("reset_all.svg"), "Reset All", self)
+        self.tb_reset_all.triggered.connect(self.reset_all)
+        tb.addAction(self.tb_reset_all)
+
+        # Initial enable/disable states
+        self._sync_toolbar_enabled_states()
+
+    def _sync_toolbar_enabled_states(self):
+        has_file = getattr(self, "raw_data", None) is not None
+        has_noise = getattr(self, "noise_reduced_data", None) is not None
+        has_undo = len(getattr(self, "_undo_stack", [])) > 0
+        has_redo = len(getattr(self, "_redo_stack", [])) > 0
+        filename = getattr(self, "filename", "")
+
+        # Always allowed
+        self.tb_open.setEnabled(True)
+        self.tb_download.setEnabled(True)
+
+        # Needs a plot / filename
+        self.tb_export.setEnabled(bool(filename))
+
+        # Undo/redo availability
+        self.tb_undo.setEnabled(has_undo)
+        self.tb_redo.setEnabled(has_redo)
+
+        # Tools that require processed data
+        self.tb_drift.setEnabled(has_noise)
+        self.tb_isolate.setEnabled(has_noise)
+        self.tb_max.setEnabled(has_noise)
+        self.tb_reset_sel.setEnabled(has_noise)
+        self.tb_reset_all.setEnabled(has_file)
+
+    def apply_graph_properties_live(self, *_):
+        """
+        Apply graph styling changes (title, font family, font sizes, bold/italic flags)
+        to the CURRENT plot without rebuilding the image.
+        """
+
+        ax = getattr(self.canvas, "ax", None)
+        if ax is None:
+            return
+
+        # Must have an image already
+        if not ax.images or len(ax.images) == 0:
+            return
+
+        # -----------------------------
+        # 1) READ UI STATE FIRST
+        # -----------------------------
+        self.remove_titles = self.remove_titles_chk.isChecked()
+
+        self.title_bold = self.title_bold_chk.isChecked()
+        self.title_italic = self.title_italic_chk.isChecked()
+
+        self.axis_bold = self.axis_bold_chk.isChecked()
+        self.axis_italic = self.axis_italic_chk.isChecked()
+
+        self.ticks_bold = self.ticks_bold_chk.isChecked()
+        self.ticks_italic = self.ticks_italic_chk.isChecked()
+
+        self.graph_title_override = self.title_edit.text().strip()
+
+        font_choice = self.font_combo.currentText()
+        self.graph_font_family = "" if font_choice == "Default" else font_choice
+
+        self.tick_font_px = int(self.tick_font_spin.value())
+        self.axis_label_font_px = int(self.axis_font_spin.value())
+        self.title_font_px = int(self.title_font_spin.value())
+
+        # Helpers
+        def _weight(bold: bool) -> str:
+            return "bold" if bold else "normal"
+
+        def _style(italic: bool) -> str:
+            return "italic" if italic else "normal"
+
+        fontfam = self.graph_font_family if self.graph_font_family else None
+
+        # -----------------------------
+        # 2) APPLY TITLES / LABELS
+        # -----------------------------
+        if self.remove_titles:
+            ax.set_title("")
+            ax.set_xlabel("")
+            ax.set_ylabel("")
+        else:
+            # Default title if custom is empty
+            title_text = self.graph_title_override or f"{self.filename} - {self.current_plot_type}"
+
+            ax.set_title(
+                title_text,
+                fontsize=self.title_font_px,
+                fontfamily=fontfam,
+                fontweight=_weight(self.title_bold),
+                fontstyle=_style(self.title_italic),
+            )
+
+            # Always set axis labels explicitly so toggles apply immediately
+            xlab = "Time [UT]" if (self.use_utc and self.ut_start_sec is not None) else "Time [s]"
+            ylab = "Frequency [MHz]"
+
+            ax.set_xlabel(
+                xlab,
+                fontsize=self.axis_label_font_px,
+                fontfamily=fontfam,
+                fontweight=_weight(self.axis_bold),
+                fontstyle=_style(self.axis_italic),
+            )
+            ax.set_ylabel(
+                ylab,
+                fontsize=self.axis_label_font_px,
+                fontfamily=fontfam,
+                fontweight=_weight(self.axis_bold),
+                fontstyle=_style(self.axis_italic),
+            )
+
+        # -----------------------------
+        # 3) APPLY TICK LABEL STYLE
+        # -----------------------------
+        for lbl in ax.get_xticklabels():
+            lbl.set_fontsize(self.tick_font_px)
+            lbl.set_fontweight(_weight(self.ticks_bold))
+            lbl.set_fontstyle(_style(self.ticks_italic))
+            if fontfam:
+                lbl.set_fontfamily(fontfam)
+
+        for lbl in ax.get_yticklabels():
+            lbl.set_fontsize(self.tick_font_px)
+            lbl.set_fontweight(_weight(self.ticks_bold))
+            lbl.set_fontstyle(_style(self.ticks_italic))
+            if fontfam:
+                lbl.set_fontfamily(fontfam)
+
+        # Colorbar style (ticks + title)
+        if self.current_colorbar is not None:
+            try:
+                cax = self.current_colorbar.ax
+                fontfam = (self.graph_font_family if self.graph_font_family else None)
+
+                # ---- ticks ----
+                cax.tick_params(labelsize=self.tick_font_px)
+                for lbl in cax.get_yticklabels():
+                    lbl.set_fontsize(self.tick_font_px)
+                    lbl.set_fontweight(_weight(self.ticks_bold))
+                    lbl.set_fontstyle(_style(self.ticks_italic))
+                    if fontfam:
+                        lbl.set_fontfamily(fontfam)
+
+                # ---- title/label ----
+                if self.remove_titles:
+                    # Hide the colorbar label, but DO NOT erase the stored text
+                    self.current_colorbar.set_label("")
+                    cax.set_ylabel("")  # extra safety for some backends
+                    cax.yaxis.label.set_text("")
+                else:
+                    # Restore label text + style
+                    label_text = getattr(self, "_colorbar_label_text", "")
+                    if not label_text:
+                        label_text = cax.get_ylabel()  # fallback
+
+                    self.current_colorbar.set_label(
+                        label_text,
+                        fontsize=self.axis_label_font_px,
+                        fontfamily=fontfam,
+                        fontweight=_weight(self.axis_bold),
+                        fontstyle=_style(self.axis_italic),
+                    )
+
+                    # Force styling on the underlying label object too
+                    ylab = cax.yaxis.label
+                    ylab.set_fontsize(self.axis_label_font_px)
+                    ylab.set_fontweight(_weight(self.axis_bold))
+                    ylab.set_fontstyle(_style(self.axis_italic))
+                    if fontfam:
+                        ylab.set_fontfamily(fontfam)
+
+            except Exception:
+                pass
+
+        # -----------------------------
+        # 4) UI: disable title inputs when Remove Titles is on
+        # -----------------------------
+        disable = self.remove_titles
+        self.title_edit.setEnabled(not disable)
+        self.title_bold_chk.setEnabled(not disable)
+        self.title_italic_chk.setEnabled(not disable)
+        self.axis_bold_chk.setEnabled(not disable)
+        self.axis_italic_chk.setEnabled(not disable)
+
+        self.canvas.draw_idle()
 
     def load_file(self):
         initial_dir = os.path.dirname(self.filename) if self.filename else ""
@@ -596,6 +1034,7 @@ class MainWindow(QMainWindow):
         self.noise_smooth_timer.start()
 
     def update_noise_live(self):
+        self._push_undo_state()
         if self.raw_data is None:
             return
 
@@ -616,10 +1055,7 @@ class MainWindow(QMainWindow):
         self.plot_data(data, title="Noise Reduced")
 
         # enable tools
-        self.drift_button.setEnabled(True)
-        self.lasso_button.setEnabled(True)
-        self.max_plot_button.setEnabled(True)
-        self.reset_selection_button.setEnabled(True)
+        self._sync_toolbar_enabled_states()
 
     def plot_data(self, data, title="Dynamic Spectrum", keep_view=False):
         view = self._capture_view() if keep_view else None
@@ -701,19 +1137,27 @@ class MainWindow(QMainWindow):
         im = self.canvas.ax.imshow(display_data, aspect='auto', extent=extent, cmap=cmap)
 
         self.current_colorbar = self.canvas.figure.colorbar(im, cax=cax)
+
         label = "Intensity [Digits]" if not self.use_db else "Intensity [dB]"
-        self.current_colorbar.set_label(label, fontsize=11)
+        self.current_colorbar.set_label(label)
+
+        # Store label string so apply_graph_properties_live can re-style it
+        self._colorbar_label_text = label
 
         self.canvas.ax.set_ylabel("Frequency [MHz]")
         self.canvas.ax.set_title(f"{self.filename} - {title}", fontsize=14)
 
         self.format_axes()  # Format x-axis based on user selection (seconds/UT)
         self._restore_view(view)
+
+        # Apply graph properties (title/font/sizes) after plot rebuild
+        self.apply_graph_properties_live()
+        self.graph_group.setEnabled(True)
+
         self.canvas.draw()
 
         self.current_plot_type = title
-        self.noise_button.setEnabled(True)
-        self.reset_all_button.setEnabled(True)
+        self._sync_toolbar_enabled_states()
         self.statusBar().showMessage(f"Loaded: {self.filename}", 5000)
 
     def on_mouse_motion_status(self, event):
@@ -772,6 +1216,7 @@ class MainWindow(QMainWindow):
         self.cursor_label.setText(msg)
 
     def change_cmap(self, name):
+        self._push_undo_state()
         self.current_cmap_name = name
         if self.raw_data is None:
             return
@@ -1001,6 +1446,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, lambda: self._plot_isolated_burst(mask))
 
     def _plot_isolated_burst(self, mask):
+        self._push_undo_state()
         # Build isolated data array
         burst_isolated = np.zeros_like(self.noise_reduced_data)
         burst_isolated[mask] = self.noise_reduced_data[mask]
@@ -1050,7 +1496,8 @@ class MainWindow(QMainWindow):
 
         # Create new colorbar
         self.current_colorbar = self.canvas.figure.colorbar(im, cax=cax)
-        self.current_colorbar.set_label("Intensity", fontsize=11)
+        self._colorbar_label_text = "Intensity [Digits]" if not self.use_db else "Intensity [dB]"
+        self.current_colorbar.set_label(self._colorbar_label_text)
 
         # Labels
         self.canvas.ax.set_title("Isolated Burst")
@@ -1194,13 +1641,9 @@ class MainWindow(QMainWindow):
         # Reset GUI
         self.statusBar().showMessage("All reset", 4000)
 
-        # Disable buttons
-        self.noise_button.setEnabled(False)
-        self.drift_button.setEnabled(False)
-        self.lasso_button.setEnabled(False)
-        self.max_plot_button.setEnabled(False)
-        self.reset_selection_button.setEnabled(False)
-        self.reset_all_button.setEnabled(False)
+        # Tool bar
+        self._sync_toolbar_enabled_states()
+        self.graph_group.setEnabled(False)
 
         if self.canvas.ax:
             self.canvas.ax.set_xlim(0, 1)
@@ -1212,7 +1655,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "About e-Callisto FITS Analyzer",
-            "e-CALLISTO FITS Analyzer version 1.7.3.\n\n"
+            "e-CALLISTO FITS Analyzer version 1.7.4.\n\n"
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"
@@ -1220,6 +1663,7 @@ class MainWindow(QMainWindow):
         )
 
     def reset_selection(self):
+        self._push_undo_state()
         if self.noise_reduced_original is not None:
             self.noise_reduced_data = self.noise_reduced_original.copy()
             if self.time is not None and self.freqs is not None:
@@ -1240,6 +1684,7 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def set_axis_to_seconds(self):
+        self._push_undo_state()
         self.use_utc = False
         self.xaxis_sec_action.setChecked(True)
         self.xaxis_ut_action.setChecked(False)
@@ -1249,6 +1694,7 @@ class MainWindow(QMainWindow):
             self.plot_data(data, title=self.current_plot_type, keep_view=True)
 
     def set_axis_to_utc(self):
+        self._push_undo_state()
         self.use_utc = True
         self.xaxis_sec_action.setChecked(False)
         self.xaxis_ut_action.setChecked(True)
@@ -1364,6 +1810,82 @@ class MainWindow(QMainWindow):
     def open_soho_lasco_window(self):
         self.soho_window = CMEViewerWindow()
         self.soho_window.show()
+
+    def _capture_state(self):
+        """Capture the current application state for Undo/Redo."""
+        state = {
+            "raw_data": None if self.raw_data is None else self.raw_data.copy(),
+            "noise_reduced_data": None if self.noise_reduced_data is None else self.noise_reduced_data.copy(),
+            "noise_reduced_original": None if self.noise_reduced_original is None else self.noise_reduced_original.copy(),
+            "lasso_mask": None if self.lasso_mask is None else self.lasso_mask.copy(),
+            "freqs": None if self.freqs is None else self.freqs.copy(),
+            "time": None if self.time is None else self.time.copy(),
+            "filename": self.filename,
+            "current_plot_type": self.current_plot_type,
+            "lower_slider": self.lower_slider.value(),
+            "upper_slider": self.upper_slider.value(),
+            "use_db": self.use_db,
+            "use_utc": self.use_utc,
+            "cmap": self.current_cmap_name,
+            "view": self._capture_view(),
+        }
+        return state
+
+    def _push_undo_state(self):
+        self._undo_stack.append(self._capture_state())
+        if len(self._undo_stack) > self._max_undo:
+            self._undo_stack.pop(0)
+        self._redo_stack.clear()
+
+    def _restore_state(self, state):
+        """Restore a previously captured application state."""
+        self.raw_data = state["raw_data"]
+        self.noise_reduced_data = state["noise_reduced_data"]
+        self.noise_reduced_original = state["noise_reduced_original"]
+        self.lasso_mask = state["lasso_mask"]
+        self.freqs = state["freqs"]
+        self.time = state["time"]
+        self.filename = state["filename"]
+        self.current_plot_type = state["current_plot_type"]
+        self.use_db = state["use_db"]
+        self.use_utc = state["use_utc"]
+        self.current_cmap_name = state["cmap"]
+
+        self.lower_slider.blockSignals(True)
+        self.upper_slider.blockSignals(True)
+        self.lower_slider.setValue(state["lower_slider"])
+        self.upper_slider.setValue(state["upper_slider"])
+        self.lower_slider.blockSignals(False)
+        self.upper_slider.blockSignals(False)
+
+        if self.raw_data is not None:
+            data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
+            self.plot_data(data, title=self.current_plot_type, keep_view=False)
+            self._restore_view(state["view"])
+
+    def undo(self):
+        if not self._undo_stack:
+            self.statusBar().showMessage("Nothing to undo", 2000)
+            return
+
+        current = self._capture_state()
+        self._redo_stack.append(current)
+
+        state = self._undo_stack.pop()
+        self._restore_state(state)
+        self.statusBar().showMessage("Undo", 2000)
+
+    def redo(self):
+        if not self._redo_stack:
+            self.statusBar().showMessage("Nothing to redo", 2000)
+            return
+
+        current = self._capture_state()
+        self._undo_stack.append(current)
+
+        state = self._redo_stack.pop()
+        self._restore_state(state)
+        self.statusBar().showMessage("Redo", 2000)
 
 
 class MaxIntensityPlotDialog(QDialog):
@@ -1604,7 +2126,7 @@ class MaxIntensityPlotDialog(QDialog):
         QMessageBox.information(
             self,
             "About e-Callisto FITS Analyzer",
-            "e-CALLISTO FITS Analyzer version 1.7.3.\n\n"
+            "e-CALLISTO FITS Analyzer version 1.7.4.\n\n"
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"
@@ -1629,7 +2151,6 @@ class MaxIntensityPlotDialog(QDialog):
         except Exception as e:
             print(f"Cleanup error: {e}")
         event.accept()
-
 
 from PySide6.QtWidgets import (
     QDialog, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
