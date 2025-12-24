@@ -187,15 +187,18 @@ class MainWindow(QMainWindow):
 
         # Sidebar layout with thresholds and buttons
         side_panel = QVBoxLayout()
+        side_panel.setSpacing(4)
+        side_panel.setContentsMargins(8, 8, 8, 8)
         side_panel.addWidget(slider_group)
 
         # ===== Units Group =====
 
         self.units_group_box = QGroupBox("Units")
         self.units_group_box.setMaximumWidth(250)
+        #self.units_group_box.setMaximumHeight(250)
 
         units_layout = QVBoxLayout()
-        units_layout.setSpacing(6)
+        units_layout.setSpacing(4)
         units_layout.setContentsMargins(8, 8, 8, 8)
 
         # --- Intensity subsection ---
