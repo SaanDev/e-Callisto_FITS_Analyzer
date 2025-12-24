@@ -284,7 +284,7 @@ class MainWindow(QMainWindow):
         self.graph_group = QGroupBox("Graph Properties")
 
         graph_layout = QVBoxLayout()
-        graph_layout.setSpacing(6)
+        graph_layout.setSpacing(8)
         graph_layout.setContentsMargins(8, 8, 8, 8)
 
         # --- Appearance ---
