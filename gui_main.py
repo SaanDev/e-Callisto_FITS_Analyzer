@@ -14,7 +14,7 @@ import requests
 from PySide6.QtWidgets import (
     QMainWindow, QSlider, QDialog, QMenuBar, QMessageBox, QLabel, QFormLayout, QGroupBox,
     QStatusBar, QProgressBar, QApplication, QMenu, QCheckBox, QRadioButton, QButtonGroup, QComboBox, QToolBar,
-    QLineEdit, QSpinBox, QPushButton, QVBoxLayout, QWidget, QFileDialog, QHBoxLayout, QSizePolicy
+    QLineEdit, QSpinBox, QScrollArea, QFrame, QVBoxLayout, QWidget, QFileDialog, QHBoxLayout, QSizePolicy
 )
 from PySide6.QtGui import QAction, QPixmap, QImage, QGuiApplication, QIcon, QFontDatabase
 from PySide6.QtCore import Qt
@@ -149,62 +149,57 @@ class MainWindow(QMainWindow):
         self.cursor_label.setStyleSheet("padding-right: 8px;")
         self.statusBar().addPermanentWidget(self.cursor_label)
 
-        # Sliders for noise clipping
-        lower_label = QLabel("Lower Threshold")
+        # =========================
+        # LEFT SIDEBAR (CROSS-PLATFORM SAFE)
+        # Put this whole block where you currently build:
+        #   slider_group, units_group_box, graph_group, main_layout, container
+        #
+        # Required imports (add if missing):
+        #   from PySide6.QtWidgets import QScrollArea, QFrame
+        # =========================
+
+        # -------------------------
+        # Noise clipping sliders
+        # -------------------------
         self.lower_slider = QSlider(Qt.Horizontal)
         self.lower_slider.setRange(-100, 100)
         self.lower_slider.setValue(0)
 
-        upper_label = QLabel("Upper Threshold")
         self.upper_slider = QSlider(Qt.Horizontal)
         self.upper_slider.setRange(-100, 100)
         self.upper_slider.setValue(0)
 
-        # === Noise Threshold Controls ===
-
         slider_group = QGroupBox("Noise Clipping Thresholds")
-        slider_layout = QVBoxLayout()
+        slider_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 
-        # Lower Threshold
-        lower_label = QLabel("Lower Threshold")
-        lower_label.setAlignment(Qt.AlignLeft)
-        slider_layout.addWidget(lower_label)
+        slider_layout = QVBoxLayout(slider_group)
+        slider_layout.setContentsMargins(10, 10, 10, 10)
+        slider_layout.setSpacing(6)
+
+        lbl_low = QLabel("Lower Threshold")
+        lbl_low.setAlignment(Qt.AlignLeft)
+        slider_layout.addWidget(lbl_low)
         slider_layout.addWidget(self.lower_slider)
 
-        # Upper Threshold
-        upper_label = QLabel("Upper Threshold")
-        upper_label.setAlignment(Qt.AlignLeft)
-        slider_layout.addWidget(upper_label)
+        lbl_high = QLabel("Upper Threshold")
+        lbl_high.setAlignment(Qt.AlignLeft)
+        slider_layout.addWidget(lbl_high)
         slider_layout.addWidget(self.upper_slider)
 
-        slider_group.setLayout(slider_layout)
-        slider_group.setMaximumWidth(250)
-        slider_group.setMaximumHeight(200)
-
-        # Labels
-        lower_label = QLabel("Lower Threshold:")
-        upper_label = QLabel("Upper Threshold:")
-
-        # Sidebar layout with thresholds and buttons
-        side_panel = QVBoxLayout()
-        side_panel.setSpacing(4)
-        side_panel.setContentsMargins(8, 8, 8, 8)
-        side_panel.addWidget(slider_group)
-
-        # ===== Units Group =====
-
+        # -------------------------
+        # Units Group
+        # -------------------------
         self.units_group_box = QGroupBox("Units")
-        self.units_group_box.setMaximumWidth(250)
-        #self.units_group_box.setMaximumHeight(250)
+        self.units_group_box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 
-        units_layout = QVBoxLayout()
-        units_layout.setSpacing(4)
-        units_layout.setContentsMargins(8, 8, 8, 8)
+        units_layout = QVBoxLayout(self.units_group_box)
+        units_layout.setContentsMargins(10, 10, 10, 10)
+        units_layout.setSpacing(6)
 
-        # --- Intensity subsection ---
         intensity_label = QLabel("Intensity")
         intensity_label.setAlignment(Qt.AlignLeft)
-        intensity_label.setStyleSheet("font-weight: bold;")
+        intensity_label.setProperty("section", True)
+        units_layout.addWidget(intensity_label)
 
         self.units_digits_radio = QRadioButton("Digits")
         self.units_db_radio = QRadioButton("dB")
@@ -214,14 +209,14 @@ class MainWindow(QMainWindow):
         self.units_group.addButton(self.units_digits_radio)
         self.units_group.addButton(self.units_db_radio)
 
-        units_layout.addWidget(intensity_label)
         units_layout.addWidget(self.units_digits_radio)
         units_layout.addWidget(self.units_db_radio)
 
-        # --- Time subsection ---
         time_label = QLabel("Time")
         time_label.setAlignment(Qt.AlignLeft)
-        time_label.setStyleSheet("font-weight: bold;")
+        time_label.setProperty("section", True)
+        units_layout.addSpacing(6)
+        units_layout.addWidget(time_label)
 
         self.time_sec_radio = QRadioButton("Seconds")
         self.time_ut_radio = QRadioButton("UT")
@@ -231,60 +226,61 @@ class MainWindow(QMainWindow):
         self.time_group.addButton(self.time_sec_radio)
         self.time_group.addButton(self.time_ut_radio)
 
-        units_layout.addSpacing(6)
-        units_layout.addWidget(time_label)
         units_layout.addWidget(self.time_sec_radio)
         units_layout.addWidget(self.time_ut_radio)
 
-        # Single stretch at the end
         units_layout.addStretch(1)
 
-        self.units_group_box.setLayout(units_layout)
-        self.units_group_box.setSizePolicy(
-            QSizePolicy.Preferred,
-            QSizePolicy.Maximum
-        )
-
-        side_panel.addWidget(self.units_group_box)
-
-        # ===== Graph Properties Group =====
-
+        # -------------------------
+        # Graph Properties Group
+        # -------------------------
         def _section_label(text: str) -> QLabel:
             lbl = QLabel(text)
             lbl.setObjectName("SectionLabel")
             return lbl
 
-        def _spin_row(label_text: str, spin: QSpinBox) -> QHBoxLayout:
-            row = QHBoxLayout()
+        def _spin_row(label_text: str, spin: QSpinBox) -> QWidget:
+            w = QWidget()
+            row = QHBoxLayout(w)
             row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(8)
 
             label = QLabel(label_text)
+            label.setWordWrap(False)
             label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
+            spin.setMinimumWidth(70)
+            spin.setMaximumWidth(90)
             spin.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
             row.addWidget(label, 1)
             row.addWidget(spin, 0, Qt.AlignRight)
-            return row
+            return w
 
-        def _style_row(label_text: str, cb_bold: QCheckBox, cb_italic: QCheckBox) -> QHBoxLayout:
-            row = QHBoxLayout()
+        def _style_row(label_text: str, cb_bold: QCheckBox, cb_italic: QCheckBox) -> QWidget:
+            w = QWidget()
+            row = QHBoxLayout(w)
             row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(6)
+            row.setSpacing(8)
 
-            row.addWidget(QLabel(label_text), 1)
+            label = QLabel(label_text)
+            label.setWordWrap(False)
+            label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+            row.addWidget(label, 1)
             row.addWidget(cb_bold, 0)
             row.addWidget(cb_italic, 0)
-            return row
+            return w
 
         self.graph_group = QGroupBox("Graph Properties")
+        self.graph_group.setEnabled(False)
+        self.graph_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 
-        graph_layout = QVBoxLayout()
-        graph_layout.setSpacing(6)
+        graph_layout = QVBoxLayout(self.graph_group)
         graph_layout.setContentsMargins(10, 10, 10, 10)
+        graph_layout.setSpacing(8)
 
-        # --- Appearance ---
+        # Appearance
         graph_layout.addWidget(_section_label("Appearance"))
 
         self.cmap_combo = QComboBox()
@@ -303,98 +299,128 @@ class MainWindow(QMainWindow):
         graph_layout.addWidget(QLabel("Font family"))
         graph_layout.addWidget(self.font_combo)
 
-        # --- Text ---
+        # Text
         graph_layout.addWidget(_section_label("Text"))
 
         self.title_edit = QLineEdit()
         self.title_edit.setPlaceholderText("Custom title (leave empty for default)")
+        self.title_edit.setMinimumHeight(28)
         graph_layout.addWidget(QLabel("Graph title"))
         graph_layout.addWidget(self.title_edit)
 
         self.remove_titles_chk = QCheckBox("Remove Titles")
         graph_layout.addWidget(self.remove_titles_chk)
 
-        # --- Font sizes ---
+        # Font sizes
         graph_layout.addWidget(_section_label("Font sizes"))
 
         self.tick_font_spin = QSpinBox()
         self.tick_font_spin.setRange(6, 60)
         self.tick_font_spin.setValue(self.tick_font_px)
-        self.tick_font_spin.setMinimumWidth(70)
-        self.tick_font_spin.setMaximumWidth(90)
-        graph_layout.addLayout(_spin_row("Tick labels (px)", self.tick_font_spin))
+        graph_layout.addWidget(_spin_row("Tick labels (px)", self.tick_font_spin))
 
         self.axis_font_spin = QSpinBox()
         self.axis_font_spin.setRange(6, 60)
         self.axis_font_spin.setValue(self.axis_label_font_px)
-        self.axis_font_spin.setMinimumWidth(70)
-        self.axis_font_spin.setMaximumWidth(90)
-        graph_layout.addLayout(_spin_row("Axis labels (px)", self.axis_font_spin))
+        graph_layout.addWidget(_spin_row("Axis labels (px)", self.axis_font_spin))
 
         self.title_font_spin = QSpinBox()
         self.title_font_spin.setRange(6, 80)
         self.title_font_spin.setValue(self.title_font_px)
-        self.title_font_spin.setMinimumWidth(70)
-        self.title_font_spin.setMaximumWidth(90)
-        graph_layout.addLayout(_spin_row("Title (px)", self.title_font_spin))
+        graph_layout.addWidget(_spin_row("Title (px)", self.title_font_spin))
 
-        # --- Text style ---
+        # Text style
         graph_layout.addWidget(_section_label("Text style"))
 
         self.title_bold_chk = QCheckBox("Bold")
         self.title_italic_chk = QCheckBox("Italic")
-        graph_layout.addLayout(_style_row("Title", self.title_bold_chk, self.title_italic_chk))
+        graph_layout.addWidget(_style_row("Title", self.title_bold_chk, self.title_italic_chk))
 
         self.axis_bold_chk = QCheckBox("Bold")
         self.axis_italic_chk = QCheckBox("Italic")
-        graph_layout.addLayout(_style_row("Axis labels", self.axis_bold_chk, self.axis_italic_chk))
+        graph_layout.addWidget(_style_row("Axis labels", self.axis_bold_chk, self.axis_italic_chk))
 
         self.ticks_bold_chk = QCheckBox("Bold")
         self.ticks_italic_chk = QCheckBox("Italic")
-        graph_layout.addLayout(_style_row("Tick labels", self.ticks_bold_chk, self.ticks_italic_chk))
+        graph_layout.addWidget(_style_row("Tick labels", self.ticks_bold_chk, self.ticks_italic_chk))
 
         graph_layout.addStretch(1)
 
-        self.graph_group.setLayout(graph_layout)
-        self.graph_group.setMaximumWidth(300)
-        self.graph_group.setEnabled(False)
+        # -------------------------
+        # Build the LEFT PANEL as a widget, then put it in a ScrollArea
+        # This is the key fix for Windows (no overlaps, no clipping).
+        # -------------------------
+        side_panel_widget = QWidget()
+        side_panel_layout = QVBoxLayout(side_panel_widget)
+        side_panel_layout.setContentsMargins(8, 8, 8, 8)
+        side_panel_layout.setSpacing(10)
 
-        side_panel.addWidget(self.graph_group)
+        side_panel_layout.addWidget(slider_group)
+        side_panel_layout.addWidget(self.units_group_box)
+        side_panel_layout.addWidget(self.graph_group)
+        side_panel_layout.addStretch(1)
 
-        # IMPORTANT: do not force tiny heights (that caused overlaps on Windows)
-        self.graph_group.setStyleSheet("""
-            QLabel {
-                font-size: 12px;
-            }
+        # Consistent width for all groups (better on Windows DPI scaling)
+        SIDEBAR_W = 320
+        slider_group.setMaximumWidth(SIDEBAR_W)
+        self.units_group_box.setMaximumWidth(SIDEBAR_W)
+        self.graph_group.setMaximumWidth(SIDEBAR_W)
 
-            QLabel#SectionLabel {
-                font-weight: bold;
-                color: #555;
-                margin-top: 6px;
-                margin-bottom: 6px;
-            }
+        side_scroll = QScrollArea()
+        side_scroll.setWidgetResizable(True)
+        side_scroll.setFrameShape(QFrame.NoFrame)
+        side_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        side_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        side_scroll.setMinimumWidth(SIDEBAR_W + 16)  # room for scrollbar
+        side_scroll.setMaximumWidth(SIDEBAR_W + 28)
+        side_scroll.setWidget(side_panel_widget)
 
-            QLineEdit, QComboBox, QSpinBox {
-                min-height: 26px;
-                padding: 3px 6px;
-                font-size: 11px;
-            }
+        # -------------------------
+        # Style (safe sizes, no tiny max-heights)
+        # -------------------------
+        sidebar_style = """
+        QGroupBox {
+            font-weight: bold;
+        }
+        QLabel {
+            font-size: 12px;
+        }
+        QLabel[section="true"] {
+            font-weight: bold;
+            color: #444;
+            margin-top: 6px;
+        }
+        QLabel#SectionLabel {
+            font-weight: bold;
+            color: #555;
+            margin-top: 8px;
+            margin-bottom: 4px;
+        }
+        QLineEdit, QComboBox, QSpinBox {
+            min-height: 28px;
+            padding: 4px 6px;
+            font-size: 12px;
+        }
+        
+        QCheckBox {
+            spacing: 6px;
+            font-size: 12px;
+            padding: 2px 0px;
+        }
+        """
+        slider_group.setStyleSheet(sidebar_style)
+        self.units_group_box.setStyleSheet(sidebar_style)
+        self.graph_group.setStyleSheet(sidebar_style)
 
-            QComboBox::drop-down {
-                width: 18px;
-            }
-
-            QCheckBox {
-                spacing: 6px;
-                font-size: 11px;
-                padding: 2px 0px;
-            }
-        """)
-
-        # Main layout with side panel and canvas
+        # -------------------------
+        # Main layout with scrollable sidebar + canvas
+        # -------------------------
         main_layout = QHBoxLayout()
-        main_layout.addLayout(side_panel)
-        main_layout.addWidget(self.canvas, stretch=1)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(10)
+
+        main_layout.addWidget(side_scroll, 0)
+        main_layout.addWidget(self.canvas, 1)
 
         container = QWidget()
         container.setLayout(main_layout)
