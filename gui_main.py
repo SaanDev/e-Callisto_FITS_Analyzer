@@ -255,15 +255,15 @@ class MainWindow(QMainWindow):
                 QLabel {
                     font-weight: bold;
                     color: #555;
-                    margin-top: 2px;
-                    margin-bottom: 3px;
+                    margin-top: 4px;
+                    margin-bottom: 6px;
                 }
             """)
             return lbl
 
         def _spin_row(label_text: str, spin: QSpinBox) -> QHBoxLayout:
             row = QHBoxLayout()
-            row.setSpacing(6)
+            row.setSpacing(8)
 
             label = QLabel(label_text)
             row.addWidget(label)
@@ -315,7 +315,7 @@ class MainWindow(QMainWindow):
         graph_layout.addWidget(self.title_edit)
 
         self.remove_titles_chk = QCheckBox("Remove Titles")
-        self.remove_titles_chk.setStyleSheet("margin-top: 5px; font-weight: bold;")
+        self.remove_titles_chk.setStyleSheet("margin-top: 8px; font-weight: bold;")
         graph_layout.addWidget(self.remove_titles_chk)
 
         # --- Font sizes ---
@@ -374,17 +374,17 @@ class MainWindow(QMainWindow):
             }
             QSpinBox {
                 min-height: 10px;
-                padding: 2px 1px;
+                padding: 4px 2px;
                 font-size: 11px;
             }
             QComboBox {
                 min-height: 10px;
-                padding: 2px 1px;
+                padding: 4px 2px;
                 font-size: 11px;
             }    
             QLineEdit {
                 min-height: 10px;
-                padding: 1px 1px;
+                padding: 3x 3px;
                 font-size: 11px;
             }
             QCheckBox {
