@@ -251,41 +251,38 @@ class MainWindow(QMainWindow):
 
         def _section_label(text: str) -> QLabel:
             lbl = QLabel(text)
-            lbl.setStyleSheet("""
-                QLabel {
-                    font-weight: bold;
-                    color: #555;
-                    margin-top: 4px;
-                    margin-bottom: 6px;
-                }
-            """)
+            lbl.setObjectName("SectionLabel")
             return lbl
 
         def _spin_row(label_text: str, spin: QSpinBox) -> QHBoxLayout:
             row = QHBoxLayout()
-            row.setSpacing(15)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(8)
 
             label = QLabel(label_text)
-            row.addWidget(label)
-            row.addStretch(1)
-            row.addWidget(spin)
+            label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
+            spin.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+            row.addWidget(label, 1)
+            row.addWidget(spin, 0, Qt.AlignRight)
             return row
 
         def _style_row(label_text: str, cb_bold: QCheckBox, cb_italic: QCheckBox) -> QHBoxLayout:
             row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(6)
-            row.addWidget(QLabel(label_text))
-            row.addStretch(1)
-            row.addWidget(cb_bold)
-            row.addWidget(cb_italic)
+
+            row.addWidget(QLabel(label_text), 1)
+            row.addWidget(cb_bold, 0)
+            row.addWidget(cb_italic, 0)
             return row
 
         self.graph_group = QGroupBox("Graph Properties")
 
         graph_layout = QVBoxLayout()
-        graph_layout.setSpacing(4)
-        graph_layout.setContentsMargins(8, 8, 8, 8)
+        graph_layout.setSpacing(6)
+        graph_layout.setContentsMargins(10, 10, 10, 10)
 
         # --- Appearance ---
         graph_layout.addWidget(_section_label("Appearance"))
@@ -315,7 +312,6 @@ class MainWindow(QMainWindow):
         graph_layout.addWidget(self.title_edit)
 
         self.remove_titles_chk = QCheckBox("Remove Titles")
-        self.remove_titles_chk.setStyleSheet("margin-top: 8px; font-weight: bold;")
         graph_layout.addWidget(self.remove_titles_chk)
 
         # --- Font sizes ---
@@ -324,26 +320,23 @@ class MainWindow(QMainWindow):
         self.tick_font_spin = QSpinBox()
         self.tick_font_spin.setRange(6, 60)
         self.tick_font_spin.setValue(self.tick_font_px)
-        self.tick_font_spin.setFixedWidth(100)
-        graph_layout.addLayout(
-            _spin_row("Tick labels (px)", self.tick_font_spin)
-        )
+        self.tick_font_spin.setMinimumWidth(70)
+        self.tick_font_spin.setMaximumWidth(90)
+        graph_layout.addLayout(_spin_row("Tick labels (px)", self.tick_font_spin))
 
         self.axis_font_spin = QSpinBox()
         self.axis_font_spin.setRange(6, 60)
         self.axis_font_spin.setValue(self.axis_label_font_px)
-        self.axis_font_spin.setFixedWidth(100)
-        graph_layout.addLayout(
-            _spin_row("Axis labels (px)", self.axis_font_spin)
-        )
+        self.axis_font_spin.setMinimumWidth(70)
+        self.axis_font_spin.setMaximumWidth(90)
+        graph_layout.addLayout(_spin_row("Axis labels (px)", self.axis_font_spin))
 
         self.title_font_spin = QSpinBox()
         self.title_font_spin.setRange(6, 80)
         self.title_font_spin.setValue(self.title_font_px)
-        self.title_font_spin.setFixedWidth(100)
-        graph_layout.addLayout(
-            _spin_row("Title (px)", self.title_font_spin)
-        )
+        self.title_font_spin.setMinimumWidth(70)
+        self.title_font_spin.setMaximumWidth(90)
+        graph_layout.addLayout(_spin_row("Title (px)", self.title_font_spin))
 
         # --- Text style ---
         graph_layout.addWidget(_section_label("Text style"))
@@ -368,28 +361,33 @@ class MainWindow(QMainWindow):
 
         side_panel.addWidget(self.graph_group)
 
+        # IMPORTANT: do not force tiny heights (that caused overlaps on Windows)
         self.graph_group.setStyleSheet("""
             QLabel {
                 font-size: 12px;
             }
-            QSpinBox {
-                max-height: 10px;
-                padding: 1px 1px;
+
+            QLabel#SectionLabel {
+                font-weight: bold;
+                color: #555;
+                margin-top: 6px;
+                margin-bottom: 6px;
+            }
+
+            QLineEdit, QComboBox, QSpinBox {
+                min-height: 26px;
+                padding: 3px 6px;
                 font-size: 11px;
             }
-            QComboBox {
-                min-height: 10px;
-                padding: 1px 1px;
-                font-size: 11px;
-            }    
-            QLineEdit {
-                min-height: 10px;
-                padding: 1x 1px;
-                font-size: 11px;
+
+            QComboBox::drop-down {
+                width: 18px;
             }
+
             QCheckBox {
-                spacing: 8px;
-                font-size: 10px;
+                spacing: 6px;
+                font-size: 11px;
+                padding: 2px 0px;
             }
         """)
 
