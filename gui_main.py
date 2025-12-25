@@ -187,19 +187,25 @@ class MainWindow(QMainWindow):
         slider_layout.addWidget(self.upper_slider)
 
         # -------------------------
-        # Units Group
+        # Units Group (Intensity + Time in one row)
         # -------------------------
         self.units_group_box = QGroupBox("Units")
         self.units_group_box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 
         units_layout = QVBoxLayout(self.units_group_box)
         units_layout.setContentsMargins(10, 10, 10, 10)
-        units_layout.setSpacing(6)
+        units_layout.setSpacing(8)
+
+        # ---- Horizontal container for Intensity + Time ----
+        units_row = QHBoxLayout()
+        units_row.setSpacing(20)
+
+        # ===== Intensity column =====
+        intensity_col = QVBoxLayout()
+        intensity_col.setSpacing(8)
 
         intensity_label = QLabel("Intensity")
-        intensity_label.setAlignment(Qt.AlignLeft)
         intensity_label.setProperty("section", True)
-        units_layout.addWidget(intensity_label)
 
         self.units_digits_radio = QRadioButton("Digits")
         self.units_db_radio = QRadioButton("dB")
@@ -209,14 +215,17 @@ class MainWindow(QMainWindow):
         self.units_group.addButton(self.units_digits_radio)
         self.units_group.addButton(self.units_db_radio)
 
-        units_layout.addWidget(self.units_digits_radio)
-        units_layout.addWidget(self.units_db_radio)
+        intensity_col.addWidget(intensity_label)
+        intensity_col.addWidget(self.units_digits_radio)
+        intensity_col.addWidget(self.units_db_radio)
+        intensity_col.addStretch(1)
+
+        # ===== Time column =====
+        time_col = QVBoxLayout()
+        time_col.setSpacing(6)
 
         time_label = QLabel("Time")
-        time_label.setAlignment(Qt.AlignLeft)
         time_label.setProperty("section", True)
-        units_layout.addSpacing(6)
-        units_layout.addWidget(time_label)
 
         self.time_sec_radio = QRadioButton("Seconds")
         self.time_ut_radio = QRadioButton("UT")
@@ -226,9 +235,17 @@ class MainWindow(QMainWindow):
         self.time_group.addButton(self.time_sec_radio)
         self.time_group.addButton(self.time_ut_radio)
 
-        units_layout.addWidget(self.time_sec_radio)
-        units_layout.addWidget(self.time_ut_radio)
+        time_col.addWidget(time_label)
+        time_col.addWidget(self.time_sec_radio)
+        time_col.addWidget(self.time_ut_radio)
+        time_col.addStretch(1)
 
+        # ---- Add both columns to the row ----
+        units_row.addLayout(intensity_col, 1)
+        units_row.addLayout(time_col, 1)
+
+        # ---- Add row to Units group ----
+        units_layout.addLayout(units_row)
         units_layout.addStretch(1)
 
         # -------------------------
@@ -243,7 +260,7 @@ class MainWindow(QMainWindow):
             w = QWidget()
             row = QHBoxLayout(w)
             row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(8)
+            row.setSpacing(6)
 
             label = QLabel(label_text)
             label.setWordWrap(False)
@@ -261,7 +278,7 @@ class MainWindow(QMainWindow):
             w = QWidget()
             row = QHBoxLayout(w)
             row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(8)
+            row.setSpacing(6)
 
             label = QLabel(label_text)
             label.setWordWrap(False)
@@ -278,7 +295,7 @@ class MainWindow(QMainWindow):
 
         graph_layout = QVBoxLayout(self.graph_group)
         graph_layout.setContentsMargins(10, 10, 10, 10)
-        graph_layout.setSpacing(8)
+        graph_layout.setSpacing(6)
 
         # Appearance
         graph_layout.addWidget(_section_label("Appearance"))
@@ -304,7 +321,7 @@ class MainWindow(QMainWindow):
 
         self.title_edit = QLineEdit()
         self.title_edit.setPlaceholderText("Custom title (leave empty for default)")
-        self.title_edit.setMinimumHeight(28)
+        self.title_edit.setMinimumHeight(20)
         graph_layout.addWidget(QLabel("Graph title"))
         graph_layout.addWidget(self.title_edit)
 
@@ -361,7 +378,7 @@ class MainWindow(QMainWindow):
         side_panel_layout.addStretch(1)
 
         # Consistent width for all groups (better on Windows DPI scaling)
-        SIDEBAR_W = 320
+        SIDEBAR_W = 250
         slider_group.setMaximumWidth(SIDEBAR_W)
         self.units_group_box.setMaximumWidth(SIDEBAR_W)
         self.graph_group.setMaximumWidth(SIDEBAR_W)
@@ -397,7 +414,7 @@ class MainWindow(QMainWindow):
             margin-bottom: 4px;
         }
         QLineEdit, QComboBox, QSpinBox {
-            min-height: 28px;
+            min-height: 20px;
             padding: 4px 6px;
             font-size: 12px;
         }
@@ -405,7 +422,10 @@ class MainWindow(QMainWindow):
         QCheckBox {
             spacing: 6px;
             font-size: 12px;
-            padding: 2px 0px;
+            margin-top: 10px;
+            margin-bottom: 10px;
+            margin-right: 10px;
+            
         }
         """
         slider_group.setStyleSheet(sidebar_style)
