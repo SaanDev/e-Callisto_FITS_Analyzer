@@ -77,6 +77,13 @@ class MainWindow(QMainWindow):
         #self.resize(1000, 700)
         self.setMinimumSize(1000, 700)
 
+        icon_path = os.path.join(os.path.abspath("."), 'icon.icns')
+
+        if os.path.isfile(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+        else:
+            print(f"Icon file not found at: {icon_path}")
+
         self.use_utc = False
         self.ut_start_sec = None
         self.use_db = False  # False = Digits (default), True = dB
@@ -266,8 +273,8 @@ class MainWindow(QMainWindow):
             label.setWordWrap(False)
             label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
-            spin.setMinimumWidth(120)
-            spin.setMaximumWidth(140)
+            spin.setMinimumWidth(90)
+            spin.setMaximumWidth(110)
             spin.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             row.addWidget(label, 1)
             row.addWidget(spin, 0, Qt.AlignRight)
@@ -425,7 +432,6 @@ class MainWindow(QMainWindow):
             padding-left: 6px;
             font-size: 12px;
         }
-
 
         QCheckBox {
             spacing: 6px;
