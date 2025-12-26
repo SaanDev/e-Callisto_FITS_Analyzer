@@ -266,10 +266,9 @@ class MainWindow(QMainWindow):
             label.setWordWrap(False)
             label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
-            spin.setMinimumWidth(90)
-            spin.setMaximumWidth(110)
+            spin.setMinimumWidth(120)
+            spin.setMaximumWidth(140)
             spin.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-
             row.addWidget(label, 1)
             row.addWidget(spin, 0, Qt.AlignRight)
             return w
