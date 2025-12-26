@@ -334,16 +334,19 @@ class MainWindow(QMainWindow):
         self.tick_font_spin = QSpinBox()
         self.tick_font_spin.setRange(6, 60)
         self.tick_font_spin.setValue(self.tick_font_px)
+        self.tick_font_spin.setButtonSymbols(QSpinBox.UpDownArrows)
         graph_layout.addWidget(_spin_row("Tick labels (px)", self.tick_font_spin))
 
         self.axis_font_spin = QSpinBox()
         self.axis_font_spin.setRange(6, 60)
         self.axis_font_spin.setValue(self.axis_label_font_px)
+        self.axis_font_spin.setButtonSymbols(QSpinBox.UpDownArrows)
         graph_layout.addWidget(_spin_row("Axis labels (px)", self.axis_font_spin))
 
         self.title_font_spin = QSpinBox()
         self.title_font_spin.setRange(6, 80)
         self.title_font_spin.setValue(self.title_font_px)
+        self.title_font_spin.setButtonSymbols(QSpinBox.UpDownArrows)
         graph_layout.addWidget(_spin_row("Title (px)", self.title_font_spin))
 
         # Text style
