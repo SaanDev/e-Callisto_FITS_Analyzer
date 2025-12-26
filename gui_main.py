@@ -413,11 +413,19 @@ class MainWindow(QMainWindow):
             margin-top: 8px;
             margin-bottom: 4px;
         }
-        QLineEdit, QComboBox, QSpinBox {
-            min-height: 20px;
+        
+        QLineEdit, QComboBox {
+            min-height: 24px;
             padding: 4px 6px;
             font-size: 12px;
         }
+
+        QSpinBox {
+            min-height: 28px;
+            padding: 2px 4px;
+            font-size: 12px;
+        }
+
         
         QCheckBox {
             spacing: 6px;
