@@ -77,6 +77,7 @@ class MainWindow(QMainWindow):
         #self.resize(1000, 700)
         self.setMinimumSize(1000, 700)
 
+        #mainwindow icon
         icon_path = os.path.join(os.path.abspath("."), 'icon.icns')
 
         if os.path.isfile(icon_path):
