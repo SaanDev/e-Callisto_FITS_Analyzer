@@ -425,31 +425,11 @@ class MainWindow(QMainWindow):
 
         QSpinBox {
             min-height: 28px;
-            min-width: 90px;            /* REQUIRED on Windows */
-            padding-right: 20px;        /* space for arrows */
+            min-width: 90px;
             padding-left: 6px;
             font-size: 12px;
         }
 
-        /* Spin buttons container */
-        QSpinBox::up-button,
-        QSpinBox::down-button {
-                subcontrol-origin: border;
-                width: 16px;
-                border: none;
-        }
-
-        /* Position arrows correctly */
-        QSpinBox::up-button {
-                subcontrol-position: right top;
-        }
-
-        QSpinBox::down-button {
-                subcontrol-position: right bottom;
-        }
-
-
-        
         QCheckBox {
             spacing: 6px;
             font-size: 12px;
