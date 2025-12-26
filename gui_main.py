@@ -424,11 +424,12 @@ class MainWindow(QMainWindow):
         }
 
         QSpinBox {
-            min-height: 28px;
+            min-height: 32px;      /* REQUIRED for Windows */
             min-width: 90px;
             padding-left: 6px;
             font-size: 12px;
         }
+
 
         QCheckBox {
             spacing: 6px;
