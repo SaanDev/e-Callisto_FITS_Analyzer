@@ -11,18 +11,19 @@ from PySide6.QtWidgets import QApplication
 from gui_main import MainWindow
 import faulthandler
 
+#Uncomment when building with Windows
+""""
 app = QApplication(sys.argv)
-
-# ---- FORCE macOS-like behavior on Windows ----
 if sys.platform.startswith("win"):
     app.setStyle("Fusion")
-
+"""
 
 if platform.system() != "Windows":
     faulthandler.enable()
 
 
 if __name__ == "__main__":
+    app = QApplication(sys.argv)
     window = MainWindow()
     window.showMaximized()
     #window.show()

@@ -40,6 +40,8 @@ from openpyxl import load_workbook, Workbook
 def start_combine(self):
     QTimer.singleShot(100, self.combine_files)  # delays execution and avoids UI freeze
 
+#Uncomment for windows build
+"""
 def resource_path(relative_path: str) -> str:
     if hasattr(sys, "_MEIPASS"):
         # Packaged app
@@ -47,17 +49,17 @@ def resource_path(relative_path: str) -> str:
     # Development mode
     base_path = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_path, relative_path)
+"""
 
-#def resource_path(relative_path: str) -> str:
-   ## py2app
-    #if getattr(sys, "frozen", False):
-        #base_path = os.path.abspath(
-            #os.path.join(os.path.dirname(sys.executable), "..", "Resources")
-        #)
-        #return os.path.join(base_path, relative_path)
-
-    ## Development
-    #return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path)
+def resource_path(relative_path: str) -> str:
+   # py2app
+    if getattr(sys, "frozen", False):
+        base_path = os.path.abspath(
+            os.path.join(os.path.dirname(sys.executable), "..", "Resources")
+        )
+        return os.path.join(base_path, relative_path)
+    # Development
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path)
 
 
 
@@ -76,14 +78,6 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("e-CALLISTO FITS Analyzer 1.7.4")
         #self.resize(1000, 700)
         self.setMinimumSize(1000, 700)
-
-        #mainwindow icon
-        icon_path = os.path.join(os.path.abspath("."), 'icon.icns')
-
-        if os.path.isfile(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
-        else:
-            print(f"Icon file not found at: {icon_path}")
 
         self.use_utc = False
         self.ut_start_sec = None
