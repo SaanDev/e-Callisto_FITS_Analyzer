@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (
     QStatusBar, QProgressBar, QApplication, QMenu, QCheckBox, QRadioButton, QButtonGroup, QComboBox, QToolBar,
     QLineEdit, QSpinBox, QScrollArea, QFrame, QVBoxLayout, QWidget, QFileDialog, QHBoxLayout, QSizePolicy
 )
+from PySide6.QtCore import QObject, QEvent
+from PySide6.QtWidgets import QLayout
 from PySide6.QtGui import QAction, QPixmap, QImage, QGuiApplication, QIcon, QFontDatabase
 from PySide6.QtCore import Qt
 from PySide6.QtCore import QTimer, QSize
@@ -34,6 +36,48 @@ from matplotlib.ticker import FuncFormatter, ScalarFormatter
 import csv
 import matplotlib.pyplot as plt
 from openpyxl import load_workbook, Workbook
+
+from PySide6.QtCore import QObject, QEvent
+from PySide6.QtWidgets import QLayout
+
+#LINUX Specific Fixes for messageboxes
+
+IS_LINUX = sys.platform.startswith("linux")
+
+_linux_msgbox_fixer = None
+
+class _LinuxMessageBoxFixer(QObject):
+    def eventFilter(self, obj, event):
+        if IS_LINUX and event.type() == QEvent.Show and isinstance(obj, QMessageBox):
+            # Make the main text label wrap and give it room
+            label = obj.findChild(QLabel, "qt_msgbox_label")
+            if label:
+                label.setWordWrap(True)
+                label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                label.setMinimumWidth(520)
+
+            # Allow the dialog to grow to its content
+            obj.setSizeGripEnabled(True)
+            obj.setMinimumWidth(560)
+
+            lay = obj.layout()
+            if lay:
+                lay.setSizeConstraint(QLayout.SetMinimumSize)
+
+            QTimer.singleShot(0, obj.adjustSize)
+
+        return super().eventFilter(obj, event)
+
+def _install_linux_msgbox_fixer():
+    global _linux_msgbox_fixer
+    if not IS_LINUX:
+        return
+    app = QApplication.instance()
+    if app is None or _linux_msgbox_fixer is not None:
+        return
+    _linux_msgbox_fixer = _LinuxMessageBoxFixer(app)
+    app.installEventFilter(_linux_msgbox_fixer)
+
 
 
 
@@ -75,6 +119,10 @@ class MplCanvas(FigureCanvas):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+
+        #Linux Messagebox Fix
+        _install_linux_msgbox_fixer()
+
         self.setWindowTitle("e-CALLISTO FITS Analyzer 1.7.4")
         #self.resize(1000, 700)
         self.setMinimumSize(1000, 700)
