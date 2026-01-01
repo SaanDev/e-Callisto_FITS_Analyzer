@@ -6,6 +6,15 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
 
 import sys
+import os
+
+if sys.platform.startswith("linux"):
+    os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --disable-gpu-compositing")
+    os.environ.setdefault("QT_OPENGL", "software")
+    os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
+    os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
+
+
 import requests
 from bs4 import BeautifulSoup
 from PySide6.QtWidgets import (
@@ -13,7 +22,7 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QComboBox, QTableWidget, QTableWidgetItem, QSplitter,
     QTextEdit, QProgressBar
 )
-from PySide6.QtWebEngineWidgets import QWebEngineView
+
 from PySide6.QtCore import Qt, QUrl, QThread, Signal
 from datetime import datetime, timedelta
 
@@ -86,8 +95,11 @@ class FetchThread(QThread):
             self.result.emit([])
 
 class CMEViewer(QMainWindow):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        from PySide6.QtWebEngineWidgets import QWebEngineView
+
         self.setWindowTitle("SOHO/LASCO CME Catalog Tool")
         self.resize(1400, 900)
 

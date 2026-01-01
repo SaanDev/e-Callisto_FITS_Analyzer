@@ -23,7 +23,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtCore import QTimer, QSize
 from callisto_downloader import CallistoDownloaderApp
 from goes_xrs_gui import MainWindow as GoesXrsWindow
-from soho_lasco_viewer import CMEViewer as CMEViewerWindow
+#from soho_lasco_viewer import CMEViewer as CMEViewerWindow
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from matplotlib.widgets import LassoSelector
@@ -623,7 +623,7 @@ class MainWindow(QMainWindow):
         # CMEs
         cmes_menu = self.menuBar().addMenu("CME")
         soho_lasco_action = QAction("SOHO/LASCO CME Catalog", self)
-        soho_lasco_action.triggered.connect(self.open_soho_lasco_window)
+        soho_lasco_action.triggered.connect(self.open_cme_viewer)
         cmes_menu.addAction(soho_lasco_action)
 
         # Flares
@@ -1960,8 +1960,7 @@ class MainWindow(QMainWindow):
         self.goes_window.show()
 
     def open_soho_lasco_window(self):
-        self.soho_window = CMEViewerWindow()
-        self.soho_window.show()
+        self.open_cme_viewer()
 
     def _capture_state(self):
         """Capture the current application state for Undo/Redo."""
@@ -2038,6 +2037,11 @@ class MainWindow(QMainWindow):
         state = self._redo_stack.pop()
         self._restore_state(state)
         self.statusBar().showMessage("Redo", 2000)
+
+    def open_cme_viewer(self):
+        from soho_lasco_viewer import CMEViewer  # import here, not at top
+        self._cme_viewer = CMEViewer(parent=self)
+        self._cme_viewer.show()
 
 
 class MaxIntensityPlotDialog(QDialog):
