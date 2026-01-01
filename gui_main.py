@@ -106,6 +106,46 @@ def resource_path(relative_path: str) -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path)
 
 
+#Fix for figure saving issue on Linux
+def _ext_from_filter(name_filter: str) -> str:
+    m = re.search(r"\*\.(\w+)", name_filter or "")
+    return m.group(1).lower() if m else ""
+
+def pick_export_path(parent, caption: str, default_name: str, filters: str, default_filter: str = None):
+    """
+    Returns (path, ext).
+    Linux uses a QFileDialog instance (non-native) so selectedNameFilter is reliable.
+    Windows/macOS keep using getSaveFileName.
+    """
+    if IS_LINUX:
+        dlg = QFileDialog(parent, caption)
+        dlg.setAcceptMode(QFileDialog.AcceptSave)
+        dlg.setNameFilters(filters.split(";;"))
+        if default_filter:
+            dlg.selectNameFilter(default_filter)
+        dlg.selectFile(default_name)
+
+        # Important for Linux reliability
+        dlg.setOption(QFileDialog.DontUseNativeDialog, True)
+
+        if not dlg.exec():
+            return "", ""
+        path = dlg.selectedFiles()[0]
+        chosen_filter = dlg.selectedNameFilter()
+    else:
+        path, chosen_filter = QFileDialog.getSaveFileName(parent, caption, default_name, filters)
+        if not path:
+            return "", ""
+
+    ext = os.path.splitext(path)[1].lstrip(".").lower()
+
+    # If user didn’t type an extension, take it from the selected filter
+    if not ext:
+        ext = _ext_from_filter(chosen_filter) or "png"
+        path = f"{path}.{ext}"
+
+    return path, ext
+
 
 class MplCanvas(FigureCanvas):
     def __init__(self, parent=None, width=10, height=6, dpi=100):
@@ -1657,24 +1697,24 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No File Loaded", "Load a FITS file before exporting.")
             return
 
-        # --- Available formats ---
         formats = "PNG (*.png);;PDF (*.pdf);;EPS (*.eps);;SVG (*.svg);;TIFF (*.tiff)"
 
         base_name = self.filename.split(".")[0]
         suffix = self.current_plot_type.replace(" ", "")
         default_name = f"{base_name}_{suffix}"
 
-        file_path, selected_filter = QFileDialog.getSaveFileName(
+        file_path, ext = pick_export_path(
             self,
             "Export Figure",
             default_name,
-            formats
+            formats,
+            default_filter="PNG (*.png)"
         )
 
         if not file_path:
             return
 
-        if file_path.lower().startswith("c:\\program files"):
+        if sys.platform.startswith("win") and file_path.lower().startswith("c:\\program files"):
             QMessageBox.warning(
                 self,
                 "Permission Denied",
@@ -1683,28 +1723,36 @@ class MainWindow(QMainWindow):
             )
             return
 
+        def normalize_ext(ext_value: str) -> str:
+            """
+            Accepts values like: 'png', '.png', 'PNG (*.png)'
+            Returns: 'png'
+            """
+            if not ext_value:
+                return "png"
+            s = str(ext_value).strip().lower()
+            if s.startswith("."):
+                s = s[1:]
+            m = re.search(r"\*\.(\w+)", s)
+            if m:
+                return m.group(1).lower()
+            return s
+
         try:
-            # --- Ensure proper extension ---
-            if "." not in os.path.basename(file_path):
-                if "PNG" in selected_filter:
-                    file_path += ".png"
-                elif "PDF" in selected_filter:
-                    file_path += ".pdf"
-                elif "EPS" in selected_filter:
-                    file_path += ".eps"
-                elif "SVG" in selected_filter:
-                    file_path += ".svg"
-                elif "TIFF" in selected_filter:
-                    file_path += ".tiff"
+            root, current_ext = os.path.splitext(file_path)
 
-            ext = file_path.split(".")[-1].lower()
+            # If user did not type an extension, add one based on returned ext
+            if current_ext == "":
+                ext_final = normalize_ext(ext)
+                file_path = f"{file_path}.{ext_final}"
+            else:
+                ext_final = current_ext.lower().lstrip(".")
 
-            # --- Save the figure ---
             self.canvas.figure.savefig(
                 file_path,
                 dpi=300,
                 bbox_inches="tight",
-                format=ext
+                format=ext_final
             )
 
             QMessageBox.information(self, "Export Complete", f"Figure saved:\n{file_path}")
@@ -2168,30 +2216,29 @@ class MaxIntensityPlotDialog(QDialog):
             self.status.showMessage(f"Error: {e}", 3000)
 
     def export_figure(self):
-        from PySide6.QtWidgets import QFileDialog
 
         if not self.filename:
-            QMessageBox.warning(self, "No File", "Load a FITS file before exporting.")
+            QMessageBox.warning(self, "No File Loaded", "Load a FITS file before exporting.")
             return
 
-        # Available export formats
-        options = "PNG (*.png);;PDF (*.pdf);;EPS (*.eps);;SVG (*.svg);;TIFF (*.tiff)"
+        formats = "PNG (*.png);;PDF (*.pdf);;EPS (*.eps);;SVG (*.svg);;TIFF (*.tiff)"
 
         base_name = self.filename.split(".")[0]
         suffix = self.current_plot_type.replace(" ", "")
         default_name = f"{base_name}_{suffix}"
 
-        file_path, selected_filter = QFileDialog.getSaveFileName(
+        file_path, ext = pick_export_path(
             self,
             "Export Figure",
-            f"{default_name}",
-            options,
+            default_name,
+            formats,
+            default_filter="PNG (*.png)"
         )
 
         if not file_path:
             return
 
-        if file_path.lower().startswith("c:\\program files"):
+        if sys.platform.startswith("win") and file_path.lower().startswith("c:\\program files"):
             QMessageBox.warning(
                 self,
                 "Permission Denied",
@@ -2201,30 +2248,25 @@ class MaxIntensityPlotDialog(QDialog):
             return
 
         try:
-            # Ensure correct extension is added when user forgets
-            if "." not in os.path.basename(file_path):
-                if "PNG" in selected_filter:
-                    file_path += ".png"
-                elif "PDF" in selected_filter:
-                    file_path += ".pdf"
-                elif "EPS" in selected_filter:
-                    file_path += ".eps"
-                elif "SVG" in selected_filter:
-                    file_path += ".svg"
-                elif "TIFF" in selected_filter:
-                    file_path += ".tiff"
+            # ✅ If user didn't type an extension, add the one from ext
+            root, current_ext = os.path.splitext(file_path)
+            if current_ext == "":
+                ext = ext.lower().lstrip(".")  # ext should be like "png"
+                file_path = f"{file_path}.{ext}"
+            else:
+                ext = current_ext.lower().lstrip(".")  # use what user typed
 
             self.canvas.figure.savefig(
                 file_path,
                 dpi=300,
                 bbox_inches="tight",
-                format=file_path.split(".")[-1]
+                format=ext
             )
 
-            QMessageBox.information(self, "Success", f"Saved plot as:\n{file_path}")
+            QMessageBox.information(self, "Export Complete", f"Figure saved:\n{file_path}")
 
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to export figure:\n{e}")
+            QMessageBox.critical(self, "Export Failed", f"An error occurred:\n{e}")
 
     def show_about_dialog(self):
         QMessageBox.information(
@@ -2485,49 +2527,45 @@ class AnalyzeDialog(QDialog):
             f"Average Shock Height: <b>{avg_height:.3f} ± {avg_height_err:.3f}</b> Rₛ")
 
     def save_graph(self):
+        plot_name = getattr(self, "current_plot_title", None) or f"{self.filename}_Plot"
 
-        if not hasattr(self, "current_plot_title"):
-            plot_name = "AnalyzePlot"
-        else:
-            plot_name = self.current_plot_title
-
-        # Supported formats
         formats = "PNG (*.png);;PDF (*.pdf);;EPS (*.eps);;SVG (*.svg);;TIFF (*.tiff)"
 
-        file_path, selected_filter = QFileDialog.getSaveFileName(
+        file_path, ext = pick_export_path(
             self,
-            "Export Plot",
+            "Export Figure",
             plot_name,
-            formats
+            formats,
+            default_filter="PNG (*.png)"
         )
 
         if not file_path:
             return
 
+        if sys.platform.startswith("win") and file_path.lower().startswith("c:\\program files"):
+            QMessageBox.warning(
+                self,
+                "Permission Denied",
+                "Windows does not allow saving files inside Program Files.\n"
+                "Please choose another folder such as Documents or Desktop."
+            )
+            return
+
         try:
-            # Add extension automatically if missing
-            if "." not in os.path.basename(file_path):
-                if "PNG" in selected_filter:
-                    file_path += ".png"
-                elif "PDF" in selected_filter:
-                    file_path += ".pdf"
-                elif "EPS" in selected_filter:
-                    file_path += ".eps"
-                elif "SVG" in selected_filter:
-                    file_path += ".svg"
-                elif "TIFF" in selected_filter:
-                    file_path += ".tiff"
+            # ✅ If user didn't type an extension, add the one from ext
+            root, current_ext = os.path.splitext(file_path)
+            if current_ext == "":
+                ext = ext.lower().lstrip(".")
+                file_path = f"{file_path}.{ext}"
+            else:
+                ext = current_ext.lower().lstrip(".")
 
-            ext = file_path.split(".")[-1].lower()
-
-            # Save figure
             self.canvas.figure.savefig(
                 file_path,
                 dpi=300,
                 bbox_inches="tight",
                 format=ext
             )
-
             QMessageBox.information(self, "Export Complete", f"Plot saved:\n{file_path}")
             self.status.showMessage("Export successful!", 3000)
 
