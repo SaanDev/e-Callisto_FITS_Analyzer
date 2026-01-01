@@ -9,7 +9,7 @@ a = Analysis(
     binaries=[],
 
     datas=[
-        ('icon.icns', '.'),
+        ('assets/appicon.png', '.'),
         ('assets/icons', 'assets/icons'),
         # Required backend files for exporting
         (backend_pdf.__file__, 'matplotlib/backends'),
@@ -52,11 +52,18 @@ a = Analysis(
         'matplotlib_widget',
         'soho_lasco_viewer',
         'goes_xrs_gui',
+
+        'PySide6.QtNetwork',
+        'PySide6.QtPrintSupport',
+        'PySide6.QtWebChannel',
+        'PySide6.QtWebEngineCore',
+        'PySide6.QtWebEngineWidgets',
+
     ],
 
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=['pyi_rth_qtwebengine_linux.py'],
     excludes=[],
     noarchive=False,
     optimize=0,
@@ -73,7 +80,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,

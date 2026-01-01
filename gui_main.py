@@ -95,6 +95,19 @@ def resource_path(relative_path: str) -> str:
     return os.path.join(base_path, relative_path)
 """
 
+#Uncomment for Linux build
+def resource_path(relative_path: str) -> str:
+    # PyInstaller sets sys._MEIPASS
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        base_path = sys._MEIPASS
+        return os.path.join(base_path, relative_path)
+
+    # Development
+    base_path = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_path, relative_path)
+
+#Uncomment for Linux build
+"""
 def resource_path(relative_path: str) -> str:
    # py2app
     if getattr(sys, "frozen", False):
@@ -104,7 +117,7 @@ def resource_path(relative_path: str) -> str:
         return os.path.join(base_path, relative_path)
     # Development
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path)
-
+"""
 
 #Fix for figure saving issue on Linux
 def _ext_from_filter(name_filter: str) -> str:
