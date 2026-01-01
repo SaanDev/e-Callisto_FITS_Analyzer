@@ -30,10 +30,12 @@ if sys.platform.startswith("linux"):
     # Safer fallback for OpenGL issues
     os.environ.setdefault("QT_OPENGL", "software")
 
-
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 from gui_main import MainWindow
 import faulthandler
+
+QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
 
 #Uncomment when building with Windows
 """"
