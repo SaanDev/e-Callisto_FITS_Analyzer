@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from PySide6.QtCore import Qt, QUrl, QThread, Signal
+from PySide6.QtGui import QDesktopServices
 from datetime import datetime, timedelta
 
 BASE_URL = "https://cdaw.gsfc.nasa.gov/CME_list/UNIVERSAL_ver2/"
@@ -98,10 +99,12 @@ class CMEViewer(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        from PySide6.QtWebEngineWidgets import QWebEngineView
-
         self.setWindowTitle("SOHO/LASCO CME Catalog Tool")
         self.resize(1400, 900)
+
+        # On Linux, QtWebEngine often crashes on some Mesa/Intel setups.
+        # Default to opening movies in the browser on Linux.
+        self._use_embedded_web = not sys.platform.startswith("linux")
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -112,15 +115,21 @@ class CMEViewer(QMainWindow):
         self.year_combo = QComboBox()
         self.month_combo = QComboBox()
         self.day_combo = QComboBox()
+
         for y in range(1996, datetime.now().year + 1):
             self.year_combo.addItem(str(y))
         for m in range(1, 13):
             self.month_combo.addItem(f"{m:02d}")
         for d in range(1, 32):
             self.day_combo.addItem(f"{d:02d}")
-        date_layout.addWidget(QLabel("Year:")); date_layout.addWidget(self.year_combo)
-        date_layout.addWidget(QLabel("Month:")); date_layout.addWidget(self.month_combo)
-        date_layout.addWidget(QLabel("Day:")); date_layout.addWidget(self.day_combo)
+
+        date_layout.addWidget(QLabel("Year:"))
+        date_layout.addWidget(self.year_combo)
+        date_layout.addWidget(QLabel("Month:"))
+        date_layout.addWidget(self.month_combo)
+        date_layout.addWidget(QLabel("Day:"))
+        date_layout.addWidget(self.day_combo)
+
         self.search_btn = QPushButton("Search")
         date_layout.addWidget(self.search_btn)
         layout.addLayout(date_layout)
@@ -149,14 +158,25 @@ class CMEViewer(QMainWindow):
         self.details_text.setReadOnly(True)
         top_splitter.addWidget(self.details_text)
 
-        # --- Bottom: WebView for movie ---
-        self.movie_view = QWebEngineView()
-        self.movie_view.setHtml("<h3 style='color:gray; text-align:center;'>Movie Area</h3>")
+        # --- Bottom: Movie area ---
+        if self._use_embedded_web:
+            # Import lazily so it does not load at module import time
+            from PySide6.QtWebEngineWidgets import QWebEngineView
+            self.movie_view = QWebEngineView()
+            self.movie_view.setHtml("<h3 style='color:gray; text-align:center;'>Movie Area</h3>")
+        else:
+            # Linux safe fallback
+            self.movie_view = QTextEdit()
+            self.movie_view.setReadOnly(True)
+            self.movie_view.setHtml(
+                "<h3 style='color:gray; text-align:center;'>Movie Area</h3>"
+                "<p style='text-align:center;'>On Linux, movies open in your browser.</p>"
+            )
+
         outer_splitter.addWidget(self.movie_view)
 
-        # Resize priorities
-        outer_splitter.setStretchFactor(0, 3)  # Table + details
-        outer_splitter.setStretchFactor(1, 2)  # Movie area
+        outer_splitter.setStretchFactor(0, 3)
+        outer_splitter.setStretchFactor(1, 2)
 
         # Connections
         self.search_btn.clicked.connect(self.search_cmes)
@@ -209,10 +229,27 @@ class CMEViewer(QMainWindow):
             end_dt = start_dt + timedelta(hours=2)
             stime = start_dt.strftime("%Y%m%d_%H%M")
             etime = end_dt.strftime("%Y%m%d_%H%M")
-            url = f"https://cdaw.gsfc.nasa.gov/movie/make_javamovie.php?stime={stime}&etime={etime}&img1=lasc2rdf"
-            self.movie_view.setUrl(QUrl(url))
+
+            url = (
+                "https://cdaw.gsfc.nasa.gov/movie/make_javamovie.php"
+                f"?stime={stime}&etime={etime}&img1=lasc2rdf"
+            )
+
+            if self._use_embedded_web:
+                self.movie_view.setUrl(QUrl(url))
+            else:
+                QDesktopServices.openUrl(QUrl(url))
+                self.movie_view.setHtml(
+                    "<h3 style='color:green; text-align:center;'>Opened in browser</h3>"
+                    f"<p style='text-align:center;'>{url}</p>"
+                )
+
         except Exception as e:
-            self.movie_view.setHtml(f"<h3 style='color:red;'>Error loading movie</h3><p>{e}</p>")
+            if hasattr(self.movie_view, "setHtml"):
+                self.movie_view.setHtml(
+                    f"<h3 style='color:red;'>Error loading movie</h3><p>{e}</p>"
+                )
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

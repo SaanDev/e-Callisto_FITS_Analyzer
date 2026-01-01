@@ -5,37 +5,33 @@ Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
 
-import platform
-import os
-import sys
+# main.py (TOP OF FILE, before anything else)
+import os, sys
 
-# Must be set BEFORE importing PySide6 / QtWebEngine
 if sys.platform.startswith("linux"):
     os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
+    os.environ.setdefault("QT_OPENGL", "software")
+    os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
 
-    existing = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
     extra = (
         "--disable-gpu "
         "--disable-gpu-compositing "
-        "--disable-features=VaapiVideoDecoder,VaapiVideoEncoder "
-        "--disable-accelerated-video-decode "
+        "--disable-features=VaapiVideoDecoder "
         "--disable-dev-shm-usage "
-        "--no-sandbox"
     )
-    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (existing + " " + extra).strip()
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
+        (os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "") + " " + extra).strip()
+    )
 
-    # Helps on older Intel chips when iHD fails
-    os.environ.setdefault("LIBVA_DRIVER_NAME", "i965")
-
-    # Safer fallback for OpenGL issues
-    os.environ.setdefault("QT_OPENGL", "software")
-
+import platform
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 from gui_main import MainWindow
 import faulthandler
 
-QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
+if sys.platform.startswith("linux"):
+    QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
+    QApplication.setAttribute(Qt.AA_UseSoftwareOpenGL, True)
 
 #Uncomment when building with Windows
 """"
