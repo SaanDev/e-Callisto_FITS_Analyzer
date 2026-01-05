@@ -16,8 +16,7 @@ from PySide6.QtWidgets import (
     QStatusBar, QProgressBar, QApplication, QMenu, QCheckBox, QRadioButton, QButtonGroup, QComboBox, QToolBar,
     QLineEdit, QSpinBox, QScrollArea, QFrame, QVBoxLayout, QWidget, QFileDialog, QHBoxLayout, QSizePolicy
 )
-from PySide6.QtCore import QObject, QEvent
-from PySide6.QtWidgets import QLayout
+
 from PySide6.QtGui import QAction, QPixmap, QImage, QGuiApplication, QIcon, QFontDatabase
 from PySide6.QtCore import Qt
 from PySide6.QtCore import QTimer, QSize
@@ -96,6 +95,7 @@ def resource_path(relative_path: str) -> str:
 """
 
 #Uncomment for Linux build
+"""
 def resource_path(relative_path: str) -> str:
     # PyInstaller sets sys._MEIPASS
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
@@ -105,9 +105,9 @@ def resource_path(relative_path: str) -> str:
     # Development
     base_path = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_path, relative_path)
-
-#Uncomment for Linux build
 """
+
+#Uncomment for MacOS build
 def resource_path(relative_path: str) -> str:
    # py2app
     if getattr(sys, "frozen", False):
@@ -117,7 +117,7 @@ def resource_path(relative_path: str) -> str:
         return os.path.join(base_path, relative_path)
     # Development
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path)
-"""
+
 
 #Fix for figure saving issue on Linux
 def _ext_from_filter(name_filter: str) -> str:
