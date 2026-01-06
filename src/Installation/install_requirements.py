@@ -39,7 +39,7 @@ def main():
             print(f"Failed to install {pkg}: {e}")
 
     print("\nAll installations attempted.")
-    print("You can start the application with:\n   python3 main.py")
+    print("You can start the application with:\n   python3 src/UI/main.py")
 
 if __name__ == "__main__":
     main()

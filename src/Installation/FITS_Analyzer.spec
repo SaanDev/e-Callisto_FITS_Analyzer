@@ -4,13 +4,13 @@
 from matplotlib.backends import backend_pdf, backend_svg, backend_ps, backend_pgf
 
 a = Analysis(
-    ['main.py'],
+    ['src/UI/main.py'],
     pathex=[],
     binaries=[],
 
     datas=[
-        ('assets/appicon.png', '.'),
-        ('assets/icons', 'assets/icons'),
+        ('assests/FITS_analyzer.png', '.'),
+        ('assests/icons', 'assests/icons'),
         # Required backend files for exporting
         (backend_pdf.__file__, 'matplotlib/backends'),
         (backend_svg.__file__, 'matplotlib/backends'),
@@ -46,12 +46,12 @@ a = Analysis(
         'cftime',
         'netCDF4',
 
-        'callisto_downloader',
-        'burst_processor',
-        'gui_main',
-        'matplotlib_widget',
-        'soho_lasco_viewer',
-        'goes_xrs_gui',
+        'src.UI.callisto_downloader',
+        'src.Backend.burst_processor',
+        'src.UI.gui_main',
+        'src.UI.matplotlib_widget',
+        'src.UI.soho_lasco_viewer',
+        'src.UI.goes_xrs_gui',
 
         'PySide6.QtNetwork',
         'PySide6.QtPrintSupport',
@@ -87,7 +87,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['icon.icns'],
+    icon=['assests/icon.icns'],
 )
 
 coll = COLLECT(

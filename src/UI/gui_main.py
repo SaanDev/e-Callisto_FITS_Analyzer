@@ -20,8 +20,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QAction, QPixmap, QImage, QGuiApplication, QIcon, QFontDatabase
 from PySide6.QtCore import Qt
 from PySide6.QtCore import QTimer, QSize
-from callisto_downloader import CallistoDownloaderApp
-from goes_xrs_gui import MainWindow as GoesXrsWindow
+from src.UI.callisto_downloader import CallistoDownloaderApp
+from src.UI.goes_xrs_gui import MainWindow as GoesXrsWindow
 #from soho_lasco_viewer import CMEViewer as CMEViewerWindow
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -116,7 +116,8 @@ def resource_path(relative_path: str) -> str:
         )
         return os.path.join(base_path, relative_path)
     # Development
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path)
+    base_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    return os.path.join(base_path, relative_path)
 
 
 #Fix for figure saving issue on Linux
@@ -718,7 +719,7 @@ class MainWindow(QMainWindow):
         self.noise_reduced_original = None  # backup before lasso
 
     def _icon(self, filename: str) -> QIcon:
-        icon_path = resource_path(os.path.join("assets", "icons", filename))
+        icon_path = resource_path(os.path.join("assests", "icons", filename))
 
         if os.path.exists(icon_path):
             return QIcon(icon_path)
@@ -1917,7 +1918,7 @@ class MainWindow(QMainWindow):
             self.downloader_dialog.import_success.emit()
             return
 
-        from burst_processor import (
+        from src.Backend.burst_processor import (
             are_time_combinable,
             are_frequency_combinable,
             combine_time,
@@ -2052,7 +2053,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Redo", 2000)
 
     def open_cme_viewer(self):
-        from soho_lasco_viewer import CMEViewer  # import here, not at top
+        from src.UI.soho_lasco_viewer import CMEViewer  # import here, not at top
         self._cme_viewer = CMEViewer(parent=self)
         self._cme_viewer.show()
 

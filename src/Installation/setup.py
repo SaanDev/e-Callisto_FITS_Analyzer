@@ -7,19 +7,19 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
 from setuptools import setup
 
-APP = ['main.py']
-DATA_FILES = ['icon.icns',
-    ('assets/icons', [
-        'assets/icons/open.svg',
-        'assets/icons/export.svg',
-        'assets/icons/undo.svg',
-        'assets/icons/redo.svg',
-        'assets/icons/download.svg',
-        'assets/icons/drift.svg',
-        'assets/icons/isolate.svg',
-        'assets/icons/max.svg',
-        'assets/icons/reset_selection.svg',
-        'assets/icons/reset_all.svg',
+APP = ['src/UI/main.py']
+DATA_FILES = ['assests/icon.icns',
+    ('assests/icons', [
+        'assests/icons/open.svg',
+        'assests/icons/export.svg',
+        'assests/icons/undo.svg',
+        'assests/icons/redo.svg',
+        'assests/icons/download.svg',
+        'assests/icons/drift.svg',
+        'assests/icons/isolate.svg',
+        'assests/icons/max.svg',
+        'assests/icons/reset_selection.svg',
+        'assests/icons/reset_all.svg',
     ])
 ]
 
@@ -78,12 +78,12 @@ OPTIONS = {
         'matplotlib.backends.backend_eps',
 
         # Project modules
-        'callisto_downloader',
-        'burst_processor',
-        'gui_main',
-        'matplotlib_widget',
-        'soho_lasco_viewer',
-        'goes_xrs_gui',
+        'src.UI.callisto_downloader',
+        'src.Backend.burst_processor',
+        'src.UI.gui_main',
+        'src.UI.matplotlib_widget',
+        'src.UI.soho_lasco_viewer',
+        'src.UI.goes_xrs_gui',
 
         # Encoding libraries
         'charset_normalizer',
@@ -93,7 +93,7 @@ OPTIONS = {
     "qt_plugins": ["platforms", "imageformats", "iconengines", "styles"],
 
 
-    'iconfile': 'icon.icns',
+    'iconfile': 'assests/icon.icns',
 
     'resources': [],
 
