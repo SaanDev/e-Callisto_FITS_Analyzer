@@ -1,0 +1,143 @@
+body {
+  margin: 0;
+  font-family: "Inter", system-ui, sans-serif;
+  background: #0b1020;
+  color: #f5f5f5;
+}
+
+header {
+  padding: 20px 32px;
+  background: #10172a;
+  border-bottom: 1px solid #26304f;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+nav {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+h1 {
+  margin: 0;
+  font-size: 28px;
+}
+
+h2,
+h3 {
+  margin-top: 0;
+}
+
+.tab {
+  background: transparent;
+  border: 1px solid #3b4a72;
+  color: #f5f5f5;
+  padding: 8px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.tab.active {
+  background: #334163;
+}
+
+.panel {
+  padding: 24px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+
+.session {
+  background: #1b2338;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.card {
+  background: #121b33;
+  padding: 16px;
+  border-radius: 12px;
+  border: 1px solid #26304f;
+}
+
+.file-list {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0 0;
+  max-height: 160px;
+  overflow: auto;
+}
+
+.file-list li {
+  padding: 6px 0;
+  border-bottom: 1px solid #1f2740;
+}
+
+.grid-2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 14px;
+}
+
+input,
+select,
+button {
+  font-size: 14px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid #3b4a72;
+  background: #0e1526;
+  color: #f5f5f5;
+}
+
+button {
+  cursor: pointer;
+  background: #2f3f63;
+}
+
+.button-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.plot {
+  width: 100%;
+  min-height: 360px;
+  border: 1px solid #26304f;
+  border-radius: 12px;
+  background: #0d1426;
+}
+
+.placeholder {
+  padding: 24px;
+  background: #0d1426;
+  border-radius: 8px;
+  text-align: center;
+  color: #9aa4bf;
+}
