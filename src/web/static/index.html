@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>e-CALLISTO FITS Analyzer (Web)</title>
+    <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: "Segoe UI", sans-serif;
+      }
+      body {
+        margin: 0;
+        background: #f5f7fb;
+        color: #1f2a44;
+      }
+      header {
+        background: #1f2a44;
+        color: #ffffff;
+        padding: 1.5rem 2rem;
+      }
+      main {
+        padding: 1.5rem 2rem 3rem;
+        display: grid;
+        gap: 1.5rem;
+      }
+      .card {
+        background: #ffffff;
+        border-radius: 12px;
+        box-shadow: 0 10px 30px rgba(31, 42, 68, 0.1);
+        padding: 1.5rem;
+      }
+      .controls {
+        display: grid;
+        gap: 1rem;
+      }
+      .controls label {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+        font-weight: 600;
+      }
+      .controls input[type="range"] {
+        width: 100%;
+      }
+      .row {
+        display: flex;
+        gap: 1rem;
+        flex-wrap: wrap;
+      }
+      button {
+        border: none;
+        background: #1f70ff;
+        color: #ffffff;
+        padding: 0.75rem 1.5rem;
+        border-radius: 999px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:disabled {
+        background: #a7b4d8;
+        cursor: not-allowed;
+      }
+      #plot {
+        height: 600px;
+      }
+      .status {
+        font-size: 0.9rem;
+        color: #4d5d85;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>e-CALLISTO FITS Analyzer (Web)</h1>
+      <p>Upload FITS data, preview the dynamic spectrum, and apply noise reduction.</p>
+    </header>
+    <main>
+      <section class="card">
+        <div class="controls">
+          <label>
+            FITS file
+            <input id="fitsFile" type="file" accept=".fit,.fits,.fit.gz" />
+          </label>
+          <div class="row">
+            <label>
+              Clip low (<span id="clipLowLabel">-5</span>)
+              <input id="clipLow" type="range" min="-20" max="10" value="-5" step="0.5" />
+            </label>
+            <label>
+              Clip high (<span id="clipHighLabel">20</span>)
+              <input id="clipHigh" type="range" min="0" max="40" value="20" step="0.5" />
+            </label>
+          </div>
+          <div class="row">
+            <button id="loadButton">Load FITS</button>
+            <button id="reduceButton" disabled>Apply Noise Reduction</button>
+          </div>
+          <div class="status" id="status">Awaiting FITS upload.</div>
+        </div>
+      </section>
+      <section class="card">
+        <div id="plot"></div>
+      </section>
+    </main>
+
+    <script>
+      const fitsInput = document.getElementById("fitsFile");
+      const loadButton = document.getElementById("loadButton");
+      const reduceButton = document.getElementById("reduceButton");
+      const statusEl = document.getElementById("status");
+      const clipLow = document.getElementById("clipLow");
+      const clipHigh = document.getElementById("clipHigh");
+      const clipLowLabel = document.getElementById("clipLowLabel");
+      const clipHighLabel = document.getElementById("clipHighLabel");
+
+      const updateLabels = () => {
+        clipLowLabel.textContent = clipLow.value;
+        clipHighLabel.textContent = clipHigh.value;
+      };
+      clipLow.addEventListener("input", updateLabels);
+      clipHigh.addEventListener("input", updateLabels);
+      updateLabels();
+
+      function renderPlot(payload) {
+        const data = [
+          {
+            z: payload.data,
+            type: "heatmap",
+            colorscale: "Turbo",
+          },
+        ];
+        const layout = {
+          title: "Dynamic Spectrum Preview",
+          xaxis: { title: "Time" },
+          yaxis: { title: "Frequency" },
+        };
+        Plotly.newPlot("plot", data, layout, { responsive: true });
+      }
+
+      async function sendRequest(url) {
+        const file = fitsInput.files[0];
+        if (!file) {
+          statusEl.textContent = "Please select a FITS file first.";
+          return;
+        }
+        const formData = new FormData();
+        formData.append("file", file);
+
+        if (url.includes("reduce-noise")) {
+          formData.append("clip_low", clipLow.value);
+          formData.append("clip_high", clipHigh.value);
+        }
+
+        statusEl.textContent = "Processing...";
+        const response = await fetch(url, {
+          method: "POST",
+          body: formData,
+        });
+
+        if (!response.ok) {
+          const error = await response.json();
+          statusEl.textContent = error.detail || "Failed to process FITS.";
+          return;
+        }
+
+        const payload = await response.json();
+        renderPlot(payload);
+        reduceButton.disabled = false;
+        statusEl.textContent = `Loaded preview (${payload.preview.rows} x ${payload.preview.cols}).`;
+      }
+
+      loadButton.addEventListener("click", () => sendRequest("/api/load-fits"));
+      reduceButton.addEventListener("click", () => sendRequest("/api/reduce-noise"));
+    </script>
+  </body>
+</html>

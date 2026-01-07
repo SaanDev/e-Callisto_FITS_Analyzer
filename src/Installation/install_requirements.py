@@ -23,7 +23,9 @@ packages = [
     "beautifulsoup4",
     "netCDF4",
     "cftime",
-    "setuptools"
+    "setuptools",
+    "fastapi",
+    "uvicorn"
 ]
 
 def install(pkg):
