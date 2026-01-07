@@ -40,7 +40,6 @@ from PySide6.QtCore import QObject, QEvent
 from PySide6.QtWidgets import QLayout
 
 #LINUX Specific Fixes for messageboxes
-
 IS_LINUX = sys.platform.startswith("linux")
 
 _linux_msgbox_fixer = None
