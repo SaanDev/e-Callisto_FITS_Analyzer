@@ -6,7 +6,8 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
 
 # main.py (TOP OF FILE, before anything else)
-import os, sys
+import os
+import sys
 
 if sys.platform.startswith("linux"):
     os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
@@ -24,8 +25,13 @@ if sys.platform.startswith("linux"):
     )
 
 import platform
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtQml import QQmlApplicationEngine
+from PySide6.QtQuickControls2 import QQuickStyle
 from PySide6.QtWidgets import QApplication
+
+from src.UI.quick_app import AppController
+import faulthandler
 
 if getattr(sys, "frozen", False):
     base_path = os.path.abspath(
@@ -38,19 +44,15 @@ if base_path not in sys.path:
     sys.path.insert(0, base_path)
 
 
-from src.UI.gui_main import MainWindow
-import faulthandler
+def resource_path(relative_path: str) -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.join(base_path, relative_path)
+    return os.path.join(base_path, relative_path)
+
 
 if sys.platform.startswith("linux"):
     QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
     QApplication.setAttribute(Qt.AA_UseSoftwareOpenGL, True)
-
-#Uncomment when building with Windows
-""""
-app = QApplication(sys.argv)
-if sys.platform.startswith("win"):
-    app.setStyle("Fusion")
-"""
 
 if platform.system() != "Windows":
     faulthandler.enable()
@@ -58,8 +60,16 @@ if platform.system() != "Windows":
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = MainWindow()
-    window.showMaximized()
-    #window.show()
-    sys.exit(app.exec())
+    QQuickStyle.setStyle("Material")
 
+    controller = AppController()
+    engine = QQmlApplicationEngine()
+    engine.rootContext().setContextProperty("appController", controller)
+
+    qml_path = resource_path(os.path.join("src", "UI", "qml", "Main.qml"))
+    engine.load(QUrl.fromLocalFile(qml_path))
+
+    if not engine.rootObjects():
+        sys.exit(1)
+
+    sys.exit(app.exec())
