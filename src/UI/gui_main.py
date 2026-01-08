@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 1.7.4
+Version 1.7.5 (In Development)
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -26,6 +26,7 @@ from src.UI.goes_xrs_gui import MainWindow as GoesXrsWindow
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from matplotlib.widgets import LassoSelector
+from matplotlib.widgets import RectangleSelector
 from matplotlib.path import Path
 from astropy.io import fits
 from matplotlib.colors import LinearSegmentedColormap
@@ -176,7 +177,7 @@ class MainWindow(QMainWindow):
         #Linux Messagebox Fix
         _install_linux_msgbox_fixer()
 
-        self.setWindowTitle("e-CALLISTO FITS Analyzer 1.7.4")
+        self.setWindowTitle("e-CALLISTO FITS Analyzer 1.7.5 (In Development)")
         #self.resize(1000, 700)
         self.setMinimumSize(1000, 700)
 
@@ -240,6 +241,11 @@ class MainWindow(QMainWindow):
 
         self._panning = False
         self._last_pan_xy = None
+
+        # --- Navigation state (pan/scroll lock + rectangle zoom) ---
+        self.nav_locked = False  # False = normal pan + scroll zoom
+        self.rect_zoom_active = False  # True only while RectangleSelector is active
+        self._rect_selector = None  # RectangleSelector instance
 
         # Colorbar
         self.current_colorbar = None
@@ -775,6 +781,18 @@ class MainWindow(QMainWindow):
         self.tb_max.triggered.connect(self.plot_max_intensities)
         tb.addAction(self.tb_max)
 
+        self.tb_zoom = QAction(self._icon("zoom.svg"), "Rectangular Zooming", self)
+        self.tb_zoom.triggered.connect(self.rectangular_zoom)
+        tb.addAction(self.tb_zoom)
+
+        self.tb_lock = QAction(self._icon("lock.svg"), "Lock zooming and panning", self)
+        self.tb_lock.triggered.connect(self.lock)
+        tb.addAction(self.tb_lock)
+
+        self.tb_unlock = QAction(self._icon("unlock.svg"), "Unlock zooming and panning", self)
+        self.tb_unlock.triggered.connect(self.unlock)
+        tb.addAction(self.tb_unlock)
+
         tb.addSeparator()
 
         self.tb_reset_sel = QAction(self._icon("reset_selection.svg"), "Reset Selection", self)
@@ -787,6 +805,7 @@ class MainWindow(QMainWindow):
 
         # Initial enable/disable states
         self._sync_toolbar_enabled_states()
+        self._sync_nav_actions()
 
     def _sync_toolbar_enabled_states(self):
         has_file = getattr(self, "raw_data", None) is not None
@@ -812,6 +831,7 @@ class MainWindow(QMainWindow):
         self.tb_max.setEnabled(has_noise)
         self.tb_reset_sel.setEnabled(has_noise)
         self.tb_reset_all.setEnabled(has_file)
+        self._sync_nav_actions()
 
     def apply_graph_properties_live(self, *_):
         """
@@ -1243,6 +1263,9 @@ class MainWindow(QMainWindow):
             pass
 
     def _plot_data_internal(self, data, title="Dynamic Spectrum", view=None):
+
+        self._stop_rect_zoom()
+
         if self.time is None or self.freqs is None:
             print("Time or frequency data not loaded. Skipping plot.")
             return
@@ -1392,6 +1415,9 @@ class MainWindow(QMainWindow):
         if self.lasso_active:
             return
 
+        if getattr(self, "nav_locked", False) or getattr(self, "rect_zoom_active", False):
+            return
+
         ax = self.canvas.ax
 
         # Mouse pointer must be inside the plot
@@ -1446,6 +1472,9 @@ class MainWindow(QMainWindow):
         Start panning with LEFT mouse button inside the main axes.
         (No modifier keys needed.)
         """
+        if getattr(self, "nav_locked", False) or getattr(self, "rect_zoom_active", False):
+            return
+
         if self.lasso_active:
             return
 
@@ -1462,6 +1491,9 @@ class MainWindow(QMainWindow):
         """
         Perform the pan movement while the left mouse button is held.
         """
+        if getattr(self, "nav_locked", False) or getattr(self, "rect_zoom_active", False):
+            return
+
         if self.lasso_active:
             return
 
@@ -1820,7 +1852,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "About e-Callisto FITS Analyzer",
-            "e-CALLISTO FITS Analyzer version 1.7.4.\n\n"
+            "e-CALLISTO FITS Analyzer version 1.7.5 (In Development).\n\n"
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"
@@ -1959,6 +1991,121 @@ class MainWindow(QMainWindow):
             "Please ensure they are consecutive in time or adjacent in frequency."
         )
 
+    def _stop_rect_zoom(self):
+        """Remove rectangle zoom selector safely (if active)."""
+        sel = getattr(self, "_rect_selector", None)
+        if sel is not None:
+            try:
+                sel.set_active(False)
+                sel.disconnect_events()
+            except Exception:
+                pass
+            self._rect_selector = None
+        self.rect_zoom_active = False
+
+    def _on_rect_zoom_select(self, eclick, erelease):
+        """Callback when the user finishes drawing the rectangle."""
+        if eclick.inaxes != self.canvas.ax or erelease.inaxes != self.canvas.ax:
+            self._stop_rect_zoom()
+            return
+
+        x0, y0 = eclick.xdata, eclick.ydata
+        x1, y1 = erelease.xdata, erelease.ydata
+        if x0 is None or x1 is None or y0 is None or y1 is None:
+            self._stop_rect_zoom()
+            return
+
+        xmin, xmax = sorted([x0, x1])
+        ymin, ymax = sorted([y0, y1])
+
+        # Ignore tiny rectangles (prevents accidental clicks)
+        if abs(xmax - xmin) < 1e-6 or abs(ymax - ymin) < 1e-6:
+            self._stop_rect_zoom()
+            return
+
+        ax = self.canvas.ax
+        ax.set_xlim(xmin, xmax)
+        ax.set_ylim(ymin, ymax)
+        self.canvas.draw_idle()
+
+        self._stop_rect_zoom()
+        self.statusBar().showMessage("Zoomed to selected region (still locked).", 2500)
+
+    def _sync_nav_actions(self):
+        """Enable/disable Lock/Unlock/Zoom actions to match current state."""
+        locked = bool(getattr(self, "nav_locked", False))
+        has_plot = getattr(self, "raw_data", None) is not None
+
+        # Zoom rectangle allowed only when locked AND a plot exists
+        self.tb_zoom.setEnabled(locked and has_plot)
+
+        # Lock and unlock behave like mutually exclusive buttons
+        self.tb_lock.setEnabled((not locked) and has_plot)
+        self.tb_unlock.setEnabled(locked and has_plot)
+
+    def lock(self):
+        """Disable scroll zoom + panning. Rectangle zoom becomes available."""
+        if getattr(self, "raw_data", None) is None:
+            self.statusBar().showMessage("Load a FITS file first.", 2500)
+            return
+
+        self.nav_locked = True
+        self._panning = False
+        self._last_pan_xy = None
+        self._stop_rect_zoom()
+
+        self._sync_nav_actions()
+        self.statusBar().showMessage("Navigation locked. Use Rectangle Zoom if needed.", 3000)
+
+    def unlock(self):
+        """Enable scroll zoom + panning again."""
+        if getattr(self, "raw_data", None) is None:
+            self.statusBar().showMessage("Load a FITS file first.", 2500)
+            return
+
+        self.nav_locked = False
+        self._panning = False
+        self._last_pan_xy = None
+        self._stop_rect_zoom()
+
+        self._sync_nav_actions()
+        self.statusBar().showMessage("Navigation unlocked. Pan and scroll zoom enabled.", 3000)
+
+    def rectangular_zoom(self):
+        """
+        Start rectangle zoom tool.
+        Requirement: only allowed when lock is active.
+        """
+        if getattr(self, "raw_data", None) is None:
+            self.statusBar().showMessage("Load a FITS file first.", 2500)
+            return
+
+        if not getattr(self, "nav_locked", False):
+            self.statusBar().showMessage("Click Lock first to enable Rectangle Zoom.", 3500)
+            return
+
+        # Do not conflict with lasso
+        if getattr(self, "lasso_active", False):
+            self.statusBar().showMessage("Finish the lasso tool first.", 3000)
+            return
+
+        # Stop any existing rectangle selector
+        self._stop_rect_zoom()
+
+        ax = self.canvas.ax
+        self.rect_zoom_active = True
+
+        # Create rectangle selector
+        self._rect_selector = RectangleSelector(
+            ax,
+            self._on_rect_zoom_select,
+            useblit=True,
+            button=[1],  # left mouse only
+            interactive=False
+        )
+
+        self.statusBar().showMessage("Drag a rectangle on the plot to zoom.", 4000)
+
     def launch_downloader(self):
         self.downloader_dialog = CallistoDownloaderApp()
         self.downloader_dialog.import_request.connect(self.process_imported_files)
@@ -2050,6 +2197,7 @@ class MainWindow(QMainWindow):
         state = self._redo_stack.pop()
         self._restore_state(state)
         self.statusBar().showMessage("Redo", 2000)
+
 
     def open_cme_viewer(self):
         from src.UI.soho_lasco_viewer import CMEViewer  # import here, not at top
@@ -2289,7 +2437,7 @@ class MaxIntensityPlotDialog(QDialog):
         QMessageBox.information(
             self,
             "About e-Callisto FITS Analyzer",
-            "e-CALLISTO FITS Analyzer version 1.7.4.\n\n"
+            "e-CALLISTO FITS Analyzer version 1.7.5 (In Development).\n\n"
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"
