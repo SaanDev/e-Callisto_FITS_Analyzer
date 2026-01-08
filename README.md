@@ -1,11 +1,13 @@
-# e-CALLISTO FITS Analyzer  
+# e-CALLISTO FITS Analyzer
 A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data.
 
-Version **1.7.3**
+Version **1.7.4**
 
 ## Download
-### [Windows version 1.7.3 (.exe) (196 MB)](https://github.com/SaanDev/e-Callisto_FITS_Analyzer/releases/download/v1.7.3(Windows)/e-CALLISTO_FITS_Analyzer_Setup_v1.7.3.exe)
-### [MacOS version 1.7.3 (.dmg) (591 MB)](https://github.com/SaanDev/e-Callisto_FITS_Analyzer/releases/download/v1.7.3(MacOS)/e-CALLISTO_FITS_Analyzer_v1.7.3.dmg)
+
+### [Windows version 1.7.4 (.exe)](https://github.com/SaanDev/e-Callisto_FITS_Analyzer/releases/download/v1.7.4%28Windows%29/e-CALLISTO_FITS_Analyzer_Setup_v1.7.4.exe)
+### [macOS version 1.7.4 (.dmg)](https://github.com/SaanDev/e-Callisto_FITS_Analyzer/releases/download/v1.7.4%28MacOS%29/e-CALLISTO_FITS_Analyzer_v1.7.4.dmg)
+### [Linux version 1.7.4 (.zip, AppImage)](https://github.com/SaanDev/e-Callisto_FITS_Analyzer/releases/download/v1.7.4%28Linux%29/e-Callisto_FITS_Analyzer_v.1.7.4_linux.zip)
 
 ---
 
@@ -19,6 +21,8 @@ This guide explains how to use the main features of the **e-CALLISTO FITS Analyz
 
 After launching the application, the main window opens with tools for loading FITS files, adjusting thresholds, selecting colormaps, isolating bursts, navigating the spectrum, and performing scientific analysis.
 
+In version 1.7.4, the main function buttons were replaced by a compact **icon toolbar** for quicker access and a cleaner layout.
+
 ### **Main Window**
 ![Main Window](assests/main_window.png)
 
@@ -28,12 +32,12 @@ After launching the application, the main window opens with tools for loading FI
 
 You can load:
 
-- **Compressed FITS:** `*.fit.gz`  
+- **Compressed FITS:** `*.fit.gz`
 - **Uncompressed FITS:** `*.fit`
 
 This supports observers who work directly with uncompressed raw data.
 
-Choose **File → Open** or click **Load FITS File**.  
+Choose **File → Open** or click the **Open** icon on the toolbar.  
 The dynamic spectrum appears immediately.
 
 ---
@@ -44,12 +48,12 @@ Noise reduction updates **live** without pressing Apply.
 
 Features:
 
-- Two wide horizontal scrollbars for lower and upper clipping thresholds (Vmin / Vmax)  
-- Labels repositioned for clearer visual feedback  
-- Dynamic spectrum refreshes automatically  
+- Two wide horizontal scrollbars for lower and upper clipping thresholds (Vmin / Vmax)
+- Labels repositioned for clearer visual feedback
+- Dynamic spectrum refreshes automatically
 - No data are lost when switching x-axis units (seconds ↔ UT)
 
-### Example: Noise Reduction  
+### Example: Noise Reduction
 ![Noise Reduction](assests/noise_reduction.png)
 
 ---
@@ -60,7 +64,7 @@ The color-bar (z-axis) now provides clearer physical meaning.
 
 Features:
 
-- Explicit intensity labeling on the color-bar  
+- Explicit intensity labeling on the color-bar
 - Unit selector for:
   - **Digits / ADU**
   - **Optional dB scaling**
@@ -75,124 +79,136 @@ This improves interpretability across different observing stations.
 The **Colormap** panel allows choosing from several scientifically useful palettes:
 
 - Custom (blue–red–yellow)
-- Viridis  
-- Plasma  
-- Inferno  
-- Magma  
-- Cividis  
-- Turbo  
-- RdYlBu  
-- Jet  
-- Cubehelix  
+- Viridis
+- Plasma
+- Inferno
+- Magma
+- Cividis
+- Turbo
+- RdYlBu
+- Jet
+- Cubehelix
 
 The plot updates as soon as a colormap is selected.
 
 ---
 
-# 6. Navigation: Zoom and Pan
+# 6. Graph Properties Panel (New in v1.7.4)
+
+A **Graph Properties** panel is included to adjust plot appearance from one place.
+
+Typical use cases:
+
+- Update titles and labels for exports
+- Adjust plot styling for clearer presentation
+- Keep visual settings consistent across plots
+
+---
+
+# 7. Navigation: Zoom and Pan
 
 Interactive navigation has been added to the dynamic spectrum.
 
 Features:
 
-- **Scroll wheel:** Zoom in and out  
-- **Click + drag:** Pan across time and frequency  
+- **Scroll wheel:** Zoom in and out
+- **Click + drag:** Pan across time and frequency
 - Navigation works alongside noise reduction and colormap changes
 
 This allows precise inspection of fine spectral structures.
 
 ---
 
-# 7. Cursor Data Display
+# 8. Cursor Data Display
 
 When moving the mouse cursor over the plot area, the status bar displays:
 
-- Time  
-- Frequency  
+- Time
+- Frequency
 - Intensity value (in selected units)
 
 This enables quick quantitative inspection without additional clicks.
 
 ---
 
-# 8. Burst Isolation (Lasso Tool)
+# 9. Burst Isolation (Lasso Tool)
 
 Click **Isolate Burst** and draw around the emission region.  
 Only the selected region is retained for further analysis.
 
-### Example: Isolated Burst  
+### Example: Isolated Burst
 ![Isolated Burst](assests/burst_isolation.png)
 
 ---
 
-# 9. Maximum Intensities Extraction
+# 10. Maximum Intensities Extraction
 
 Click **Plot Maximum Intensities** to compute the maximum frequency for each time channel after noise reduction or burst isolation.
 
-### Example: Maximum Intensities  
+### Example: Maximum Intensities
 ![Maximum Intensities](assests/maximum_intensity.png)
 
 ---
 
-# 10. Outlier Removal
+# 11. Outlier Removal
 
 Inside the Maximum Intensities window:
 
-- Draw a lasso to select outliers  
-- Remove them instantly  
+- Draw a lasso to select outliers
+- Remove them instantly
 - Prepare the cleaned curve for fitting
 
 ---
 
-# 11. Burst Analyzer (Best Fit & Shock Parameters)
+# 12. Burst Analyzer (Best Fit & Shock Parameters)
 
 The Analyzer window performs:
 
-- Power-law fitting of the Type II backbone  
-- Drift-rate evaluation  
-- Shock speed  
-- Shock height  
-- R² and RMSE  
+- Power-law fitting of the Type II backbone
+- Drift-rate evaluation
+- Shock speed
+- Shock height
+- R² and RMSE
 
 Optional additional plots:
 
-- Shock speed vs height  
-- Shock speed vs frequency  
-- Height vs frequency  
+- Shock speed vs height
+- Shock speed vs frequency
+- Height vs frequency
 
-### Example: Analyzer  
+### Example: Analyzer
 ![Analyzer](assests/analysis.png)
 
 Export options:
 
-- Best-fit graph (PNG, PDF, EPS, SVG, TIFF)  
-- Data summary to Excel  
-- Multiple additional plots  
+- Best-fit graph (PNG, PDF, EPS, SVG, TIFF)
+- Data summary to Excel
+- Multiple additional plots
 
 ---
 
-# 12. FITS Downloader
+# 13. FITS Downloader
 
 Open via **Download → FITS Downloader**.
 
 Features:
 
-- Select station, date, and hour  
-- Fetch available files from the server  
-- Preview selected files  
-- Download multiple FITS files  
-- Import selected FITS files directly into the Analyzer  
-- Automatic detection of frequency or time stitching compatibility  
+- Select station, date, and hour
+- Fetch available files from the server
+- Preview selected files
+- Download multiple FITS files
+- Import selected FITS files directly into the Analyzer
+- Automatic detection of frequency or time stitching compatibility
 - Clear error messages when selected files cannot be combined
 
-### Example: Downloader  
+### Example: Downloader
 ![Downloader](assests/callisto_downloader.png)
 
 ![Downloader](assests/callisto_downloader_preview.png)
 
 ---
 
-# 13. Combine FITS Files
+# 14. Combine FITS Files
 
 Two combination modes are supported.
 
@@ -208,61 +224,61 @@ Combined data can be imported directly into the Analyzer.
 
 ---
 
-# 14. Saving and Exporting Plots
+# 15. Saving and Exporting Plots
 
 All figures across the application can be exported in:
 
-- PNG  
-- PDF  
-- EPS  
-- SVG  
-- TIFF  
+- PNG
+- PDF
+- EPS
+- SVG
+- TIFF
 
 Export handling improvements:
 
-- Export errors for PDF, EPS, and SVG formats have been resolved  
-- On Windows, if the default save location is restricted (e.g., `C:\Program Files`), the user is prompted to select an alternate folder
+- Export errors for PDF, EPS, and SVG formats have been resolved
+- On Windows, if the default save location is restricted (for example `C:\Program Files`), the user is prompted to select an alternate folder
 
-This ensures smooth operation across operating systems and publication workflows.
+This supports publication workflows across operating systems.
 
 ---
 
-# 15. CME Catalog Viewer (SOHO/LASCO)
+# 16. CME Catalog Viewer (SOHO/LASCO)
 
 Features:
 
-- Retrieve daily CME lists  
-- Display CME parameters in a structured table  
-- Show associated LASCO movies  
-- Event metadata panel  
+- Retrieve daily CME lists
+- Display CME parameters in a structured table
+- Show associated LASCO movies
+- Event metadata panel
 
-### Example: CME Viewer  
+### Example: CME Viewer
 ![CME Viewer](assests/cme_catalog.png)
 
 ---
 
-# 16. GOES X-Ray Flux Viewer
+# 17. GOES X-Ray Flux Viewer
 
 Features:
 
-- View GOES-16 / GOES-18 X-ray light curves  
-- Select short or long channels  
-- Adjust time windows  
-- Extract flare parameters  
-- Export plots and data  
+- View GOES-16 / GOES-18 X-ray light curves
+- Select short or long channels
+- Adjust time windows
+- Extract flare parameters
+- Export plots and data
 
-### Example: GOES X-Ray Viewer  
+### Example: GOES X-Ray Viewer
 ![GOES X-Ray](assests/goes_xray.png)
 
 ---
 
 ## 📄 Notes
 
-- Supports both `.fit` and `.fit.gz` files  
-- Live noise reduction with preserved zoom, pan, and axis format  
-- Cursor-based data readout for time, frequency, and intensity  
-- Robust export system with OS-aware save handling  
-- All major plots are publication ready
+- Supports both `.fit` and `.fit.gz` files
+- Live noise reduction with preserved zoom, pan, and axis format
+- Cursor-based data readout for time, frequency, and intensity
+- Robust export system with OS-aware save handling
+- Major plots are publication ready
 
 ---
 
