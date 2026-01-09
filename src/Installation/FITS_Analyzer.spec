@@ -11,6 +11,7 @@ PROJECT = ROOT.parent           # <root>
 
 MAIN = PROJECT / "src" / "UI" / "main.py"
 
+#fix
 # Change this if your folder name is different.
 ASSETS_DIR = PROJECT / "assets"
 
