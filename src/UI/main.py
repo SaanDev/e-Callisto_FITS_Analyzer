@@ -1,12 +1,18 @@
 """
 e-CALLISTO FITS Analyzer
-Version 1.7.5 - Beta (In Development)
+Version 1.7.6 (In Development)
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
 
-# main.py (TOP OF FILE, before anything else)
 import os, sys
+import platform
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
+from theme_manager import AppTheme
+from src.UI.gui_main import MainWindow
+import faulthandler
+
 
 if sys.platform.startswith("linux"):
     os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
@@ -23,9 +29,6 @@ if sys.platform.startswith("linux"):
         (os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "") + " " + extra).strip()
     )
 
-import platform
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
 
 if getattr(sys, "frozen", False):
     base_path = os.path.abspath(
@@ -37,9 +40,6 @@ else:
 if base_path not in sys.path:
     sys.path.insert(0, base_path)
 
-
-from src.UI.gui_main import MainWindow
-import faulthandler
 
 if sys.platform.startswith("linux"):
     QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
@@ -58,7 +58,11 @@ if platform.system() != "Windows":
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = MainWindow()
+
+    theme = AppTheme(app)
+    app.setProperty("theme_manager", theme)
+
+    window = MainWindow(theme=theme)
     window.showMaximized()
     #window.show()
     sys.exit(app.exec())

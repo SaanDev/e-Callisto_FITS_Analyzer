@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 1.7.4
+Version 1.7.6 (In Development)
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -22,7 +22,7 @@ from PySide6.QtCore import (
 from PySide6.QtWidgets import (
     QLabel, QPushButton, QComboBox, QVBoxLayout,
     QHBoxLayout, QDateEdit, QListWidget, QFileDialog, QMessageBox,
-    QListWidgetItem, QProgressBar, QGroupBox, QDialog
+    QListWidgetItem, QProgressBar, QGroupBox, QDialog, QApplication
 )
 
 from matplotlib.figure import Figure
@@ -175,7 +175,11 @@ class PreviewWindow(QDialog):
             ax.set_xlabel("Time bin")
             ax.set_ylabel("Frequency channel")
 
-        fig.colorbar(im, ax=ax)
+        cbar = fig.colorbar(im, ax=ax)
+
+        theme = QApplication.instance().property("theme_manager")
+        if theme:
+            theme.apply_mpl(fig, ax, cbar)
 
         layout = QVBoxLayout()
         layout.addWidget(canvas)
@@ -207,7 +211,7 @@ class CallistoDownloaderApp(QDialog):
 
         self.setWindowTitle("e-CALLISTO FITS Downloader")
         self.resize(900, 600)
-        self.setStyleSheet("QWidget { font-family: Arial, sans-serif; font-size: 13px; }")
+
 
         self.init_ui()
 

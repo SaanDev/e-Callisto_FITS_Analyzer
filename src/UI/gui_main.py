@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 1.7.5 (In Development)
+Version 1.7.6 (In Development)
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QSpinBox, QScrollArea, QFrame, QVBoxLayout, QWidget, QFileDialog, QHBoxLayout, QSizePolicy
 )
 
-from PySide6.QtGui import QAction, QPixmap, QImage, QGuiApplication, QIcon, QFontDatabase
+from PySide6.QtGui import QAction, QPixmap, QImage, QGuiApplication, QIcon, QFontDatabase, QActionGroup, QPalette
 from PySide6.QtCore import Qt
 from PySide6.QtCore import QTimer, QSize
 from src.UI.callisto_downloader import CallistoDownloaderApp
@@ -171,13 +171,17 @@ class MplCanvas(FigureCanvas):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, theme=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.theme = QApplication.instance().property("theme_manager") if QApplication.instance() else None
+        if self.theme and hasattr(self.theme, "themeChanged"):
+            self.theme.themeChanged.connect(self._on_theme_changed)
 
         #Linux Messagebox Fix
         _install_linux_msgbox_fixer()
 
-        self.setWindowTitle("e-CALLISTO FITS Analyzer 1.7.5 (In Development)")
+        self.setWindowTitle("e-CALLISTO FITS Analyzer 1.7.6 (In Development)")
         #self.resize(1000, 700)
         self.setMinimumSize(1000, 700)
 
@@ -221,6 +225,7 @@ class MainWindow(QMainWindow):
         self.remove_titles = False
 
         self._build_toolbar()
+        self._refresh_toolbar_icons()
 
         # Debounce timer for smooth slider updates
         self.noise_smooth_timer = QTimer()
@@ -238,6 +243,8 @@ class MainWindow(QMainWindow):
         self._cid_release = self.canvas.mpl_connect("button_release_event", self.on_mouse_release)
         self._cid_motion = self.canvas.mpl_connect("motion_notify_event", self.on_mouse_move)
         self._cid_motion_status = self.canvas.mpl_connect("motion_notify_event", self.on_mouse_motion_status)
+
+        self._apply_mpl_theme()
 
         self._panning = False
         self._last_pan_xy = None
@@ -651,6 +658,32 @@ class MainWindow(QMainWindow):
         goes_flux_action.triggered.connect(self.open_goes_xrs_window)
         flares_menu.addAction(goes_flux_action)
 
+        #view
+        view_menu = self.menuBar().addMenu("View")
+        theme_menu = view_menu.addMenu("Theme")
+
+        self.theme_action_system = QAction("System", self, checkable=True)
+        self.theme_action_light = QAction("Light", self, checkable=True)
+        self.theme_action_dark = QAction("Dark", self, checkable=True)
+
+        theme_group = QActionGroup(self)
+        theme_group.setExclusive(True)
+        for a in (self.theme_action_system, self.theme_action_light, self.theme_action_dark):
+            theme_group.addAction(a)
+            theme_menu.addAction(a)
+
+        # Set initial checks from saved mode
+        if self.theme:
+            m = self.theme.mode()
+            self.theme_action_system.setChecked(m == "system")
+            self.theme_action_light.setChecked(m == "light")
+            self.theme_action_dark.setChecked(m == "dark")
+
+        # Connect changes
+        self.theme_action_system.triggered.connect(lambda: self.theme.set_mode("system"))
+        self.theme_action_light.triggered.connect(lambda: self.theme.set_mode("light"))
+        self.theme_action_dark.triggered.connect(lambda: self.theme.set_mode("dark"))
+
         # About Menu
         about_menu = menubar.addMenu("About")
         about_action = QAction("About", self)
@@ -723,13 +756,40 @@ class MainWindow(QMainWindow):
 
         self.noise_reduced_original = None  # backup before lasso
 
+    def _is_dark_ui(self) -> bool:
+        # Prefer theme manager if available
+        theme = getattr(self, "theme", None)
+        if theme is not None:
+            flag = getattr(theme, "is_dark", None)
+            try:
+                if callable(flag):
+                    return bool(flag())
+                return bool(flag)
+            except Exception:
+                pass
+
+        # Fallback: infer from palette
+        app = QApplication.instance()
+        if not app:
+            return False
+        return app.palette().color(QPalette.Window).lightness() < 128
+
     def _icon(self, filename: str) -> QIcon:
-        icon_path = resource_path(os.path.join("assests", "icons", filename))
+        folder = "icons_dark" if self._is_dark_ui() else "icons"
 
-        if os.path.exists(icon_path):
-            return QIcon(icon_path)
+        # Try correct folder name first, then keep your old typo as a fallback
+        for assets_root in ("assets", "assests"):
+            icon_path = resource_path(os.path.join(assets_root, folder, filename))
+            if os.path.exists(icon_path):
+                return QIcon(icon_path)
 
-        print(f"⚠️ Icon not found: {icon_path}")
+        # Fallback to light icons if a dark one is missing
+        for assets_root in ("assets", "assests"):
+            icon_path = resource_path(os.path.join(assets_root, "icons", filename))
+            if os.path.exists(icon_path):
+                return QIcon(icon_path)
+
+        print(f"⚠️ Icon not found: {filename}")
         return QIcon()
 
     def _build_toolbar(self):
@@ -832,6 +892,117 @@ class MainWindow(QMainWindow):
         self.tb_reset_sel.setEnabled(has_noise)
         self.tb_reset_all.setEnabled(has_file)
         self._sync_nav_actions()
+
+    def _on_theme_changed(self, dark: bool):
+        self._refresh_icons()
+        self._apply_mpl_theme()
+
+        # If you have a main matplotlib canvas and colorbar:
+        # Use your real names here (example uses self.canvas + self.current_colorbar)
+        if self.theme and hasattr(self, "canvas"):
+            fig = getattr(self.canvas, "fig", None) or getattr(self.canvas, "figure", None)
+            ax = getattr(self.canvas, "ax", None)
+            if fig is not None and ax is not None:
+                self.theme.apply_mpl(fig, ax, getattr(self, "current_colorbar", None))
+
+    def _apply_mpl_theme(self):
+        """
+        Ensure Matplotlib canvas (figure, axes, and colorbar) matches the current Qt theme.
+        Call this AFTER you finish setting titles/labels/ticks.
+        """
+        if not hasattr(self, "canvas"):
+            return
+
+        fig = getattr(self.canvas, "figure", None) or getattr(self.canvas, "fig", None)
+        ax = getattr(self.canvas, "ax", None)
+        if fig is None or ax is None:
+            return
+
+        # 1) Preferred: use your theme manager if available
+        if self.theme and hasattr(self.theme, "apply_mpl"):
+            try:
+                self.theme.apply_mpl(fig, ax, getattr(self, "current_colorbar", None))
+            except Exception:
+                pass
+
+        # 2) Fallback: enforce readable colors from Qt palette (covers white bg / black text issues)
+        app = QApplication.instance()
+        if app:
+            pal = app.palette()
+            win_bg = pal.color(QPalette.Window).name()
+            base_bg = pal.color(QPalette.Base).name()
+            fg = pal.color(QPalette.WindowText).name()
+            mid = pal.color(QPalette.Mid).name()
+
+            fig.set_facecolor(win_bg)
+            ax.set_facecolor(base_bg)
+
+            for spine in ax.spines.values():
+                spine.set_color(fg)
+
+            ax.tick_params(axis="both", colors=fg, which="both")
+            ax.xaxis.label.set_color(fg)
+            ax.yaxis.label.set_color(fg)
+            ax.title.set_color(fg)
+
+            # If you use grids elsewhere, keep their color readable without forcing grid on
+            ax.grid(False)
+            ax.set_axisbelow(True)
+
+            cbar = getattr(self, "current_colorbar", None)
+            if cbar is not None:
+                cax = cbar.ax
+                cax.set_facecolor(base_bg)
+                cax.tick_params(colors=fg)
+                cax.yaxis.label.set_color(fg)
+                for spine in cax.spines.values():
+                    spine.set_color(fg)
+                try:
+                    cbar.outline.set_edgecolor(mid)
+                except Exception:
+                    pass
+
+        self.canvas.draw_idle()
+
+    def _refresh_icons(self):
+        if not self.theme:
+            return
+
+        # Example: if you have toolbar actions
+        # self.open_action.setIcon(self.theme.icon("open.svg"))
+        # self.download_action.setIcon(self.theme.icon("download.svg"))
+
+        # If you have toolbuttons:
+        # self.some_button.setIcon(self.theme.icon("lock.svg"))
+        pass
+
+    def _refresh_toolbar_icons(self):
+        # Only run after toolbar actions exist
+        for attr, fname in (
+                ("tb_open", "open.svg"),
+                ("tb_export", "export.svg"),
+                ("tb_undo", "undo.svg"),
+                ("tb_redo", "redo.svg"),
+                ("tb_download", "download.svg"),
+                ("tb_drift", "drift.svg"),
+                ("tb_isolate", "isolate.svg"),
+                ("tb_max", "max.svg"),
+                ("tb_zoom", "zoom.svg"),
+                ("tb_lock", "lock.svg"),
+                ("tb_unlock", "unlock.svg"),
+                ("tb_reset_sel", "reset_selection.svg"),
+                ("tb_reset_all", "reset_all.svg"),
+        ):
+            act = getattr(self, attr, None)
+            if act is not None:
+                act.setIcon(self._icon(fname))
+
+    def _on_theme_changed(self, dark: bool):
+        self._refresh_toolbar_icons()
+
+        # If you already added MPL theme syncing earlier, keep it too:
+        if hasattr(self, "_apply_mpl_theme"):
+            self._apply_mpl_theme()
 
     def apply_graph_properties_live(self, *_):
         """
@@ -1332,9 +1503,12 @@ class MainWindow(QMainWindow):
 
         # Apply graph properties (title/font/sizes) after plot rebuild
         self.apply_graph_properties_live()
-        self.graph_group.setEnabled(True)
 
-        self.canvas.draw()
+        # Now force the MPL colors/background to match the theme (dark/light)
+        self._apply_mpl_theme()
+
+        self.graph_group.setEnabled(True)
+        self.canvas.draw_idle()
 
         self.current_plot_type = title
         self._sync_toolbar_enabled_states()
@@ -1691,9 +1865,14 @@ class MainWindow(QMainWindow):
         # Labels
         self.canvas.ax.set_title("Isolated Burst")
         self.canvas.ax.set_ylabel("Frequency [MHz]")
+
         self.format_axes()
 
-        self.canvas.draw()
+        # Keep graph styling consistent (fonts) then apply theme colors
+        self.apply_graph_properties_live()
+        self._apply_mpl_theme()
+
+        self.canvas.draw_idle()
 
         # Replace display data with isolated data
         self.noise_reduced_data = burst_isolated
@@ -1852,7 +2031,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "About e-Callisto FITS Analyzer",
-            "e-CALLISTO FITS Analyzer version 1.7.5 (In Development).\n\n"
+            "e-CALLISTO FITS Analyzer version 1.7.6 (In Development).\n\n"
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"
@@ -2437,7 +2616,7 @@ class MaxIntensityPlotDialog(QDialog):
         QMessageBox.information(
             self,
             "About e-Callisto FITS Analyzer",
-            "e-CALLISTO FITS Analyzer version 1.7.5 (In Development).\n\n"
+            "e-CALLISTO FITS Analyzer version 1.7.6 (In Development).\n\n"
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"

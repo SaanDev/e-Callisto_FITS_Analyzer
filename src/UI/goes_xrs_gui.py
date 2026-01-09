@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 1.7.4
+Version 1.7.6 (In Development)
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -21,6 +21,7 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.widgets import RectangleSelector
 import matplotlib.dates as mdates
+from PySide6.QtGui import QPalette
 
 from PySide6.QtCore import Qt, QDate, QTimer, QObject, Signal, Slot, QThread
 from PySide6.QtWidgets import (
@@ -126,6 +127,13 @@ def fmt_timedelta_seconds(seconds: float) -> str:
     m, s = divmod(seconds, 60); h, m = divmod(m, 60)
     return f"{h:d}h {m:02d}m {s:02d}s" if h else f"{m:d}m {s:02d}s"
 
+def _get_theme():
+    app = QApplication.instance()
+    if not app:
+        return None
+    return app.property("theme_manager")
+
+
 from PySide6.QtCore import QObject, Signal, Slot, QThread
 
 class DataWorker(QObject):
@@ -152,12 +160,14 @@ class DataWorker(QObject):
             self.failed.emit(traceback.format_exc())
 
 class PlotCanvas(FigureCanvas):
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, parent: Optional[QWidget] = None, theme=None):
         self.fig = Figure(figsize=(8, 5), tight_layout=True)
         super().__init__(self.fig)
         self.ax = self.fig.add_subplot(111)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.updateGeometry()
+
+        self.theme = theme  # AppTheme or None
 
         self._times: Optional[np.ndarray] = None
         self._xrsa: Optional[np.ndarray] = None
@@ -167,6 +177,27 @@ class PlotCanvas(FigureCanvas):
 
         self.selector: Optional[RectangleSelector] = None
         self.enable_selector(True)
+
+        self.apply_theme()
+
+    def apply_theme(self):
+        theme = self.theme or _get_theme()
+        if theme:
+            theme.apply_mpl(self.fig, self.ax)
+
+        # Improve selection rectangle visibility on dark backgrounds
+        pal = QApplication.instance().palette() if QApplication.instance() else None
+        if pal and self.selector:
+            edge = pal.color(QPalette.Mid).name()
+            artist = getattr(self.selector, "_selection_artist", None)
+            if artist:
+                try:
+                    artist.set_edgecolor(edge)
+                except Exception:
+                    pass
+
+        self.draw_idle()
+
 
     def enable_selector(self, enabled: bool):
         if self.selector is None:
@@ -197,7 +228,7 @@ class PlotCanvas(FigureCanvas):
 
     def clear_plot(self):
         self.ax.clear()
-        self.draw_idle()
+        self.apply_theme()
 
     def plot_xrs(self, times, xrsa, xrsb, start_dt: datetime, end_dt: datetime, goes_num: int):
         self.ax.clear()
@@ -216,12 +247,17 @@ class PlotCanvas(FigureCanvas):
 
         flare_levels = {"A1": 1e-8, "B1": 1e-7, "C1": 1e-6, "M1": 1e-5, "X1": 1e-4}
         if len(self._times) > 0:
+            pal = QApplication.instance().palette() if QApplication.instance() else None
+            line_col = pal.color(QPalette.Mid).name() if pal else "gray"
+            text_col = pal.color(QPalette.WindowText).name() if pal else "gray"
+
             for label, level in flare_levels.items():
-                self.ax.axhline(y=level, color="gray", ls="--", lw=0.8)
-                self.ax.text(self._times[0], level * 1.15, label, color="gray", fontsize=8, va="bottom")
+                self.ax.axhline(y=level, color=line_col, ls="--", lw=0.8, alpha=0.6)
+                self.ax.text(self._times[0], level * 1.15, label, color=text_col, fontsize=8, va="bottom", alpha=0.85)
 
         self.ax.legend()
         self.fig.autofmt_xdate()
+        self.apply_theme()
         self.draw_idle()
 
     def _on_select(self, eclick, erelease):
@@ -291,6 +327,10 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("GOES XRS Plotter")
         self.resize(1250, 760)
 
+        self.theme = _get_theme()
+        if self.theme:
+            self.theme.themeChanged.connect(self._on_theme_changed)
+
         self.current_start_dt: Optional[datetime] = None
         self.current_end_dt: Optional[datetime] = None
         self.current_goes_num: int = 16  # default
@@ -300,6 +340,7 @@ class MainWindow(QMainWindow):
         root = QVBoxLayout(central); root.setSpacing(0)
 
         top_panel = QWidget(objectName="top_panel")
+        self.top_panel = top_panel
         top_panel_layout = QHBoxLayout(top_panel)
         top_panel_layout.setContentsMargins(12, 12, 12, 12)
         top_panel_layout.setSpacing(16)
@@ -376,12 +417,16 @@ class MainWindow(QMainWindow):
         top_panel_layout.addWidget(info_group, 2)
         root.addWidget(top_panel, 0)
 
-        divider = QFrame(); divider.setFrameShape(QFrame.HLine); divider.setFrameShadow(QFrame.Plain)
-        divider.setStyleSheet("background:#ffffff; min-height:2px; max-height:2px;"); root.addWidget(divider)
+        divider = QFrame()
+        divider.setFrameShape(QFrame.HLine)
+        divider.setFrameShadow(QFrame.Sunken)
+        divider.setLineWidth(1)
+        root.addWidget(divider)
 
         bottom = QWidget(); bottom_layout = QVBoxLayout(bottom)
         bottom_layout.setContentsMargins(12, 12, 12, 12); bottom_layout.setSpacing(8)
-        self.canvas = PlotCanvas(self); bottom_layout.addWidget(self.canvas, 1)
+        self.canvas = PlotCanvas(self, theme=self.theme);
+        bottom_layout.addWidget(self.canvas, 1)
         root.addWidget(bottom, 1)
 
         self.sb = self.statusBar()
@@ -391,11 +436,26 @@ class MainWindow(QMainWindow):
         self.progress.setMinimumWidth(200); self.progress.setVisible(False)
         self.sb.addPermanentWidget(self.progress, 1)
 
-        self.setStyleSheet("#top_panel { background: #f7f7f7; }")
+
         self.canvas.on_flare_info = self.update_flare_info
 
         self.thread: Optional[QThread] = None
         self.worker: Optional[DataWorker] = None
+
+        self._apply_theme_to_panels()
+
+    def _apply_theme_to_panels(self):
+        # Give the top panel a slightly distinct background that works in both themes
+        pal = self.top_panel.palette()
+        app_pal = QApplication.instance().palette()
+        pal.setColor(QPalette.Window, app_pal.color(QPalette.AlternateBase))
+        self.top_panel.setAutoFillBackground(True)
+        self.top_panel.setPalette(pal)
+
+    def _on_theme_changed(self, dark: bool):
+        self._apply_theme_to_panels()
+        if self.canvas:
+            self.canvas.apply_theme()
 
     def start_progress(self, text: str = "", indeterminate: bool = True):
         self.sb.showMessage(text)
@@ -518,6 +578,12 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Save Error", str(e))
 
+        theme = QApplication.instance().property("theme_manager")
+        if theme:
+            theme.apply_mpl(self.canvas.fig, self.canvas.ax)
+
+
+
     def on_save_data(self):
         t = self.canvas._times; a = self.canvas._xrsa; b = self.canvas._xrsb
         if t is None or a is None or b is None or len(t) == 0:
@@ -566,9 +632,17 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+
+    # If the GOES module is launched standalone, create the theme manager
+    if app.property("theme_manager") is None:
+        from theme_manager import AppTheme
+        theme = AppTheme(app)
+        app.setProperty("theme_manager", theme)
+
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
+
 
 if __name__ == "__main__":
     main()
