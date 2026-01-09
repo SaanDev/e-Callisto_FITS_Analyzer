@@ -778,19 +778,55 @@ class MainWindow(QMainWindow):
     def _icon(self, filename: str) -> QIcon:
         folder = "icons_dark" if self._is_dark_ui() else "icons"
 
-        # Try correct folder name first, then keep your old typo as a fallback
-        for assets_root in ("assets", "assests"):
-            icon_path = resource_path(os.path.join(assets_root, folder, filename))
-            if os.path.exists(icon_path):
-                return QIcon(icon_path)
+        rels = [
+            os.path.join("assests", folder, filename),
+            os.path.join("assests", "icons", filename),  # fallback to light icons
+        ]
 
-        # Fallback to light icons if a dark one is missing
-        for assets_root in ("assets", "assests"):
-            icon_path = resource_path(os.path.join(assets_root, "icons", filename))
-            if os.path.exists(icon_path):
-                return QIcon(icon_path)
+        bases = []
 
-        print(f"⚠️ Icon not found: {filename}")
+        if getattr(sys, "frozen", False):
+            bases.append(os.path.abspath(os.path.join(os.path.dirname(sys.executable), "..", "Resources")))
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            bases.append(os.path.abspath(meipass))
+
+        here = os.path.abspath(os.path.dirname(__file__))
+        bases.extend([
+            os.path.abspath(os.path.join(here, "..", "..")),  # project root (src/UI -> root)
+            os.path.abspath(os.path.join(here, "..", "..", "..")),  # one more up (safe)
+            os.path.abspath(os.getcwd()),
+            os.path.abspath(os.path.join(os.getcwd(), "..")),
+        ])
+
+        seen = set()
+        uniq_bases = []
+        for b in bases:
+            if b and b not in seen:
+                seen.add(b)
+                uniq_bases.append(b)
+
+        for b in uniq_bases:
+            for rel in rels:
+                p = os.path.normpath(os.path.join(b, rel))
+                if os.path.exists(p):
+                    return QIcon(p)
+
+        for rel in rels:
+            try:
+                p = resource_path(rel)
+                if os.path.exists(p):
+                    return QIcon(p)
+            except Exception:
+                pass
+
+        # Avoid spamming the console with the same missing icon message
+        if not hasattr(self, "_missing_icons"):
+            self._missing_icons = set()
+        if filename not in self._missing_icons:
+            self._missing_icons.add(filename)
+            print(f"⚠️ Icon not found: {filename}")
+
         return QIcon()
 
     def _build_toolbar(self):
