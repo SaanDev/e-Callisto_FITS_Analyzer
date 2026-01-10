@@ -66,6 +66,7 @@ a = Analysis(
         "src.UI.matplotlib_widget",
         "src.UI.soho_lasco_viewer",
         "src.UI.goes_xrs_gui",
+        "src.UI.theme_manager",
 
         "PySide6.QtNetwork",
         "PySide6.QtPrintSupport",

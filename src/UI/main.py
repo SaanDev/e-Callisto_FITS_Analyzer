@@ -9,7 +9,7 @@ import os, sys
 import platform
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
-from theme_manager import AppTheme
+from src.UI.theme_manager import AppTheme
 from src.UI.gui_main import MainWindow
 import faulthandler
 
