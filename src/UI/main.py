@@ -13,7 +13,7 @@ from theme_manager import AppTheme
 from src.UI.gui_main import MainWindow
 import faulthandler
 
-
+#linux
 if sys.platform.startswith("linux"):
     os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
     os.environ.setdefault("QT_OPENGL", "software")
