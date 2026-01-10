@@ -1437,7 +1437,7 @@ class MainWindow(QMainWindow):
         self.noise_vmin = data.min()
         self.noise_vmax = data.max()
 
-        self.plot_data(data, title="Noise Reduced")
+        self.plot_data(data, title="Background Substracted")
 
         # enable tools
         self._sync_toolbar_enabled_states()
@@ -1790,7 +1790,7 @@ class MainWindow(QMainWindow):
 
     def activate_lasso(self):
         if self.noise_reduced_data is None:
-            QMessageBox.warning(self, "Error", "Please apply noise reduction before isolating a burst.")
+            QMessageBox.warning(self, "Error", "Please apply background substraction before isolating a burst.")
             return
 
         self.canvas.mpl_disconnect(self._cid_press)
