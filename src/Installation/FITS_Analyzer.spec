@@ -13,7 +13,7 @@ MAIN = PROJECT / "src" / "UI" / "main.py"
 
 #fix
 # Change this if your folder name is different.
-ASSETS_DIR = PROJECT / "assets"
+ASSETS_DIR = PROJECT / "assests"
 
 a = Analysis(
     [str(MAIN)],
@@ -21,7 +21,7 @@ a = Analysis(
     binaries=[],
     datas=[
         (str(ASSETS_DIR / "FITS_analyzer.png"), "."),
-        (str(ASSETS_DIR / "icons"), "assets/icons"),
+        (str(ASSETS_DIR / "icons"), "assests/icons"),
 
         # Required backend files for exporting
         (backend_pdf.__file__, "matplotlib/backends"),
@@ -56,6 +56,9 @@ a = Analysis(
         "scipy",
         "cftime",
         "netCDF4",
+        'src',
+        'src.UI',
+        'src.Backend',
 
         "src.UI.callisto_downloader",
         "src.Backend.burst_processor",

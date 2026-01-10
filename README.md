@@ -24,7 +24,7 @@ After launching the application, the main window opens with tools for loading FI
 In version 1.7.4, the main function buttons were replaced by a compact **icon toolbar** for quicker access and a cleaner layout.
 
 ### **Main Window**
-![Main Window](assests/main_window.png)
+![Main Window](assets/main_window.png)
 
 ---
 
@@ -54,7 +54,7 @@ Features:
 - No data are lost when switching x-axis units (seconds ↔ UT)
 
 ### Example: Noise Reduction
-![Noise Reduction](assests/noise_reduction.png)
+![Noise Reduction](assets/noise_reduction.png)
 
 ---
 
@@ -137,7 +137,7 @@ Click **Isolate Burst** and draw around the emission region.
 Only the selected region is retained for further analysis.
 
 ### Example: Isolated Burst
-![Isolated Burst](assests/burst_isolation.png)
+![Isolated Burst](assets/burst_isolation.png)
 
 ---
 
@@ -146,7 +146,7 @@ Only the selected region is retained for further analysis.
 Click **Plot Maximum Intensities** to compute the maximum frequency for each time channel after noise reduction or burst isolation.
 
 ### Example: Maximum Intensities
-![Maximum Intensities](assests/maximum_intensity.png)
+![Maximum Intensities](assets/maximum_intensity.png)
 
 ---
 
@@ -177,7 +177,7 @@ Optional additional plots:
 - Height vs frequency
 
 ### Example: Analyzer
-![Analyzer](assests/analysis.png)
+![Analyzer](assets/analysis.png)
 
 Export options:
 
@@ -202,9 +202,9 @@ Features:
 - Clear error messages when selected files cannot be combined
 
 ### Example: Downloader
-![Downloader](assests/callisto_downloader.png)
+![Downloader](assets/callisto_downloader.png)
 
-![Downloader](assests/callisto_downloader_preview.png)
+![Downloader](assets/callisto_downloader_preview.png)
 
 ---
 
@@ -253,7 +253,7 @@ Features:
 - Event metadata panel
 
 ### Example: CME Viewer
-![CME Viewer](assests/cme_catalog.png)
+![CME Viewer](assets/cme_catalog.png)
 
 ---
 
@@ -268,7 +268,7 @@ Features:
 - Export plots and data
 
 ### Example: GOES X-Ray Viewer
-![GOES X-Ray](assests/goes_xray.png)
+![GOES X-Ray](assets/goes_xray.png)
 
 ---
 

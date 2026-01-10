@@ -12,18 +12,18 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 APP = ['src/UI/main.py']
-DATA_FILES = ['assests/icon.icns',
-    ('assests/icons', [
-        'assests/icons/open.svg',
-        'assests/icons/export.svg',
-        'assests/icons/undo.svg',
-        'assests/icons/redo.svg',
-        'assests/icons/download.svg',
-        'assests/icons/drift.svg',
-        'assests/icons/isolate.svg',
-        'assests/icons/max.svg',
-        'assests/icons/reset_selection.svg',
-        'assests/icons/reset_all.svg',
+DATA_FILES = ['assets/icon.icns',
+    ('assets/icons', [
+        'assets/icons/open.svg',
+        'assets/icons/export.svg',
+        'assets/icons/undo.svg',
+        'assets/icons/redo.svg',
+        'assets/icons/download.svg',
+        'assets/icons/drift.svg',
+        'assets/icons/isolate.svg',
+        'assets/icons/max.svg',
+        'assets/icons/reset_selection.svg',
+        'assets/icons/reset_all.svg',
     ])
 ]
 
@@ -100,7 +100,7 @@ OPTIONS = {
     "qt_plugins": ["platforms", "imageformats", "iconengines", "styles"],
 
 
-    'iconfile': 'assests/icon.icns',
+    'iconfile': 'assets/icon.icns',
 
     'resources': [],
 

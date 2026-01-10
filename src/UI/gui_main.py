@@ -777,8 +777,8 @@ class MainWindow(QMainWindow):
         folder = "icons_dark" if self._is_dark_ui() else "icons"
 
         rels = [
-            os.path.join("assests", folder, filename),
-            os.path.join("assests", "icons", filename),  # fallback to light icons
+            os.path.join("assets", folder, filename),
+            os.path.join("assets", "icons", filename),  # fallback to light icons
         ]
 
         bases = []
