@@ -2076,21 +2076,46 @@ class MainWindow(QMainWindow):
         dialog = CombineTimeDialog(self)
         dialog.exec()
 
+    def _set_checked_if_exists(self, attr_name: str, checked: bool):
+        obj = getattr(self, attr_name, None)
+        if obj is None:
+            return
+        try:
+            was_blocked = obj.blockSignals(True)
+            obj.setChecked(checked)
+        except Exception:
+            pass
+        finally:
+            try:
+                obj.blockSignals(was_blocked)
+            except Exception:
+                pass
+
     def set_axis_to_seconds(self):
-        self._push_undo_state()
         self.use_utc = False
-        self.xaxis_sec_action.setChecked(True)
-        self.xaxis_ut_action.setChecked(False)
+
+        # Old Graph-menu actions (may not exist anymore)
+        self._set_checked_if_exists("xaxis_sec_action", True)
+        self._set_checked_if_exists("xaxis_ut_action", False)
+
+        # If you are using radio buttons, store them as these names (optional)
+        self._set_checked_if_exists("xaxis_sec_radio", True)
+        self._set_checked_if_exists("xaxis_ut_radio", False)
 
         if self.raw_data is not None:
             data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
             self.plot_data(data, title=self.current_plot_type, keep_view=True)
 
     def set_axis_to_utc(self):
-        self._push_undo_state()
         self.use_utc = True
-        self.xaxis_sec_action.setChecked(False)
-        self.xaxis_ut_action.setChecked(True)
+
+        # Old Graph-menu actions (may not exist anymore)
+        self._set_checked_if_exists("xaxis_sec_action", False)
+        self._set_checked_if_exists("xaxis_ut_action", True)
+
+        # If you are using radio buttons, store them as these names (optional)
+        self._set_checked_if_exists("xaxis_sec_radio", False)
+        self._set_checked_if_exists("xaxis_ut_radio", True)
 
         if self.raw_data is not None:
             data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
