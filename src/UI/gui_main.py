@@ -2758,6 +2758,17 @@ class AnalyzeDialog(QDialog):
         self.fold_calc_button.setEnabled(False)  # enable only after Best Fit
         self.fold_calc_button.clicked.connect(self.recalculate_shock_parameters)
 
+        # Put fold controls into a widget so it can live inside self.labels
+        self.fold_row_widget = QWidget()
+        fold_row_layout = QHBoxLayout(self.fold_row_widget)
+        fold_row_layout.setContentsMargins(0, 0, 0, 0)
+        fold_row_layout.addWidget(self.fold_label)
+        fold_row_layout.addWidget(self.fold_combo)
+        fold_row_layout.addWidget(self.fold_calc_button)
+
+        # Optional: keeps it neat
+        self.fold_combo.setFixedWidth(70)
+
         self.equation_label = QLabel("Best Fit Equation:")
         self.equation_display = QLabel("")
         self.equation_display.setTextFormat(Qt.RichText)
@@ -2777,6 +2788,7 @@ class AnalyzeDialog(QDialog):
         self.avg_shock_height_display = QLabel("")
 
         self.labels = [
+            self.fold_row_widget,
             self.equation_label, self.equation_display,
             self.stats_header, self.r2_display, self.rmse_display,
             self.shock_header,
@@ -2788,15 +2800,9 @@ class AnalyzeDialog(QDialog):
         ]
 
         right_inner = QVBoxLayout()
-
-        fold_row = QHBoxLayout()
-        fold_row.addWidget(self.fold_label)
-        fold_row.addWidget(self.fold_combo)
-        fold_row.addWidget(self.fold_calc_button)
-        right_inner.addLayout(fold_row)
-
         for widget in self.labels:
             right_inner.addWidget(widget)
+        right_inner.addStretch()
 
         right_inner.addStretch()
 
