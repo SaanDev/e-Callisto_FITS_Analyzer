@@ -36,7 +36,7 @@ from matplotlib.ticker import FuncFormatter, ScalarFormatter
 import csv
 import matplotlib.pyplot as plt
 from openpyxl import load_workbook, Workbook
-from mpl_style import style_axes
+from src.UI.mpl_style import style_axes
 from PySide6.QtCore import QObject, QEvent
 from PySide6.QtWidgets import QLayout
 

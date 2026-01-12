@@ -50,11 +50,9 @@ if sys.platform.startswith("linux"):
     QApplication.setAttribute(Qt.AA_UseSoftwareOpenGL, True)
 
 #Uncomment when building with Windows
-""""
 app = QApplication(sys.argv)
 if sys.platform.startswith("win"):
     app.setStyle("Fusion")
-"""
 
 if platform.system() != "Windows":
     faulthandler.enable()
