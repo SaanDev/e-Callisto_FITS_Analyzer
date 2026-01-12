@@ -1417,7 +1417,7 @@ class MainWindow(QMainWindow):
         self.noise_vmin = data.min()
         self.noise_vmax = data.max()
 
-        self.plot_data(data, title="Background Substracted")
+        self.plot_data(data, title="Background Subtracted")
 
         # enable tools
         self._sync_toolbar_enabled_states()

@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import tempfile
 from urllib.parse import urljoin
-
+import numpy as np
 import requests
 from bs4 import BeautifulSoup
 from astropy.io import fits
@@ -142,38 +142,112 @@ class PreviewWindow(QDialog):
         self.setMinimumSize(900, 600)
 
         # Astropy can open .fit and .fit.gz paths directly
-        with fits.open(file_path) as hdul:
-            data = hdul[0].data
+        with fits.open(file_path, memmap=False) as hdul:
+            data = np.array(hdul[0].data, dtype=float)
+            data = np.squeeze(data)
 
-            # Many CALLISTO FITS have freq/time in extension 1
+            # If extra dimensions exist, keep the last 2D plane
+            while data.ndim > 2:
+                data = data[0]
+
             freqs = None
             times = None
-            if len(hdul) > 1 and hasattr(hdul[1], "data") and hdul[1].data is not None:
-                cols = getattr(hdul[1].data, "columns", None)
-                # Safer access for common schemas
-                try:
-                    if "frequency" in hdul[1].data.names:
-                        freqs = hdul[1].data["frequency"][0]
-                    if "time" in hdul[1].data.names:
-                        times = hdul[1].data["time"][0]
-                except Exception:
-                    freqs = None
-                    times = None
+
+            def _col_to_1d(col):
+                if col is None:
+                    return None
+                arr = np.array(col)
+                if arr.ndim == 0:
+                    return None
+                if arr.ndim == 1:
+                    return arr.astype(float)
+                # If it's 2D (repeated rows), take the first row
+                return arr[0].astype(float)
+
+            # Try to read from extension 1 table (common in CALLISTO)
+            if len(hdul) > 1 and getattr(hdul[1], "data", None) is not None:
+                t = hdul[1].data
+                names = [n.lower() for n in getattr(t, "names", [])]
+
+                def _get(name):
+                    if not names:
+                        return None
+                    for n in t.names:
+                        if n.lower() == name:
+                            return t[n]
+                    return None
+
+                # IMPORTANT: do NOT index [0] or [-1] here
+                freq_col = _get("frequency")
+                if freq_col is None:
+                    freq_col = _get("freq")
+                freqs = _col_to_1d(freq_col)
+
+                time_col = _get("time")
+                if time_col is None:
+                    time_col = _get("times")
+                times = _col_to_1d(time_col)
+
+            # If still missing, use header linear WCS if available
+            hdr = hdul[0].header
+
+            def _axis_from_header(axis_num, length):
+                crval = hdr.get(f"CRVAL{axis_num}", None)
+                cdelt = hdr.get(f"CDELT{axis_num}", None)
+                crpix = hdr.get(f"CRPIX{axis_num}", 1.0)
+                if crval is None or cdelt is None:
+                    return None
+                i = np.arange(length, dtype=float) + 1.0  # FITS is 1-based
+                return crval + (i - float(crpix)) * float(cdelt)
+
+            if freqs is None:
+                # Usually axis 2 is frequency for (freq, time)
+                freqs = _axis_from_header(2, data.shape[0])
+
+            if times is None:
+                # Usually axis 1 is time
+                times = _axis_from_header(1, data.shape[1])
+
+            # If table axes are swapped (data is time x freq), fix it
+            if freqs is not None and times is not None:
+                if data.shape[0] == len(times) and data.shape[1] == len(freqs):
+                    data = data.T
+
+            # Mean background subtraction (per-frequency channel across time)
+            #if data.ndim == 2:
+                #bg = np.nanmean(data, axis=1, keepdims=True)
+                #data = data - bg
 
         fig = Figure()
         canvas = FigureCanvas(fig)
         ax = fig.add_subplot(111)
 
-        # If we do not have time/freq arrays, plot without extent
         if freqs is not None and times is not None and len(freqs) > 1 and len(times) > 1:
-            extent = [0, float(times[-1]), float(freqs[-1]), float(freqs[0])]
-            im = ax.imshow(data, aspect="auto", extent=extent, cmap="inferno")
+            freqs = np.array(freqs, dtype=float).ravel()
+            times = np.array(times, dtype=float).ravel()
+
+            fmin = float(np.nanmin(freqs))
+            fmax = float(np.nanmax(freqs))
+            tmax = float(np.nanmax(times))
+
+            # If freqs are descending (high -> low), row 0 should be at the top
+            origin = "upper" if freqs[0] > freqs[-1] else "lower"
+
+            extent = [fmin, tmax, fmin, fmax]
+            im = ax.imshow(data, aspect="auto", extent=extent, origin=origin, cmap="inferno")
+
             ax.set_xlabel("Time [s]")
             ax.set_ylabel("Frequency [MHz]")
+
+            # Force visible y-axis to start at 0 MHz
+            ax.set_ylim(fmin, fmax)
+
         else:
-            im = ax.imshow(data, aspect="auto", cmap="inferno")
+            # Fallback: show channels, but keep 0 at bottom (not inverted)
+            im = ax.imshow(data, aspect="auto", origin="lower", cmap="inferno")
             ax.set_xlabel("Time bin")
             ax.set_ylabel("Frequency channel")
+            ax.set_ylim(0.0, float(data.shape[0] - 1))
 
         cbar = fig.colorbar(im, ax=ax)
 
