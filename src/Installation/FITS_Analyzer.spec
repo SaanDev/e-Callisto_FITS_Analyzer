@@ -1,3 +1,10 @@
+
+#e-CALLISTO FITS Analyzer
+#Version 1.7.6
+#Sahan S Liyanage (sahanslst@gmail.com)
+#Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
+
+
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
 
@@ -67,6 +74,7 @@ a = Analysis(
         "src.UI.soho_lasco_viewer",
         "src.UI.goes_xrs_gui",
         "src.UI.theme_manager",
+        "src.UI.mpl_style",
 
         "PySide6.QtNetwork",
         "PySide6.QtPrintSupport",
