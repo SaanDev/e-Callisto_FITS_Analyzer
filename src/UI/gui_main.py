@@ -582,10 +582,17 @@ class MainWindow(QMainWindow):
         self.save_action.setEnabled(False)
         file_menu.addAction(self.save_action)
 
-        # --- Export As ---
-        self.export_action = QAction("Export As", self)
-        file_menu.addAction(self.export_action)
-        self.export_action.triggered.connect(self.export_figure)
+        # --- Export As submenu ---
+        export_menu = QMenu("Export As", self)
+        file_menu.addMenu(export_menu)
+
+        self.export_figure_action = QAction("Export Figure", self)
+        export_menu.addAction(self.export_figure_action)
+        self.export_figure_action.triggered.connect(self.export_figure)
+
+        self.export_fits_action = QAction("Export to FIT", self)
+        export_menu.addAction(self.export_fits_action)
+        self.export_fits_action.triggered.connect(self.export_to_fits)
 
         # Edit Menu
         edit_menu = menubar.addMenu("Edit")
@@ -719,6 +726,14 @@ class MainWindow(QMainWindow):
         self.time = None
         self.filename = ""
         self.current_plot_type = "Raw"  # or "NoiseReduced" or "Isolated"
+
+        # FITS export metadata
+        self._fits_header0 = None  # primary header template
+        self._fits_source_path = None  # original single-file path (if any)
+
+        self._is_combined = False
+        self._combined_mode = None  # "time" or "frequency"
+        self._combined_sources = []  # list of source files used to combine
 
         self.lasso = None
         self.lasso_mask = None
@@ -1205,6 +1220,14 @@ class MainWindow(QMainWindow):
 
             # UT start
             hdr = hdul[0].header
+            # Store header template for Export to FITS
+            self._fits_header0 = hdr.copy()
+            self._fits_source_path = file_path
+
+            self._is_combined = False
+            self._combined_mode = None
+            self._combined_sources = []
+
             hh, mm, ss = hdr['TIME-OBS'].split(":")
             self.ut_start_sec = int(hh) * 3600 + int(mm) * 60 + float(ss)
             hdul.close()
@@ -1365,22 +1388,28 @@ class MainWindow(QMainWindow):
 
     def load_fits_into_main(self, file_path):
         hdul = fits.open(file_path)
-        self.raw_data = hdul[0].data
-        self.freqs = hdul[1].data['frequency'][0]
-        self.time = hdul[1].data['time'][0]
-        self.filename = os.path.basename(file_path)
-
         try:
-            hdr = hdul[0].header
-            hh, mm, ss = hdr['TIME-OBS'].split(":")
-            hh = int(hh)
-            mm = int(mm)
-            ss = float(ss)
-            self.ut_start_sec = hh * 3600 + mm * 60 + ss
-        except Exception:
-            self.ut_start_sec = None
+            self.raw_data = hdul[0].data
+            self.freqs = hdul[1].data['frequency'][0]
+            self.time = hdul[1].data['time'][0]
+            self.filename = os.path.basename(file_path)
 
-        hdul.close()
+            # header template
+            hdr = hdul[0].header
+            self._fits_header0 = hdr.copy()
+            self._fits_source_path = file_path
+
+            self._is_combined = False
+            self._combined_mode = None
+            self._combined_sources = []
+
+            try:
+                hh, mm, ss = hdr['TIME-OBS'].split(":")
+                self.ut_start_sec = int(hh) * 3600 + int(mm) * 60 + float(ss)
+            except Exception:
+                self.ut_start_sec = None
+        finally:
+            hdul.close()
 
         self.plot_data(self.raw_data, title="Raw Data")
 
@@ -1390,6 +1419,16 @@ class MainWindow(QMainWindow):
         self.time = combined["time"]
         self.filename = combined.get("filename", "Combined")
         self.ut_start_sec = combined.get("ut_start_sec", None)
+
+        # metadata for Export to FITS
+        self._is_combined = True
+        self._combined_mode = combined.get("combine_type", None)
+        self._combined_sources = combined.get("sources", [])
+
+        hdr0 = combined.get("header0", None)
+        self._fits_header0 = hdr0.copy() if hdr0 is not None else None
+        self._fits_source_path = None
+
         self.plot_data(self.raw_data, title="Combined Data")
 
     def schedule_noise_update(self):
@@ -2002,6 +2041,96 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Export Failed", f"An error occurred:\n{e}")
 
+    def export_to_fits(self):
+        if self.raw_data is None or self.freqs is None or self.time is None:
+            QMessageBox.warning(self, "No Data", "Load a FITS file before exporting.")
+            return
+
+        # Pick exactly what is currently shown
+        data_to_save = getattr(self, "current_display_data", None)
+        if data_to_save is None:
+            data_to_save = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
+
+        # Default filename
+        base = os.path.splitext(self.filename)[0] if self.filename else "export"
+        suffix = ""
+        if self._is_combined:
+            if self._combined_mode == "time":
+                suffix = "_combined_time"
+            elif self._combined_mode == "frequency":
+                suffix = "_combined_frequency"
+            else:
+                suffix = "_combined"
+        else:
+            suffix = "_noise_reduced" if self.noise_reduced_data is not None else "_raw"
+
+        default_name = f"{base}{suffix}.fit"
+
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export to FITS",
+            default_name,
+            "FITS files (*.fit *.fits *.fit.gz *.fits.gz)"
+        )
+        if not save_path:
+            return
+
+        # Ensure extension
+        lower = save_path.lower()
+        if not (lower.endswith(".fit") or lower.endswith(".fits") or lower.endswith(".fit.gz") or lower.endswith(
+                ".fits.gz")):
+            save_path += ".fit"
+
+        # Header template
+        if self._fits_header0 is not None:
+            hdr0 = self._fits_header0.copy()
+        else:
+            hdr0 = fits.Header()
+
+        # Mark what this file is
+        hdr0["HISTORY"] = "Exported by e-CALLISTO FITS Analyzer"
+        hdr0["HISTORY"] = f"Export plot type: {self.current_plot_type}"
+        hdr0["HISTORY"] = f"Units shown: {'dB' if getattr(self, 'use_db', False) else 'Digits'}"
+
+        if self._is_combined:
+            hdr0["COMBINED"] = True
+            if self._combined_mode:
+                hdr0["COMBMETH"] = str(self._combined_mode)
+            hdr0["NFILES"] = len(self._combined_sources) if self._combined_sources else 0
+            if self._combined_sources:
+                hdr0["HISTORY"] = f"First source: {os.path.basename(self._combined_sources[0])}"
+                hdr0["HISTORY"] = f"Last source: {os.path.basename(self._combined_sources[-1])}"
+        else:
+            hdr0["COMBINED"] = False
+            if self._fits_source_path:
+                hdr0["HISTORY"] = f"Source: {os.path.basename(self._fits_source_path)}"
+
+        # Save BUNIT if you want the file to be self-describing
+        hdr0["BUNIT"] = "dB" if getattr(self, "use_db", False) else "Digits"
+
+        # Build FITS HDUs
+        primary = fits.PrimaryHDU(data=np.asarray(data_to_save), header=hdr0)
+
+        freqs = np.asarray(self.freqs, dtype=np.float32)
+        times = np.asarray(self.time, dtype=np.float32)
+
+        cols = fits.ColDefs([
+            fits.Column(name="frequency", format=f"{freqs.size}E", array=[freqs]),
+            fits.Column(name="time", format=f"{times.size}E", array=[times]),
+        ])
+        axis_hdu = fits.BinTableHDU.from_columns(cols)
+        axis_hdu.header["EXTNAME"] = "AXIS"
+
+        hdul = fits.HDUList([primary, axis_hdu])
+
+        try:
+            hdul.writeto(save_path, overwrite=True, output_verify="silentfix")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", f"Could not write FITS file:\n{e}")
+            return
+
+        self.statusBar().showMessage(f"Exported FITS: {os.path.basename(save_path)}", 5000)
+
     def reset_all(self):
         # Safely remove colorbar
         try:
@@ -2181,7 +2310,14 @@ class MainWindow(QMainWindow):
         try:
             if are_time_combinable(local_files):
                 combined = combine_time(local_files)
+                combined["combine_type"] = "time"
+                combined["sources"] = list(local_files)
+                try:
+                    combined["header0"] = fits.getheader(local_files[0], 0)
+                except Exception:
+                    combined["header0"] = None
                 self.load_combined_into_main(combined)
+
                 self.downloader_dialog.import_success.emit()
                 return
 
