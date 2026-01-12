@@ -36,7 +36,7 @@ from matplotlib.ticker import FuncFormatter, ScalarFormatter
 import csv
 import matplotlib.pyplot as plt
 from openpyxl import load_workbook, Workbook
-
+from mpl_style import style_axes
 from PySide6.QtCore import QObject, QEvent
 from PySide6.QtWidgets import QLayout
 
@@ -234,8 +234,7 @@ class MainWindow(QMainWindow):
 
         # Canvas
         self.canvas = MplCanvas(self, width=10, height=6)
-        self.canvas.figure.clf()
-        self.canvas.ax = self.canvas.figure.add_subplot(111)
+        style_axes(self.canvas.ax)
 
         self.canvas.mpl_connect("scroll_event", self.on_scroll_zoom)
         self._cid_press = self.canvas.mpl_connect("button_press_event", self.on_mouse_press)
@@ -1523,6 +1522,7 @@ class MainWindow(QMainWindow):
 
         # Now force the MPL colors/background to match the theme (dark/light)
         self._apply_mpl_theme()
+        style_axes(self.canvas.ax)
 
         self.graph_group.setEnabled(True)
         self.canvas.draw_idle()
@@ -1835,6 +1835,7 @@ class MainWindow(QMainWindow):
         self.canvas.ax.clear()
         self.canvas.figure.clf()
         self.canvas.ax = self.canvas.figure.add_subplot(111)
+        style_axes(self.canvas.ax)
 
         # Remove old colorbar safely
         try:
@@ -2444,6 +2445,7 @@ class MaxIntensityPlotDialog(QDialog):
         self.canvas = MplCanvas(self, width=10, height=6)
         self.canvas.figure.clf()
         self.canvas.ax = self.canvas.figure.add_subplot(111)
+        style_axes(self.canvas.ax)
         self.canvas.ax.scatter(self.time_channels, self.freqs, marker="o", s=5, color='red')
         self.canvas.ax.set_xlabel("Time Channel Number")
         self.canvas.ax.set_ylabel("Frequency (MHz)")
@@ -2559,6 +2561,7 @@ class MaxIntensityPlotDialog(QDialog):
         self.canvas.ax.clear()
         self.canvas.figure.clf()
         self.canvas.ax = self.canvas.figure.add_subplot(111)
+        style_axes(self.canvas.ax)
 
         self.canvas.ax.scatter(self.time_channels, self.freqs, marker="o", s=5, color='red')
         self.canvas.ax.set_xlabel("Time Channel Number")
@@ -2714,6 +2717,7 @@ class AnalyzeDialog(QDialog):
         self.canvas = MplCanvas(self, width=8, height=5)
         self.canvas.figure.clf()
         self.canvas.ax = self.canvas.figure.add_subplot(111)
+        style_axes(self.canvas.ax)
 
         # Buttons
         self.max_button = QPushButton("Maximum Intensities")
@@ -2866,6 +2870,7 @@ class AnalyzeDialog(QDialog):
         self.canvas.ax.clear()
         self.canvas.figure.clf()
         self.canvas.ax = self.canvas.figure.add_subplot(111)
+        style_axes(self.canvas.ax)
 
         self.canvas.ax.scatter(self.time, self.freq, s=10, color='blue', label="Original Data")
         self.canvas.ax.plot(time_fit, freq_fit, color='red', label=fr"Best Fit: $f = {a:.2f} \cdot t^{{{b:.2f}}}$")
@@ -3287,6 +3292,7 @@ class CombineFrequencyDialog(QDialog):
 
             # Plot image
             fig, ax = plt.subplots(figsize=(6, 4))
+            style_axes(ax)
             extent = [0, self.combined_time[-1], self.combined_freqs[-1], self.combined_freqs[0]]
             cmap = mcolors.LinearSegmentedColormap.from_list("custom", [(0.0, 'blue'), (0.5, 'red'), (1.0, 'yellow')])
             ax.imshow(self.combined_data, aspect='auto', extent=extent, cmap=cmap)
@@ -3464,6 +3470,7 @@ class CombineTimeDialog(QDialog):
 
             # Plot preview
             fig, ax = plt.subplots(figsize=(6, 4))
+            style_axes(ax)
             extent = [combined_time[0], combined_time[-1], reference_freqs[-1], reference_freqs[0]]
             cmap = LinearSegmentedColormap.from_list('custom_cmap', [(0, 'darkblue'), (1, 'orange')])
             im = ax.imshow(combined_data, aspect='auto', extent=extent, cmap=cmap)
