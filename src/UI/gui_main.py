@@ -616,49 +616,31 @@ class MainWindow(QMainWindow):
         download_menu.addAction(launch_downloader_action)
         launch_downloader_action.triggered.connect(self.launch_downloader)
 
-        # Combine Menu
-        combine_menu = menubar.addMenu("Combine FITS")
+        # Solar Events Menu
+        solar_events_menu = menubar.addMenu("Solar Events")
 
-        combine_freq_action = QAction("Combine Frequency", self)
-        combine_freq_action.triggered.connect(self.open_combine_freq_window)
-        combine_menu.addAction(combine_freq_action)
-
-        combine_time_action = QAction("Combine Time", self)
-        combine_time_action.triggered.connect(self.open_combine_time_window)
-        combine_menu.addAction(combine_time_action)
-
-        # Graph Menu
-        graph_menu = menubar.addMenu("Graph")
-
-        xaxis_unit_menu = QMenu("x-axis units", self)
-        self.xaxis_sec_action = QAction("Seconds (s)", self, checkable=True)
-        self.xaxis_ut_action = QAction("Universal Time (UT)", self, checkable=True)
-
-        # Make "Seconds" default
-        self.xaxis_sec_action.setChecked(True)
-
-        xaxis_unit_menu.addAction(self.xaxis_sec_action)
-        xaxis_unit_menu.addAction(self.xaxis_ut_action)
-        graph_menu.addMenu(xaxis_unit_menu)
-
-        # Toggle logic
-        self.xaxis_sec_action.triggered.connect(self.set_axis_to_seconds)
-        self.xaxis_ut_action.triggered.connect(self.set_axis_to_utc)
-
-        # CMEs
-        cmes_menu = self.menuBar().addMenu("CME")
+        # CMEs submenu
+        cmes_submenu = solar_events_menu.addMenu("CMEs")
         soho_lasco_action = QAction("SOHO/LASCO CME Catalog", self)
         soho_lasco_action.triggered.connect(self.open_cme_viewer)
-        cmes_menu.addAction(soho_lasco_action)
+        cmes_submenu.addAction(soho_lasco_action)
 
-        # Flares
-        flares_menu = self.menuBar().addMenu("Flares")
+        # Flares submenu
+        flares_submenu = solar_events_menu.addMenu("Flares")
         goes_flux_action = QAction("GOES X-Ray Flux", self)
         goes_flux_action.triggered.connect(self.open_goes_xrs_window)
-        flares_menu.addAction(goes_flux_action)
+        flares_submenu.addAction(goes_flux_action)
 
-        #view
-        view_menu = self.menuBar().addMenu("View")
+        # Radio submenu
+        radio_submenu = solar_events_menu.addMenu("Radio Bursts")
+        radio_action = QAction("e-CALLISTO", self)
+        radio_action.triggered.connect(self.launch_downloader)
+        radio_submenu.addAction(radio_action)
+
+
+
+        # View Menu
+        view_menu = menubar.addMenu("View")
         theme_menu = view_menu.addMenu("Theme")
 
         self.theme_action_system = QAction("System", self, checkable=True)
@@ -2740,6 +2722,17 @@ class AnalyzeDialog(QDialog):
         left_layout.addWidget(self.canvas)
 
         # === Info Panel ===
+
+        # --- Newkirk fold selection (n-fold) ---
+        self.fold_label = QLabel("Fold-number:")
+        self.fold_combo = QComboBox()
+        self.fold_combo.addItems(["1", "2", "3", "4"])
+        self.fold_combo.setCurrentIndex(0)
+
+        self.fold_calc_button = QPushButton("Calculate")
+        self.fold_calc_button.setEnabled(False)  # enable only after Best Fit
+        self.fold_calc_button.clicked.connect(self.recalculate_shock_parameters)
+
         self.equation_label = QLabel("Best Fit Equation:")
         self.equation_display = QLabel("")
         self.equation_display.setTextFormat(Qt.RichText)
@@ -2770,8 +2763,16 @@ class AnalyzeDialog(QDialog):
         ]
 
         right_inner = QVBoxLayout()
+
+        fold_row = QHBoxLayout()
+        fold_row.addWidget(self.fold_label)
+        fold_row.addWidget(self.fold_combo)
+        fold_row.addWidget(self.fold_calc_button)
+        right_inner.addLayout(fold_row)
+
         for widget in self.labels:
             right_inner.addWidget(widget)
+
         right_inner.addStretch()
 
         right_widget = QWidget()
@@ -2816,6 +2817,7 @@ class AnalyzeDialog(QDialog):
         self.canvas.ax.grid(True)
         self.canvas.draw()
         self.equation_display.setText("")
+        self.fold_calc_button.setEnabled(False)
         self.status.showMessage("Max intensities plotted successfully!", 3000)
 
     def plot_fit(self):
@@ -2857,53 +2859,107 @@ class AnalyzeDialog(QDialog):
         freq_err = np.std(residuals)
         drift_errs = np.abs(drift_vals) * np.sqrt((std_errs[0] / a) ** 2 + (std_errs[1] / b) ** 2)
 
-        shock_speed = (13853221.38 * np.abs(drift_vals)) / (self.freq * (np.log(self.freq ** 2 / 3.385)) ** 2)
-        R_p = 4.32 * np.log(10) / np.log(self.freq ** 2 / 3.385)
+        drift_vals = drift_rate(self.time, a, b)
+        residuals = self.freq - predicted
+        freq_err = np.std(residuals)
+        drift_errs = np.abs(drift_vals) * np.sqrt((std_errs[0] / a) ** 2 + (std_errs[1] / b) ** 2)
 
+        # Cache results so we can recompute shock params for different folds
+        self._drift_vals = drift_vals
+        self._drift_errs = drift_errs
+        self.freq_err = freq_err
+
+        # Enable fold recalculation now that Best Fit exists
+        self.fold_calc_button.setEnabled(True)
+
+        # Compute and display shock parameters using selected fold-number
+        self._update_shock_parameters(self._selected_fold())
+
+        self.status.showMessage("Best fit plotted successfully!", 3000)
+
+    def _selected_fold(self):
+        try:
+            n = int(self.fold_combo.currentText())
+        except Exception:
+            n = 1
+        return max(1, min(4, n))
+
+    def recalculate_shock_parameters(self):
+        if not hasattr(self, "_drift_vals") or not hasattr(self, "_drift_errs"):
+            QMessageBox.information(self, "Analyzer", "Please click 'Best Fit' first.")
+            return
+
+        n = self._selected_fold()
+        self._update_shock_parameters(n)
+        self.status.showMessage(f"Updated using Newkirk {n}-fold model.", 3000)
+
+    def _update_shock_parameters(self, n):
+        # Your updated n-fold formulas
+        denom = n * 3.385
+        drift_vals = self._drift_vals
+        drift_errs = self._drift_errs
+
+        shock_speed = (13853221.38 * np.abs(drift_vals)) / (
+                self.freq * (np.log(self.freq ** 2 / denom) ** 2)
+        )
+        R_p = 4.32 * np.log(10) / np.log(self.freq ** 2 / denom)
+
+        # Starting frequency (same logic you already use)
         percentile = 90
         start_freq = np.percentile(self.freq, percentile)
-
         if self.harmonic:
             start_freq = start_freq / 2
 
         idx = np.abs(self.freq - start_freq).argmin()
         f0 = self.freq[idx]
-        start_shock_speed = shock_speed[idx]
-        start_height = R_p[idx]
-        drift0 = drift_vals[idx]
         drift_err0 = drift_errs[idx]
 
-        shock_speed_err = (13853221.38 * drift_err0) / (f0 * (np.log(f0 ** 2 / 3.385)) ** 2)
-        dRp_df = (8.64 / f0) / np.log(10) / np.log(f0 ** 2 / 3.385)
-        Rp_err = np.abs(dRp_df * freq_err)
+        start_shock_speed = shock_speed[idx]
+        start_height = R_p[idx]
 
+        shock_speed_err = (13853221.38 * drift_err0) / (
+                f0 * (np.log(f0 ** 2 / denom) ** 2)
+        )
+
+        # Error propagation for R_p based on your n-fold expression
+        g0 = np.log(f0 ** 2 / denom)
+        dRp_df = 8.64 * np.log(10) / (f0 * (g0 ** 2))
+        Rp_err = np.abs(dRp_df * self.freq_err)
+
+        # Averages (drift and freq do not depend on n, speeds/heights do)
         avg_freq = np.mean(self.freq)
         avg_freq_err = np.std(self.freq) / np.sqrt(len(self.freq))
         avg_drift = np.mean(drift_vals)
         avg_drift_err = np.std(drift_vals) / np.sqrt(len(drift_vals))
+
         avg_speed = np.mean(shock_speed)
         avg_speed_err = np.std(shock_speed) / np.sqrt(len(shock_speed))
         avg_height = np.mean(R_p)
         avg_height_err = np.std(R_p) / np.sqrt(len(R_p))
 
+        # Store arrays for extra plots
         self.shock_speed = shock_speed
         self.R_p = R_p
-        self.freq_err = freq_err
         self.start_freq = start_freq
         self.start_height = start_height
 
-        self.status.showMessage("Best fit plotted successfully!", 3000)
+        # Optional but helpful to show which model is used
+        self.shock_header.setText(f"<b>Shock Parameters (Newkirk {n}-fold):</b>")
 
-        # Display values
+        # Update the right-panel text
         self.avg_freq_display.setText(f"Average Frequency: <b>{avg_freq:.2f} ± {avg_freq_err:.2f}</b> MHz")
         self.drift_display.setText(f"Average Drift Rate: <b>{avg_drift:.4f} ± {avg_drift_err:.4f}</b> MHz/s")
-        self.start_freq_display.setText(f"Starting Frequency: <b>{start_freq:.2f} ± {freq_err:.2f}</b> MHz")
+        self.start_freq_display.setText(f"Starting Frequency: <b>{start_freq:.2f} ± {self.freq_err:.2f}</b> MHz")
         self.initial_shock_speed_display.setText(
-            f"Initial Shock Speed: <b>{start_shock_speed:.2f} ± {shock_speed_err:.2f}</b> km/s")
-        self.initial_shock_height_display.setText(f"Initial Shock Height: <b>{start_height:.3f} ± {Rp_err:.3f}</b> Rₛ")
+            f"Initial Shock Speed: <b>{start_shock_speed:.2f} ± {shock_speed_err:.2f}</b> km/s"
+        )
+        self.initial_shock_height_display.setText(
+            f"Initial Shock Height: <b>{start_height:.3f} ± {Rp_err:.3f}</b> Rₛ"
+        )
         self.avg_shock_speed_display.setText(f"Average Shock Speed: <b>{avg_speed:.2f} ± {avg_speed_err:.2f}</b> km/s")
         self.avg_shock_height_display.setText(
-            f"Average Shock Height: <b>{avg_height:.3f} ± {avg_height_err:.3f}</b> Rₛ")
+            f"Average Shock Height: <b>{avg_height:.3f} ± {avg_height_err:.3f}</b> Rₛ"
+        )
 
     def save_graph(self):
         plot_name = getattr(self, "current_plot_title", None) or f"{self.filename}_Plot"
