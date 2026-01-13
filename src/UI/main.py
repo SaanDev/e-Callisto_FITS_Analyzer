@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 1.7.6
+Version 1.7.5
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -49,10 +49,14 @@ if sys.platform.startswith("linux"):
     QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
     QApplication.setAttribute(Qt.AA_UseSoftwareOpenGL, True)
 
+#app = QApplication(sys.argv)
+
 #Uncomment when building with Windows
+""""
 app = QApplication(sys.argv)
 if sys.platform.startswith("win"):
     app.setStyle("Fusion")
+"""
 
 if platform.system() != "Windows":
     faulthandler.enable()
