@@ -84,7 +84,7 @@ def start_combine(self):
     QTimer.singleShot(100, self.combine_files)  # delays execution and avoids UI freeze
 
 #Uncomment for windows build
-"""
+
 def resource_path(relative_path: str) -> str:
     if hasattr(sys, "_MEIPASS"):
         # Packaged app
@@ -92,7 +92,7 @@ def resource_path(relative_path: str) -> str:
     # Development mode
     base_path = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_path, relative_path)
-"""
+
 
 #Uncomment for Linux build
 """
@@ -107,6 +107,7 @@ def resource_path(relative_path: str) -> str:
     return os.path.join(base_path, relative_path)
 """
 
+"""
 #Uncomment for MacOS build
 def resource_path(relative_path: str) -> str:
    # py2app
@@ -118,6 +119,8 @@ def resource_path(relative_path: str) -> str:
     # Development
     base_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     return os.path.join(base_path, relative_path)
+"""
+
 
 #Fix for figure saving issue on Linux
 def _ext_from_filter(name_filter: str) -> str:

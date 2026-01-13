@@ -52,18 +52,18 @@ if sys.platform.startswith("linux"):
 #app = QApplication(sys.argv)
 
 #Uncomment when building with Windows
-""""
+
 app = QApplication(sys.argv)
 if sys.platform.startswith("win"):
     app.setStyle("Fusion")
-"""
+
 
 if platform.system() != "Windows":
     faulthandler.enable()
 
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
+    #app = QApplication(sys.argv)
 
     theme = AppTheme(app)
     app.setProperty("theme_manager", theme)
