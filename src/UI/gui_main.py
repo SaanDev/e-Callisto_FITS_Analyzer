@@ -14,12 +14,12 @@ import requests
 from PySide6.QtWidgets import (
     QMainWindow, QSlider, QDialog, QMenuBar, QMessageBox, QLabel, QFormLayout, QGroupBox,
     QStatusBar, QProgressBar, QApplication, QMenu, QCheckBox, QRadioButton, QButtonGroup, QComboBox, QToolBar,
-    QLineEdit, QSpinBox, QScrollArea, QFrame, QVBoxLayout, QWidget, QFileDialog, QHBoxLayout, QSizePolicy
+    QLineEdit, QSpinBox, QScrollArea, QFrame, QVBoxLayout, QWidget, QFileDialog, QHBoxLayout, QSizePolicy, QLayout
 )
 
 from PySide6.QtGui import QAction, QPixmap, QImage, QGuiApplication, QIcon, QFontDatabase, QActionGroup, QPalette
-from PySide6.QtCore import Qt
-from PySide6.QtCore import QTimer, QSize
+from PySide6.QtCore import Qt, QTimer, QSize, QObject, QEvent
+#from PySide6.QtCore import QTimer, QSize
 from src.UI.callisto_downloader import CallistoDownloaderApp
 from src.UI.goes_xrs_gui import MainWindow as GoesXrsWindow
 #from soho_lasco_viewer import CMEViewer as CMEViewerWindow
@@ -37,8 +37,8 @@ import csv
 import matplotlib.pyplot as plt
 from openpyxl import load_workbook, Workbook
 from src.UI.mpl_style import style_axes
-from PySide6.QtCore import QObject, QEvent
-from PySide6.QtWidgets import QLayout
+#from PySide6.QtCore import QObject, QEvent
+#from PySide6.QtWidgets import QLayout
 
 #LINUX Specific Fixes for messageboxes
 IS_LINUX = sys.platform.startswith("linux")
@@ -838,10 +838,19 @@ class MainWindow(QMainWindow):
         self.tb_open.triggered.connect(self.load_file)
         tb.addAction(self.tb_open)
 
+        self.tb_download = QAction(self._icon("download.svg"), "Download", self)
+        self.tb_download.triggered.connect(self.launch_downloader)
+        tb.addAction(self.tb_download)
+
         self.tb_export = QAction(self._icon("export.svg"), "Export", self)
         self.tb_export.setShortcut("Ctrl+E")
         self.tb_export.triggered.connect(self.export_figure)
         tb.addAction(self.tb_export)
+
+        self.tb_export_fits = QAction(self._icon("export_fits.svg"), "Export as FITS", self)
+        self.tb_export_fits.setShortcut("Ctrl+F")
+        self.tb_export_fits.triggered.connect(self.export_to_fits)
+        tb.addAction(self.tb_export_fits)
 
         tb.addSeparator()
 
@@ -854,12 +863,6 @@ class MainWindow(QMainWindow):
         self.tb_redo.setShortcut("Ctrl+Shift+Z")
         self.tb_redo.triggered.connect(self.redo)
         tb.addAction(self.tb_redo)
-
-        tb.addSeparator()
-
-        self.tb_download = QAction(self._icon("download.svg"), "Download", self)
-        self.tb_download.triggered.connect(self.launch_downloader)
-        tb.addAction(self.tb_download)
 
         tb.addSeparator()
 
@@ -914,6 +917,7 @@ class MainWindow(QMainWindow):
 
         # Needs a plot / filename
         self.tb_export.setEnabled(bool(filename))
+        self.tb_export_fits.setEnabled(bool(filename))
 
         # Undo/redo availability
         self.tb_undo.setEnabled(has_undo)
