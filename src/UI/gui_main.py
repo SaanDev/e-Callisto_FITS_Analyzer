@@ -2189,7 +2189,7 @@ class MainWindow(QMainWindow):
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"
-            "2025©Copyright, All Rights Reserved."
+            "2026©Copyright, All Rights Reserved."
         )
 
     def reset_selection(self):
@@ -2808,7 +2808,7 @@ class MaxIntensityPlotDialog(QDialog):
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"
-            "2025©Copyright, All Rights Reserved."
+            "2026©Copyright, All Rights Reserved."
         )
 
     def open_analyze_window(self, fundamental=True, harmonic=False):
