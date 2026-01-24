@@ -7,17 +7,20 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
 import os, sys
 import platform
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
-from src.UI.theme_manager import AppTheme
-from src.UI.mpl_style import apply_origin_style
-
-apply_origin_style()
-
-from src.UI.gui_main import MainWindow
 import faulthandler
 
-#linux
+# Set up sys.path BEFORE importing from src
+if getattr(sys, "frozen", False):
+    base_path = os.path.abspath(
+        os.path.join(os.path.dirname(sys.executable), "..", "Resources")
+    )
+else:
+    base_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+if base_path not in sys.path:
+    sys.path.insert(0, base_path)
+
+# Linux-specific environment setup
 if sys.platform.startswith("linux"):
     os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
     os.environ.setdefault("QT_OPENGL", "software")
@@ -33,16 +36,15 @@ if sys.platform.startswith("linux"):
         (os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "") + " " + extra).strip()
     )
 
+# Now import from src (after sys.path is configured)
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
+from src.UI.theme_manager import AppTheme
+from src.UI.mpl_style import apply_origin_style
 
-if getattr(sys, "frozen", False):
-    base_path = os.path.abspath(
-        os.path.join(os.path.dirname(sys.executable), "..", "Resources")
-    )
-else:
-    base_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+apply_origin_style()
 
-if base_path not in sys.path:
-    sys.path.insert(0, base_path)
+from src.UI.gui_main import MainWindow
 
 
 if sys.platform.startswith("linux"):
