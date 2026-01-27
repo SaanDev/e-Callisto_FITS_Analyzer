@@ -1,19 +1,19 @@
 # e-CALLISTO FITS Analyzer
 A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data.
 
-Version **1.7.4**
+Version **1.7.6**
 
 ## Download
 
-### [Windows version 1.7.4 (.exe)](https://github.com/SaanDev/e-Callisto_FITS_Analyzer/releases/download/v1.7.4%28Windows%29/e-CALLISTO_FITS_Analyzer_Setup_v1.7.4.exe)
-### [macOS version 1.7.4 (.dmg)](https://github.com/SaanDev/e-Callisto_FITS_Analyzer/releases/download/v1.7.4%28MacOS%29/e-CALLISTO_FITS_Analyzer_v1.7.4.dmg)
-### [Linux version 1.7.4 (.zip, AppImage)](https://github.com/SaanDev/e-Callisto_FITS_Analyzer/releases/download/v1.7.4%28Linux%29/e-Callisto_FITS_Analyzer_v.1.7.4_linux.zip)
+### [Windows version 1.7.6 (.exe)](https://github.com/SaanDev/e-Callisto_FITS_Analyzer/releases/download/v1.7.6%28Windows%29/e-CALLISTO_FITS_Analyzer_Setup_v1.7.6.exe)
+### [macOS version 1.7.6 (.dmg)](https://github.com/SaanDev/e-Callisto_FITS_Analyzer/releases/download/v1.7.6%28MacOS%29/e-CALLISTO_FITS_Analyzer_v1.7.6.dmg)
+### [Linux version 1.7.6 (.deb)](https://github.com/SaanDev/e-Callisto_FITS_Analyzer/releases/download/v1.7.6%28Linux%29/e-Callisto_FITS_Analyzer_v1.7.6_amd64.deb)
 
 ---
 
 ## 📘 User Guide
 
-This guide explains how to use the main features of the **e-CALLISTO FITS Analyzer**, including dynamic spectrum visualization, live noise reduction, burst isolation, drift estimation, maximum intensity extraction, best-fit analysis, the FITS downloader, and the built-in CME and GOES modules.
+This guide explains how to use the main features of the **e-CALLISTO FITS Analyzer**, including dynamic spectrum visualization, live noise reduction, burst isolation, drift estimation, maximum intensity extraction, best-fit analysis, FITS export, the FITS downloader, and the built-in CME and GOES modules.
 
 ---
 
@@ -21,7 +21,7 @@ This guide explains how to use the main features of the **e-CALLISTO FITS Analyz
 
 After launching the application, the main window opens with tools for loading FITS files, adjusting thresholds, selecting colormaps, isolating bursts, navigating the spectrum, and performing scientific analysis.
 
-In version 1.7.4, the main function buttons were replaced by a compact **icon toolbar** for quicker access and a cleaner layout.
+The main functions are available through a compact **icon toolbar** for quick access and a clean layout.
 
 ### **Main Window**
 ![Main Window](assets/main_window.png)
@@ -60,7 +60,7 @@ Features:
 
 # 4. Intensity Scale and Units
 
-The color-bar (z-axis) now provides clearer physical meaning.
+The color-bar (z-axis) provides clearer physical meaning.
 
 Features:
 
@@ -93,7 +93,7 @@ The plot updates as soon as a colormap is selected.
 
 ---
 
-# 6. Graph Properties Panel (New in v1.7.4)
+# 6. Graph Properties Panel
 
 A **Graph Properties** panel is included to adjust plot appearance from one place.
 
@@ -107,7 +107,7 @@ Typical use cases:
 
 # 7. Navigation: Zoom and Pan
 
-Interactive navigation has been added to the dynamic spectrum.
+Interactive navigation is available in the dynamic spectrum.
 
 Features:
 
@@ -170,6 +170,11 @@ The Analyzer window performs:
 - Shock height
 - R² and RMSE
 
+Newkirk model option:
+
+- **Newkirk fold number** can be selected as:
+  - **1, 2, 3, 4**
+
 Optional additional plots:
 
 - Shock speed vs height
@@ -224,7 +229,23 @@ Combined data can be imported directly into the Analyzer.
 
 ---
 
-# 15. Saving and Exporting Plots
+# 15. Export Data as FITS (New in v1.7.6)
+
+You can now export processed data as a new FITS file with a modified header. This is useful for downstream analysis and **Machine Learning** workflows.
+
+Export options:
+
+- **Raw**
+- **Combined**
+- **Background-subtracted**
+
+Path:
+
+- **File → Export As → Export to FIT**
+
+---
+
+# 16. Saving and Exporting Plots
 
 All figures across the application can be exported in:
 
@@ -243,7 +264,7 @@ This supports publication workflows across operating systems.
 
 ---
 
-# 16. CME Catalog Viewer (SOHO/LASCO)
+# 17. CME Catalog Viewer (SOHO/LASCO)
 
 Features:
 
@@ -257,7 +278,7 @@ Features:
 
 ---
 
-# 17. GOES X-Ray Flux Viewer
+# 18. GOES X-Ray Flux Viewer
 
 Features:
 
@@ -277,6 +298,7 @@ Features:
 - Supports both `.fit` and `.fit.gz` files
 - Live noise reduction with preserved zoom, pan, and axis format
 - Cursor-based data readout for time, frequency, and intensity
+- Improved plotting area for clearer scientific visualization
 - Robust export system with OS-aware save handling
 - Major plots are publication ready
 
