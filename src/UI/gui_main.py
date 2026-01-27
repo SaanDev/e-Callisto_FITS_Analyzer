@@ -1019,6 +1019,7 @@ class MainWindow(QMainWindow):
         for attr, fname in (
                 ("tb_open", "open.svg"),
                 ("tb_export", "export.svg"),
+                ("tb_export_fits","export_fits.svg"),
                 ("tb_undo", "undo.svg"),
                 ("tb_redo", "redo.svg"),
                 ("tb_download", "download.svg"),
