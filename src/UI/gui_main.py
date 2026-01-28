@@ -183,7 +183,7 @@ class MainWindow(QMainWindow):
         #Linux Messagebox Fix
         _install_linux_msgbox_fixer()
 
-        self.setWindowTitle("e-CALLISTO FITS Analyzer 1.7.6")
+        self.setWindowTitle("e-CALLISTO FITS Analyzer 1.7.7 - Development")
         #self.resize(1000, 700)
         self.setMinimumSize(1000, 700)
 
@@ -2186,7 +2186,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "About e-Callisto FITS Analyzer",
-            "e-CALLISTO FITS Analyzer version 1.7.6.\n\n"
+            "e-CALLISTO FITS Analyzer version 1.7.7 - Development.\n\n"
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"
@@ -2805,7 +2805,7 @@ class MaxIntensityPlotDialog(QDialog):
         QMessageBox.information(
             self,
             "About e-Callisto FITS Analyzer",
-            "e-CALLISTO FITS Analyzer version 1.7.6.\n\n"
+            "e-CALLISTO FITS Analyzer version 1.7.7 - Development.\n\n"
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"
