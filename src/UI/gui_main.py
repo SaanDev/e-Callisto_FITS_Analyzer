@@ -2198,7 +2198,7 @@ class MainWindow(QMainWindow):
         if self.noise_reduced_original is not None:
             self.noise_reduced_data = self.noise_reduced_original.copy()
             if self.time is not None and self.freqs is not None:
-                self.plot_data(self.noise_reduced_data, title="Noise Reduced")
+                self.plot_data(self.noise_reduced_data, title="Background Subtracted")
             self.lasso_mask = None
             self.lasso = None
             self.statusBar().showMessage("Selection Reset", 4000)
