@@ -19,7 +19,6 @@ from PySide6.QtWidgets import (
 
 from PySide6.QtGui import QAction, QPixmap, QImage, QGuiApplication, QIcon, QFontDatabase, QActionGroup, QPalette
 from PySide6.QtCore import Qt, QTimer, QSize, QObject, QEvent
-#from PySide6.QtCore import QTimer, QSize
 from src.UI.callisto_downloader import CallistoDownloaderApp
 from src.UI.goes_xrs_gui import MainWindow as GoesXrsWindow
 #from soho_lasco_viewer import CMEViewer as CMEViewerWindow
