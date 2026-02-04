@@ -172,6 +172,8 @@ class MplCanvas(FigureCanvas):
 
 
 class MainWindow(QMainWindow):
+    DB_SCALE = 2500.0 / 255.0 / 25.4
+
     def __init__(self, theme=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -930,18 +932,6 @@ class MainWindow(QMainWindow):
         self.tb_reset_all.setEnabled(has_file)
         self._sync_nav_actions()
 
-    def _on_theme_changed(self, dark: bool):
-        self._refresh_icons()
-        self._apply_mpl_theme()
-
-        # If you have a main matplotlib canvas and colorbar:
-        # Use your real names here (example uses self.canvas + self.current_colorbar)
-        if self.theme and hasattr(self, "canvas"):
-            fig = getattr(self.canvas, "fig", None) or getattr(self.canvas, "figure", None)
-            ax = getattr(self.canvas, "ax", None)
-            if fig is not None and ax is not None:
-                self.theme.apply_mpl(fig, ax, getattr(self, "current_colorbar", None))
-
     def _apply_mpl_theme(self):
         """
         Ensure Matplotlib canvas (figure, axes, and colorbar) matches the current Qt theme.
@@ -1000,18 +990,6 @@ class MainWindow(QMainWindow):
                     pass
 
         self.canvas.draw_idle()
-
-    def _refresh_icons(self):
-        if not self.theme:
-            return
-
-        # Example: if you have toolbar actions
-        # self.open_action.setIcon(self.theme.icon("open.svg"))
-        # self.download_action.setIcon(self.theme.icon("download.svg"))
-
-        # If you have toolbuttons:
-        # self.some_button.setIcon(self.theme.icon("lock.svg"))
-        pass
 
     def _refresh_toolbar_icons(self):
         # Only run after toolbar actions exist
@@ -1242,96 +1220,63 @@ class MainWindow(QMainWindow):
             self.plot_data(self.raw_data, title="Raw Data")
             return
 
-        basenames = [os.path.basename(p) for p in file_paths]
+        from src.Backend.burst_processor import (
+            are_time_combinable,
+            are_frequency_combinable,
+            combine_time,
+            combine_frequency,
+        )
 
-        pattern = r"(.*)_(\d{8})_(\d{6})_(\d+)\.fit(?:\.gz)?"
-
-        meta = []
-        for name in basenames:
-            m = re.match(pattern, name)
-            if not m:
-                QMessageBox.warning(self, "Invalid File",
-                                    f"Invalid CALLISTO filename format:\n{name}")
+        try:
+            if are_time_combinable(file_paths):
+                combined = combine_time(file_paths)
+                combined["combine_type"] = "time"
+            elif are_frequency_combinable(file_paths):
+                combined = combine_frequency(file_paths)
+                combined["combine_type"] = "frequency"
+            else:
+                error_msg = (
+                    "The selected FITS files cannot be combined.\n\n"
+                    "Valid combinations are:\n"
+                    "1. Frequency Combine:\n"
+                    "   • Same station\n"
+                    "   • Same date\n"
+                    "   • Same timestamp (HHMMSS)\n"
+                    "   • Different receiver IDs\n"
+                    "   • Matching time arrays\n\n"
+                    "2. Time Combine:\n"
+                    "   • Same station\n"
+                    "   • Same receiver ID\n"
+                    "   • Same date\n"
+                    "   • Different timestamps (continuous time segments)\n"
+                    "   • Matching frequency arrays\n\n"
+                    "Your selection does not match either rule.\n"
+                    "Please choose files that follow one of the above patterns."
+                )
+                QMessageBox.warning(self, "Invalid Combination Selection", error_msg)
                 return
-            meta.append(m.groups())
 
-        stations = [m[0] for m in meta]
-        dates = [m[1] for m in meta]
-        times = [m[2] for m in meta]
-        ids = [int(m[3]) for m in meta]
+            combined["sources"] = list(file_paths)
+            try:
+                combined["header0"] = fits.getheader(file_paths[0], 0)
+            except Exception:
+                combined["header0"] = None
 
-        same_station = len(set(stations)) == 1
-        same_date = len(set(dates)) == 1
-        same_time = len(set(times)) == 1
-
-        if same_station and same_date and same_time:
-            combine_type = "frequency"
-
-        elif same_station and len(set(ids)) == 1:
-            combine_type = "time"
-        else:
-            error_msg = (
-
-                "The selected FITS files cannot be combined.\n\n"
-
-                "Valid combinations are:\n"
-
-                "1. Frequency Combine:\n"
-
-                "   • Same station\n"
-
-                "   • Same date\n"
-
-                "   • Same timestamp (HHMMSS)\n"
-
-                "   • Different receiver IDs\n\n"
-
-                "2. Time Combine:\n"
-
-                "   • Same station\n"
-
-                "   • Same receiver ID\n"
-
-                "   • Same date\n"
-
-                "   • Different timestamps (continuous time segments)\n\n"
-
-                "Your selection does not match either rule.\n"
-
-                "Please choose files that follow one of the above patterns."
-
-            )
-
-            QMessageBox.warning(self, "Invalid Combination Selection", error_msg)
-
+            self.load_combined_into_main(combined)
+            self.statusBar().showMessage(f"Loaded {len(file_paths)} files (combined)", 5000)
+        except Exception as e:
+            QMessageBox.critical(self, "Combine Error", f"An error occurred while combining files:\n{e}")
             return
 
-        if combine_type == "frequency":
-            combined_data, combined_freqs, combined_time = self.combine_frequency_files(file_paths)
+    def _intensity_for_display(self, data):
+        if data is None:
+            return None
+        return data * self.DB_SCALE if self.use_db else data
 
-        elif combine_type == "time":
-            combined_data, combined_freqs, combined_time = self.combine_time_files(file_paths)
-
-        self.raw_data = combined_data
-        self.freqs = combined_freqs
-        self.time = combined_time
-
-        # Extract UT start from FIRST FITS file
-        try:
-            hdul = fits.open(file_paths[0])
-            hdr = hdul[0].header
-            hh, mm, ss = hdr["TIME-OBS"].split(":")
-            self.ut_start_sec = int(hh) * 3600 + int(mm) * 60 + float(ss)
-            hdul.close()
-        except Exception as e:
-            print("⚠️ UT extraction failed:", e)
-            self.ut_start_sec = None
-
-        original_name = os.path.basename(file_paths[0])
-        self.filename = original_name
-
-        self.plot_data(self.raw_data, title="Raw Data")
-        self.statusBar().showMessage(f"Loaded {len(file_paths)} files (combined)", 5000)
+    def _intensity_range_for_display(self, vmin, vmax):
+        if vmin is None or vmax is None:
+            return vmin, vmax
+        return (vmin * self.DB_SCALE, vmax * self.DB_SCALE) if self.use_db else (vmin, vmax)
 
     def update_units(self):
         if self.units_db_radio.isChecked():
@@ -1454,7 +1399,6 @@ class MainWindow(QMainWindow):
         data = self.raw_data.copy()
         data = data - data.mean(axis=1, keepdims=True)
         data = np.clip(data, low, high)
-        data = data * 2500.0 / 255.0 / 25.4
 
         self.noise_reduced_data = data
         self.noise_reduced_original = data.copy()
@@ -1538,12 +1482,8 @@ class MainWindow(QMainWindow):
         cax = divider.append_axes("right", size="5%", pad=0.1)
         self.current_cax = cax
 
-        # Show image
-        # Convert units if needed
-        if self.use_db:
-            display_data = data * 2500.0 / 255.0 / 25.4
-        else:
-            display_data = data
+        # Show image (convert units for display if needed)
+        display_data = self._intensity_for_display(data)
 
         self.current_display_data = display_data
 
@@ -1909,17 +1849,20 @@ class MainWindow(QMainWindow):
         cax = divider.append_axes("right", size="5%", pad=0.1)
         self.current_cax = cax
 
-        # Plot with fixed vmin/vmax from noise reduction
+        # Plot with fixed vmin/vmax from noise reduction (converted to display units if needed)
+        display_burst = self._intensity_for_display(burst_isolated)
+        vmin, vmax = self._intensity_range_for_display(self.noise_vmin, self.noise_vmax)
+
         im = self.canvas.ax.imshow(
-            burst_isolated,
+            display_burst,
             aspect='auto',
             extent=extent,
             cmap=cmap,
-            vmin=self.noise_vmin,
-            vmax=self.noise_vmax,
+            vmin=vmin,
+            vmax=vmax,
         )
 
-        self.current_display_data = burst_isolated
+        self.current_display_data = display_burst
 
         # Create new colorbar
         self.current_colorbar = self.canvas.figure.colorbar(im, cax=cax)
@@ -2330,6 +2273,12 @@ class MainWindow(QMainWindow):
 
             if are_frequency_combinable(local_files):
                 combined = combine_frequency(local_files)
+                combined["combine_type"] = "frequency"
+                combined["sources"] = list(local_files)
+                try:
+                    combined["header0"] = fits.getheader(local_files[0], 0)
+                except Exception:
+                    combined["header0"] = None
                 self.load_combined_into_main(combined)
                 self.downloader_dialog.import_success.emit()
                 return
@@ -3483,6 +3432,25 @@ class CombineFrequencyDialog(QDialog):
         self.main_window.freqs = self.combined_freqs
         self.main_window.time = self.combined_time
         self.main_window.filename = self.combined_title  # ✅ update filename as the title
+
+        # Mark as combined so Export-to-FITS can record provenance correctly
+        self.main_window._is_combined = True
+        self.main_window._combined_mode = "frequency"
+        self.main_window._combined_sources = list(self.file_paths)
+        try:
+            self.main_window._fits_header0 = fits.getheader(self.file_paths[0], 0).copy()
+        except Exception:
+            self.main_window._fits_header0 = None
+        self.main_window._fits_source_path = None
+
+        # UT start for UT-axis formatting
+        try:
+            hdr = fits.getheader(self.file_paths[0], 0)
+            hh, mm, ss = hdr["TIME-OBS"].split(":")
+            self.main_window.ut_start_sec = int(hh) * 3600 + int(mm) * 60 + float(ss)
+        except Exception:
+            self.main_window.ut_start_sec = None
+
         self.main_window.plot_data(self.combined_data, title="Raw Data (Combined Frequency)")
         self.close()
 
@@ -3644,6 +3612,16 @@ class CombineTimeDialog(QDialog):
             self.main_window.freqs = self.main_window.freqs  # already set earlier
             self.main_window.time = self.combined_time
             self.main_window.filename = self.main_window.filename  # already set earlier
+
+            # Mark as combined so Export-to-FITS can record provenance correctly
+            self.main_window._is_combined = True
+            self.main_window._combined_mode = "time"
+            self.main_window._combined_sources = list(self.file_paths)
+            try:
+                self.main_window._fits_header0 = fits.getheader(self.file_paths[0], 0).copy()
+            except Exception:
+                self.main_window._fits_header0 = None
+            self.main_window._fits_source_path = None
 
             # Calculate UT start from FITS header of first file
             try:

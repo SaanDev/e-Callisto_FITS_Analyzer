@@ -32,7 +32,6 @@ a = Analysis(
         (str(ASSETS_DIR / "FITS_analyzer.png"), "assets"),
         (str(ASSETS_DIR / "icons"), "assets/icons"),
         (str(ASSETS_DIR / "icons_dark"), "assets/icons_dark"),
-        (str(ASSETS_DIR / "icons_light"), "assets/icons_light"),
 
         # Matplotlib exporter backends
         (backend_pdf.__file__, "matplotlib/backends"),

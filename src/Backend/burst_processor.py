@@ -27,59 +27,88 @@ def reduce_noise(data, clip_low=-5, clip_high=20):
 
 def parse_filename(filepath):
     base = os.path.basename(filepath)
-    parts = base.split("_")
+    # Support common CALLISTO variants, e.g.:
+    #   STATION_YYYYMMDD_HHMMSS_ID.fit(.gz)
+    #   STATION_YYYYMMDD_HHMMSS_HHMMSS_ID.fit(.gz)
+    stem = base
+    for ext in (".fit.gz", ".fits.gz", ".fit", ".fits"):
+        if stem.lower().endswith(ext):
+            stem = stem[: -len(ext)]
+            break
+
+    parts = stem.split("_")
     if len(parts) < 4:
         raise ValueError(f"Invalid CALLISTO filename format: {base}")
 
     station = parts[0]
     date = parts[1]
     time = parts[2]
-    focus = parts[3].split(".")[0]
+    receiver_id = parts[-1]
 
-    return station, date, time, focus
+    return station, date, time, receiver_id
 
 
 def are_frequency_combinable(file_paths):
-    if len(file_paths) != 2:
+    if len(file_paths) < 2:
         return False
 
-    f1, f2 = file_paths
-
-    s1, d1, t1, foc1 = parse_filename(f1)
-    s2, d2, t2, foc2 = parse_filename(f2)
-
-    if s1 != s2:
-        return False
-    if d1 != d2:
-        return False
-    if t1 != t2:
-        return False
-    if foc1 == foc2:
+    try:
+        s_ref, d_ref, t_ref, _ = parse_filename(file_paths[0])
+    except Exception:
         return False
 
-    _, _, time1 = load_fits(f1)
-    _, _, time2 = load_fits(f2)
+    receiver_ids = set()
+    time_ref = None
 
-    if not np.allclose(time1, time2, atol=0.01):
-        return False
+    for fp in file_paths:
+        try:
+            s, d, t, rec = parse_filename(fp)
+        except Exception:
+            return False
+
+        if s != s_ref or d != d_ref or t != t_ref:
+            return False
+
+        # Require different receiver IDs (adjacent frequency blocks)
+        if rec in receiver_ids:
+            return False
+        receiver_ids.add(rec)
+
+        _, _, time_arr = load_fits(fp)
+        if time_ref is None:
+            time_ref = time_arr
+        elif not np.allclose(time_arr, time_ref, atol=0.01):
+            return False
 
     return True
 
 
 def combine_frequency(file_paths):
-    f1, f2 = file_paths
+    if len(file_paths) < 2:
+        raise ValueError("Need at least 2 files to combine frequencies.")
 
-    data1, freqs1, time1 = load_fits(f1)
-    data2, freqs2, time2 = load_fits(f2)
+    data_list = []
+    freq_list = []
+    time_ref = None
 
-    combined_data = np.vstack([data1, data2])
-    combined_freqs = np.concatenate([freqs1, freqs2])
+    for fp in file_paths:
+        data, freqs, time_arr = load_fits(fp)
+        data_list.append(data)
+        freq_list.append(freqs)
 
-    station, date, tstamp, _ = parse_filename(f1)
+        if time_ref is None:
+            time_ref = time_arr
+        elif not np.allclose(time_arr, time_ref, atol=0.01):
+            raise ValueError("Time arrays do not match; cannot frequency-combine.")
+
+    combined_data = np.vstack(data_list)
+    combined_freqs = np.concatenate(freq_list)
+
+    station, date, tstamp, _ = parse_filename(file_paths[0])
     combined_name = f"{station}_{date}_{tstamp}_freq_combined"
 
     try:
-        hdr = fits.open(f1)[0].header
+        hdr = fits.getheader(file_paths[0], 0)
         hh, mm, ss = hdr["TIME-OBS"].split(":")
         ut_start_sec = int(hh) * 3600 + int(mm) * 60 + float(ss)
     except Exception:
@@ -88,7 +117,7 @@ def combine_frequency(file_paths):
     return {
         "data": combined_data,
         "freqs": combined_freqs,
-        "time": time1,
+        "time": time_ref,
         "filename": combined_name,
         "ut_start_sec": ut_start_sec,
     }
@@ -167,7 +196,7 @@ def combine_time(file_paths):
     combined_name = f"{s}_{d}_combined_time"
 
     try:
-        hdr = fits.open(sorted_paths[0])[0].header
+        hdr = fits.getheader(sorted_paths[0], 0)
         hh, mm, ss = hdr["TIME-OBS"].split(":")
         ut_start_sec = int(hh) * 3600 + int(mm) * 60 + float(ss)
     except Exception:

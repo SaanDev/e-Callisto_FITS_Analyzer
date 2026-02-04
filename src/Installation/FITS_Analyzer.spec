@@ -18,17 +18,19 @@ PROJECT = ROOT.parent           # <root>
 
 MAIN = PROJECT / "src" / "UI" / "main.py"
 
-#fix
-# Change this if your folder name is different.
-ASSETS_DIR = PROJECT / "assests"
+# Assets folder (prefer "assets", fallback to "assests" if your repo uses that)
+ASSETS_DIR = PROJECT / "assets"
+if not ASSETS_DIR.exists():
+    ASSETS_DIR = PROJECT / "assests"
 
 a = Analysis(
     [str(MAIN)],
     pathex=[str(PROJECT), str(PROJECT / "src")],
     binaries=[],
     datas=[
-        (str(ASSETS_DIR / "FITS_analyzer.png"), "."),
-        (str(ASSETS_DIR / "icons"), "assests/icons"),
+        (str(ASSETS_DIR / "FITS_analyzer.png"), "assets"),
+        (str(ASSETS_DIR / "icons"), "assets/icons"),
+        (str(ASSETS_DIR / "icons_dark"), "assets/icons_dark"),
 
         # Required backend files for exporting
         (backend_pdf.__file__, "matplotlib/backends"),
@@ -108,7 +110,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=str(ASSETS_DIR / "icon.ico"),  # Windows icon must be .ico
+    icon=str((PROJECT / "icon.ico") if (PROJECT / "icon.ico").exists() else (ASSETS_DIR / "icon.ico")),  # Windows icon must be .ico
 )
 
 coll = COLLECT(

@@ -101,17 +101,8 @@ def test_combine_frequency_merges_data(monkeypatch):
             return data1, freqs1, time
         return data2, freqs2, time
 
-    class FakeOpen:
-        def __init__(self):
-            self._primary = FakeHDU(header={"TIME-OBS": "01:02:03"})
-
-        def __getitem__(self, idx):
-            if idx == 0:
-                return self._primary
-            raise IndexError
-
     monkeypatch.setattr(burst_processor, "load_fits", fake_load)
-    monkeypatch.setattr(burst_processor.fits, "open", lambda _: FakeOpen())
+    monkeypatch.setattr(burst_processor.fits, "getheader", lambda *_args, **_kwargs: {"TIME-OBS": "01:02:03"})
 
     result = burst_processor.combine_frequency([
         "STAT_20240101_120000_A.fit",
@@ -135,17 +126,8 @@ def test_combine_time_stitches_time_axis(monkeypatch):
             return data1, freqs, time
         return data2, freqs, time
 
-    class FakeOpen:
-        def __init__(self):
-            self._primary = FakeHDU(header={"TIME-OBS": "00:00:10"})
-
-        def __getitem__(self, idx):
-            if idx == 0:
-                return self._primary
-            raise IndexError
-
     monkeypatch.setattr(burst_processor, "load_fits", fake_load)
-    monkeypatch.setattr(burst_processor.fits, "open", lambda _: FakeOpen())
+    monkeypatch.setattr(burst_processor.fits, "getheader", lambda *_args, **_kwargs: {"TIME-OBS": "00:00:10"})
 
     result = burst_processor.combine_time([
         "STAT_20240101_120000_A.fit",

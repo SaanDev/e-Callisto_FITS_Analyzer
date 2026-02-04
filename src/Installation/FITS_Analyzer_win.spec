@@ -11,9 +11,10 @@ PROJECT = ROOT.parent           # <root>
 
 MAIN = PROJECT / "src" / "UI" / "main.py"
 
-#fix
-# Change this if your folder name is different.
-ASSETS_DIR = PROJECT / "assests"
+# Assets folder (prefer "assets", fallback to "assests" if your repo uses that)
+ASSETS_DIR = PROJECT / "assets"
+if not ASSETS_DIR.exists():
+    ASSETS_DIR = PROJECT / "assests"
 
 a = Analysis(
     [str(MAIN)],
@@ -102,7 +103,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=str(ASSETS_DIR / "icon.ico"),  # Windows icon must be .ico
+    icon=str((PROJECT / "icon.ico") if (PROJECT / "icon.ico").exists() else (ASSETS_DIR / "icon.ico")),  # Windows icon must be .ico
 )
 
 coll = COLLECT(

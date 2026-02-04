@@ -8,7 +8,7 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
-from mpl_style import apply_origin_style, style_axes
+from src.UI.mpl_style import apply_origin_style, style_axes
 apply_origin_style()
 
 
@@ -18,4 +18,3 @@ class MplCanvas(FigureCanvas):
         self.ax = self.fig.add_subplot(111)
         style_axes(self.ax)
         super().__init__(self.fig)
-
