@@ -118,12 +118,20 @@ def load_callisto_fits(filepath: str, *, memmap: bool = False) -> FitsLoadResult
         if data.ndim != 2:
             raise ValueError(f"Expected 2D data after squeeze, got shape={data.shape}.")
 
-        table = None
-        if len(hdul) > 1:
-            table = getattr(hdul[1], "data", None)
+        freqs = None
+        time = None
 
-        freqs = _col_to_1d(_get_col(table, ("frequency", "freq")))
-        time = _col_to_1d(_get_col(table, ("time", "times")))
+        if len(hdul) > 1:
+            for hdu in hdul[1:]:
+                table = getattr(hdu, "data", None)
+                if table is None:
+                    continue
+                if freqs is None:
+                    freqs = _col_to_1d(_get_col(table, ("frequency", "freq")))
+                if time is None:
+                    time = _col_to_1d(_get_col(table, ("time", "times")))
+                if freqs is not None and time is not None:
+                    break
 
         # Header-based WCS fallback
         if freqs is None:
@@ -235,4 +243,3 @@ def build_combined_header(
         pass
 
     return hdr
-

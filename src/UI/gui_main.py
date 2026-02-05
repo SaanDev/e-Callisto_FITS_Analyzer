@@ -14,7 +14,8 @@ import requests
 from PySide6.QtWidgets import (
     QMainWindow, QSlider, QDialog, QMenuBar, QMessageBox, QLabel, QFormLayout, QGroupBox,
     QStatusBar, QProgressBar, QApplication, QMenu, QCheckBox, QRadioButton, QButtonGroup, QComboBox, QToolBar,
-    QLineEdit, QSpinBox, QScrollArea, QFrame, QVBoxLayout, QWidget, QFileDialog, QHBoxLayout, QSizePolicy, QLayout
+    QLineEdit, QSpinBox, QScrollArea, QFrame, QVBoxLayout, QWidget, QFileDialog, QHBoxLayout, QSizePolicy, QLayout,
+    QInputDialog,
 )
 
 from PySide6.QtGui import QAction, QPixmap, QImage, QGuiApplication, QIcon, QFontDatabase, QActionGroup, QPalette
@@ -33,6 +34,7 @@ import matplotlib.colors as mcolors
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from matplotlib.ticker import FuncFormatter, ScalarFormatter
 import csv
+import numpy as np
 import matplotlib.pyplot as plt
 from openpyxl import load_workbook, Workbook
 from src.UI.mpl_style import style_axes
@@ -1504,7 +1506,7 @@ class MainWindow(QMainWindow):
         # enable tools
         self._sync_toolbar_enabled_states()
 
-    def plot_data(self, data, title="Dynamic Spectrum", keep_view=False, restore_view=None):
+    def plot_data(self, data, keep_view=False, restore_view=None):
         view = restore_view if restore_view is not None else (self._capture_view() if keep_view else None)
         QTimer.singleShot(0, lambda: self._plot_data_internal(data, title, view))
 
@@ -1532,7 +1534,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    def _plot_data_internal(self, data, title="Dynamic Spectrum", view=None):
+    def _plot_data_internal(self, data, view=None):
 
         self._stop_rect_zoom()
 
@@ -2136,6 +2138,198 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Export Failed", f"An error occurred:\n{e}")
 
+    def _recommend_bitpix_for_export(self, data: np.ndarray) -> int:
+        """
+        Recommend a FITS BITPIX (8/16/32) based on the data range.
+
+        CALLISTO raw files are typically 8-bit, but combined/processed data can exceed that.
+        JavaViewer cannot read BITPIX=-64, so we avoid float64 exports.
+        """
+        try:
+            arr = np.asarray(data)
+            if arr.size == 0:
+                return 16
+            finite = np.isfinite(arr)
+            if not np.any(finite):
+                return 16
+            mn = float(np.nanmin(arr))
+            mx = float(np.nanmax(arr))
+        except Exception:
+            return 16
+
+        if 0.0 <= mn and mx <= 255.0:
+            return 8
+        if -32768.0 <= mn and mx <= 32767.0:
+            return 16
+        return 32
+
+    def _cast_data_for_bitpix(self, data: np.ndarray, bitpix: int) -> np.ndarray:
+        arr = np.asarray(data)
+        arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+
+        if int(bitpix) == 8:
+            out = np.rint(arr)
+            out = np.clip(out, 0, 255)
+            return out.astype(np.uint8, copy=False)
+
+        if int(bitpix) == 16:
+            info = np.iinfo(np.int16)
+            out = np.rint(arr)
+            out = np.clip(out, info.min, info.max)
+            return out.astype(np.int16, copy=False)
+
+        if int(bitpix) == 32:
+            info = np.iinfo(np.int32)
+            out = np.rint(arr)
+            out = np.clip(out, info.min, info.max)
+            return out.astype(np.int32, copy=False)
+
+        raise ValueError(f"Unsupported BITPIX: {bitpix}")
+
+    def _sanitize_primary_header_for_export(self, hdr: fits.Header) -> fits.Header:
+        # Structural/scaling keywords are determined from the data by Astropy.
+        for key in ("SIMPLE", "BITPIX", "NAXIS", "NAXIS1", "NAXIS2", "EXTEND", "BSCALE", "BZERO", "BLANK"):
+            try:
+                hdr.remove(key, ignore_missing=True, remove_all=True)
+            except Exception:
+                pass
+        return hdr
+
+    def _axis_kind_from_name(self, name: str) -> str | None:
+        n = str(name or "").strip().lower()
+        if n in ("freq", "frequency", "freqs", "frequency_mhz", "freq_mhz"):
+            return "freq"
+        if n in ("time", "times", "time_s", "time_sec", "seconds", "sec"):
+            return "time"
+        if "freq" in n:
+            return "freq"
+        if n.startswith("time"):
+            return "time"
+        return None
+
+    def _update_axis_table_hdu(self, hdu, freqs: np.ndarray, times: np.ndarray) -> bool:
+        data = getattr(hdu, "data", None)
+        if data is None:
+            return False
+        dtype = getattr(data, "dtype", None)
+        names = list(getattr(dtype, "names", []) or [])
+        if not names:
+            return False
+
+        axis_map: dict[str, np.ndarray] = {}
+        for name in names:
+            kind = self._axis_kind_from_name(name)
+            if kind == "freq":
+                axis_map[name] = freqs
+            elif kind == "time":
+                axis_map[name] = times
+
+        if not axis_map:
+            extname = str(hdu.header.get("EXTNAME", "")).lower()
+            if "freq" in extname and len(names) == 1:
+                axis_map[names[0]] = freqs
+            elif "time" in extname and len(names) == 1:
+                axis_map[names[0]] = times
+
+        if not axis_map:
+            return False
+
+        old_rows = int(data.shape[0]) if hasattr(data, "shape") and len(data.shape) > 0 else 0
+        row_lengths = []
+        for name, axis in axis_map.items():
+            field_dtype = dtype.fields[name][0]
+            if field_dtype.shape == ():
+                row_lengths.append(len(axis))
+
+        if row_lengths:
+            nrows = row_lengths[0]
+            for length in row_lengths[1:]:
+                if length != nrows:
+                    nrows = max(row_lengths)
+                    break
+        else:
+            nrows = old_rows if old_rows > 0 else 1
+
+        new_descr = []
+        for name in names:
+            field_dtype = dtype.fields[name][0]
+            base = field_dtype.base
+            if name in axis_map:
+                if field_dtype.shape == ():
+                    new_descr.append((name, base))
+                else:
+                    new_descr.append((name, base, (len(axis_map[name]),)))
+            else:
+                if field_dtype.shape == ():
+                    new_descr.append((name, field_dtype))
+                else:
+                    new_descr.append((name, base, field_dtype.shape))
+
+        new_dtype = np.dtype(new_descr)
+        new_data = np.zeros(nrows, dtype=new_dtype)
+
+        for name, axis in axis_map.items():
+            axis_arr = np.asarray(axis)
+            target = new_data[name]
+            if target.ndim == 1:
+                axis_cast = axis_arr.astype(target.dtype, copy=False)
+                if axis_cast.shape[0] < nrows:
+                    pad = np.zeros(nrows, dtype=target.dtype)
+                    pad[:axis_cast.shape[0]] = axis_cast
+                    axis_cast = pad
+                elif axis_cast.shape[0] > nrows:
+                    axis_cast = axis_cast[:nrows]
+                new_data[name] = axis_cast
+            else:
+                vec_len = target.shape[1]
+                axis_cast = axis_arr.astype(target.dtype, copy=False)
+                if axis_cast.shape[0] < vec_len:
+                    pad = np.zeros(vec_len, dtype=target.dtype)
+                    pad[:axis_cast.shape[0]] = axis_cast
+                    axis_cast = pad
+                elif axis_cast.shape[0] > vec_len:
+                    axis_cast = axis_cast[:vec_len]
+                new_data[name][:] = axis_cast
+
+        for name in names:
+            if name in axis_map:
+                continue
+            try:
+                old_col = data[name]
+                if old_col.shape == new_data[name].shape:
+                    new_data[name] = old_col
+                else:
+                    if old_col.size > 0:
+                        new_data[name][0] = old_col[0]
+                        if new_data[name].shape[0] > 1:
+                            new_data[name][1:] = new_data[name][0]
+            except Exception:
+                pass
+
+        hdu.data = new_data
+        try:
+            hdu.update_header()
+        except Exception:
+            pass
+        return True
+
+    def _build_export_hdul_from_template(
+        self,
+        template_hdul: fits.HDUList,
+        primary: fits.PrimaryHDU,
+        freqs: np.ndarray,
+        times: np.ndarray,
+    ) -> tuple[fits.HDUList, bool]:
+        new_hdus = [primary]
+        updated_any = False
+        for hdu in template_hdul[1:]:
+            new_hdu = hdu.copy()
+            if isinstance(new_hdu, (fits.BinTableHDU, fits.TableHDU)):
+                if self._update_axis_table_hdu(new_hdu, freqs, times):
+                    updated_any = True
+            new_hdus.append(new_hdu)
+        return fits.HDUList(new_hdus), updated_any
+
     def export_to_fits(self):
         if self.raw_data is None or self.freqs is None or self.time is None:
             QMessageBox.warning(self, "No Data", "Load a FITS file before exporting.")
@@ -2146,8 +2340,48 @@ class MainWindow(QMainWindow):
         if data_to_save is None:
             data_to_save = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
 
+        # Choose BITPIX for compatibility (JavaViewer does not support BITPIX=-64)
+        rec_bitpix = self._recommend_bitpix_for_export(data_to_save)
+        bitpix_items = [
+            f"Auto (Recommended: {rec_bitpix})",
+            "8 (unsigned byte)",
+            "16 (signed int16)",
+            "32 (signed int32)",
+        ]
+        chosen, ok = QInputDialog.getItem(
+            self,
+            "Export FITS - BITPIX",
+            "Choose BITPIX for the exported FITS (JavaViewer compatibility):",
+            bitpix_items,
+            0,
+            False,
+        )
+        if not ok:
+            return
+
+        bitpix = rec_bitpix
+        try:
+            if isinstance(chosen, str) and chosen.strip().startswith("8"):
+                bitpix = 8
+            elif isinstance(chosen, str) and chosen.strip().startswith("16"):
+                bitpix = 16
+            elif isinstance(chosen, str) and chosen.strip().startswith("32"):
+                bitpix = 32
+        except Exception:
+            bitpix = rec_bitpix
+
+        try:
+            export_data = self._cast_data_for_bitpix(data_to_save, bitpix)
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", f"Could not convert data for BITPIX={bitpix}:\n{e}")
+            return
+
         # Default filename
-        base = os.path.splitext(self.filename)[0] if self.filename else "export"
+        base = self.filename if self.filename else "export"
+        for ext in (".fit.gz", ".fits.gz", ".fit", ".fits"):
+            if base.lower().endswith(ext):
+                base = base[: -len(ext)]
+                break
         suffix = ""
         if self._is_combined:
             if self._combined_mode == "time":
@@ -2182,6 +2416,8 @@ class MainWindow(QMainWindow):
         else:
             hdr0 = fits.Header()
 
+        hdr0 = self._sanitize_primary_header_for_export(hdr0)
+
         # Mark what this file is
         hdr0["HISTORY"] = "Exported by e-CALLISTO FITS Analyzer"
         hdr0["HISTORY"] = f"Export plot type: {self.current_plot_type}"
@@ -2203,20 +2439,53 @@ class MainWindow(QMainWindow):
         # Save BUNIT if you want the file to be self-describing
         hdr0["BUNIT"] = "dB" if getattr(self, "use_db", False) else "Digits"
 
-        # Build FITS HDUs
-        primary = fits.PrimaryHDU(data=np.asarray(data_to_save), header=hdr0)
+        primary = fits.PrimaryHDU(data=export_data, header=hdr0)
+        try:
+            primary.header["BSCALE"] = 1
+            primary.header["BZERO"] = 0
+        except Exception:
+            pass
+        try:
+            primary.header["DATAMIN"] = float(np.nanmin(export_data))
+            primary.header["DATAMAX"] = float(np.nanmax(export_data))
+        except Exception:
+            pass
 
         freqs = np.asarray(self.freqs, dtype=np.float32)
         times = np.asarray(self.time, dtype=np.float32)
 
-        cols = fits.ColDefs([
-            fits.Column(name="frequency", format=f"{freqs.size}E", array=[freqs]),
-            fits.Column(name="time", format=f"{times.size}E", array=[times]),
-        ])
-        axis_hdu = fits.BinTableHDU.from_columns(cols)
-        axis_hdu.header["EXTNAME"] = "AXIS"
+        hdul = None
+        updated_any = False
+        template_path = self._fits_source_path
+        if not template_path and self._combined_sources:
+            template_path = self._combined_sources[0]
+        if template_path and os.path.exists(template_path):
+            try:
+                with fits.open(template_path, memmap=False) as tmpl:
+                    hdul, updated_any = self._build_export_hdul_from_template(tmpl, primary, freqs, times)
+            except Exception:
+                hdul = None
+                updated_any = False
 
-        hdul = fits.HDUList([primary, axis_hdu])
+        if hdul is not None and self._is_combined and not updated_any:
+            hdul = None
+
+        if hdul is None:
+            try:
+                cols = fits.ColDefs([
+                    fits.Column(name="FREQUENCY", format=f"{freqs.size}E", array=[freqs]),
+                    fits.Column(name="TIME", format=f"{times.size}E", array=[times]),
+                ])
+                axis_hdu = fits.BinTableHDU.from_columns(cols)
+                axis_hdu.header["EXTNAME"] = "AXIS"
+                hdul = fits.HDUList([primary, axis_hdu])
+            except Exception:
+                hdul = fits.HDUList([primary])
+
+        try:
+            hdul[0].header["EXTEND"] = True if len(hdul) > 1 else False
+        except Exception:
+            pass
 
         try:
             hdul.writeto(save_path, overwrite=True, output_verify="silentfix")
@@ -2224,7 +2493,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Export Failed", f"Could not write FITS file:\n{e}")
             return
 
-        self.statusBar().showMessage(f"Exported FITS: {os.path.basename(save_path)}", 5000)
+        self.statusBar().showMessage(f"Exported FITS (BITPIX={bitpix}): {os.path.basename(save_path)}", 5000)
 
     def reset_all(self):
         # Safely remove colorbar
