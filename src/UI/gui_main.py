@@ -36,6 +36,7 @@ import csv
 import matplotlib.pyplot as plt
 from openpyxl import load_workbook, Workbook
 from src.UI.mpl_style import style_axes
+from src.Backend.project_session import ProjectFormatError, read_project, write_project
 #from PySide6.QtCore import QObject, QEvent
 #from PySide6.QtWidgets import QLayout
 
@@ -581,6 +582,23 @@ class MainWindow(QMainWindow):
         self.open_action = QAction("Open", self)
         file_menu.addAction(self.open_action)
 
+        file_menu.addSeparator()
+
+        # --- Project (session) ---
+        self.open_project_action = QAction("Open Project...", self)
+        self.open_project_action.setShortcut("Ctrl+Shift+O")
+        file_menu.addAction(self.open_project_action)
+
+        self.save_project_action = QAction("Save Project", self)
+        self.save_project_action.setShortcut("Ctrl+S")
+        file_menu.addAction(self.save_project_action)
+
+        self.save_project_as_action = QAction("Save Project As...", self)
+        self.save_project_as_action.setShortcut("Ctrl+Shift+S")
+        file_menu.addAction(self.save_project_as_action)
+
+        file_menu.addSeparator()
+
         # --- Save As (disabled for main window) ---
         self.save_action = QAction("Save As", self)
         self.save_action.setEnabled(False)
@@ -692,6 +710,9 @@ class MainWindow(QMainWindow):
         self.upper_slider.valueChanged.connect(self.schedule_noise_update)
         self.cmap_combo.currentTextChanged.connect(self.change_cmap)
         self.open_action.triggered.connect(self.load_file)
+        self.open_project_action.triggered.connect(self.open_project)
+        self.save_project_action.triggered.connect(self.save_project)
+        self.save_project_as_action.triggered.connect(self.save_project_as)
         self.units_digits_radio.toggled.connect(self.update_units)
         self.units_db_radio.toggled.connect(self.update_units)
 
@@ -731,6 +752,12 @@ class MainWindow(QMainWindow):
         self.filename = ""
         self.current_plot_type = "Raw"  # or "NoiseReduced" or "Isolated"
 
+        # ----- Project/session save state -----
+        self._project_path = None
+        self._project_dirty = False
+        self._loading_project = False
+        self._max_intensity_state = None  # populated after Max-Intensity dialog closes
+
         # FITS export metadata
         self._fits_header0 = None  # primary header template
         self._fits_source_path = None  # original single-file path (if any)
@@ -754,6 +781,9 @@ class MainWindow(QMainWindow):
         """)
 
         self.noise_reduced_original = None  # backup before lasso
+
+        # Ensure project actions reflect initial state
+        self._sync_project_actions()
 
     def _is_dark_ui(self) -> bool:
         # Prefer theme manager if available
@@ -1180,6 +1210,8 @@ class MainWindow(QMainWindow):
         self.canvas.draw_idle()
 
     def load_file(self):
+        if not self._maybe_prompt_save_dirty():
+            return
         initial_dir = os.path.dirname(self.filename) if self.filename else ""
         dialog = QFileDialog(self)
         dialog.setFileMode(QFileDialog.ExistingFiles)
@@ -1218,6 +1250,9 @@ class MainWindow(QMainWindow):
             hdul.close()
 
             self.plot_data(self.raw_data, title="Raw Data")
+            self._project_path = None
+            self._max_intensity_state = None
+            self._mark_project_dirty()
             return
 
         from src.Backend.burst_processor import (
@@ -1263,6 +1298,9 @@ class MainWindow(QMainWindow):
                 combined["header0"] = None
 
             self.load_combined_into_main(combined)
+            self._project_path = None
+            self._max_intensity_state = None
+            self._mark_project_dirty()
             self.statusBar().showMessage(f"Loaded {len(file_paths)} files (combined)", 5000)
         except Exception as e:
             QMessageBox.critical(self, "Combine Error", f"An error occurred while combining files:\n{e}")
@@ -1286,6 +1324,8 @@ class MainWindow(QMainWindow):
 
         if self.raw_data is None:
             return
+
+        self._mark_project_dirty()
 
         # Choose which data to replot
         data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
@@ -1364,6 +1404,9 @@ class MainWindow(QMainWindow):
             hdul.close()
 
         self.plot_data(self.raw_data, title="Raw Data")
+        self._project_path = None
+        self._max_intensity_state = None
+        self._mark_project_dirty()
 
     def load_combined_into_main(self, combined):
         self.raw_data = combined["data"]
@@ -1382,6 +1425,9 @@ class MainWindow(QMainWindow):
         self._fits_source_path = None
 
         self.plot_data(self.raw_data, title="Combined Data")
+        self._project_path = None
+        self._max_intensity_state = None
+        self._mark_project_dirty()
 
     def schedule_noise_update(self):
         if self.raw_data is None:
@@ -1411,8 +1457,8 @@ class MainWindow(QMainWindow):
         # enable tools
         self._sync_toolbar_enabled_states()
 
-    def plot_data(self, data, title="Dynamic Spectrum", keep_view=False):
-        view = self._capture_view() if keep_view else None
+    def plot_data(self, data, title="Dynamic Spectrum", keep_view=False, restore_view=None):
+        view = restore_view if restore_view is not None else (self._capture_view() if keep_view else None)
         QTimer.singleShot(0, lambda: self._plot_data_internal(data, title, view))
 
     def _capture_view(self):
@@ -1904,19 +1950,46 @@ class MainWindow(QMainWindow):
         print("🎯 Creating MaxIntensityPlotDialog...")
 
         try:
-            data = self.noise_reduced_data
-            ny, nx = data.shape
-            time_channel_number = np.linspace(0, nx, nx)
-            max_intensity_freqs = self.freqs[np.argmax(data, axis=0)]
+            session = None
+            cached = getattr(self, "_max_intensity_state", None)
+            if (
+                isinstance(cached, dict)
+                and cached.get("time_channels") is not None
+                and cached.get("freqs") is not None
+                and (cached.get("source_filename") in (None, self.filename))
+            ):
+                time_channel_number = np.asarray(cached["time_channels"], dtype=float)
+                max_intensity_freqs = np.asarray(cached["freqs"], dtype=float)
+                session = cached
+            else:
+                data = self.noise_reduced_data
+                _ny, nx = data.shape
+                time_channel_number = np.linspace(0, nx, nx)
+                max_intensity_freqs = self.freqs[np.argmax(data, axis=0)]
 
             # Safely create the dialog
-            dialog = MaxIntensityPlotDialog(time_channel_number, max_intensity_freqs, self.filename, self)
+            dialog = MaxIntensityPlotDialog(
+                time_channel_number,
+                max_intensity_freqs,
+                self.filename,
+                parent=self,
+                session=session,
+            )
             dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
 
             # Connect to GC after close
             dialog.finished.connect(lambda: gc.collect())
 
             dialog.exec()
+
+            try:
+                self._max_intensity_state = dialog.session_state()
+                if isinstance(self._max_intensity_state, dict):
+                    self._max_intensity_state["source_filename"] = self.filename
+            except Exception:
+                pass
+
+            self._mark_project_dirty()
             gc.collect()
 
         except Exception as e:
@@ -2122,6 +2195,9 @@ class MainWindow(QMainWindow):
             self.canvas.ax.set_xlim(0, 1)
             self.canvas.ax.set_ylim(1, 0)
 
+        self._max_intensity_state = None
+        self._set_project_clean(None)
+
         print("Application reset to initial state.")
 
     def show_about_dialog(self):
@@ -2183,6 +2259,7 @@ class MainWindow(QMainWindow):
         self._set_checked_if_exists("xaxis_ut_radio", False)
 
         if self.raw_data is not None:
+            self._mark_project_dirty()
             data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
             self.plot_data(data, title=self.current_plot_type, keep_view=True)
 
@@ -2198,6 +2275,7 @@ class MainWindow(QMainWindow):
         self._set_checked_if_exists("xaxis_ut_radio", True)
 
         if self.raw_data is not None:
+            self._mark_project_dirty()
             data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
             self.plot_data(data, title=self.current_plot_type, keep_view=True)
 
@@ -2461,6 +2539,7 @@ class MainWindow(QMainWindow):
         if len(self._undo_stack) > self._max_undo:
             self._undo_stack.pop(0)
         self._redo_stack.clear()
+        self._mark_project_dirty()
 
     def _restore_state(self, state):
         """Restore a previously captured application state."""
@@ -2485,8 +2564,7 @@ class MainWindow(QMainWindow):
 
         if self.raw_data is not None:
             data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
-            self.plot_data(data, title=self.current_plot_type, keep_view=False)
-            self._restore_view(state["view"])
+            self.plot_data(data, title=self.current_plot_type, restore_view=state.get("view"))
 
     def undo(self):
         if not self._undo_stack:
@@ -2512,6 +2590,374 @@ class MainWindow(QMainWindow):
         self._restore_state(state)
         self.statusBar().showMessage("Redo", 2000)
 
+    # -----------------------------
+    # Project/session Save + Load
+    # -----------------------------
+
+    def _mark_project_dirty(self):
+        if getattr(self, "_loading_project", False):
+            return
+        if getattr(self, "raw_data", None) is None:
+            return
+        self._project_dirty = True
+        self._sync_project_actions()
+
+    def _set_project_clean(self, path: str | None):
+        self._project_path = path
+        self._project_dirty = False
+        self._sync_project_actions()
+
+    def _sync_project_actions(self):
+        has_data = getattr(self, "raw_data", None) is not None
+
+        for name, enabled in (
+            ("save_project_action", has_data),
+            ("save_project_as_action", has_data),
+        ):
+            act = getattr(self, name, None)
+            if act is not None:
+                act.setEnabled(bool(enabled))
+
+    def _maybe_prompt_save_dirty(self) -> bool:
+        if not getattr(self, "_project_dirty", False):
+            return True
+
+        resp = QMessageBox.question(
+            self,
+            "Unsaved Project",
+            "You have unsaved project changes.\n\nSave before continuing?",
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save,
+        )
+
+        if resp == QMessageBox.StandardButton.Save:
+            return bool(self.save_project())
+        if resp == QMessageBox.StandardButton.Discard:
+            return True
+        return False
+
+    def _project_default_filename(self) -> str:
+        base = "project"
+        if getattr(self, "filename", ""):
+            base = os.path.splitext(os.path.basename(self.filename))[0] or base
+        return f"{base}.efaproj"
+
+    def _capture_project_payload(self):
+        state = self._capture_state()
+
+        arrays = {
+            "raw_data": state["raw_data"],
+            "noise_reduced_data": state["noise_reduced_data"],
+            "noise_reduced_original": state["noise_reduced_original"],
+            "lasso_mask": state["lasso_mask"],
+            "freqs": state["freqs"],
+            "time": state["time"],
+        }
+
+        header_txt = None
+        try:
+            if getattr(self, "_fits_header0", None) is not None:
+                header_txt = self._fits_header0.tostring(sep="\n", endcard=True, padding=False)
+        except Exception:
+            header_txt = None
+
+        graph = {
+            "remove_titles": bool(getattr(self, "remove_titles", False)),
+            "title_bold": bool(getattr(self, "title_bold", False)),
+            "title_italic": bool(getattr(self, "title_italic", False)),
+            "axis_bold": bool(getattr(self, "axis_bold", False)),
+            "axis_italic": bool(getattr(self, "axis_italic", False)),
+            "ticks_bold": bool(getattr(self, "ticks_bold", False)),
+            "ticks_italic": bool(getattr(self, "ticks_italic", False)),
+            "title_override": str(getattr(self, "graph_title_override", "")),
+            "font_family": str(getattr(self, "graph_font_family", "")),
+            "tick_font_px": int(getattr(self, "tick_font_px", 11)),
+            "axis_label_font_px": int(getattr(self, "axis_label_font_px", 12)),
+            "title_font_px": int(getattr(self, "title_font_px", 14)),
+        }
+
+        meta = {
+            "filename": state["filename"],
+            "current_plot_type": state["current_plot_type"],
+            "lower_slider": int(state["lower_slider"]),
+            "upper_slider": int(state["upper_slider"]),
+            "use_db": bool(state["use_db"]),
+            "use_utc": bool(state["use_utc"]),
+            "ut_start_sec": self.ut_start_sec,
+            "cmap": state["cmap"],
+            "view": state["view"],
+            "noise_vmin": self.noise_vmin,
+            "noise_vmax": self.noise_vmax,
+            "fits_header": header_txt,
+            "fits_source_path": getattr(self, "_fits_source_path", None),
+            "is_combined": bool(getattr(self, "_is_combined", False)),
+            "combined_mode": getattr(self, "_combined_mode", None),
+            "combined_sources": list(getattr(self, "_combined_sources", []) or []),
+            "graph": graph,
+        }
+
+        # Optional derived analysis state (populated after dialogs)
+        if getattr(self, "_max_intensity_state", None):
+            meta["max_intensity"] = {"present": True}
+            arrays.update({
+                "max_time_channels": self._max_intensity_state.get("time_channels"),
+                "max_freqs": self._max_intensity_state.get("freqs"),
+            })
+            meta["max_intensity"].update({
+                "fundamental": bool(self._max_intensity_state.get("fundamental", True)),
+                "harmonic": bool(self._max_intensity_state.get("harmonic", False)),
+                "analyzer": self._max_intensity_state.get("analyzer"),
+            })
+
+        return meta, arrays
+
+    def _apply_project_payload(self, meta: dict, arrays: dict):
+        self._loading_project = True
+        try:
+            # Clear undo/redo stacks on project load
+            self._undo_stack.clear()
+            self._redo_stack.clear()
+
+            self.raw_data = arrays.get("raw_data", None)
+            self.noise_reduced_data = arrays.get("noise_reduced_data", None)
+            self.noise_reduced_original = arrays.get("noise_reduced_original", None)
+            self.lasso_mask = arrays.get("lasso_mask", None)
+            self.freqs = arrays.get("freqs", None)
+            self.time = arrays.get("time", None)
+
+            # Copies avoid read-only arrays from np.load
+            for name in ("raw_data", "noise_reduced_data", "noise_reduced_original", "lasso_mask", "freqs", "time"):
+                val = getattr(self, name, None)
+                if val is not None:
+                    try:
+                        setattr(self, name, val.copy())
+                    except Exception:
+                        pass
+
+            self.filename = meta.get("filename", "") or ""
+            self.current_plot_type = meta.get("current_plot_type", "Raw Data") or "Raw Data"
+
+            self.use_db = bool(meta.get("use_db", False))
+            self.use_utc = bool(meta.get("use_utc", False))
+            self.ut_start_sec = meta.get("ut_start_sec", None)
+            self.current_cmap_name = meta.get("cmap", "Custom") or "Custom"
+
+            self.noise_vmin = meta.get("noise_vmin", None)
+            self.noise_vmax = meta.get("noise_vmax", None)
+
+            self._fits_source_path = meta.get("fits_source_path", None)
+            self._is_combined = bool(meta.get("is_combined", False))
+            self._combined_mode = meta.get("combined_mode", None)
+            self._combined_sources = list(meta.get("combined_sources", []) or [])
+
+            header_txt = meta.get("fits_header", None)
+            self._fits_header0 = None
+            if header_txt:
+                try:
+                    self._fits_header0 = fits.Header.fromstring(header_txt, sep="\n")
+                except Exception:
+                    self._fits_header0 = None
+
+            # Restore widgets without triggering live updates
+            try:
+                self.lower_slider.blockSignals(True)
+                self.upper_slider.blockSignals(True)
+                self.lower_slider.setValue(int(meta.get("lower_slider", self.lower_slider.value())))
+                self.upper_slider.setValue(int(meta.get("upper_slider", self.upper_slider.value())))
+            finally:
+                self.lower_slider.blockSignals(False)
+                self.upper_slider.blockSignals(False)
+
+            # Units radios
+            try:
+                self.units_digits_radio.blockSignals(True)
+                self.units_db_radio.blockSignals(True)
+                self.units_db_radio.setChecked(bool(self.use_db))
+                self.units_digits_radio.setChecked(not bool(self.use_db))
+            finally:
+                self.units_digits_radio.blockSignals(False)
+                self.units_db_radio.blockSignals(False)
+
+            # Time-axis radios
+            try:
+                self.time_sec_radio.blockSignals(True)
+                self.time_ut_radio.blockSignals(True)
+                self.time_ut_radio.setChecked(bool(self.use_utc))
+                self.time_sec_radio.setChecked(not bool(self.use_utc))
+            finally:
+                self.time_sec_radio.blockSignals(False)
+                self.time_ut_radio.blockSignals(False)
+
+            # Colormap combo
+            try:
+                self.cmap_combo.blockSignals(True)
+                if self.current_cmap_name:
+                    self.cmap_combo.setCurrentText(self.current_cmap_name)
+            finally:
+                self.cmap_combo.blockSignals(False)
+
+            # Graph properties
+            graph = meta.get("graph", {}) or {}
+            try:
+                self.remove_titles_chk.blockSignals(True)
+                self.title_bold_chk.blockSignals(True)
+                self.title_italic_chk.blockSignals(True)
+                self.axis_bold_chk.blockSignals(True)
+                self.axis_italic_chk.blockSignals(True)
+                self.ticks_bold_chk.blockSignals(True)
+                self.ticks_italic_chk.blockSignals(True)
+                self.title_edit.blockSignals(True)
+                self.font_combo.blockSignals(True)
+                self.tick_font_spin.blockSignals(True)
+                self.axis_font_spin.blockSignals(True)
+                self.title_font_spin.blockSignals(True)
+
+                self.remove_titles_chk.setChecked(bool(graph.get("remove_titles", False)))
+                self.title_bold_chk.setChecked(bool(graph.get("title_bold", False)))
+                self.title_italic_chk.setChecked(bool(graph.get("title_italic", False)))
+                self.axis_bold_chk.setChecked(bool(graph.get("axis_bold", False)))
+                self.axis_italic_chk.setChecked(bool(graph.get("axis_italic", False)))
+                self.ticks_bold_chk.setChecked(bool(graph.get("ticks_bold", False)))
+                self.ticks_italic_chk.setChecked(bool(graph.get("ticks_italic", False)))
+
+                self.title_edit.setText(str(graph.get("title_override", "")) or "")
+
+                font_family = str(graph.get("font_family", "")) or ""
+                self.font_combo.setCurrentText(font_family if font_family else "Default")
+
+                self.tick_font_spin.setValue(int(graph.get("tick_font_px", self.tick_font_spin.value())))
+                self.axis_font_spin.setValue(int(graph.get("axis_label_font_px", self.axis_font_spin.value())))
+                self.title_font_spin.setValue(int(graph.get("title_font_px", self.title_font_spin.value())))
+            finally:
+                self.remove_titles_chk.blockSignals(False)
+                self.title_bold_chk.blockSignals(False)
+                self.title_italic_chk.blockSignals(False)
+                self.axis_bold_chk.blockSignals(False)
+                self.axis_italic_chk.blockSignals(False)
+                self.ticks_bold_chk.blockSignals(False)
+                self.ticks_italic_chk.blockSignals(False)
+                self.title_edit.blockSignals(False)
+                self.font_combo.blockSignals(False)
+                self.tick_font_spin.blockSignals(False)
+                self.axis_font_spin.blockSignals(False)
+                self.title_font_spin.blockSignals(False)
+
+            # Derived analysis state (optional)
+            self._max_intensity_state = None
+            if (meta.get("max_intensity") or {}).get("present"):
+                self._max_intensity_state = {
+                    "time_channels": arrays.get("max_time_channels", None),
+                    "freqs": arrays.get("max_freqs", None),
+                    "fundamental": bool((meta.get("max_intensity") or {}).get("fundamental", True)),
+                    "harmonic": bool((meta.get("max_intensity") or {}).get("harmonic", False)),
+                    "analyzer": (meta.get("max_intensity") or {}).get("analyzer"),
+                    "source_filename": self.filename,
+                }
+
+            # Redraw
+            if self.raw_data is not None:
+                data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
+                self.plot_data(data, title=self.current_plot_type, restore_view=meta.get("view"))
+                self.graph_group.setEnabled(True)
+                self._sync_toolbar_enabled_states()
+        finally:
+            self._loading_project = False
+            self._sync_project_actions()
+
+    def save_project(self) -> bool:
+        if getattr(self, "raw_data", None) is None:
+            QMessageBox.information(self, "Save Project", "Load a FITS file first.")
+            return False
+
+        if not getattr(self, "_project_path", None):
+            return bool(self.save_project_as())
+
+        try:
+            meta, arrays = self._capture_project_payload()
+            write_project(self._project_path, meta=meta, arrays=arrays)
+        except Exception as e:
+            QMessageBox.critical(self, "Save Project Failed", f"Could not save project:\n{e}")
+            return False
+
+        self._set_project_clean(self._project_path)
+        self.statusBar().showMessage(f"Project saved: {os.path.basename(self._project_path)}", 5000)
+        return True
+
+    def save_project_as(self) -> bool:
+        if getattr(self, "raw_data", None) is None:
+            QMessageBox.information(self, "Save Project", "Load a FITS file first.")
+            return False
+
+        start_dir = ""
+        if getattr(self, "_project_path", None):
+            start_dir = os.path.dirname(self._project_path)
+        elif getattr(self, "_fits_source_path", None):
+            start_dir = os.path.dirname(self._fits_source_path)
+
+        default_name = os.path.join(start_dir, self._project_default_filename()) if start_dir else self._project_default_filename()
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Project As",
+            default_name,
+            "e-CALLISTO Project (*.efaproj)",
+        )
+        if not path:
+            return False
+        if not path.lower().endswith(".efaproj"):
+            path += ".efaproj"
+
+        try:
+            meta, arrays = self._capture_project_payload()
+            write_project(path, meta=meta, arrays=arrays)
+        except Exception as e:
+            QMessageBox.critical(self, "Save Project Failed", f"Could not save project:\n{e}")
+            return False
+
+        self._set_project_clean(path)
+        self.statusBar().showMessage(f"Project saved: {os.path.basename(path)}", 5000)
+        return True
+
+    def open_project(self):
+        if not self._maybe_prompt_save_dirty():
+            return
+
+        start_dir = ""
+        if getattr(self, "_project_path", None):
+            start_dir = os.path.dirname(self._project_path)
+        elif getattr(self, "_fits_source_path", None):
+            start_dir = os.path.dirname(self._fits_source_path)
+
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Project",
+            start_dir,
+            "e-CALLISTO Project (*.efaproj)",
+        )
+        if not path:
+            return
+
+        try:
+            payload = read_project(path)
+        except ProjectFormatError as e:
+            QMessageBox.critical(self, "Open Project Failed", str(e))
+            return
+        except Exception as e:
+            QMessageBox.critical(self, "Open Project Failed", f"Could not open project:\n{e}")
+            return
+
+        self._apply_project_payload(payload.meta, payload.arrays)
+        self._set_project_clean(path)
+        self.statusBar().showMessage(f"Project loaded: {os.path.basename(path)}", 5000)
+
+    def closeEvent(self, event):
+        if not self._maybe_prompt_save_dirty():
+            event.ignore()
+            return
+        super().closeEvent(event)
+
 
     def open_cme_viewer(self):
         from src.UI.soho_lasco_viewer import CMEViewer  # import here, not at top
@@ -2520,12 +2966,13 @@ class MainWindow(QMainWindow):
 
 
 class MaxIntensityPlotDialog(QDialog):
-    def __init__(self, time_channels, max_freqs, filename, parent=None):
+    def __init__(self, time_channels, max_freqs, filename, parent=None, session=None):
         super().__init__(parent)
         self.setWindowTitle("Maximum Intensities for Each Time Channel")
         self.resize(1000, 700)
         self.filename = filename
         self.current_plot_type = "MaxIntensityPlot"
+        self._analyzer_state = None
 
         # Data
         self.time_channels = np.array(time_channels)
@@ -2623,6 +3070,18 @@ class MaxIntensityPlotDialog(QDialog):
             QLabel { font-size: 13px; }
         """)
 
+        # Restore optional session state (radio selections + analyzer state)
+        if isinstance(session, dict):
+            try:
+                self._analyzer_state = session.get("analyzer", None)
+                harmonic = bool(session.get("harmonic", False))
+                if harmonic:
+                    self.harmonic_radio.setChecked(True)
+                else:
+                    self.fundamental_radio.setChecked(True)
+            except Exception:
+                pass
+
     def activate_lasso(self):
         self.canvas.ax.set_title("Draw around outliers to remove")
         self.canvas.draw()
@@ -2649,6 +3108,7 @@ class MaxIntensityPlotDialog(QDialog):
         self.time_channels = self.time_channels[~self.selected_mask]
         self.freqs = self.freqs[~self.selected_mask]
         self.selected_mask = np.zeros_like(self.time_channels, dtype=bool)
+        self._analyzer_state = None
 
         self.canvas.ax.clear()
         self.canvas.figure.clf()
@@ -2662,6 +3122,15 @@ class MaxIntensityPlotDialog(QDialog):
         self.canvas.draw()
 
         self.status.showMessage("Selected outliers removed", 3000)
+
+    def session_state(self) -> dict:
+        return {
+            "time_channels": np.asarray(self.time_channels, dtype=float),
+            "freqs": np.asarray(self.freqs, dtype=float),
+            "fundamental": bool(self.fundamental_radio.isChecked()),
+            "harmonic": bool(self.harmonic_radio.isChecked()),
+            "analyzer": self._analyzer_state,
+        }
 
     def reset_all(self):
         # Clear canvas
@@ -2760,10 +3229,25 @@ class MaxIntensityPlotDialog(QDialog):
             "2026©Copyright, All Rights Reserved."
         )
 
-    def open_analyze_window(self, fundamental=True, harmonic=False):
-        dialog = AnalyzeDialog(self.time_channels, self.freqs, self.filename, fundamental=fundamental,
-                               harmonic=harmonic, parent=self)
+    def open_analyze_window(self, fundamental=None, harmonic=None):
+        if fundamental is None and harmonic is None:
+            fundamental = bool(self.fundamental_radio.isChecked())
+            harmonic = bool(self.harmonic_radio.isChecked())
+
+        dialog = AnalyzeDialog(
+            self.time_channels,
+            self.freqs,
+            self.filename,
+            fundamental=bool(fundamental),
+            harmonic=bool(harmonic),
+            parent=self,
+            session=self._analyzer_state,
+        )
         dialog.exec()
+        try:
+            self._analyzer_state = dialog.session_state()
+        except Exception:
+            pass
 
     def closeEvent(self, event):
         try:
@@ -2792,7 +3276,7 @@ from sklearn.metrics import r2_score, mean_squared_error
 
 
 class AnalyzeDialog(QDialog):
-    def __init__(self, time_channels, freqs, filename, fundamental=True, harmonic=False, parent=None):
+    def __init__(self, time_channels, freqs, filename, fundamental=True, harmonic=False, parent=None, session=None):
         super().__init__(parent)
         self.fundamental = fundamental
         self.harmonic = harmonic
@@ -2935,6 +3419,12 @@ class AnalyzeDialog(QDialog):
             }
         """)
 
+        if isinstance(session, dict):
+            try:
+                self.restore_session(session)
+            except Exception:
+                pass
+
     def plot_max(self):
         self.canvas.ax.clear()
         self.canvas.ax.scatter(self.time, self.freq, s=10, color='blue')
@@ -2947,14 +3437,19 @@ class AnalyzeDialog(QDialog):
         self.fold_calc_button.setEnabled(False)
         self.status.showMessage("Max intensities plotted successfully!", 3000)
 
-    def plot_fit(self):
+    def plot_fit(self, _checked=False, params=None, std_errs=None):
         def model_func(t, a, b): return a * t ** (b)
 
         def drift_rate(t, a_, b_): return a_ * b_ * t ** (b_ - 1)
 
-        params, cov = curve_fit(model_func, self.time, self.freq, maxfev=10000)
-        a, b = params
-        std_errs = np.sqrt(np.diag(cov))
+        if params is None:
+            params, cov = curve_fit(model_func, self.time, self.freq, maxfev=10000)
+            a, b = params
+            std_errs = np.sqrt(np.diag(cov))
+        else:
+            a, b = params
+            if std_errs is None:
+                std_errs = np.array([np.nan, np.nan], dtype=float)
 
         time_fit = np.linspace(self.time.min(), self.time.max(), 400)
         freq_fit = model_func(time_fit, a, b)
@@ -2982,6 +3477,18 @@ class AnalyzeDialog(QDialog):
         self.r2_display.setText(f"R² = {r2:.4f}")
         self.rmse_display.setText(f"RMSE = {rmse:.4f}")
 
+        # Cache fit parameters for session persistence
+        try:
+            self._fit_params = {
+                "a": float(a),
+                "b": float(b),
+                "std_errs": [float(std_errs[0]), float(std_errs[1])],
+                "r2": float(r2),
+                "rmse": float(rmse),
+            }
+        except Exception:
+            self._fit_params = None
+
         drift_vals = drift_rate(self.time, a, b)
         residuals = self.freq - predicted
         freq_err = np.std(residuals)
@@ -3004,6 +3511,51 @@ class AnalyzeDialog(QDialog):
         self._update_shock_parameters(self._selected_fold())
 
         self.status.showMessage("Best fit plotted successfully!", 3000)
+
+    def session_state(self) -> dict:
+        state = {
+            "fundamental": bool(getattr(self, "fundamental", True)),
+            "harmonic": bool(getattr(self, "harmonic", False)),
+            "fold": int(self._selected_fold()),
+        }
+        fit = getattr(self, "_fit_params", None)
+        if isinstance(fit, dict):
+            state["fit_params"] = fit
+        return state
+
+    def restore_session(self, state: dict):
+        try:
+            fold = int(state.get("fold", 1))
+        except Exception:
+            fold = 1
+        fold = max(1, min(4, fold))
+        try:
+            self.fold_combo.setCurrentIndex(fold - 1)
+        except Exception:
+            pass
+
+        fit = state.get("fit_params", None)
+        if not isinstance(fit, dict):
+            return
+
+        if "a" not in fit or "b" not in fit:
+            return
+
+        try:
+            a = float(fit["a"])
+            b = float(fit["b"])
+        except Exception:
+            return
+
+        std_errs = fit.get("std_errs", None)
+        std_errs_arr = None
+        if isinstance(std_errs, (list, tuple)) and len(std_errs) >= 2:
+            try:
+                std_errs_arr = np.array([float(std_errs[0]), float(std_errs[1])], dtype=float)
+            except Exception:
+                std_errs_arr = None
+
+        self.plot_fit(params=(a, b), std_errs=std_errs_arr)
 
     def _selected_fold(self):
         try:
