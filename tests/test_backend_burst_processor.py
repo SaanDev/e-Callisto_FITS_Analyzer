@@ -3,16 +3,25 @@ import pytest
 
 pytest.importorskip("astropy")
 
+from astropy.io import fits
+
 from src.Backend import burst_processor
+from src.Backend import fits_io
 
 
 class FakeHDU:
     def __init__(self, data=None, header=None):
         self.data = data
-        self.header = header or {}
+        self.header = header or fits.Header()
 
 
 class FakeHDUList(list):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
     def close(self):
         return None
 
@@ -24,12 +33,12 @@ def test_load_fits_reads_arrays(monkeypatch):
 
     fake_hdul = FakeHDUList(
         [
-            FakeHDU(data=data),
+            FakeHDU(data=data, header=fits.Header()),
             FakeHDU(data={"frequency": [freqs], "time": [times]}),
         ]
     )
 
-    monkeypatch.setattr(burst_processor.fits, "open", lambda _: fake_hdul)
+    monkeypatch.setattr(fits_io.fits, "open", lambda *_args, **_kwargs: fake_hdul)
 
     loaded_data, loaded_freqs, loaded_time = burst_processor.load_fits("test.fit")
 
@@ -96,13 +105,15 @@ def test_combine_frequency_merges_data(monkeypatch):
     freqs2 = np.array([300.0, 400.0])
     time = np.array([0.0, 1.0])
 
-    def fake_load(path):
-        if path.endswith("A.fit"):
-            return data1, freqs1, time
-        return data2, freqs2, time
+    hdr = fits.Header()
+    hdr["TIME-OBS"] = "01:02:03"
 
-    monkeypatch.setattr(burst_processor, "load_fits", fake_load)
-    monkeypatch.setattr(burst_processor.fits, "getheader", lambda *_args, **_kwargs: {"TIME-OBS": "01:02:03"})
+    def fake_load(path, memmap=False):
+        if path.endswith("A.fit"):
+            return fits_io.FitsLoadResult(data=data1, freqs=freqs1, time=time, header0=hdr)
+        return fits_io.FitsLoadResult(data=data2, freqs=freqs2, time=time, header0=hdr)
+
+    monkeypatch.setattr(burst_processor, "load_callisto_fits", fake_load)
 
     result = burst_processor.combine_frequency([
         "STAT_20240101_120000_A.fit",
@@ -121,13 +132,15 @@ def test_combine_time_stitches_time_axis(monkeypatch):
     data1 = np.ones((2, 3))
     data2 = np.zeros((2, 3))
 
-    def fake_load(path):
-        if path.endswith("120000_A.fit"):
-            return data1, freqs, time
-        return data2, freqs, time
+    hdr = fits.Header()
+    hdr["TIME-OBS"] = "00:00:10"
 
-    monkeypatch.setattr(burst_processor, "load_fits", fake_load)
-    monkeypatch.setattr(burst_processor.fits, "getheader", lambda *_args, **_kwargs: {"TIME-OBS": "00:00:10"})
+    def fake_load(path, memmap=False):
+        if path.endswith("120000_A.fit"):
+            return fits_io.FitsLoadResult(data=data1, freqs=freqs, time=time, header0=hdr)
+        return fits_io.FitsLoadResult(data=data2, freqs=freqs, time=time, header0=hdr)
+
+    monkeypatch.setattr(burst_processor, "load_callisto_fits", fake_load)
 
     result = burst_processor.combine_time([
         "STAT_20240101_120000_A.fit",

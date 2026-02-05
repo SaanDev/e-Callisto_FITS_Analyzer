@@ -14,6 +14,7 @@ import numpy as np
 import requests
 from bs4 import BeautifulSoup
 from astropy.io import fits
+from src.Backend.fits_io import load_callisto_fits
 
 from PySide6.QtCore import (
     Qt, QDate, QThread, Signal, QObject, QRunnable, Slot,
@@ -141,82 +142,10 @@ class PreviewWindow(QDialog):
         self.setWindowTitle(f"FITS Preview: {title}")
         self.setMinimumSize(900, 600)
 
-        # Astropy can open .fit and .fit.gz paths directly
-        with fits.open(file_path, memmap=False) as hdul:
-            data = np.array(hdul[0].data, dtype=float)
-            data = np.squeeze(data)
-
-            # If extra dimensions exist, keep the last 2D plane
-            while data.ndim > 2:
-                data = data[0]
-
-            freqs = None
-            times = None
-
-            def _col_to_1d(col):
-                if col is None:
-                    return None
-                arr = np.array(col)
-                if arr.ndim == 0:
-                    return None
-                if arr.ndim == 1:
-                    return arr.astype(float)
-                # If it's 2D (repeated rows), take the first row
-                return arr[0].astype(float)
-
-            # Try to read from extension 1 table (common in CALLISTO)
-            if len(hdul) > 1 and getattr(hdul[1], "data", None) is not None:
-                t = hdul[1].data
-                names = [n.lower() for n in getattr(t, "names", [])]
-
-                def _get(name):
-                    if not names:
-                        return None
-                    for n in t.names:
-                        if n.lower() == name:
-                            return t[n]
-                    return None
-
-                # IMPORTANT: do NOT index [0] or [-1] here
-                freq_col = _get("frequency")
-                if freq_col is None:
-                    freq_col = _get("freq")
-                freqs = _col_to_1d(freq_col)
-
-                time_col = _get("time")
-                if time_col is None:
-                    time_col = _get("times")
-                times = _col_to_1d(time_col)
-
-            # If still missing, use header linear WCS if available
-            hdr = hdul[0].header
-
-            def _axis_from_header(axis_num, length):
-                crval = hdr.get(f"CRVAL{axis_num}", None)
-                cdelt = hdr.get(f"CDELT{axis_num}", None)
-                crpix = hdr.get(f"CRPIX{axis_num}", 1.0)
-                if crval is None or cdelt is None:
-                    return None
-                i = np.arange(length, dtype=float) + 1.0  # FITS is 1-based
-                return crval + (i - float(crpix)) * float(cdelt)
-
-            if freqs is None:
-                # Usually axis 2 is frequency for (freq, time)
-                freqs = _axis_from_header(2, data.shape[0])
-
-            if times is None:
-                # Usually axis 1 is time
-                times = _axis_from_header(1, data.shape[1])
-
-            # If table axes are swapped (data is time x freq), fix it
-            if freqs is not None and times is not None:
-                if data.shape[0] == len(times) and data.shape[1] == len(freqs):
-                    data = data.T
-
-            # Mean background subtraction (per-frequency channel across time)
-            #if data.ndim == 2:
-                #bg = np.nanmean(data, axis=1, keepdims=True)
-                #data = data - bg
+        res = load_callisto_fits(file_path, memmap=False)
+        data = res.data
+        freqs = res.freqs
+        times = res.time
 
         fig = Figure()
         canvas = FigureCanvas(fig)
@@ -228,12 +157,13 @@ class PreviewWindow(QDialog):
 
             fmin = float(np.nanmin(freqs))
             fmax = float(np.nanmax(freqs))
+            tmin = float(np.nanmin(times))
             tmax = float(np.nanmax(times))
 
             # If freqs are descending (high -> low), row 0 should be at the top
             origin = "upper" if freqs[0] > freqs[-1] else "lower"
 
-            extent = [fmin, tmax, fmin, fmax]
+            extent = [tmin, tmax, fmin, fmax]
             im = ax.imshow(data, aspect="auto", extent=extent, origin=origin, cmap="inferno")
 
             ax.set_xlabel("Time [s]")

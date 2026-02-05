@@ -6,17 +6,14 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
 
 import numpy as np
-from astropy.io import fits
 import os
 from datetime import datetime
 
+from src.Backend.fits_io import build_combined_header, extract_ut_start_sec, load_callisto_fits
+
 def load_fits(filepath):
-    hdul = fits.open(filepath)
-    data = hdul[0].data
-    freqs = hdul[1].data['frequency'][0]
-    time = hdul[1].data['time'][0]
-    hdul.close()
-    return data, freqs, time
+    res = load_callisto_fits(filepath, memmap=False)
+    return res.data, res.freqs, res.time
 
 def reduce_noise(data, clip_low=-5, clip_high=20):
     data = data - data.mean(axis=1, keepdims=True)
@@ -90,14 +87,17 @@ def combine_frequency(file_paths):
     data_list = []
     freq_list = []
     time_ref = None
+    header0 = None
 
     for fp in file_paths:
-        data, freqs, time_arr = load_fits(fp)
+        res = load_callisto_fits(fp, memmap=False)
+        data, freqs, time_arr = res.data, res.freqs, res.time
         data_list.append(data)
         freq_list.append(freqs)
 
         if time_ref is None:
             time_ref = time_arr
+            header0 = res.header0
         elif not np.allclose(time_arr, time_ref, atol=0.01):
             raise ValueError("Time arrays do not match; cannot frequency-combine.")
 
@@ -107,12 +107,16 @@ def combine_frequency(file_paths):
     station, date, tstamp, _ = parse_filename(file_paths[0])
     combined_name = f"{station}_{date}_{tstamp}_freq_combined"
 
-    try:
-        hdr = fits.getheader(file_paths[0], 0)
-        hh, mm, ss = hdr["TIME-OBS"].split(":")
-        ut_start_sec = int(hh) * 3600 + int(mm) * 60 + float(ss)
-    except Exception:
-        ut_start_sec = None
+    ut_start_sec = extract_ut_start_sec(header0)
+
+    combined_header = build_combined_header(
+        header0,
+        mode="frequency",
+        sources=file_paths,
+        data_shape=combined_data.shape,
+        freqs=combined_freqs,
+        time=time_ref,
+    )
 
     return {
         "data": combined_data,
@@ -120,6 +124,9 @@ def combine_frequency(file_paths):
         "time": time_ref,
         "filename": combined_name,
         "ut_start_sec": ut_start_sec,
+        "header0": combined_header,
+        "sources": list(file_paths),
+        "combine_type": "frequency",
     }
 
 
@@ -174,15 +181,18 @@ def combine_time(file_paths):
     combined_data = None
     combined_time = None
     reference_freqs = None
+    header0 = None
 
     for idx, f in enumerate(sorted_paths):
-        data, freqs, time = load_fits(f)
+        res = load_callisto_fits(f, memmap=False)
+        data, freqs, time = res.data, res.freqs, res.time
 
         if reference_freqs is None:
             reference_freqs = freqs
             combined_data = data
             combined_time = time
             dt = time[1] - time[0]
+            header0 = res.header0
         else:
 
             dt = time[1] - time[0]
@@ -195,12 +205,16 @@ def combine_time(file_paths):
     s, d, t, foc = parse_filename(sorted_paths[0])
     combined_name = f"{s}_{d}_combined_time"
 
-    try:
-        hdr = fits.getheader(sorted_paths[0], 0)
-        hh, mm, ss = hdr["TIME-OBS"].split(":")
-        ut_start_sec = int(hh) * 3600 + int(mm) * 60 + float(ss)
-    except Exception:
-        ut_start_sec = None
+    ut_start_sec = extract_ut_start_sec(header0)
+
+    combined_header = build_combined_header(
+        header0,
+        mode="time",
+        sources=sorted_paths,
+        data_shape=combined_data.shape,
+        freqs=reference_freqs,
+        time=combined_time,
+    )
 
     return {
         "data": combined_data,
@@ -208,4 +222,7 @@ def combine_time(file_paths):
         "time": combined_time,
         "filename": combined_name,
         "ut_start_sec": ut_start_sec,
+        "header0": combined_header,
+        "sources": list(sorted_paths),
+        "combine_type": "time",
     }

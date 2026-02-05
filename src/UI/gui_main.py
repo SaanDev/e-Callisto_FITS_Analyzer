@@ -37,6 +37,8 @@ import matplotlib.pyplot as plt
 from openpyxl import load_workbook, Workbook
 from src.UI.mpl_style import style_axes
 from src.Backend.project_session import ProjectFormatError, read_project, write_project
+from src.Backend.fits_io import build_combined_header, extract_ut_start_sec, load_callisto_fits
+from src.UI.fits_header_viewer import FitsHeaderViewerDialog
 #from PySide6.QtCore import QObject, QEvent
 #from PySide6.QtWidgets import QLayout
 
@@ -196,7 +198,13 @@ class MainWindow(QMainWindow):
         # --- Undo / Redo ---
         self._undo_stack = []
         self._redo_stack = []
+        # Limit only applies to full data-state snapshots (zoom/pan history is lightweight)
         self._max_undo = 30  # prevent memory blow-up
+        self._max_history_entries = 5000  # guardrail for view-history spam
+
+        # --- View (zoom/pan) "home" + history ---
+        self._home_view = None
+        self._pan_start_view = None
 
         # --- Graph Properties (non-colormap) ---
         self.graph_title_override = ""  # empty = use default "{filename} - {title}"
@@ -665,6 +673,13 @@ class MainWindow(QMainWindow):
         radio_action.triggered.connect(self.launch_downloader)
         radio_submenu.addAction(radio_action)
 
+        # FITS View Menu
+        fits_view_menu = menubar.addMenu("FITS View")
+        self.view_fits_header_action = QAction("View FITS Header", self)
+        self.view_fits_header_action.setEnabled(False)
+        fits_view_menu.addAction(self.view_fits_header_action)
+        self.view_fits_header_action.triggered.connect(self.open_fits_header_viewer)
+
 
 
         # View Menu
@@ -886,12 +901,10 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
 
         self.tb_undo = QAction(self._icon("undo.svg"), "Undo", self)
-        self.tb_undo.setShortcut("Ctrl+Z")
         self.tb_undo.triggered.connect(self.undo)
         tb.addAction(self.tb_undo)
 
         self.tb_redo = QAction(self._icon("redo.svg"), "Redo", self)
-        self.tb_redo.setShortcut("Ctrl+Shift+Z")
         self.tb_redo.triggered.connect(self.redo)
         tb.addAction(self.tb_redo)
 
@@ -942,6 +955,15 @@ class MainWindow(QMainWindow):
         has_redo = len(getattr(self, "_redo_stack", [])) > 0
         filename = getattr(self, "filename", "")
 
+        can_reset_view = False
+        try:
+            cur_view = self._capture_view()
+            home_view = getattr(self, "_home_view", None)
+            if cur_view and home_view:
+                can_reset_view = not self._views_close(cur_view, home_view)
+        except Exception:
+            can_reset_view = False
+
         # Always allowed
         self.tb_open.setEnabled(True)
         self.tb_download.setEnabled(True)
@@ -953,13 +975,20 @@ class MainWindow(QMainWindow):
         # Undo/redo availability
         self.tb_undo.setEnabled(has_undo)
         self.tb_redo.setEnabled(has_redo)
+        act = getattr(self, "undo_action", None)
+        if act is not None:
+            act.setEnabled(has_undo)
+        act = getattr(self, "redo_action", None)
+        if act is not None:
+            act.setEnabled(has_redo)
 
         # Tools that require processed data
         self.tb_drift.setEnabled(has_noise)
         self.tb_isolate.setEnabled(has_noise)
         self.tb_max.setEnabled(has_noise)
-        self.tb_reset_sel.setEnabled(has_noise)
+        self.tb_reset_sel.setEnabled(has_noise or can_reset_view)
         self.tb_reset_all.setEnabled(has_file)
+        self._sync_fits_view_actions()
         self._sync_nav_actions()
 
     def _apply_mpl_theme(self):
@@ -1215,7 +1244,7 @@ class MainWindow(QMainWindow):
         initial_dir = os.path.dirname(self.filename) if self.filename else ""
         dialog = QFileDialog(self)
         dialog.setFileMode(QFileDialog.ExistingFiles)
-        dialog.setNameFilter("FITS files (*.fit *.fit.gz)")
+        dialog.setNameFilter("FITS files (*.fit *.fits *.fit.gz *.fits.gz)")
         dialog.setOption(QFileDialog.DontUseNativeDialog, True)
 
         if dialog.exec():
@@ -1230,24 +1259,29 @@ class MainWindow(QMainWindow):
             file_path = file_paths[0]
             self.filename = os.path.basename(file_path)
 
-            hdul = fits.open(file_path)
-            self.raw_data = hdul[0].data
-            self.freqs = hdul[1].data['frequency'][0]
-            self.time = hdul[1].data['time'][0]
+            res = load_callisto_fits(file_path, memmap=False)
+            self.raw_data = res.data
+            self.freqs = res.freqs
+            self.time = res.time
 
-            # UT start
-            hdr = hdul[0].header
-            # Store header template for Export to FITS
-            self._fits_header0 = hdr.copy()
+            # Store header template for Export to FITS / viewing
+            self._fits_header0 = res.header0.copy()
             self._fits_source_path = file_path
 
             self._is_combined = False
             self._combined_mode = None
             self._combined_sources = []
+            self.ut_start_sec = extract_ut_start_sec(res.header0)
 
-            hh, mm, ss = hdr['TIME-OBS'].split(":")
-            self.ut_start_sec = int(hh) * 3600 + int(mm) * 60 + float(ss)
-            hdul.close()
+            # Reset derived state for a fresh start
+            self.noise_reduced_data = None
+            self.noise_reduced_original = None
+            self.lasso_mask = None
+            self.noise_vmin = None
+            self.noise_vmax = None
+            self.current_display_data = None
+            self._undo_stack.clear()
+            self._redo_stack.clear()
 
             self.plot_data(self.raw_data, title="Raw Data")
             self._project_path = None
@@ -1265,10 +1299,8 @@ class MainWindow(QMainWindow):
         try:
             if are_time_combinable(file_paths):
                 combined = combine_time(file_paths)
-                combined["combine_type"] = "time"
             elif are_frequency_combinable(file_paths):
                 combined = combine_frequency(file_paths)
-                combined["combine_type"] = "frequency"
             else:
                 error_msg = (
                     "The selected FITS files cannot be combined.\n\n"
@@ -1290,12 +1322,6 @@ class MainWindow(QMainWindow):
                 )
                 QMessageBox.warning(self, "Invalid Combination Selection", error_msg)
                 return
-
-            combined["sources"] = list(file_paths)
-            try:
-                combined["header0"] = fits.getheader(file_paths[0], 0)
-            except Exception:
-                combined["header0"] = None
 
             self.load_combined_into_main(combined)
             self._project_path = None
@@ -1337,13 +1363,13 @@ class MainWindow(QMainWindow):
         file_paths = sorted(file_paths)
         data_list = []
         freq_list = []
+        time_array = None
 
         for path in file_paths:
-            hdul = fits.open(path)
-            data_list.append(hdul[0].data)
-            freq_list.append(hdul[1].data['frequency'][0])
-            time_array = hdul[1].data['time'][0]
-            hdul.close()
+            res = load_callisto_fits(path, memmap=False)
+            data_list.append(res.data)
+            freq_list.append(res.freqs)
+            time_array = res.time
 
         combined_data = np.concatenate(data_list, axis=0)
         combined_freqs = np.concatenate(freq_list)
@@ -1355,13 +1381,13 @@ class MainWindow(QMainWindow):
         file_paths = sorted(file_paths)
         data_list = []
         time_list = []
+        freqs = None
 
         for path in file_paths:
-            hdul = fits.open(path)
-            data_list.append(hdul[0].data)
-            time_list.append(hdul[1].data['time'][0])
-            freqs = hdul[1].data['frequency'][0]
-            hdul.close()
+            res = load_callisto_fits(path, memmap=False)
+            data_list.append(res.data)
+            time_list.append(res.time)
+            freqs = res.freqs
 
         combined_data = np.concatenate(data_list, axis=1)
 
@@ -1379,29 +1405,31 @@ class MainWindow(QMainWindow):
         return combined_data, combined_freqs, combined_time
 
     def load_fits_into_main(self, file_path):
-        hdul = fits.open(file_path)
-        try:
-            self.raw_data = hdul[0].data
-            self.freqs = hdul[1].data['frequency'][0]
-            self.time = hdul[1].data['time'][0]
-            self.filename = os.path.basename(file_path)
+        res = load_callisto_fits(file_path, memmap=False)
+        self.raw_data = res.data
+        self.freqs = res.freqs
+        self.time = res.time
+        self.filename = os.path.basename(file_path)
 
-            # header template
-            hdr = hdul[0].header
-            self._fits_header0 = hdr.copy()
-            self._fits_source_path = file_path
+        # header template
+        self._fits_header0 = res.header0.copy()
+        self._fits_source_path = file_path
 
-            self._is_combined = False
-            self._combined_mode = None
-            self._combined_sources = []
+        self._is_combined = False
+        self._combined_mode = None
+        self._combined_sources = []
 
-            try:
-                hh, mm, ss = hdr['TIME-OBS'].split(":")
-                self.ut_start_sec = int(hh) * 3600 + int(mm) * 60 + float(ss)
-            except Exception:
-                self.ut_start_sec = None
-        finally:
-            hdul.close()
+        self.ut_start_sec = extract_ut_start_sec(res.header0)
+
+        # Reset derived state for a fresh start
+        self.noise_reduced_data = None
+        self.noise_reduced_original = None
+        self.lasso_mask = None
+        self.noise_vmin = None
+        self.noise_vmax = None
+        self.current_display_data = None
+        self._undo_stack.clear()
+        self._redo_stack.clear()
 
         self.plot_data(self.raw_data, title="Raw Data")
         self._project_path = None
@@ -1415,16 +1443,35 @@ class MainWindow(QMainWindow):
         self.filename = combined.get("filename", "Combined")
         self.ut_start_sec = combined.get("ut_start_sec", None)
 
+        # Reset derived state for a fresh start
+        self.noise_reduced_data = None
+        self.noise_reduced_original = None
+        self.lasso_mask = None
+        self.noise_vmin = None
+        self.noise_vmax = None
+        self.current_display_data = None
+        self._undo_stack.clear()
+        self._redo_stack.clear()
+
         # metadata for Export to FITS
         self._is_combined = True
         self._combined_mode = combined.get("combine_type", None)
         self._combined_sources = combined.get("sources", [])
 
         hdr0 = combined.get("header0", None)
+        if hdr0 is None:
+            hdr0 = build_combined_header(
+                None,
+                mode=combined.get("combine_type", "combined"),
+                sources=combined.get("sources", []) or self._combined_sources,
+                data_shape=getattr(self.raw_data, "shape", (0, 0)),
+                freqs=self.freqs,
+                time=self.time,
+            )
         self._fits_header0 = hdr0.copy() if hdr0 is not None else None
         self._fits_source_path = None
 
-        self.plot_data(self.raw_data, title="Combined Data")
+        self.plot_data(self.raw_data)
         self._project_path = None
         self._max_intensity_state = None
         self._mark_project_dirty()
@@ -1546,6 +1593,9 @@ class MainWindow(QMainWindow):
         self.canvas.ax.set_ylabel("Frequency [MHz]")
         self.canvas.ax.set_title(f"{self.filename} - {title}", fontsize=14)
 
+        # Save full-extent limits as the "home" view (used for Reset Selection after zoom/pan)
+        self._home_view = self._capture_view()
+
         self.format_axes()  # Format x-axis based on user selection (seconds/UT)
         self._restore_view(view)
 
@@ -1646,6 +1696,10 @@ class MainWindow(QMainWindow):
         # Mouse pointer must be inside the plot
         if event.inaxes != ax:
             return
+        if event.xdata is None or event.ydata is None:
+            return
+
+        prev_view = self._capture_view()
 
         # Zoom factor
         base_scale = 1.15  # smooth and gentle zoom
@@ -1688,7 +1742,11 @@ class MainWindow(QMainWindow):
         ax.set_xlim(new_x_min, new_x_max)
         ax.set_ylim(new_y_min, new_y_max)
 
+        if prev_view:
+            self._push_undo_view(prev_view)
+
         self.canvas.draw_idle()
+        self._sync_toolbar_enabled_states()
 
     def on_mouse_press(self, event):
         """
@@ -1709,6 +1767,7 @@ class MainWindow(QMainWindow):
         if event.button == 1 and event.xdata is not None and event.ydata is not None:
             self._panning = True
             self._last_pan_xy = (event.xdata, event.ydata)
+            self._pan_start_view = self._capture_view()
 
     def on_mouse_move(self, event):
         """
@@ -1755,6 +1814,16 @@ class MainWindow(QMainWindow):
         """
         self._panning = False
         self._last_pan_xy = None
+        if getattr(self, "_pan_start_view", None):
+            try:
+                cur_view = self._capture_view()
+                if cur_view and (not self._views_close(cur_view, self._pan_start_view)):
+                    self._push_undo_view(self._pan_start_view)
+            except Exception:
+                pass
+            finally:
+                self._pan_start_view = None
+                self._sync_toolbar_enabled_states()
 
 
     def activate_drift_tool(self):
@@ -1918,6 +1987,9 @@ class MainWindow(QMainWindow):
         # Labels
         self.canvas.ax.set_title("Isolated Burst")
         self.canvas.ax.set_ylabel("Frequency [MHz]")
+
+        # Save full-extent limits as the "home" view (used for Reset Selection after zoom/pan)
+        self._home_view = self._capture_view()
 
         self.format_axes()
 
@@ -2183,6 +2255,19 @@ class MainWindow(QMainWindow):
         self.noise_reduced_original = None
         self.lasso_mask = None
         self.current_plot_type = "Raw"
+        self.current_display_data = None
+        self.noise_vmin = None
+        self.noise_vmax = None
+
+        # FITS metadata / provenance
+        self._fits_header0 = None
+        self._fits_source_path = None
+        self._is_combined = False
+        self._combined_mode = None
+        self._combined_sources = []
+        self.ut_start_sec = None
+        self._home_view = None
+        self._pan_start_view = None
 
         # Reset GUI
         self.statusBar().showMessage("All reset", 4000)
@@ -2212,8 +2297,8 @@ class MainWindow(QMainWindow):
         )
 
     def reset_selection(self):
-        self._push_undo_state()
         if self.noise_reduced_original is not None:
+            self._push_undo_state()
             self.noise_reduced_data = self.noise_reduced_original.copy()
             if self.time is not None and self.freqs is not None:
                 self.plot_data(self.noise_reduced_data, title="Background Subtracted")
@@ -2221,8 +2306,21 @@ class MainWindow(QMainWindow):
             self.lasso = None
             self.statusBar().showMessage("Selection Reset", 4000)
             print("Lasso selection reset. Original noise-reduced data restored.")
+            self._sync_toolbar_enabled_states()
         else:
-            print("No noise-reduced backup found. Reset skipped.")
+            # If no selection exists, treat this as a "reset view" (home) action after zoom/pan.
+            try:
+                cur_view = self._capture_view()
+                home_view = getattr(self, "_home_view", None)
+                if cur_view and home_view and (not self._views_close(cur_view, home_view)):
+                    self._push_undo_view(cur_view)
+                    self._restore_view(home_view)
+                    self.canvas.draw_idle()
+                    self.statusBar().showMessage("View reset", 2500)
+                else:
+                    print("No noise-reduced backup found. Reset skipped.")
+            finally:
+                self._sync_toolbar_enabled_states()
 
     def open_combine_freq_window(self):
         dialog = CombineFrequencyDialog(self)
@@ -2282,10 +2380,24 @@ class MainWindow(QMainWindow):
     def format_axes(self):
         if self.use_utc and self.ut_start_sec is not None:
             def format_func(x, pos):
-                total_seconds = self.ut_start_sec + x
-                hours = int(total_seconds // 3600) % 24
-                minutes = int((total_seconds % 3600) // 60)
-                seconds = int(total_seconds % 60)
+                # Show seconds when viewing a short span (e.g. short files or zoomed-in region)
+                try:
+                    x0, x1 = self.canvas.ax.get_xlim()
+                    span = abs(float(x1) - float(x0))
+                except Exception:
+                    span = None
+
+                show_seconds = (span is not None) and (span <= 5 * 60)
+
+                total_seconds = float(self.ut_start_sec) + float(x)
+                total_seconds_i = int(round(total_seconds))
+
+                hours = int(total_seconds_i // 3600) % 24
+                minutes = int((total_seconds_i % 3600) // 60)
+                seconds = int(total_seconds_i % 60)
+
+                if show_seconds:
+                    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
                 return f"{hours:02d}:{minutes:02d}"
 
             self.canvas.ax.xaxis.set_major_formatter(FuncFormatter(format_func))
@@ -2299,6 +2411,9 @@ class MainWindow(QMainWindow):
     def process_imported_files(self, urls):
         if not urls:
             QMessageBox.warning(self, "No Files", "No files were received from the downloader.")
+            return
+
+        if not self._maybe_prompt_save_dirty():
             return
 
         local_files = []
@@ -2338,12 +2453,6 @@ class MainWindow(QMainWindow):
         try:
             if are_time_combinable(local_files):
                 combined = combine_time(local_files)
-                combined["combine_type"] = "time"
-                combined["sources"] = list(local_files)
-                try:
-                    combined["header0"] = fits.getheader(local_files[0], 0)
-                except Exception:
-                    combined["header0"] = None
                 self.load_combined_into_main(combined)
 
                 self.downloader_dialog.import_success.emit()
@@ -2351,26 +2460,9 @@ class MainWindow(QMainWindow):
 
             if are_frequency_combinable(local_files):
                 combined = combine_frequency(local_files)
-                combined["combine_type"] = "frequency"
-                combined["sources"] = list(local_files)
-                try:
-                    combined["header0"] = fits.getheader(local_files[0], 0)
-                except Exception:
-                    combined["header0"] = None
                 self.load_combined_into_main(combined)
                 self.downloader_dialog.import_success.emit()
                 return
-
-            # Extract UT from first downloaded file
-            try:
-                hdul = fits.open(local_files[0])
-                hdr = hdul[0].header
-                hh, mm, ss = hdr["TIME-OBS"].split(":")
-                self.ut_start_sec = int(hh) * 3600 + int(mm) * 60 + float(ss)
-                hdul.close()
-            except Exception:
-                self.ut_start_sec = None
-
 
         except Exception as e:
             QMessageBox.critical(self, "Combine Error", f"An error occurred while combining files:\n{e}")
@@ -2416,12 +2508,16 @@ class MainWindow(QMainWindow):
             return
 
         ax = self.canvas.ax
+        prev_view = self._capture_view()
         ax.set_xlim(xmin, xmax)
         ax.set_ylim(ymin, ymax)
+        if prev_view:
+            self._push_undo_view(prev_view)
         self.canvas.draw_idle()
 
         self._stop_rect_zoom()
         self.statusBar().showMessage("Zoomed to selected region (still locked).", 2500)
+        self._sync_toolbar_enabled_states()
 
     def _sync_nav_actions(self):
         """Enable/disable Lock/Unlock/Zoom actions to match current state."""
@@ -2534,11 +2630,93 @@ class MainWindow(QMainWindow):
         }
         return state
 
-    def _push_undo_state(self):
-        self._undo_stack.append(self._capture_state())
-        if len(self._undo_stack) > self._max_undo:
-            self._undo_stack.pop(0)
+    def _entry_kind(self, entry) -> str:
+        if isinstance(entry, dict) and entry.get("kind") in ("state", "view"):
+            return entry["kind"]
+        return "state"
+
+    def _entry_state(self, entry):
+        if self._entry_kind(entry) != "state":
+            return None
+        if isinstance(entry, dict) and "state" in entry:
+            return entry["state"]
+        return entry
+
+    def _entry_view(self, entry):
+        kind = self._entry_kind(entry)
+        if kind == "view":
+            return entry.get("view") if isinstance(entry, dict) else None
+        st = self._entry_state(entry)
+        if isinstance(st, dict):
+            return st.get("view")
+        return None
+
+    def _count_state_entries(self, stack) -> int:
+        n = 0
+        for e in stack:
+            if self._entry_kind(e) == "state":
+                n += 1
+        return n
+
+    def _trim_history(self):
+        # Enforce limit on heavy (state) snapshots by dropping the oldest state entry,
+        # along with any older view entries before it.
+        while self._count_state_entries(self._undo_stack) > self._max_undo:
+            drop_to = None
+            for i, e in enumerate(self._undo_stack):
+                if self._entry_kind(e) == "state":
+                    drop_to = i
+                    break
+            if drop_to is None:
+                break
+            del self._undo_stack[: drop_to + 1]
+
+        # Guardrail to prevent unbounded growth from view-history spam
+        if len(self._undo_stack) > self._max_history_entries:
+            extra = len(self._undo_stack) - self._max_history_entries
+            del self._undo_stack[:extra]
+
+        if len(self._redo_stack) > self._max_history_entries:
+            extra = len(self._redo_stack) - self._max_history_entries
+            del self._redo_stack[:extra]
+
+    def _views_close(self, a, b, tol: float = 1e-6) -> bool:
+        if not a or not b:
+            return False
+        for key in ("xlim", "ylim"):
+            try:
+                a0, a1 = a.get(key)
+                b0, b1 = b.get(key)
+            except Exception:
+                return False
+            try:
+                a0 = float(a0)
+                a1 = float(a1)
+                b0 = float(b0)
+                b1 = float(b1)
+            except Exception:
+                return False
+            if abs(a0 - b0) > tol or abs(a1 - b1) > tol:
+                return False
+        return True
+
+    def _push_undo_view(self, view):
+        if not view:
+            return
+        # Avoid pushing duplicate consecutive view entries
+        if self._undo_stack and self._entry_kind(self._undo_stack[-1]) == "view":
+            last_view = self._entry_view(self._undo_stack[-1])
+            if last_view and self._views_close(last_view, view):
+                return
+
+        self._undo_stack.append({"kind": "view", "view": view})
         self._redo_stack.clear()
+        self._trim_history()
+
+    def _push_undo_state(self):
+        self._undo_stack.append({"kind": "state", "state": self._capture_state()})
+        self._redo_stack.clear()
+        self._trim_history()
         self._mark_project_dirty()
 
     def _restore_state(self, state):
@@ -2570,25 +2748,59 @@ class MainWindow(QMainWindow):
         if not self._undo_stack:
             self.statusBar().showMessage("Nothing to undo", 2000)
             return
+        entry = self._undo_stack.pop()
+        kind = self._entry_kind(entry)
 
-        current = self._capture_state()
-        self._redo_stack.append(current)
+        if kind == "view":
+            cur_view = self._capture_view()
+            if cur_view:
+                self._redo_stack.append({"kind": "view", "view": cur_view})
+                self._trim_history()
 
-        state = self._undo_stack.pop()
-        self._restore_state(state)
+            view = self._entry_view(entry)
+            if view:
+                self._restore_view(view)
+                self.canvas.draw_idle()
+        else:
+            current = {"kind": "state", "state": self._capture_state()}
+            self._redo_stack.append(current)
+            self._trim_history()
+
+            state = self._entry_state(entry)
+            if state:
+                self._restore_state(state)
+
         self.statusBar().showMessage("Undo", 2000)
+        self._sync_toolbar_enabled_states()
 
     def redo(self):
         if not self._redo_stack:
             self.statusBar().showMessage("Nothing to redo", 2000)
             return
+        entry = self._redo_stack.pop()
+        kind = self._entry_kind(entry)
 
-        current = self._capture_state()
-        self._undo_stack.append(current)
+        if kind == "view":
+            cur_view = self._capture_view()
+            if cur_view:
+                self._undo_stack.append({"kind": "view", "view": cur_view})
+                self._trim_history()
 
-        state = self._redo_stack.pop()
-        self._restore_state(state)
+            view = self._entry_view(entry)
+            if view:
+                self._restore_view(view)
+                self.canvas.draw_idle()
+        else:
+            current = {"kind": "state", "state": self._capture_state()}
+            self._undo_stack.append(current)
+            self._trim_history()
+
+            state = self._entry_state(entry)
+            if state:
+                self._restore_state(state)
+
         self.statusBar().showMessage("Redo", 2000)
+        self._sync_toolbar_enabled_states()
 
     # -----------------------------
     # Project/session Save + Load
@@ -2617,6 +2829,12 @@ class MainWindow(QMainWindow):
             act = getattr(self, name, None)
             if act is not None:
                 act.setEnabled(bool(enabled))
+
+    def _sync_fits_view_actions(self):
+        has_data = getattr(self, "raw_data", None) is not None
+        act = getattr(self, "view_fits_header_action", None)
+        if act is not None:
+            act.setEnabled(bool(has_data))
 
     def _maybe_prompt_save_dirty(self) -> bool:
         if not getattr(self, "_project_dirty", False):
@@ -2951,6 +3169,32 @@ class MainWindow(QMainWindow):
         self._apply_project_payload(payload.meta, payload.arrays)
         self._set_project_clean(path)
         self.statusBar().showMessage(f"Project loaded: {os.path.basename(path)}", 5000)
+
+    def open_fits_header_viewer(self):
+        if getattr(self, "raw_data", None) is None:
+            QMessageBox.information(self, "FITS Header", "Load a FITS file first.")
+            return
+
+        hdr = getattr(self, "_fits_header0", None)
+        if hdr is None:
+            hdr = fits.Header()
+
+        base = "fits"
+        if getattr(self, "filename", ""):
+            base = os.path.splitext(os.path.basename(self.filename))[0] or base
+        default_name = f"{base}_header.txt"
+
+        title = "FITS Header"
+        if getattr(self, "filename", ""):
+            title = f"FITS Header — {self.filename}"
+
+        self._fits_header_viewer = FitsHeaderViewerDialog(
+            hdr,
+            title=title,
+            default_name=default_name,
+            parent=self,
+        )
+        self._fits_header_viewer.show()
 
     def closeEvent(self, event):
         if not self._maybe_prompt_save_dirty():
@@ -3877,13 +4121,14 @@ class CombineFrequencyDialog(QDialog):
         self.combined_freqs = None
         self.combined_time = None
         self.combined_filename = "Combined_Frequency"
+        self.combined_header0 = None
 
     def load_files(self):
         files, _ = QFileDialog.getOpenFileNames(
             self,
             "Select FITS Files to Combine",
             "",
-            "FITS files (*.fit *.fit.gz)"
+            "FITS files (*.fit *.fits *.fit.gz *.fits.gz)"
         )
         if len(files) != 2:
             QMessageBox.warning(self, "Error", "Please select exactly TWO files.")
@@ -3901,25 +4146,18 @@ class CombineFrequencyDialog(QDialog):
         self.combine_button.setEnabled(True)
 
     def combine_files(self):
-        from astropy.io import fits
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(10)
         QApplication.processEvents()
 
         try:
-            hdul1 = fits.open(self.file_paths[0])
-            data1 = hdul1[0].data
-            freqs1 = hdul1[1].data['frequency'][0]
-            time1 = hdul1[1].data['time'][0]
-            hdul1.close()
+            res1 = load_callisto_fits(self.file_paths[0], memmap=False)
+            data1, freqs1, time1, hdr1 = res1.data, res1.freqs, res1.time, res1.header0
             self.progress_bar.setValue(30)
             QApplication.processEvents()
 
-            hdul2 = fits.open(self.file_paths[1])
-            data2 = hdul2[0].data
-            freqs2 = hdul2[1].data['frequency'][0]
-            time2 = hdul2[1].data['time'][0]
-            hdul2.close()
+            res2 = load_callisto_fits(self.file_paths[1], memmap=False)
+            data2, freqs2, time2 = res2.data, res2.freqs, res2.time
             self.progress_bar.setValue(60)
             QApplication.processEvents()
 
@@ -3931,6 +4169,14 @@ class CombineFrequencyDialog(QDialog):
             self.combined_data = np.vstack([data1, data2])
             self.combined_freqs = np.concatenate([freqs1, freqs2])
             self.combined_time = time1
+            self.combined_header0 = build_combined_header(
+                hdr1,
+                mode="frequency",
+                sources=self.file_paths,
+                data_shape=self.combined_data.shape,
+                freqs=self.combined_freqs,
+                time=self.combined_time,
+            )
             self.progress_bar.setValue(80)
             QApplication.processEvents()
 
@@ -3989,19 +4235,25 @@ class CombineFrequencyDialog(QDialog):
         self.main_window._is_combined = True
         self.main_window._combined_mode = "frequency"
         self.main_window._combined_sources = list(self.file_paths)
-        try:
-            self.main_window._fits_header0 = fits.getheader(self.file_paths[0], 0).copy()
-        except Exception:
-            self.main_window._fits_header0 = None
+        self.main_window._fits_header0 = self.combined_header0.copy() if self.combined_header0 is not None else None
         self.main_window._fits_source_path = None
 
         # UT start for UT-axis formatting
-        try:
-            hdr = fits.getheader(self.file_paths[0], 0)
-            hh, mm, ss = hdr["TIME-OBS"].split(":")
-            self.main_window.ut_start_sec = int(hh) * 3600 + int(mm) * 60 + float(ss)
-        except Exception:
-            self.main_window.ut_start_sec = None
+        self.main_window.ut_start_sec = extract_ut_start_sec(self.main_window._fits_header0)
+
+        # Reset derived state for a fresh start
+        self.main_window.noise_reduced_data = None
+        self.main_window.noise_reduced_original = None
+        self.main_window.lasso_mask = None
+        self.main_window.noise_vmin = None
+        self.main_window.noise_vmax = None
+        self.main_window.current_display_data = None
+        self.main_window._undo_stack.clear()
+        self.main_window._redo_stack.clear()
+
+        self.main_window._project_path = None
+        self.main_window._max_intensity_state = None
+        self.main_window._mark_project_dirty()
 
         self.main_window.plot_data(self.combined_data, title="Raw Data (Combined Frequency)")
         self.close()
@@ -4016,6 +4268,7 @@ class CombineTimeDialog(QDialog):
 
         self.file_paths = []
         self.combined_data = None
+        self.combined_header0 = None
 
         # Buttons
         self.load_button = QPushButton("Import FITS Files")
@@ -4052,7 +4305,7 @@ class CombineTimeDialog(QDialog):
             self,
             "Select FITS Files to Combine",
             "",
-            "FITS files (*.fit *.fit.gz)"
+            "FITS files (*.fit *.fits *.fit.gz *.fits.gz)"
         )
 
         if len(files) < 2:
@@ -4097,12 +4350,13 @@ class CombineTimeDialog(QDialog):
             combined_data = None
             combined_time = None
             reference_freqs = None
+            header0 = None
 
             for idx, file_path in enumerate(self.file_paths):
-                hdul = fits.open(file_path)
-                data = hdul[0].data
-                freqs = hdul[1].data["frequency"][0]
-                time = hdul[1].data["time"][0]
+                res = load_callisto_fits(file_path, memmap=False)
+                data, freqs, time = res.data, res.freqs, res.time
+                if header0 is None:
+                    header0 = res.header0
 
                 if reference_freqs is None:
                     reference_freqs = freqs
@@ -4122,12 +4376,18 @@ class CombineTimeDialog(QDialog):
                     combined_data = np.concatenate((combined_data, data), axis=1)
                     combined_time = np.concatenate((combined_time, adjusted_time))
 
-                hdul.close()
-
             self.combined_data = combined_data
             self.combined_time = combined_time
             self.main_window.freqs = reference_freqs
             self.main_window.time = combined_time
+            self.combined_header0 = build_combined_header(
+                header0,
+                mode="time",
+                sources=self.file_paths,
+                data_shape=combined_data.shape,
+                freqs=reference_freqs,
+                time=combined_time,
+            )
 
             self.progress_bar.setValue(80)
 
@@ -4169,25 +4429,25 @@ class CombineTimeDialog(QDialog):
             self.main_window._is_combined = True
             self.main_window._combined_mode = "time"
             self.main_window._combined_sources = list(self.file_paths)
-            try:
-                self.main_window._fits_header0 = fits.getheader(self.file_paths[0], 0).copy()
-            except Exception:
-                self.main_window._fits_header0 = None
+            self.main_window._fits_header0 = self.combined_header0.copy() if self.combined_header0 is not None else None
             self.main_window._fits_source_path = None
 
             # Calculate UT start from FITS header of first file
-            try:
-                hdul = fits.open(self.file_paths[0])
-                hdr = hdul[0].header
-                hh, mm, ss = hdr['TIME-OBS'].split(":")
-                hh = int(hh)
-                mm = int(mm)
-                ss = float(ss)
-                self.main_window.ut_start_sec = hh * 3600 + mm * 60 + ss
-                hdul.close()
-            except Exception as e:
-                print("⚠️ Could not extract UT time from first file:", e)
-                self.main_window.ut_start_sec = None
+            self.main_window.ut_start_sec = extract_ut_start_sec(self.main_window._fits_header0)
+
+            # Reset derived state for a fresh start
+            self.main_window.noise_reduced_data = None
+            self.main_window.noise_reduced_original = None
+            self.main_window.lasso_mask = None
+            self.main_window.noise_vmin = None
+            self.main_window.noise_vmax = None
+            self.main_window.current_display_data = None
+            self.main_window._undo_stack.clear()
+            self.main_window._redo_stack.clear()
+
+            self.main_window._project_path = None
+            self.main_window._max_intensity_state = None
+            self.main_window._mark_project_dirty()
 
             self.main_window.plot_data(self.combined_data, title="Combined Time")
             self.close()
