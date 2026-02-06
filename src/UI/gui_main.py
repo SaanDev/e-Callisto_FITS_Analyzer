@@ -713,7 +713,6 @@ class MainWindow(QMainWindow):
         self.view_fits_header_action.triggered.connect(self.open_fits_header_viewer)
 
 
-
         # View Menu
         view_menu = menubar.addMenu("View")
         theme_menu = view_menu.addMenu("Theme")
