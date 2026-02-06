@@ -28,7 +28,7 @@ Version **1.7.7**
 - Default export filenames (image + FITS) now follow the active graph title and avoid duplicated combine suffixes.
 
 ### UI/UX
-- Added a **collapsible left sidebar** with a centered arrow toggle.
+- Added a **collapsible left sidebar**.
 - When collapsed, the graph area expands to use the full available width.
 
 ---
