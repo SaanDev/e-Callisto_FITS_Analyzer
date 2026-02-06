@@ -209,7 +209,7 @@ class MainWindow(QMainWindow):
         self._pan_start_view = None
 
         # --- Graph Properties (non-colormap) ---
-        self.graph_title_override = ""  # empty = use default "{filename} - {title}"
+        self.graph_title_override = ""  # empty = use context-aware default title
         self.graph_font_family = ""  # empty = use Matplotlib default
 
         self.tick_font_px = 11
@@ -639,6 +639,13 @@ class MainWindow(QMainWindow):
 
         edit_menu.addSeparator()
 
+        self.reset_to_raw_action = QAction("Reset to Raw", self)
+        self.reset_to_raw_action.setEnabled(False)
+        edit_menu.addAction(self.reset_to_raw_action)
+        self.reset_to_raw_action.triggered.connect(self.reset_to_raw)
+
+        edit_menu.addSeparator()
+
         reset_action = QAction("Reset All", self)
         edit_menu.addAction(reset_action)
         reset_action.triggered.connect(self.reset_all)
@@ -983,6 +990,9 @@ class MainWindow(QMainWindow):
         act = getattr(self, "redo_action", None)
         if act is not None:
             act.setEnabled(has_redo)
+        act = getattr(self, "reset_to_raw_action", None)
+        if act is not None:
+            act.setEnabled(has_file)
 
         # Tools that require processed data
         self.tb_drift.setEnabled(has_noise)
@@ -1081,6 +1091,60 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_apply_mpl_theme"):
             self._apply_mpl_theme()
 
+    def _normalize_plot_type(self, title: str | None) -> str:
+        txt = str(title or "").strip()
+        if not txt:
+            return "Raw"
+
+        lowered = txt.lower()
+        raw_aliases = {
+            "raw",
+            "raw data",
+            "dynamic spectrum",
+            "combined time",
+            "combined time plot",
+            "raw data (combined frequency)",
+        }
+        if lowered in raw_aliases:
+            return "Raw"
+
+        if lowered in {"background subtracted", "background-subtracted"}:
+            return "Background Subtracted"
+
+        return txt
+
+    def _default_graph_title(self, plot_type: str | None = None) -> str:
+        normalized = self._normalize_plot_type(plot_type if plot_type is not None else self.current_plot_type)
+        base = str(getattr(self, "filename", "") or "").strip() or "Untitled"
+
+        return f"{base}-{normalized}"
+
+    def _current_graph_title_for_export(self) -> str:
+        ax = getattr(getattr(self, "canvas", None), "ax", None)
+        if ax is not None:
+            try:
+                live_title = str(ax.get_title() or "").strip()
+                if live_title:
+                    return live_title
+            except Exception:
+                pass
+
+        override = str(getattr(self, "graph_title_override", "") or "").strip()
+        if override:
+            return override
+
+        return self._default_graph_title(self.current_plot_type)
+
+    def _sanitize_export_stem(self, text: str) -> str:
+        stem = str(text or "").strip()
+        if not stem:
+            stem = "export"
+
+        stem = re.sub(r"\s+", " ", stem)
+        stem = re.sub(r"[\\\\/:*?\"<>|]+", "_", stem)
+        stem = stem.strip(" .")
+        return stem or "export"
+
     def apply_graph_properties_live(self, *_):
         """
         Apply graph styling changes (title, font family, font sizes, bold/italic flags)
@@ -1136,7 +1200,7 @@ class MainWindow(QMainWindow):
             ax.set_ylabel("")
         else:
             # Default title if custom is empty
-            title_text = self.graph_title_override or f"{self.filename} - {self.current_plot_type}"
+            title_text = self.graph_title_override or self._default_graph_title(self.current_plot_type)
 
             ax.set_title(
                 title_text,
@@ -1285,7 +1349,7 @@ class MainWindow(QMainWindow):
             self._undo_stack.clear()
             self._redo_stack.clear()
 
-            self.plot_data(self.raw_data, title="Raw Data")
+            self.plot_data(self.raw_data, title="Raw")
             self._project_path = None
             self._max_intensity_state = None
             self._mark_project_dirty()
@@ -1433,7 +1497,7 @@ class MainWindow(QMainWindow):
         self._undo_stack.clear()
         self._redo_stack.clear()
 
-        self.plot_data(self.raw_data, title="Raw Data")
+        self.plot_data(self.raw_data, title="Raw")
         self._project_path = None
         self._max_intensity_state = None
         self._mark_project_dirty()
@@ -1506,7 +1570,7 @@ class MainWindow(QMainWindow):
         # enable tools
         self._sync_toolbar_enabled_states()
 
-    def plot_data(self, data, keep_view=False, restore_view=None):
+    def plot_data(self, data, title="Raw", keep_view=False, restore_view=None):
         view = restore_view if restore_view is not None else (self._capture_view() if keep_view else None)
         QTimer.singleShot(0, lambda: self._plot_data_internal(data, title, view))
 
@@ -1534,7 +1598,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    def _plot_data_internal(self, data, view=None):
+    def _plot_data_internal(self, data, title="Raw", view=None):
 
         self._stop_rect_zoom()
 
@@ -1592,8 +1656,9 @@ class MainWindow(QMainWindow):
         # Store label string so apply_graph_properties_live can re-style it
         self._colorbar_label_text = label
 
+        plot_type = self._normalize_plot_type(title)
         self.canvas.ax.set_ylabel("Frequency [MHz]")
-        self.canvas.ax.set_title(f"{self.filename} - {title}", fontsize=14)
+        self.canvas.ax.set_title(self._default_graph_title(plot_type), fontsize=14)
 
         # Save full-extent limits as the "home" view (used for Reset Selection after zoom/pan)
         self._home_view = self._capture_view()
@@ -1611,7 +1676,7 @@ class MainWindow(QMainWindow):
         self.graph_group.setEnabled(True)
         self.canvas.draw_idle()
 
-        self.current_plot_type = title
+        self.current_plot_type = plot_type
         self._sync_toolbar_enabled_states()
         self.statusBar().showMessage(f"Loaded: {self.filename}", 5000)
 
@@ -2077,9 +2142,7 @@ class MainWindow(QMainWindow):
 
         formats = "PNG (*.png);;PDF (*.pdf);;EPS (*.eps);;SVG (*.svg);;TIFF (*.tiff)"
 
-        base_name = self.filename.split(".")[0]
-        suffix = self.current_plot_type.replace(" ", "")
-        default_name = f"{base_name}_{suffix}"
+        default_name = self._sanitize_export_stem(self._current_graph_title_for_export())
 
         file_path, ext = pick_export_path(
             self,
@@ -2351,7 +2414,7 @@ class MainWindow(QMainWindow):
         chosen, ok = QInputDialog.getItem(
             self,
             "Export FITS - BITPIX",
-            "Choose BITPIX for the exported FITS (JavaViewer compatibility):",
+            "Choose BITPIX for the exported FITS:",
             bitpix_items,
             0,
             False,
@@ -2376,24 +2439,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Export Failed", f"Could not convert data for BITPIX={bitpix}:\n{e}")
             return
 
-        # Default filename
-        base = self.filename if self.filename else "export"
-        for ext in (".fit.gz", ".fits.gz", ".fit", ".fits"):
-            if base.lower().endswith(ext):
-                base = base[: -len(ext)]
-                break
-        suffix = ""
-        if self._is_combined:
-            if self._combined_mode == "time":
-                suffix = "_combined_time"
-            elif self._combined_mode == "frequency":
-                suffix = "_combined_frequency"
-            else:
-                suffix = "_combined"
-        else:
-            suffix = "_noise_reduced" if self.noise_reduced_data is not None else "_raw"
-
-        default_name = f"{base}{suffix}.fit"
+        default_name = f"{self._sanitize_export_stem(self._current_graph_title_for_export())}.fit"
 
         save_path, _ = QFileDialog.getSaveFileName(
             self,
@@ -2553,6 +2599,71 @@ class MainWindow(QMainWindow):
         self._set_project_clean(None)
 
         print("Application reset to initial state.")
+
+    def reset_to_raw(self):
+        if self.raw_data is None:
+            QMessageBox.warning(self, "No Data", "Load a FITS file first.")
+            return
+
+        had_processed = (
+            self.noise_reduced_data is not None
+            or self.noise_reduced_original is not None
+            or self.lasso_mask is not None
+            or self.lasso_active
+            or bool(getattr(self, "lasso", None))
+            or self.lower_slider.value() != 0
+            or self.upper_slider.value() != 0
+        )
+        if had_processed:
+            self._push_undo_state()
+
+        self.noise_smooth_timer.stop()
+
+        if getattr(self, "lasso", None):
+            try:
+                self.lasso.disconnect_events()
+            except Exception:
+                pass
+            self.lasso = None
+        self.lasso_active = False
+
+        # Ensure pan handlers are restored if lasso activation had disconnected them.
+        try:
+            self.canvas.mpl_disconnect(self._cid_press)
+        except Exception:
+            pass
+        try:
+            self.canvas.mpl_disconnect(self._cid_motion)
+        except Exception:
+            pass
+        try:
+            self.canvas.mpl_disconnect(self._cid_release)
+        except Exception:
+            pass
+        self._cid_press = self.canvas.mpl_connect("button_press_event", self.on_mouse_press)
+        self._cid_motion = self.canvas.mpl_connect("motion_notify_event", self.on_mouse_move)
+        self._cid_release = self.canvas.mpl_connect("button_release_event", self.on_mouse_release)
+
+        self.noise_reduced_data = None
+        self.noise_reduced_original = None
+        self.lasso_mask = None
+        self.noise_vmin = None
+        self.noise_vmax = None
+
+        self.lower_slider.blockSignals(True)
+        self.upper_slider.blockSignals(True)
+        try:
+            self.lower_slider.setValue(0)
+            self.upper_slider.setValue(0)
+        finally:
+            self.lower_slider.blockSignals(False)
+            self.upper_slider.blockSignals(False)
+
+        self.plot_data(self.raw_data, title="Raw")
+        if had_processed:
+            self._mark_project_dirty()
+        self.statusBar().showMessage("Reset to raw", 3000)
+        self._sync_toolbar_enabled_states()
 
     def show_about_dialog(self):
         QMessageBox.information(
@@ -3224,7 +3335,7 @@ class MainWindow(QMainWindow):
                         pass
 
             self.filename = meta.get("filename", "") or ""
-            self.current_plot_type = meta.get("current_plot_type", "Raw Data") or "Raw Data"
+            self.current_plot_type = self._normalize_plot_type(meta.get("current_plot_type", "Raw"))
 
             self.use_db = bool(meta.get("use_db", False))
             self.use_utc = bool(meta.get("use_utc", False))
@@ -4524,7 +4635,7 @@ class CombineFrequencyDialog(QDialog):
         self.main_window._max_intensity_state = None
         self.main_window._mark_project_dirty()
 
-        self.main_window.plot_data(self.combined_data, title="Raw Data (Combined Frequency)")
+        self.main_window.plot_data(self.combined_data, title="Raw")
         self.close()
 
 
@@ -4718,5 +4829,5 @@ class CombineTimeDialog(QDialog):
             self.main_window._max_intensity_state = None
             self.main_window._mark_project_dirty()
 
-            self.main_window.plot_data(self.combined_data, title="Combined Time")
+            self.main_window.plot_data(self.combined_data, title="Raw")
             self.close()
