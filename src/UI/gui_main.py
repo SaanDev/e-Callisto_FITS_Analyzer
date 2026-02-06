@@ -511,14 +511,34 @@ class MainWindow(QMainWindow):
         self.units_group_box.setMaximumWidth(SIDEBAR_W)
         self.graph_group.setMaximumWidth(SIDEBAR_W)
 
-        side_scroll = QScrollArea()
-        side_scroll.setWidgetResizable(True)
-        side_scroll.setFrameShape(QFrame.NoFrame)
-        side_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        side_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        side_scroll.setMinimumWidth(SIDEBAR_W + 16)  # room for scrollbar
-        side_scroll.setMaximumWidth(SIDEBAR_W + 28)
-        side_scroll.setWidget(side_panel_widget)
+        self.side_scroll = QScrollArea()
+        self.side_scroll.setWidgetResizable(True)
+        self.side_scroll.setFrameShape(QFrame.NoFrame)
+        self.side_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.side_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.side_scroll.setMinimumWidth(SIDEBAR_W + 16)  # room for scrollbar
+        self.side_scroll.setMaximumWidth(SIDEBAR_W + 28)
+        self.side_scroll.setWidget(side_panel_widget)
+
+        self.sidebar_toggle_btn = QPushButton("◀")
+        self.sidebar_toggle_btn.setObjectName("SidebarToggleButton")
+        self.sidebar_toggle_btn.setToolTip("Collapse sidebar")
+        self.sidebar_toggle_btn.setFixedSize(12, 22)
+        self.sidebar_toggle_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.sidebar_toggle_btn.setFocusPolicy(Qt.NoFocus)
+        self.sidebar_toggle_btn.setStyleSheet("QPushButton#SidebarToggleButton { font-size: 10px; padding: 0px; }")
+        self.sidebar_toggle_btn.clicked.connect(self.toggle_left_sidebar)
+
+        self.sidebar_toggle_strip = QWidget()
+        self.sidebar_toggle_strip.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self.sidebar_toggle_strip.setFixedWidth(12)
+        sidebar_toggle_layout = QVBoxLayout(self.sidebar_toggle_strip)
+        sidebar_toggle_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_toggle_layout.setSpacing(0)
+        sidebar_toggle_layout.addStretch(1)
+        sidebar_toggle_layout.addWidget(self.sidebar_toggle_btn, 0, Qt.AlignHCenter)
+        sidebar_toggle_layout.addStretch(1)
+        self._sidebar_collapsed = False
 
         # -------------------------
         # Style (safe sizes, no tiny max-heights)
@@ -573,14 +593,17 @@ class MainWindow(QMainWindow):
         # -------------------------
         main_layout = QHBoxLayout()
         main_layout.setContentsMargins(8, 8, 8, 8)
-        main_layout.setSpacing(10)
+        main_layout.setSpacing(0)
 
-        main_layout.addWidget(side_scroll, 0)
+        main_layout.addWidget(self.side_scroll, 0)
+        main_layout.addWidget(self.sidebar_toggle_strip, 0)
         main_layout.addWidget(self.canvas, 1)
+        self._main_layout = main_layout
 
         container = QWidget()
         container.setLayout(main_layout)
         self.setCentralWidget(container)
+        self._set_sidebar_collapsed(False)
 
         # ----- Menu Bar -----
         menubar = self.menuBar()
@@ -1090,6 +1113,26 @@ class MainWindow(QMainWindow):
         # If you already added MPL theme syncing earlier, keep it too:
         if hasattr(self, "_apply_mpl_theme"):
             self._apply_mpl_theme()
+
+    def toggle_left_sidebar(self):
+        self._set_sidebar_collapsed(not bool(getattr(self, "_sidebar_collapsed", False)))
+
+    def _set_sidebar_collapsed(self, collapsed: bool):
+        self._sidebar_collapsed = bool(collapsed)
+        if getattr(self, "side_scroll", None) is None or getattr(self, "sidebar_toggle_btn", None) is None:
+            return
+
+        self.side_scroll.setVisible(not self._sidebar_collapsed)
+        if self._sidebar_collapsed:
+            self.sidebar_toggle_btn.setText("▶")
+            self.sidebar_toggle_btn.setToolTip("Expand sidebar")
+        else:
+            self.sidebar_toggle_btn.setText("◀")
+            self.sidebar_toggle_btn.setToolTip("Collapse sidebar")
+
+        layout = getattr(self, "_main_layout", None)
+        if layout is not None:
+            layout.setSpacing(0)
 
     def _normalize_plot_type(self, title: str | None) -> str:
         txt = str(title or "").strip()
