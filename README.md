@@ -1,7 +1,35 @@
 # e-CALLISTO FITS Analyzer
 A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data.
 
-Version **1.7.6**
+Version **1.7.7**
+
+---
+
+## 🆕 What's New (v1.7.7)
+
+### Core workflow
+- Added **session/project save and load** support to restore analysis state.
+- Introduced a unified, more robust FITS I/O layer across loading/downloading/combining workflows.
+- Improved FITS parsing for `.fit`, `.fits`, `.fit.gz`, `.fits.gz`, swapped axes, and missing/alternate axis tables.
+- Added **FITS View → View FITS Header** with header inspection and save-to-`.txt`.
+- Combined datasets now carry updated header metadata for time/frequency merge context.
+
+### Analysis and plotting
+- Fixed Best-Fit/Analyzer crash (`TypeError: cannot unpack non-iterable bool object`) in shock parameter workflows.
+- Dynamic spectrum titles are now context-aware (`filename-Raw`, `filename-Background Subtracted`) and no longer use `Dynamic Spectrum`.
+- Short-duration time windows now show `hh:mm:ss` for better readability.
+- Fixed undo/reset-view behavior after zooming so actions stay enabled and functional.
+- Added **Edit → Reset to Raw** to restore raw data view and reset clipping sliders to `0`.
+
+### Export and compatibility
+- Improved exported FITS compatibility with external tools (including JavaViewer) for combined files.
+- Added export `BITPIX` control (`Auto`, `8`, `16`, `32`) and removed problematic float64 export behavior.
+- FITS export now reuses source FITS structure for combined output to preserve axis-table compatibility.
+- Default export filenames (image + FITS) now follow the active graph title and avoid duplicated combine suffixes.
+
+### UI/UX
+- Added a **collapsible left sidebar** with a centered arrow toggle.
+- When collapsed, the graph area expands to use the full available width.
 
 ---
 
@@ -223,7 +251,7 @@ Combined data can be imported directly into the Analyzer.
 
 ---
 
-# 15. Export Data as FITS (New in v1.7.6)
+# 15. Export Data as FITS
 
 You can now export processed data as a new FITS file with a modified header. This is useful for downstream analysis and **Machine Learning** workflows.
 
