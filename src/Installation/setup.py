@@ -11,6 +11,13 @@ from setuptools import setup
 
 HERE = os.path.abspath(os.path.dirname(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
+APP_VERSION = "1.7.7"
+
+LZMA_CANDIDATES = [
+    "/opt/homebrew/opt/xz/lib/liblzma.5.dylib",
+    "/usr/local/opt/xz/lib/liblzma.5.dylib",
+]
+LZMA_FRAMEWORKS = [path for path in LZMA_CANDIDATES if os.path.exists(path)]
 
 def R(*parts: str) -> str:
     return os.path.join(PROJECT_ROOT, *parts)
@@ -50,6 +57,7 @@ DATA_FILES = [
 ]
 
 OPTIONS = {
+    "argv_emulation": False,
     "packages": [
         "src",
         "src.UI",
@@ -126,10 +134,12 @@ OPTIONS = {
 
     "resources": [],
 
+    "frameworks": LZMA_FRAMEWORKS,
+
     "plist": {
         "CFBundleName": "e-Callisto FITS Analyzer",
-        "CFBundleShortVersionString": "1.7.6",
-        "CFBundleVersion": "1.7.6",
+        "CFBundleShortVersionString": APP_VERSION,
+        "CFBundleVersion": APP_VERSION,
         "CFBundleIdentifier": "com.sahansliyanage.callisto.fitsanalyzer",
     },
 }
@@ -137,6 +147,7 @@ OPTIONS = {
 setup(
     app=APP,
     name="e-Callisto FITS Analyzer",
+    version=APP_VERSION,
     data_files=DATA_FILES,
     options={"py2app": OPTIONS},
 )
