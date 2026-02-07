@@ -53,6 +53,7 @@ _configure_platform_env()
 
 # Now import from src (after sys.path is configured)
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 from src.UI.mpl_style import apply_origin_style
 from src.UI.gui_main import MainWindow
@@ -65,6 +66,37 @@ if sys.platform.startswith("linux"):
     QApplication.setAttribute(Qt.AA_UseSoftwareOpenGL, True)
 
 
+def _load_app_icon() -> QIcon:
+    candidates = []
+
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(sys.executable)
+        candidates.extend(
+            [
+                os.path.join(exe_dir, "icon.ico"),
+                os.path.join(getattr(sys, "_MEIPASS", ""), "icon.ico"),
+                sys.executable,
+            ]
+        )
+    else:
+        candidates.extend(
+            [
+                os.path.join(BASE_PATH, "icon.ico"),
+                os.path.join(BASE_PATH, "assets", "icon.ico"),
+            ]
+        )
+
+    for path in candidates:
+        if not path:
+            continue
+        if os.path.exists(path):
+            icon = QIcon(path)
+            if not icon.isNull():
+                return icon
+
+    return QIcon()
+
+
 def main() -> int:
     if platform.system() != "Windows":
         faulthandler.enable()
@@ -72,12 +104,19 @@ def main() -> int:
     app = QApplication(sys.argv)
     if sys.platform.startswith("win"):
         app.setStyle("Fusion")
+        app_icon = _load_app_icon()
+        if not app_icon.isNull():
+            app.setWindowIcon(app_icon)
 
     apply_origin_style()
     theme = AppTheme(app)
     app.setProperty("theme_manager", theme)
 
     window = MainWindow(theme=theme)
+    if sys.platform.startswith("win"):
+        app_icon = app.windowIcon()
+        if not app_icon.isNull():
+            window.setWindowIcon(app_icon)
     window.showMaximized()
     return app.exec()
 

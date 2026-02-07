@@ -22,6 +22,7 @@ a = Analysis(
     binaries=[],
 
     datas=[
+        (str(PROJECT / "icon.ico"), "."),
         (str(ASSETS_DIR / "FITS_analyzer.png"), "assets"),
         (str(ASSETS_DIR / "icons"), "assets/icons"),
         (str(ASSETS_DIR / "icons_dark"), "assets/icons_dark"),
