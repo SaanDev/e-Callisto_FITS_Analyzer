@@ -1,9 +1,8 @@
 """
-Project/session save+load for e-CALLISTO FITS Analyzer.
-
-File format: a zip archive containing:
-  - meta.json   (UTF-8 JSON metadata, including schema version and optional FITS header text)
-  - arrays.npz  (NumPy savez_compressed payload, allow_pickle=False on load)
+e-CALLISTO FITS Analyzer
+Version 1.7.7
+Sahan S Liyanage (sahanslst@gmail.com)
+Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
 
 from __future__ import annotations
