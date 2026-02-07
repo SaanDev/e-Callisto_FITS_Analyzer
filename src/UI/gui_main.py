@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QSlider, QDialog, QMenuBar, QMessageBox, QLabel, QFormLayout, QGroupBox,
     QStatusBar, QProgressBar, QApplication, QMenu, QCheckBox, QRadioButton, QButtonGroup, QComboBox, QToolBar,
     QLineEdit, QSpinBox, QScrollArea, QFrame, QVBoxLayout, QWidget, QFileDialog, QHBoxLayout, QSizePolicy, QLayout,
-    QInputDialog,
+    QInputDialog, QStyle,
 )
 
 from PySide6.QtGui import QAction, QPixmap, QImage, QGuiApplication, QIcon, QFontDatabase, QActionGroup, QPalette
@@ -884,15 +884,23 @@ class MainWindow(QMainWindow):
             for rel in rels:
                 p = os.path.normpath(os.path.join(b, rel))
                 if os.path.exists(p):
-                    return QIcon(p)
+                    icon = QIcon(p)
+                    if not icon.isNull():
+                        return icon
 
         for rel in rels:
             try:
                 p = resource_path(rel)
                 if os.path.exists(p):
-                    return QIcon(p)
+                    icon = QIcon(p)
+                    if not icon.isNull():
+                        return icon
             except Exception:
                 pass
+
+        fallback = self._fallback_toolbar_icon(filename)
+        if not fallback.isNull():
+            return fallback
 
         # Avoid spamming the console with the same missing icon message
         if not hasattr(self, "_missing_icons"):
@@ -902,6 +910,29 @@ class MainWindow(QMainWindow):
             print(f"⚠️ Icon not found: {filename}")
 
         return QIcon()
+
+    def _fallback_toolbar_icon(self, filename: str) -> QIcon:
+        style = QApplication.style()
+        if style is None:
+            return QIcon()
+
+        sp = {
+            "open.svg": QStyle.SP_DialogOpenButton,
+            "export.svg": QStyle.SP_DialogSaveButton,
+            "export_fits.svg": QStyle.SP_DialogSaveButton,
+            "undo.svg": QStyle.SP_ArrowBack,
+            "redo.svg": QStyle.SP_ArrowForward,
+            "download.svg": QStyle.SP_ArrowDown,
+            "drift.svg": QStyle.SP_FileDialogDetailedView,
+            "isolate.svg": QStyle.SP_DialogApplyButton,
+            "max.svg": QStyle.SP_TitleBarMaxButton,
+            "zoom.svg": QStyle.SP_FileDialogContentsView,
+            "lock.svg": QStyle.SP_MessageBoxWarning,
+            "unlock.svg": QStyle.SP_DialogResetButton,
+            "reset_selection.svg": QStyle.SP_BrowserReload,
+            "reset_all.svg": QStyle.SP_DialogResetButton,
+        }.get(filename, QStyle.SP_FileIcon)
+        return style.standardIcon(sp)
 
     def _build_toolbar(self):
         tb = QToolBar("Main Toolbar", self)

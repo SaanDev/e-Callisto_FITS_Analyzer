@@ -73,6 +73,8 @@ a = Analysis(
 
         "PySide6.QtNetwork",
         "PySide6.QtPrintSupport",
+        "PySide6.QtSvg",
+        "PySide6.QtSvgWidgets",
         "PySide6.QtWebChannel",
         "PySide6.QtWebEngineCore",
         "PySide6.QtWebEngineWidgets",
