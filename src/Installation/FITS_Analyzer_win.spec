@@ -4,10 +4,16 @@ from pathlib import Path
 # Import backend modules that exist on Windows
 from matplotlib.backends import backend_pdf, backend_svg, backend_ps, backend_pgf
 
-# FITS_Analyzer.spec is in: <root>/src/Installation/
-HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[1]          # <root>/src
-PROJECT = ROOT.parent           # <root>
+# FITS_Analyzer_win.spec is in: <root>/src/Installation/
+if "SPECPATH" in globals():
+    HERE = Path(SPECPATH).resolve()            # <root>/src/Installation
+elif "__file__" in globals():
+    HERE = Path(__file__).resolve().parent     # fallback for direct execution
+else:
+    HERE = Path.cwd().resolve()
+
+PROJECT = HERE.parents[1]                      # <root>
+ROOT = PROJECT / "src"                         # <root>/src
 
 MAIN = PROJECT / "src" / "UI" / "main.py"
 
@@ -18,7 +24,7 @@ if not ASSETS_DIR.exists():
 
 a = Analysis(
     [str(MAIN)],
-    pathex=[str(PROJECT), str(PROJECT / "src")],
+    pathex=[str(PROJECT), str(ROOT)],
     binaries=[],
 
     datas=[
