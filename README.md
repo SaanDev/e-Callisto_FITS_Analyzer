@@ -46,7 +46,7 @@ After launching the application, the main window opens with tools for loading FI
 The main functions are available through a compact **icon toolbar** for quick access and a clean layout.
 
 ### **Main Window**
-![Main Window](assets/main_window.png)
+![Main Window](assets/screenshots/main_window.png)
 
 ---
 
@@ -76,7 +76,7 @@ Features:
 - No data are lost when switching x-axis units (seconds ↔ UT)
 
 ### Example: Noise Reduction
-![Noise Reduction](assets/noise_reduction.png)
+![Noise Reduction](assets/screenshots/noise_reduction.png)
 
 ---
 
@@ -159,7 +159,7 @@ Click **Isolate Burst** and draw around the emission region.
 Only the selected region is retained for further analysis.
 
 ### Example: Isolated Burst
-![Isolated Burst](assets/burst_isolation.png)
+![Isolated Burst](assets/screenshots/burst_isolation.png)
 
 ---
 
@@ -168,7 +168,7 @@ Only the selected region is retained for further analysis.
 Click **Plot Maximum Intensities** to compute the maximum frequency for each time channel after noise reduction or burst isolation.
 
 ### Example: Maximum Intensities
-![Maximum Intensities](assets/maximum_intensity.png)
+![Maximum Intensities](assets/screenshots/maximum_intensity.png)
 
 ---
 
@@ -204,7 +204,7 @@ Optional additional plots:
 - Height vs frequency
 
 ### Example: Analyzer
-![Analyzer](assets/analysis.png)
+![Analyzer](assets/screenshots/analysis.png)
 
 Export options:
 
@@ -229,9 +229,9 @@ Features:
 - Clear error messages when selected files cannot be combined
 
 ### Example: Downloader
-![Downloader](assets/callisto_downloader.png)
+![Downloader](assets/screenshots/callisto_downloader.png)
 
-![Downloader](assets/callisto_downloader_preview.png)
+![Downloader](assets/screenshots/callisto_downloader_preview.png)
 
 ---
 
@@ -296,7 +296,7 @@ Features:
 - Event metadata panel
 
 ### Example: CME Viewer
-![CME Viewer](assets/cme_catalog.png)
+![CME Viewer](assets/screenshots/cme_catalog.png)
 
 ---
 
@@ -311,7 +311,7 @@ Features:
 - Export plots and data
 
 ### Example: GOES X-Ray Viewer
-![GOES X-Ray](assets/goes_xray.png)
+![GOES X-Ray](assets/screenshots/goes_xray.png)
 
 ---
 
