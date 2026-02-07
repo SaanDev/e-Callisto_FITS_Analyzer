@@ -34,3 +34,5 @@ htmlcov/
 .coverage
 .coverage.*
 /Untitled.txt
+/projects/Arecibo-Observatory_20220302_combined_time.efaproj
+/.codex/environments/environment.toml
