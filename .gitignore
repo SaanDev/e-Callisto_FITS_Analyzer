@@ -33,3 +33,4 @@ dmg_tmp/
 htmlcov/
 .coverage
 .coverage.*
+/Untitled.txt
