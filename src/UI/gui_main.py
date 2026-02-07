@@ -15,10 +15,10 @@ from PySide6.QtWidgets import (
     QMainWindow, QSlider, QDialog, QMenuBar, QMessageBox, QLabel, QFormLayout, QGroupBox,
     QStatusBar, QProgressBar, QApplication, QMenu, QCheckBox, QRadioButton, QButtonGroup, QComboBox, QToolBar,
     QLineEdit, QSpinBox, QScrollArea, QFrame, QVBoxLayout, QWidget, QFileDialog, QHBoxLayout, QSizePolicy, QLayout,
-    QInputDialog, QStyle,
+    QInputDialog,
 )
 
-from PySide6.QtGui import QAction, QPixmap, QImage, QGuiApplication, QIcon, QFontDatabase, QActionGroup, QPalette
+from PySide6.QtGui import QAction, QPixmap, QImage, QGuiApplication, QIcon, QFontDatabase, QActionGroup, QPalette, QPainter
 from PySide6.QtCore import Qt, QTimer, QSize, QObject, QEvent
 from src.UI.callisto_downloader import CallistoDownloaderApp
 from src.UI.goes_xrs_gui import MainWindow as GoesXrsWindow
@@ -884,7 +884,7 @@ class MainWindow(QMainWindow):
             for rel in rels:
                 p = os.path.normpath(os.path.join(b, rel))
                 if os.path.exists(p):
-                    icon = QIcon(p)
+                    icon = self._load_icon_file(p)
                     if not icon.isNull():
                         return icon
 
@@ -892,15 +892,11 @@ class MainWindow(QMainWindow):
             try:
                 p = resource_path(rel)
                 if os.path.exists(p):
-                    icon = QIcon(p)
+                    icon = self._load_icon_file(p)
                     if not icon.isNull():
                         return icon
             except Exception:
                 pass
-
-        fallback = self._fallback_toolbar_icon(filename)
-        if not fallback.isNull():
-            return fallback
 
         # Avoid spamming the console with the same missing icon message
         if not hasattr(self, "_missing_icons"):
@@ -911,28 +907,38 @@ class MainWindow(QMainWindow):
 
         return QIcon()
 
-    def _fallback_toolbar_icon(self, filename: str) -> QIcon:
-        style = QApplication.style()
-        if style is None:
+    def _load_icon_file(self, path: str) -> QIcon:
+        icon = QIcon(path)
+        if not icon.isNull():
+            return icon
+
+        if not str(path).lower().endswith(".svg"):
             return QIcon()
 
-        sp = {
-            "open.svg": QStyle.SP_DialogOpenButton,
-            "export.svg": QStyle.SP_DialogSaveButton,
-            "export_fits.svg": QStyle.SP_DialogSaveButton,
-            "undo.svg": QStyle.SP_ArrowBack,
-            "redo.svg": QStyle.SP_ArrowForward,
-            "download.svg": QStyle.SP_ArrowDown,
-            "drift.svg": QStyle.SP_FileDialogDetailedView,
-            "isolate.svg": QStyle.SP_DialogApplyButton,
-            "max.svg": QStyle.SP_TitleBarMaxButton,
-            "zoom.svg": QStyle.SP_FileDialogContentsView,
-            "lock.svg": QStyle.SP_MessageBoxWarning,
-            "unlock.svg": QStyle.SP_DialogResetButton,
-            "reset_selection.svg": QStyle.SP_BrowserReload,
-            "reset_all.svg": QStyle.SP_DialogResetButton,
-        }.get(filename, QStyle.SP_FileIcon)
-        return style.standardIcon(sp)
+        try:
+            from PySide6.QtSvg import QSvgRenderer
+        except Exception:
+            return QIcon()
+
+        try:
+            renderer = QSvgRenderer(path)
+            if not renderer.isValid():
+                return QIcon()
+
+            size = renderer.defaultSize()
+            w = max(48, int(size.width())) if size.isValid() else 64
+            h = max(48, int(size.height())) if size.isValid() else 64
+
+            pixmap = QPixmap(w, h)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            renderer.render(painter)
+            painter.end()
+
+            icon = QIcon(pixmap)
+            return icon if not icon.isNull() else QIcon()
+        except Exception:
+            return QIcon()
 
     def _build_toolbar(self):
         tb = QToolBar("Main Toolbar", self)
