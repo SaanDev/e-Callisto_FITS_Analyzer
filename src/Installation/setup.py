@@ -71,6 +71,7 @@ OPTIONS = {
         "src.UI",
         "src.Backend",
         "matplotlib",
+        "pyqtgraph",
         "numpy",
         "pandas",
         "scipy",
@@ -93,6 +94,7 @@ OPTIONS = {
         "PySide6.QtSvg",
         "PySide6.QtSvgWidgets",
         "matplotlib.backends.backend_qtagg",
+        "pyqtgraph",
 
         # Standard libs used dynamically
         "csv",
@@ -128,6 +130,7 @@ OPTIONS = {
         "src.Backend.burst_processor",
         "src.UI.gui_main",
         "src.UI.matplotlib_widget",
+        "src.UI.accelerated_plot_widget",
         "src.UI.soho_lasco_viewer",
         "src.UI.goes_xrs_gui",
 

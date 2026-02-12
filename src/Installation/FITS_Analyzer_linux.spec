@@ -43,6 +43,7 @@ a = Analysis(
         # Qt + Matplotlib
         "PySide6",
         "matplotlib",
+        "pyqtgraph",
         "matplotlib.backends.backend_qtagg",
         "matplotlib.backends.backend_qt5agg",
 
@@ -76,6 +77,7 @@ a = Analysis(
         "src.Backend.burst_processor",
         "src.UI.gui_main",
         "src.UI.matplotlib_widget",
+        "src.UI.accelerated_plot_widget",
         "src.UI.soho_lasco_viewer",
         "src.UI.goes_xrs_gui",
         "src.UI.theme_manager",

@@ -13,6 +13,7 @@ packages = [
     "PySide6-Addons",
     "PySide6-Essentials",
     "matplotlib",
+    "pyqtgraph",
     "numpy",
     "pandas",
     "scipy",

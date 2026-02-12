@@ -10,6 +10,15 @@ import os
 import platform
 import sys
 
+
+def _force_software_opengl() -> bool:
+    raw = os.environ.get("CALLISTO_FORCE_SOFTWARE_OPENGL", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+FORCE_SOFTWARE_OPENGL = _force_software_opengl()
+
+
 def _project_base_path() -> str:
     # py2app executable lives in .../e-CALLISTO FITS Analyzer.app/Contents/MacOS
     if getattr(sys, "frozen", False):
@@ -20,8 +29,9 @@ def _project_base_path() -> str:
 def _configure_platform_env() -> None:
     if sys.platform.startswith("linux"):
         os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
-        os.environ.setdefault("QT_OPENGL", "software")
-        os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
+        if FORCE_SOFTWARE_OPENGL:
+            os.environ.setdefault("QT_OPENGL", "software")
+            os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
 
         extra = (
             "--disable-gpu "
@@ -62,7 +72,7 @@ from src.UI.theme_manager import AppTheme
 
 # Must be set before QApplication is created.
 QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
-if sys.platform.startswith("linux"):
+if sys.platform.startswith("linux") and FORCE_SOFTWARE_OPENGL:
     QApplication.setAttribute(Qt.AA_UseSoftwareOpenGL, True)
 
 

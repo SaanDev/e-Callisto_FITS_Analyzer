@@ -42,6 +42,7 @@ a = Analysis(
     hiddenimports=[
         "PySide6",
         "matplotlib",
+        "pyqtgraph",
 
         # Canvas backends
         "matplotlib.backends.backend_qtagg",
@@ -74,6 +75,7 @@ a = Analysis(
         "src.Backend.burst_processor",
         "src.UI.gui_main",
         "src.UI.matplotlib_widget",
+        "src.UI.accelerated_plot_widget",
         "src.UI.soho_lasco_viewer",
         "src.UI.goes_xrs_gui",
         "src.UI.theme_manager",

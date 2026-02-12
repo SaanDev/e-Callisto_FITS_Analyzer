@@ -15,10 +15,11 @@ from PySide6.QtWidgets import (
     QMainWindow, QSlider, QDialog, QMenuBar, QMessageBox, QLabel, QFormLayout, QGroupBox,
     QStatusBar, QProgressBar, QApplication, QMenu, QCheckBox, QRadioButton, QButtonGroup, QComboBox, QToolBar,
     QLineEdit, QSpinBox, QScrollArea, QFrame, QVBoxLayout, QWidget, QFileDialog, QHBoxLayout, QSizePolicy, QLayout,
+    QStackedLayout,
     QInputDialog,
 )
 
-from PySide6.QtGui import QAction, QPixmap, QImage, QGuiApplication, QIcon, QFontDatabase, QActionGroup, QPalette, QPainter
+from PySide6.QtGui import QAction, QPixmap, QImage, QGuiApplication, QIcon, QFontDatabase, QActionGroup, QPalette, QPainter, QPdfWriter
 from PySide6.QtCore import Qt, QTimer, QSize, QObject, QEvent
 from src.UI.callisto_downloader import CallistoDownloaderApp
 from src.UI.goes_xrs_gui import MainWindow as GoesXrsWindow
@@ -38,6 +39,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from openpyxl import load_workbook, Workbook
 from src.UI.mpl_style import style_axes
+from src.UI.accelerated_plot_widget import AcceleratedPlotWidget
 from src.Backend.project_session import ProjectFormatError, read_project, write_project
 from src.Backend.fits_io import build_combined_header, extract_ut_start_sec, load_callisto_fits
 from src.UI.fits_header_viewer import FitsHeaderViewerDialog
@@ -243,13 +245,34 @@ class MainWindow(QMainWindow):
 
         # Debounce timer for smooth slider updates
         self.noise_smooth_timer = QTimer()
-        self.noise_smooth_timer.setInterval(40)
+        self.noise_smooth_timer.setInterval(12)
         self.noise_smooth_timer.setSingleShot(True)
         self.noise_smooth_timer.timeout.connect(self.update_noise_live)
+        self.noise_commit_timer = QTimer()
+        self.noise_commit_timer.setInterval(80)
+        self.noise_commit_timer.setSingleShot(True)
+        self.noise_commit_timer.timeout.connect(self._commit_noise_live_update)
+
+        self._noise_undo_pending = False
+        self._noise_slider_drag_active = False
+        self._noise_preview_active = False
+        self._noise_base_data = None
+        self._noise_base_source_id = None
 
         # Canvas
         self.canvas = MplCanvas(self, width=10, height=6)
         style_axes(self.canvas.ax)
+
+        # Hardware-accelerated plotting canvas (full graph area when enabled)
+        self.accel_canvas = AcceleratedPlotWidget(self)
+        self.use_hw_live_preview = False
+        if self.accel_canvas.is_available:
+            self.accel_canvas.mousePositionChanged.connect(self.on_accel_mouse_motion_status)
+            self.accel_canvas.viewInteractionFinished.connect(self._on_accel_view_interaction_finished)
+            self.accel_canvas.rectZoomFinished.connect(self._on_accel_rect_zoom_finished)
+            self.accel_canvas.lassoFinished.connect(self._on_accel_lasso_finished)
+            self.accel_canvas.driftPointAdded.connect(self._on_accel_drift_point_added)
+            self.accel_canvas.driftCaptureFinished.connect(self._on_accel_drift_capture_finished)
 
         self.canvas.mpl_connect("scroll_event", self.on_scroll_zoom)
         self._cid_press = self.canvas.mpl_connect("button_press_event", self.on_mouse_press)
@@ -258,6 +281,7 @@ class MainWindow(QMainWindow):
         self._cid_motion_status = self.canvas.mpl_connect("motion_notify_event", self.on_mouse_motion_status)
 
         self._apply_mpl_theme()
+        self._apply_accel_theme()
 
         self._panning = False
         self._last_pan_xy = None
@@ -595,9 +619,17 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.setSpacing(0)
 
+        self.plot_stack_host = QWidget()
+        self.plot_stack = QStackedLayout(self.plot_stack_host)
+        self.plot_stack.setContentsMargins(0, 0, 0, 0)
+        self.plot_stack.setSpacing(0)
+        self.plot_stack.addWidget(self.canvas)
+        self.plot_stack.addWidget(self.accel_canvas)
+        self.plot_stack.setCurrentWidget(self.canvas)
+
         main_layout.addWidget(self.side_scroll, 0)
         main_layout.addWidget(self.sidebar_toggle_strip, 0)
-        main_layout.addWidget(self.canvas, 1)
+        main_layout.addWidget(self.plot_stack_host, 1)
         self._main_layout = main_layout
 
         container = QWidget()
@@ -727,6 +759,13 @@ class MainWindow(QMainWindow):
             theme_group.addAction(a)
             theme_menu.addAction(a)
 
+        processing_menu = menubar.addMenu("Processing")
+        hw_menu = processing_menu.addMenu("Hardware Acceleration")
+        self.hw_live_preview_action = QAction("Enable", self, checkable=True)
+        self.hw_live_preview_action.setChecked(False)
+        self.hw_live_preview_action.setEnabled(bool(self.accel_canvas.is_available))
+        hw_menu.addAction(self.hw_live_preview_action)
+
         # Set initial checks from saved mode
         if self.theme:
             m = self.theme.mode()
@@ -738,6 +777,7 @@ class MainWindow(QMainWindow):
         self.theme_action_system.triggered.connect(lambda: self.theme.set_mode("system"))
         self.theme_action_light.triggered.connect(lambda: self.theme.set_mode("light"))
         self.theme_action_dark.triggered.connect(lambda: self.theme.set_mode("dark"))
+        self.hw_live_preview_action.toggled.connect(self.set_hardware_live_preview_enabled)
 
         # About Menu
         about_menu = menubar.addMenu("About")
@@ -754,6 +794,10 @@ class MainWindow(QMainWindow):
         # Signals
         self.lower_slider.valueChanged.connect(self.schedule_noise_update)
         self.upper_slider.valueChanged.connect(self.schedule_noise_update)
+        self.lower_slider.sliderPressed.connect(self._on_noise_slider_pressed)
+        self.upper_slider.sliderPressed.connect(self._on_noise_slider_pressed)
+        self.lower_slider.sliderReleased.connect(self._on_noise_slider_released)
+        self.upper_slider.sliderReleased.connect(self._on_noise_slider_released)
         self.cmap_combo.currentTextChanged.connect(self.change_cmap)
         self.open_action.triggered.connect(self.load_file)
         self.open_project_action.triggered.connect(self.open_project)
@@ -1062,6 +1106,136 @@ class MainWindow(QMainWindow):
         self._sync_fits_view_actions()
         self._sync_nav_actions()
 
+    def _show_plot_canvas(self):
+        stack = getattr(self, "plot_stack", None)
+        if stack is not None:
+            stack.setCurrentWidget(self.canvas)
+        self._noise_preview_active = False
+
+    def _hardware_mode_enabled(self) -> bool:
+        return bool(
+            getattr(self, "use_hw_live_preview", False)
+            and getattr(self, "accel_canvas", None) is not None
+            and self.accel_canvas.is_available
+        )
+
+    def _show_accel_canvas(self):
+        if not self._hardware_mode_enabled():
+            return False
+        accel = getattr(self, "accel_canvas", None)
+        stack = getattr(self, "plot_stack", None)
+        if accel is None or stack is None or not bool(accel.is_available):
+            return False
+        stack.setCurrentWidget(accel)
+        self._noise_preview_active = True
+        return True
+
+    def _apply_accel_theme(self):
+        accel = getattr(self, "accel_canvas", None)
+        if accel is None or not bool(accel.is_available):
+            return
+        accel.set_dark(self._is_dark_ui())
+        accel.set_time_mode(self.use_utc, self.ut_start_sec)
+
+    def set_hardware_live_preview_enabled(self, enabled: bool):
+        mpl_view = None
+        try:
+            ax = self.canvas.ax
+            if ax is not None and ax.images is not None and len(ax.images) > 0:
+                mpl_view = {"xlim": ax.get_xlim(), "ylim": ax.get_ylim()}
+        except Exception:
+            mpl_view = None
+
+        accel_available = bool(getattr(self, "accel_canvas", None) and self.accel_canvas.is_available)
+        self.use_hw_live_preview = bool(enabled) and accel_available
+
+        act = getattr(self, "hw_live_preview_action", None)
+        if act is not None and act.isChecked() != self.use_hw_live_preview:
+            was_blocked = act.blockSignals(True)
+            act.setChecked(self.use_hw_live_preview)
+            act.blockSignals(was_blocked)
+
+        if not self.use_hw_live_preview:
+            self.noise_commit_timer.stop()
+            self._noise_undo_pending = False
+            self._noise_slider_drag_active = False
+            self._sync_mpl_view_from_accel()
+            self._show_plot_canvas()
+            self.accel_canvas.stop_interaction_capture()
+        else:
+            self._apply_accel_theme()
+            self.accel_canvas.set_navigation_locked(self.nav_locked)
+            self._refresh_accel_plot(view=mpl_view, preserve_view=False)
+            self._show_accel_canvas()
+        self._sync_toolbar_enabled_states()
+
+    def _sync_mpl_view_from_accel(self):
+        if not self._hardware_mode_enabled():
+            return
+        try:
+            view = self.accel_canvas.get_view()
+            if not view:
+                return
+            self.canvas.ax.set_xlim(view["xlim"])
+            self.canvas.ax.set_ylim(view["ylim"])
+            self.canvas.draw_idle()
+        except Exception:
+            pass
+
+    def _refresh_accel_plot(self, data=None, title=None, view=None, preserve_view=True):
+        if not bool(getattr(self, "accel_canvas", None) and self.accel_canvas.is_available):
+            return False
+        if self.time is None or self.freqs is None or len(self.time) == 0 or len(self.freqs) == 0:
+            return False
+
+        if data is None:
+            data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
+        if data is None:
+            return False
+
+        if view is None and preserve_view:
+            view = self.accel_canvas.get_view()
+
+        display_data = self._intensity_for_display(data)
+        self.current_display_data = display_data
+
+        plot_type = self._normalize_plot_type(title if title is not None else self.current_plot_type)
+        if self.remove_titles:
+            plot_title = ""
+            x_label = ""
+            y_label = ""
+        else:
+            plot_title = self.graph_title_override or self._default_graph_title(plot_type)
+            x_label = "Time [UT]" if (self.use_utc and self.ut_start_sec is not None) else "Time [s]"
+            y_label = "Frequency [MHz]"
+
+        extent = [0, self.time[-1], self.freqs[-1], self.freqs[0]]
+        cbar_label = "" if self.remove_titles else ("Intensity [Digits]" if not self.use_db else "Intensity [dB]")
+        self.accel_canvas.set_text_style(
+            font_family=self.graph_font_family,
+            tick_font_px=self.tick_font_px,
+            axis_label_font_px=self.axis_label_font_px,
+            title_font_px=self.title_font_px,
+            title_bold=self.title_bold,
+            title_italic=self.title_italic,
+            axis_bold=self.axis_bold,
+            axis_italic=self.axis_italic,
+            ticks_bold=self.ticks_bold,
+            ticks_italic=self.ticks_italic,
+        )
+        self.accel_canvas.update_image(
+            display_data,
+            extent=extent,
+            cmap=self.get_current_cmap(),
+            title=plot_title,
+            x_label=x_label,
+            y_label=y_label,
+            colorbar_label=cbar_label,
+            view=view,
+        )
+        self.accel_canvas.set_time_mode(self.use_utc, self.ut_start_sec)
+        return True
+
     def _apply_mpl_theme(self):
         """
         Ensure Matplotlib canvas (figure, axes, and colorbar) matches the current Qt theme.
@@ -1149,6 +1323,7 @@ class MainWindow(QMainWindow):
         # If you already added MPL theme syncing earlier, keep it too:
         if hasattr(self, "_apply_mpl_theme"):
             self._apply_mpl_theme()
+        self._apply_accel_theme()
 
     def toggle_left_sidebar(self):
         self._set_sidebar_collapsed(not bool(getattr(self, "_sidebar_collapsed", False)))
@@ -1382,6 +1557,7 @@ class MainWindow(QMainWindow):
         self.axis_italic_chk.setEnabled(not disable)
 
         self.canvas.draw_idle()
+        self._refresh_accel_plot(preserve_view=True)
 
     def load_file(self):
         if not self._maybe_prompt_save_dirty():
@@ -1406,6 +1582,7 @@ class MainWindow(QMainWindow):
 
             res = load_callisto_fits(file_path, memmap=False)
             self.raw_data = res.data
+            self._invalidate_noise_cache()
             self.freqs = res.freqs
             self.time = res.time
 
@@ -1552,6 +1729,7 @@ class MainWindow(QMainWindow):
     def load_fits_into_main(self, file_path):
         res = load_callisto_fits(file_path, memmap=False)
         self.raw_data = res.data
+        self._invalidate_noise_cache()
         self.freqs = res.freqs
         self.time = res.time
         self.filename = os.path.basename(file_path)
@@ -1583,6 +1761,7 @@ class MainWindow(QMainWindow):
 
     def load_combined_into_main(self, combined):
         self.raw_data = combined["data"]
+        self._invalidate_noise_cache()
         self.freqs = combined["freqs"]
         self.time = combined["time"]
         self.filename = combined.get("filename", "Combined")
@@ -1626,25 +1805,96 @@ class MainWindow(QMainWindow):
             return
         self.noise_smooth_timer.start()
 
+    def _on_noise_slider_pressed(self):
+        self._noise_slider_drag_active = True
+
+    def _on_noise_slider_released(self):
+        self._noise_slider_drag_active = False
+        if self.raw_data is None:
+            return
+        self.noise_smooth_timer.stop()
+        self.update_noise_live()
+
+    def _invalidate_noise_cache(self):
+        self._noise_base_data = None
+        self._noise_base_source_id = None
+
+    def _ensure_noise_base_data(self):
+        if self.raw_data is None:
+            return None
+
+        source_id = id(self.raw_data)
+        if self._noise_base_data is not None and self._noise_base_source_id == source_id:
+            return self._noise_base_data
+
+        arr = np.asarray(self.raw_data, dtype=np.float32)
+        row_mean = arr.mean(axis=1, keepdims=True, dtype=np.float32)
+        self._noise_base_data = arr - row_mean
+        self._noise_base_source_id = source_id
+        return self._noise_base_data
+
+    def _compute_noise_reduced(self, low: float, high: float):
+        base = self._ensure_noise_base_data()
+        if base is None:
+            return None
+        return np.clip(base, low, high).astype(np.float32, copy=False)
+
+    def _update_live_preview_canvas(self, data):
+        if not self._hardware_mode_enabled():
+            return False
+        ok = self._refresh_accel_plot(data=data, title="Background Subtracted", preserve_view=True)
+        if ok:
+            self._show_accel_canvas()
+        return ok
+
+    def _commit_noise_live_update(self):
+        self.noise_commit_timer.stop()
+
+        if self._noise_slider_drag_active:
+            return
+
+        if self.raw_data is None or self.noise_reduced_data is None:
+            self._noise_undo_pending = False
+            if self._hardware_mode_enabled():
+                self._show_accel_canvas()
+            else:
+                self._show_plot_canvas()
+            return
+
+        self.plot_data(self.noise_reduced_data, title="Background Subtracted")
+        self._noise_undo_pending = False
+
     def update_noise_live(self):
-        self._push_undo_state()
         if self.raw_data is None:
             return
 
+        if not self._noise_undo_pending:
+            self._push_undo_state()
+            self._noise_undo_pending = True
+
         low = self.lower_slider.value()
         high = self.upper_slider.value()
+        if low > high:
+            low, high = high, low
 
-        data = self.raw_data.copy()
-        data = data - data.mean(axis=1, keepdims=True)
-        data = np.clip(data, low, high)
+        data = self._compute_noise_reduced(low, high)
+        if data is None:
+            return
 
         self.noise_reduced_data = data
         self.noise_reduced_original = data.copy()
 
-        self.noise_vmin = data.min()
-        self.noise_vmax = data.max()
+        self.noise_vmin = float(np.nanmin(data)) if data.size else None
+        self.noise_vmax = float(np.nanmax(data)) if data.size else None
+        self.current_plot_type = "Background Subtracted"
 
-        self.plot_data(data, title="Background Subtracted")
+        if self._update_live_preview_canvas(data):
+            self.noise_commit_timer.start()
+            if not self._noise_slider_drag_active:
+                self._commit_noise_live_update()
+        else:
+            self.plot_data(data, title="Background Subtracted")
+            self._noise_undo_pending = False
 
         # enable tools
         self._sync_toolbar_enabled_states()
@@ -1655,6 +1905,12 @@ class MainWindow(QMainWindow):
 
     def _capture_view(self):
         """Save current zoom/pan limits (only if a plot exists)."""
+        if self._hardware_mode_enabled():
+            try:
+                return self.accel_canvas.get_view()
+            except Exception:
+                return None
+
         try:
             ax = self.canvas.ax
             if ax is None or ax.images is None or len(ax.images) == 0:
@@ -1670,6 +1926,14 @@ class MainWindow(QMainWindow):
         """Restore zoom/pan limits safely."""
         if not view:
             return
+
+        if self._hardware_mode_enabled():
+            try:
+                self.accel_canvas.set_view(view)
+            except Exception:
+                pass
+            return
+
         try:
             ax = self.canvas.ax
             ax.set_xlim(view["xlim"])
@@ -1740,7 +2004,10 @@ class MainWindow(QMainWindow):
         self.canvas.ax.set_title(self._default_graph_title(plot_type), fontsize=14)
 
         # Save full-extent limits as the "home" view (used for Reset Selection after zoom/pan)
-        self._home_view = self._capture_view()
+        self._home_view = {
+            "xlim": self.canvas.ax.get_xlim(),
+            "ylim": self.canvas.ax.get_ylim(),
+        }
 
         self.format_axes()  # Format x-axis based on user selection (seconds/UT)
         self._restore_view(view)
@@ -1755,37 +2022,44 @@ class MainWindow(QMainWindow):
         self.graph_group.setEnabled(True)
         self.canvas.draw_idle()
 
+        try:
+            self._refresh_accel_plot(data=data, title=plot_type, view=view, preserve_view=(view is not None))
+        except Exception:
+            pass
+
         self.current_plot_type = plot_type
+        if self._hardware_mode_enabled():
+            self._show_accel_canvas()
+        else:
+            self._show_plot_canvas()
         self._sync_toolbar_enabled_states()
         self.statusBar().showMessage(f"Loaded: {self.filename}", 5000)
 
     def on_mouse_motion_status(self, event):
         """Show time, frequency and intensity under cursor in status bar."""
-        # Cursor not over axes or no data
-        if event.inaxes != self.canvas.ax:
-            # Cursor outside plot → show zeros
+        in_axes = event.inaxes == self.canvas.ax and event.xdata is not None and event.ydata is not None
+        x = float(event.xdata) if in_axes else 0.0
+        y = float(event.ydata) if in_axes else 0.0
+        self._update_cursor_label_from_xy(x, y, in_axes)
+
+    def on_accel_mouse_motion_status(self, x: float, y: float, inside: bool):
+        self._update_cursor_label_from_xy(float(x), float(y), bool(inside))
+
+    def _update_cursor_label_from_xy(self, x: float, y: float, inside: bool):
+        if not inside:
             self.cursor_label.setText("t = 0.00   |   f = 0.00 MHz   |   I = 0.00")
             return
 
         if self.current_display_data is None or self.time is None or self.freqs is None:
             return
-        if event.xdata is None or event.ydata is None:
-            return
 
-        x = float(event.xdata)
-        y = float(event.ydata)
-
-        # Convert x to nearest time index
         time_arr = np.array(self.time)
         freq_arr = np.array(self.freqs)
-
-        # Safety guard
         if time_arr.size == 0 or freq_arr.size == 0:
             return
 
-        # Find nearest indices in time and frequency
-        idx_x = int(np.argmin(np.abs(time_arr - x)))
-        idx_y = int(np.argmin(np.abs(freq_arr - y)))
+        idx_x = int(np.argmin(np.abs(time_arr - float(x))))
+        idx_y = int(np.argmin(np.abs(freq_arr - float(y))))
 
         ny, nx = self.current_display_data.shape
         if idx_x < 0 or idx_x >= nx or idx_y < 0 or idx_y >= ny:
@@ -1795,7 +2069,6 @@ class MainWindow(QMainWindow):
         f_val = freq_arr[idx_y]
         intensity = self.current_display_data[idx_y, idx_x]
 
-        # Format time string in seconds or UT
         if self.use_utc and self.ut_start_sec is not None:
             total_seconds = self.ut_start_sec + t_val
             hours = int(total_seconds // 3600) % 24
@@ -1806,7 +2079,6 @@ class MainWindow(QMainWindow):
             time_str = f"{t_val:.2f} s"
 
         unit_label = "dB" if self.use_db else "Digits"
-
         msg = (
             f"t = {time_str}   |   "
             f"f = {f_val:.2f} MHz   |   "
@@ -1829,8 +2101,42 @@ class MainWindow(QMainWindow):
         else:
             return plt.get_cmap(self.current_cmap_name)
 
+    def _on_accel_view_interaction_finished(self, prev_view, new_view):
+        if not self._hardware_mode_enabled():
+            return
+        if prev_view and new_view and (not self._views_close(prev_view, new_view)):
+            self._push_undo_view(prev_view)
+        self._sync_toolbar_enabled_states()
+
+    def _on_accel_rect_zoom_finished(self, prev_view, new_view):
+        if not self._hardware_mode_enabled():
+            return
+        self.rect_zoom_active = False
+        if prev_view and new_view and (not self._views_close(prev_view, new_view)):
+            self._push_undo_view(prev_view)
+        self.statusBar().showMessage("Zoomed to selected region (still locked).", 2500)
+        self._sync_toolbar_enabled_states()
+
+    def _on_accel_lasso_finished(self, verts):
+        if not self._hardware_mode_enabled():
+            return
+        if not self.lasso_active:
+            return
+        self.on_lasso_select(list(verts))
+
+    def _on_accel_drift_point_added(self, x: float, y: float):
+        self.drift_points.append((float(x), float(y)))
+        self.accel_canvas.show_drift_points(self.drift_points, with_segments=False)
+
+    def _on_accel_drift_capture_finished(self, points):
+        self.drift_points = [(float(x), float(y)) for (x, y) in (points or [])]
+        self.finish_drift_estimation()
+
     def on_scroll_zoom(self, event):
         """Smooth zoom using mouse scroll wheel."""
+        if self._hardware_mode_enabled():
+            return
+
         if self.lasso_active:
             return
 
@@ -1899,6 +2205,9 @@ class MainWindow(QMainWindow):
         Start panning with LEFT mouse button inside the main axes.
         (No modifier keys needed.)
         """
+        if self._hardware_mode_enabled():
+            return
+
         if getattr(self, "nav_locked", False) or getattr(self, "rect_zoom_active", False):
             return
 
@@ -1919,6 +2228,9 @@ class MainWindow(QMainWindow):
         """
         Perform the pan movement while the left mouse button is held.
         """
+        if self._hardware_mode_enabled():
+            return
+
         if getattr(self, "nav_locked", False) or getattr(self, "rect_zoom_active", False):
             return
 
@@ -1958,6 +2270,9 @@ class MainWindow(QMainWindow):
         """
         Stop panning when the mouse button is released.
         """
+        if self._hardware_mode_enabled():
+            return
+
         self._panning = False
         self._last_pan_xy = None
         if getattr(self, "_pan_start_view", None):
@@ -1976,6 +2291,10 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Click multiple points along the burst. Right-click or double-click to finish.",
                                      8000)
         self.drift_points = []
+        if self._hardware_mode_enabled():
+            self.accel_canvas.begin_drift_capture()
+            self.accel_canvas.show_drift_points([], with_segments=False)
+            return
         self.drift_click_cid = self.canvas.mpl_connect("button_press_event", self.on_drift_point_click)
 
     def on_drift_point_click(self, event):
@@ -1992,7 +2311,10 @@ class MainWindow(QMainWindow):
         self.canvas.draw()
 
     def finish_drift_estimation(self):
-        self.canvas.mpl_disconnect(self.drift_click_cid)
+        if self._hardware_mode_enabled():
+            self.accel_canvas.stop_interaction_capture()
+        else:
+            self.canvas.mpl_disconnect(self.drift_click_cid)
 
         if len(self.drift_points) < 2:
             self.statusBar().showMessage("Need at least two points to estimate drift.", 4000)
@@ -2002,14 +2324,24 @@ class MainWindow(QMainWindow):
         for i in range(len(self.drift_points) - 1):
             x1, y1 = self.drift_points[i]
             x2, y2 = self.drift_points[i + 1]
+            if abs(x2 - x1) < 1e-12:
+                continue
             drift = (y2 - y1) / (x2 - x1)
             drift_rates.append(drift)
             # Draw line between points
-            self.canvas.ax.plot([x1, x2], [y1, y2], linestyle='--', color='lime')
+            if not self._hardware_mode_enabled():
+                self.canvas.ax.plot([x1, x2], [y1, y2], linestyle='--', color='lime')
+
+        if not drift_rates:
+            self.statusBar().showMessage("Need points with different time values to estimate drift.", 4000)
+            return
 
         avg_drift = np.mean(drift_rates)
-        self.canvas.ax.legend(["Drift Segments"])
-        self.canvas.draw()
+        if self._hardware_mode_enabled():
+            self.accel_canvas.show_drift_points(self.drift_points, with_segments=True)
+        else:
+            self.canvas.ax.legend(["Drift Segments"])
+            self.canvas.draw()
 
         self.statusBar().showMessage(
             f"Average Drift Rate: {avg_drift:.4f} MHz/s, Start Frequency: {y1: .3f}, End Frequency: {y2: .3f}, Duration: {x2 - x1: .3f} s",
@@ -2018,6 +2350,12 @@ class MainWindow(QMainWindow):
     def activate_lasso(self):
         if self.noise_reduced_data is None:
             QMessageBox.warning(self, "Error", "Please apply background substraction before isolating a burst.")
+            return
+
+        if self._hardware_mode_enabled():
+            self.lasso_active = True
+            self.accel_canvas.begin_lasso_capture()
+            self.statusBar().showMessage("Draw around the burst (right-click to finish).", 5000)
             return
 
         self.canvas.mpl_disconnect(self._cid_press)
@@ -2065,9 +2403,10 @@ class MainWindow(QMainWindow):
                 pass
             self.lasso = None
 
-        self._cid_press = self.canvas.mpl_connect("button_press_event", self.on_mouse_press)
-        self._cid_motion = self.canvas.mpl_connect("motion_notify_event", self.on_mouse_move)
-        self._cid_release = self.canvas.mpl_connect("button_release_event", self.on_mouse_release)
+        if not self._hardware_mode_enabled():
+            self._cid_press = self.canvas.mpl_connect("button_press_event", self.on_mouse_press)
+            self._cid_motion = self.canvas.mpl_connect("motion_notify_event", self.on_mouse_move)
+            self._cid_release = self.canvas.mpl_connect("button_release_event", self.on_mouse_release)
         self.lasso_active = False
         # Defer drawing to avoid crash during event handling
         QTimer.singleShot(0, lambda: self._plot_isolated_burst(mask))
@@ -2135,7 +2474,10 @@ class MainWindow(QMainWindow):
         self.canvas.ax.set_ylabel("Frequency [MHz]")
 
         # Save full-extent limits as the "home" view (used for Reset Selection after zoom/pan)
-        self._home_view = self._capture_view()
+        self._home_view = {
+            "xlim": self.canvas.ax.get_xlim(),
+            "ylim": self.canvas.ax.get_ylim(),
+        }
 
         self.format_axes()
 
@@ -2144,6 +2486,11 @@ class MainWindow(QMainWindow):
         self._apply_mpl_theme()
 
         self.canvas.draw_idle()
+        self._refresh_accel_plot(data=burst_isolated, title="Isolated Burst", preserve_view=False)
+        if self._hardware_mode_enabled():
+            self._show_accel_canvas()
+        else:
+            self._show_plot_canvas()
 
         # Replace display data with isolated data
         self.noise_reduced_data = burst_isolated
@@ -2213,6 +2560,61 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"❌ Error showing MaxIntensityPlotDialog: {e}")
 
+    def _pixmap_to_rgba_array(self, pixmap: QPixmap) -> np.ndarray:
+        image = pixmap.toImage().convertToFormat(QImage.Format_RGBA8888)
+        width = image.width()
+        height = image.height()
+        ptr = image.bits()
+        ptr.setsize(image.sizeInBytes())
+        arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, image.bytesPerLine()))
+        return arr[:, : width * 4].reshape((height, width, 4)).copy()
+
+    def _export_hardware_visible_plot(self, file_path: str, ext_final: str) -> None:
+        pixmap = self.accel_canvas.grab()
+        if pixmap.isNull():
+            raise RuntimeError("Could not capture the accelerated plot image.")
+
+        ext = str(ext_final or "").lower()
+        if ext in {"png", "tif", "tiff", "jpg", "jpeg", "bmp", "webp"}:
+            if not pixmap.save(file_path, ext.upper()):
+                raise RuntimeError(f"Failed to save image as {ext}.")
+            return
+
+        if ext == "pdf":
+            writer = QPdfWriter(file_path)
+            writer.setResolution(300)
+            painter = QPainter(writer)
+            target = writer.pageLayout().paintRectPixels(writer.resolution())
+            painter.drawPixmap(target, pixmap)
+            painter.end()
+            return
+
+        if ext == "svg":
+            try:
+                from PySide6.QtSvg import QSvgGenerator
+            except Exception as e:
+                raise RuntimeError(f"SVG export unavailable: {e}")
+
+            generator = QSvgGenerator()
+            generator.setFileName(file_path)
+            generator.setSize(pixmap.size())
+            generator.setViewBox(pixmap.rect())
+            painter = QPainter(generator)
+            painter.drawPixmap(0, 0, pixmap)
+            painter.end()
+            return
+
+        if ext == "eps":
+            rgba = self._pixmap_to_rgba_array(pixmap)
+            fig = Figure(figsize=(rgba.shape[1] / 300.0, rgba.shape[0] / 300.0), dpi=300)
+            ax = fig.add_axes([0, 0, 1, 1])
+            ax.imshow(rgba)
+            ax.axis("off")
+            fig.savefig(file_path, dpi=300, bbox_inches="tight", pad_inches=0, format="eps")
+            return
+
+        raise RuntimeError(f"Unsupported export format in hardware mode: {ext}")
+
     def export_figure(self):
 
         if not self.filename:
@@ -2268,12 +2670,15 @@ class MainWindow(QMainWindow):
             else:
                 ext_final = current_ext.lower().lstrip(".")
 
-            self.canvas.figure.savefig(
-                file_path,
-                dpi=300,
-                bbox_inches="tight",
-                format=ext_final
-            )
+            if self._hardware_mode_enabled():
+                self._export_hardware_visible_plot(file_path, ext_final)
+            else:
+                self.canvas.figure.savefig(
+                    file_path,
+                    dpi=300,
+                    bbox_inches="tight",
+                    format=ext_final
+                )
 
             QMessageBox.information(self, "Export Complete", f"Figure saved:\n{file_path}")
 
@@ -2621,6 +3026,19 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Exported FITS (BITPIX={bitpix}): {os.path.basename(save_path)}", 5000)
 
     def reset_all(self):
+        self.noise_smooth_timer.stop()
+        self.noise_commit_timer.stop()
+        self._noise_undo_pending = False
+        self._noise_slider_drag_active = False
+        if self._hardware_mode_enabled():
+            self._show_accel_canvas()
+        else:
+            self._show_plot_canvas()
+        try:
+            self.accel_canvas.clear()
+        except Exception:
+            pass
+
         # Safely remove colorbar
         try:
             if self.current_colorbar and self.current_colorbar.ax:
@@ -2642,6 +3060,7 @@ class MainWindow(QMainWindow):
 
         # Clear data
         self.raw_data = None
+        self._invalidate_noise_cache()
         self.freqs = None
         self.time = None
         self.filename = ""
@@ -2697,6 +3116,13 @@ class MainWindow(QMainWindow):
             self._push_undo_state()
 
         self.noise_smooth_timer.stop()
+        self.noise_commit_timer.stop()
+        self._noise_undo_pending = False
+        self._noise_slider_drag_active = False
+        if self._hardware_mode_enabled():
+            self._show_accel_canvas()
+        else:
+            self._show_plot_canvas()
 
         if getattr(self, "lasso", None):
             try:
@@ -2705,6 +3131,11 @@ class MainWindow(QMainWindow):
                 pass
             self.lasso = None
         self.lasso_active = False
+        try:
+            self.accel_canvas.stop_interaction_capture()
+            self.accel_canvas.clear_overlays()
+        except Exception:
+            pass
 
         # Ensure pan handlers are restored if lasso activation had disconnected them.
         try:
@@ -2774,7 +3205,10 @@ class MainWindow(QMainWindow):
                 if cur_view and home_view and (not self._views_close(cur_view, home_view)):
                     self._push_undo_view(cur_view)
                     self._restore_view(home_view)
-                    self.canvas.draw_idle()
+                    if self._hardware_mode_enabled():
+                        self._show_accel_canvas()
+                    else:
+                        self.canvas.draw_idle()
                     self.statusBar().showMessage("View reset", 2500)
                 else:
                     print("No noise-reduced backup found. Reset skipped.")
@@ -2866,6 +3300,8 @@ class MainWindow(QMainWindow):
             self.canvas.ax.set_xlabel("Time [s]")
 
         self.canvas.ax.figure.canvas.draw()
+        if getattr(self, "accel_canvas", None) is not None and self.accel_canvas.is_available:
+            self.accel_canvas.set_time_mode(self.use_utc, self.ut_start_sec)
 
     def process_imported_files(self, urls):
         if not urls:
@@ -2945,6 +3381,12 @@ class MainWindow(QMainWindow):
                 pass
             self._rect_selector = None
         self.rect_zoom_active = False
+        if self._hardware_mode_enabled():
+            try:
+                self.accel_canvas.cancel_rect_zoom()
+                self.accel_canvas.set_navigation_locked(self.nav_locked)
+            except Exception:
+                pass
 
     def _on_rect_zoom_select(self, eclick, erelease):
         """Callback when the user finishes drawing the rectangle."""
@@ -3000,6 +3442,8 @@ class MainWindow(QMainWindow):
         self._panning = False
         self._last_pan_xy = None
         self._stop_rect_zoom()
+        if self._hardware_mode_enabled():
+            self.accel_canvas.set_navigation_locked(True)
 
         self._sync_nav_actions()
         self.statusBar().showMessage("Navigation locked. Use Rectangle Zoom if needed.", 3000)
@@ -3014,6 +3458,8 @@ class MainWindow(QMainWindow):
         self._panning = False
         self._last_pan_xy = None
         self._stop_rect_zoom()
+        if self._hardware_mode_enabled():
+            self.accel_canvas.set_navigation_locked(False)
 
         self._sync_nav_actions()
         self.statusBar().showMessage("Navigation unlocked. Pan and scroll zoom enabled.", 3000)
@@ -3038,6 +3484,12 @@ class MainWindow(QMainWindow):
 
         # Stop any existing rectangle selector
         self._stop_rect_zoom()
+
+        if self._hardware_mode_enabled():
+            self.rect_zoom_active = True
+            self.accel_canvas.start_rect_zoom_once()
+            self.statusBar().showMessage("Drag a rectangle on the plot to zoom.", 4000)
+            return
 
         ax = self.canvas.ax
         self.rect_zoom_active = True
@@ -3181,6 +3633,7 @@ class MainWindow(QMainWindow):
     def _restore_state(self, state):
         """Restore a previously captured application state."""
         self.raw_data = state["raw_data"]
+        self._invalidate_noise_cache()
         self.noise_reduced_data = state["noise_reduced_data"]
         self.noise_reduced_original = state["noise_reduced_original"]
         self.lasso_mask = state["lasso_mask"]
@@ -3398,6 +3851,7 @@ class MainWindow(QMainWindow):
             self._redo_stack.clear()
 
             self.raw_data = arrays.get("raw_data", None)
+            self._invalidate_noise_cache()
             self.noise_reduced_data = arrays.get("noise_reduced_data", None)
             self.noise_reduced_original = arrays.get("noise_reduced_original", None)
             self.lasso_mask = arrays.get("lasso_mask", None)
@@ -3659,6 +4113,11 @@ class MainWindow(QMainWindow):
         if not self._maybe_prompt_save_dirty():
             event.ignore()
             return
+        try:
+            self.noise_smooth_timer.stop()
+            self.noise_commit_timer.stop()
+        except Exception:
+            pass
         super().closeEvent(event)
 
 
