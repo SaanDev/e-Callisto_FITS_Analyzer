@@ -16,11 +16,12 @@ from PySide6.QtWidgets import (
     QStatusBar, QProgressBar, QApplication, QMenu, QCheckBox, QRadioButton, QButtonGroup, QComboBox, QToolBar,
     QLineEdit, QSpinBox, QScrollArea, QFrame, QVBoxLayout, QWidget, QFileDialog, QHBoxLayout, QSizePolicy, QLayout,
     QStackedLayout,
+    QProgressDialog,
     QInputDialog,
 )
 
 from PySide6.QtGui import QAction, QPixmap, QImage, QGuiApplication, QIcon, QFontDatabase, QActionGroup, QPalette, QPainter, QPdfWriter
-from PySide6.QtCore import Qt, QTimer, QSize, QObject, QEvent
+from PySide6.QtCore import Qt, QTimer, QSize, QObject, QEvent, QThread, Signal, Slot
 from src.UI.callisto_downloader import CallistoDownloaderApp
 from src.UI.goes_xrs_gui import MainWindow as GoesXrsWindow
 #from soho_lasco_viewer import CMEViewer as CMEViewerWindow
@@ -178,6 +179,90 @@ class MplCanvas(FigureCanvas):
         self.updateGeometry()
 
 
+class DownloaderImportWorker(QObject):
+    progress_text = Signal(str)
+    progress_range = Signal(int, int)
+    progress_value = Signal(int)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, urls):
+        super().__init__()
+        self.urls = list(urls or [])
+
+    @Slot()
+    def run(self):
+        if not self.urls:
+            self.failed.emit("No files were received from the downloader.")
+            return
+
+        local_files = []
+        self.progress_text.emit("Downloading selected FITS files...")
+        self.progress_range.emit(0, len(self.urls))
+        self.progress_value.emit(0)
+
+        try:
+            for i, url in enumerate(self.urls, start=1):
+                r = requests.get(url, timeout=25)
+                r.raise_for_status()
+
+                original_name = str(url).split("/")[-1] or f"import_{i}.fit"
+                temp_dir = tempfile.gettempdir()
+                local_path = os.path.join(temp_dir, original_name)
+
+                with open(local_path, "wb") as f:
+                    f.write(r.content)
+
+                local_files.append(local_path)
+                self.progress_value.emit(i)
+        except Exception as e:
+            self.failed.emit(f"Failed to download one or more FITS files:\n{e}")
+            return
+
+        if len(local_files) == 1:
+            try:
+                res = load_callisto_fits(local_files[0], memmap=False)
+                payload = {
+                    "kind": "single",
+                    "filename": os.path.basename(local_files[0]),
+                    "source_path": local_files[0],
+                    "data": res.data,
+                    "freqs": res.freqs,
+                    "time": res.time,
+                    "header0": res.header0.copy(),
+                    "ut_start_sec": extract_ut_start_sec(res.header0),
+                }
+                self.finished.emit(payload)
+            except Exception as e:
+                self.failed.emit(f"Could not load FITS file:\n{e}")
+            return
+
+        from src.Backend.burst_processor import (
+            are_time_combinable,
+            are_frequency_combinable,
+            combine_time,
+            combine_frequency,
+        )
+
+        try:
+            self.progress_text.emit("Checking file compatibility...")
+            if are_time_combinable(local_files):
+                self.progress_text.emit("Combining files (time mode)...")
+                combined = combine_time(local_files)
+                self.finished.emit({"kind": "combined", "combined": combined})
+                return
+
+            if are_frequency_combinable(local_files):
+                self.progress_text.emit("Combining files (frequency mode)...")
+                combined = combine_frequency(local_files)
+                self.finished.emit({"kind": "combined", "combined": combined})
+                return
+
+            self.finished.emit({"kind": "invalid"})
+        except Exception as e:
+            self.failed.emit(f"An error occurred while combining files:\n{e}")
+
+
 class MainWindow(QMainWindow):
     DB_SCALE = 2500.0 / 255.0 / 25.4
 
@@ -258,6 +343,10 @@ class MainWindow(QMainWindow):
         self._noise_preview_active = False
         self._noise_base_data = None
         self._noise_base_source_id = None
+
+        self._import_thread = None
+        self._import_worker = None
+        self._import_progress_dialog = None
 
         # Canvas
         self.canvas = MplCanvas(self, width=10, height=6)
@@ -3436,6 +3525,166 @@ class MainWindow(QMainWindow):
         if getattr(self, "accel_canvas", None) is not None and self.accel_canvas.is_available:
             self.accel_canvas.set_time_mode(self.use_utc, self.ut_start_sec)
 
+    def _show_import_progress_dialog(self, total_steps: int):
+        self._close_import_progress_dialog()
+
+        parent = self
+        downloader = getattr(self, "downloader_dialog", None)
+        if downloader is not None:
+            try:
+                if downloader.isVisible():
+                    parent = downloader
+            except Exception:
+                pass
+
+        dlg = QProgressDialog("Downloading selected FITS files...", "", 0, max(1, int(total_steps)), parent)
+        dlg.setWindowTitle("Importing FITS Files")
+        dlg.setWindowModality(Qt.ApplicationModal)
+        dlg.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        dlg.setCancelButton(None)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        dlg.setValue(0)
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+        self._import_progress_dialog = dlg
+
+    def _close_import_progress_dialog(self):
+        dlg = getattr(self, "_import_progress_dialog", None)
+        if dlg is None:
+            return
+        try:
+            dlg.close()
+            dlg.deleteLater()
+        except Exception:
+            pass
+        self._import_progress_dialog = None
+
+    @Slot(str)
+    def _on_import_progress_text(self, text: str):
+        dlg = getattr(self, "_import_progress_dialog", None)
+        if dlg is None:
+            return
+        dlg.setLabelText(str(text or "Importing FITS files..."))
+
+    @Slot(int, int)
+    def _on_import_progress_range(self, minimum: int, maximum: int):
+        dlg = getattr(self, "_import_progress_dialog", None)
+        if dlg is None:
+            return
+        mn = int(minimum)
+        mx = max(int(maximum), mn)
+        dlg.setRange(mn, mx)
+        if dlg.value() < mn:
+            dlg.setValue(mn)
+
+    @Slot(int)
+    def _on_import_progress_value(self, value: int):
+        dlg = getattr(self, "_import_progress_dialog", None)
+        if dlg is None:
+            return
+        v = int(value)
+        if v > dlg.maximum():
+            dlg.setMaximum(v)
+        dlg.setValue(v)
+
+    def _cleanup_import_worker(self):
+        thread = getattr(self, "_import_thread", None)
+        if thread is not None:
+            try:
+                thread.deleteLater()
+            except Exception:
+                pass
+        self._import_thread = None
+        self._import_worker = None
+
+    def _emit_downloader_import_success(self):
+        dlg = getattr(self, "downloader_dialog", None)
+        if dlg is None:
+            return
+        try:
+            dlg.import_success.emit()
+        except Exception:
+            pass
+
+    def _load_single_import_payload(self, payload: dict):
+        data = payload.get("data", None)
+        freqs = payload.get("freqs", None)
+        time = payload.get("time", None)
+        if data is None or freqs is None or time is None:
+            raise ValueError("Imported FITS payload is incomplete.")
+
+        self.raw_data = data
+        self._invalidate_noise_cache()
+        self.freqs = freqs
+        self.time = time
+        self.filename = str(payload.get("filename", "") or "Imported")
+
+        hdr0 = payload.get("header0", None)
+        self._fits_header0 = hdr0.copy() if hdr0 is not None else None
+        self._fits_source_path = payload.get("source_path", None)
+
+        self._is_combined = False
+        self._combined_mode = None
+        self._combined_sources = []
+        self.ut_start_sec = payload.get("ut_start_sec", None)
+
+        self.noise_reduced_data = None
+        self.noise_reduced_original = None
+        self.lasso_mask = None
+        self.noise_vmin = None
+        self.noise_vmax = None
+        self.current_display_data = None
+        self._undo_stack.clear()
+        self._redo_stack.clear()
+
+        self.plot_data(self.raw_data, title="Raw")
+        self._project_path = None
+        self._max_intensity_state = None
+        self._mark_project_dirty()
+
+    @Slot(object)
+    def _on_downloader_import_finished(self, payload):
+        self._close_import_progress_dialog()
+
+        try:
+            kind = payload.get("kind", "") if isinstance(payload, dict) else ""
+
+            if kind == "single":
+                self._load_single_import_payload(payload)
+                self._emit_downloader_import_success()
+                return
+
+            if kind == "combined":
+                combined = payload.get("combined", None) if isinstance(payload, dict) else None
+                if combined is None:
+                    QMessageBox.critical(self, "Import Failed", "Combined FITS payload is missing.")
+                    return
+                self.load_combined_into_main(combined)
+                self._emit_downloader_import_success()
+                return
+
+            if kind == "invalid":
+                QMessageBox.warning(
+                    self,
+                    "Invalid Selection",
+                    "Selected files cannot be time-combined or frequency-combined.\n"
+                    "Please ensure they are consecutive in time or adjacent in frequency."
+                )
+                return
+
+            QMessageBox.critical(self, "Import Failed", "Unexpected import result from downloader.")
+        except Exception as e:
+            QMessageBox.critical(self, "Import Failed", f"Could not import downloaded files:\n{e}")
+
+    @Slot(str)
+    def _on_downloader_import_failed(self, message: str):
+        self._close_import_progress_dialog()
+        QMessageBox.critical(self, "Import Failed", str(message or "Import failed."))
+
     def process_imported_files(self, urls):
         if not urls:
             QMessageBox.warning(self, "No Files", "No files were received from the downloader.")
@@ -3444,64 +3693,30 @@ class MainWindow(QMainWindow):
         if not self._maybe_prompt_save_dirty():
             return
 
-        local_files = []
-
-        try:
-            for url in urls:
-                r = requests.get(url, timeout=20)
-                r.raise_for_status()
-
-                original_name = url.split("/")[-1]
-
-                temp_dir = tempfile.gettempdir()
-                local_path = os.path.join(temp_dir, original_name)
-
-                with open(local_path, "wb") as f:
-                    f.write(r.content)
-
-                local_files.append(local_path)
-
-        except Exception as e:
-            QMessageBox.critical(self, "Download Error",
-                                 f"Failed to download one or more FITS files:\n{e}")
+        if self._import_thread is not None and self._import_thread.isRunning():
+            QMessageBox.information(self, "Import In Progress", "Another FITS import is already running.")
             return
 
-        if len(local_files) == 1:
-            self.load_fits_into_main(local_files[0])
-            self.downloader_dialog.import_success.emit()
-            return
+        self._show_import_progress_dialog(len(urls))
 
-        from src.Backend.burst_processor import (
-            are_time_combinable,
-            are_frequency_combinable,
-            combine_time,
-            combine_frequency,
-        )
+        self._import_thread = QThread(self)
+        self._import_worker = DownloaderImportWorker(urls)
+        self._import_worker.moveToThread(self._import_thread)
 
-        try:
-            if are_time_combinable(local_files):
-                combined = combine_time(local_files)
-                self.load_combined_into_main(combined)
+        self._import_thread.started.connect(self._import_worker.run)
+        self._import_worker.progress_text.connect(self._on_import_progress_text)
+        self._import_worker.progress_range.connect(self._on_import_progress_range)
+        self._import_worker.progress_value.connect(self._on_import_progress_value)
+        self._import_worker.finished.connect(self._on_downloader_import_finished)
+        self._import_worker.failed.connect(self._on_downloader_import_failed)
 
-                self.downloader_dialog.import_success.emit()
-                return
+        self._import_worker.finished.connect(self._import_thread.quit)
+        self._import_worker.failed.connect(self._import_thread.quit)
+        self._import_worker.finished.connect(self._import_worker.deleteLater)
+        self._import_worker.failed.connect(self._import_worker.deleteLater)
+        self._import_thread.finished.connect(self._cleanup_import_worker)
 
-            if are_frequency_combinable(local_files):
-                combined = combine_frequency(local_files)
-                self.load_combined_into_main(combined)
-                self.downloader_dialog.import_success.emit()
-                return
-
-        except Exception as e:
-            QMessageBox.critical(self, "Combine Error", f"An error occurred while combining files:\n{e}")
-            return
-
-        QMessageBox.warning(
-            self,
-            "Invalid Selection",
-            "Selected files cannot be time-combined or frequency-combined.\n"
-            "Please ensure they are consecutive in time or adjacent in frequency."
-        )
+        self._import_thread.start()
 
     def _stop_rect_zoom(self):
         """Remove rectangle zoom selector safely (if active)."""
