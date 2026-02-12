@@ -5,7 +5,7 @@ Hardware-accelerated plotting widget for dynamic spectrum rendering.
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
@@ -74,6 +74,18 @@ else:
         pass
 
 
+class _SceneEventFilter(QObject):
+    def __init__(self, owner):
+        super().__init__(owner)
+        self._owner = owner
+
+    def eventFilter(self, obj, event):
+        try:
+            return bool(self._owner._handle_scene_event(event))
+        except Exception:
+            return False
+
+
 class AcceleratedPlotWidget(QWidget):
     mousePositionChanged = Signal(float, float, bool)
     lassoFinished = Signal(list)
@@ -121,9 +133,11 @@ class AcceleratedPlotWidget(QWidget):
         self._interaction_mode = None  # None | lasso | drift
         self._lasso_points = []
         self._lasso_line_item = None
+        self._lasso_drag_active = False
         self._drift_points = []
         self._drift_scatter_item = None
         self._drift_line_item = None
+        self._scene_filter = None
 
         self._interaction_timer = QTimer(self)
         self._interaction_timer.setSingleShot(True)
@@ -172,6 +186,8 @@ class AcceleratedPlotWidget(QWidget):
             self._color_bar = None
 
         scene = self._graphics.scene()
+        self._scene_filter = _SceneEventFilter(self)
+        scene.installEventFilter(self._scene_filter)
         scene.sigMouseMoved.connect(self._on_scene_mouse_moved)
         scene.sigMouseClicked.connect(self._on_scene_mouse_clicked)
 
@@ -373,12 +389,25 @@ class AcceleratedPlotWidget(QWidget):
 
     def _clear_lasso_overlay(self):
         self._lasso_points = []
+        self._lasso_drag_active = False
         if self._lasso_line_item is not None:
             try:
                 self._plot.removeItem(self._lasso_line_item)
             except Exception:
                 pass
             self._lasso_line_item = None
+
+    def _apply_navigation_state(self):
+        if not self.is_available:
+            return
+        if self._navigation_locked:
+            self._plot.setMouseEnabled(x=False, y=False)
+        else:
+            self._plot.setMouseEnabled(x=True, y=True)
+            try:
+                self._viewbox.setMouseMode(pg.ViewBox.PanMode)
+            except Exception:
+                pass
 
     def _clear_drift_overlay(self):
         self._drift_points = []
@@ -483,6 +512,8 @@ class AcceleratedPlotWidget(QWidget):
             return
         self._interaction_mode = "lasso"
         self._clear_lasso_overlay()
+        # Avoid panning while drawing freehand lasso
+        self._plot.setMouseEnabled(x=False, y=False)
 
     def begin_drift_capture(self) -> None:
         if not self.is_available:
@@ -493,6 +524,7 @@ class AcceleratedPlotWidget(QWidget):
     def stop_interaction_capture(self) -> None:
         self._interaction_mode = None
         self._clear_lasso_overlay()
+        self._apply_navigation_state()
 
     def show_drift_points(self, points, with_segments: bool = False) -> None:
         if not self.is_available:
@@ -537,12 +569,73 @@ class AcceleratedPlotWidget(QWidget):
             return
         self.mousePositionChanged.emit(xy[0], xy[1], True)
 
+    def _update_lasso_curve(self):
+        if self._lasso_line_item is None:
+            self._lasso_line_item = pg.PlotDataItem(pen=pg.mkPen(0, 212, 255, width=2))
+            self._plot.addItem(self._lasso_line_item)
+        if not self._lasso_points:
+            self._lasso_line_item.setData([], [])
+            return
+        xs = [p[0] for p in self._lasso_points]
+        ys = [p[1] for p in self._lasso_points]
+        self._lasso_line_item.setData(xs, ys)
+
+    def _handle_scene_event(self, event) -> bool:
+        if not self.is_available or self._interaction_mode != "lasso":
+            return False
+
+        etype = event.type()
+        if etype == QEvent.Type.GraphicsSceneMousePress:
+            if event.button() == Qt.MouseButton.LeftButton:
+                xy = self._scene_to_plot_xy(event.scenePos())
+                if xy is None:
+                    return False
+                self._lasso_drag_active = True
+                self._lasso_points = [xy]
+                self._update_lasso_curve()
+                return True
+            if event.button() == Qt.MouseButton.RightButton:
+                self._interaction_mode = None
+                self._clear_lasso_overlay()
+                self._apply_navigation_state()
+                return True
+
+        if etype == QEvent.Type.GraphicsSceneMouseMove:
+            if not self._lasso_drag_active:
+                return False
+            xy = self._scene_to_plot_xy(event.scenePos())
+            if xy is None:
+                return True
+            if self._lasso_points:
+                last_x, last_y = self._lasso_points[-1]
+                if ((xy[0] - last_x) ** 2 + (xy[1] - last_y) ** 2) < 1e-6:
+                    return True
+            self._lasso_points.append(xy)
+            self._update_lasso_curve()
+            return True
+
+        if etype == QEvent.Type.GraphicsSceneMouseRelease:
+            if event.button() != Qt.MouseButton.LeftButton or not self._lasso_drag_active:
+                return False
+
+            self._lasso_drag_active = False
+            xy = self._scene_to_plot_xy(event.scenePos())
+            if xy is not None:
+                self._lasso_points.append(xy)
+                self._update_lasso_curve()
+
+            self._finish_lasso()
+            return True
+
+        return False
+
     def _finish_lasso(self):
         if len(self._lasso_points) >= 3:
             out = [(float(p[0]), float(p[1])) for p in self._lasso_points]
             self.lassoFinished.emit(out)
         self._interaction_mode = None
         self._clear_lasso_overlay()
+        self._apply_navigation_state()
 
     def _finish_drift(self):
         out = [(float(p[0]), float(p[1])) for p in self._drift_points]
@@ -561,20 +654,6 @@ class AcceleratedPlotWidget(QWidget):
             is_double = False
 
         x, y = xy
-        if self._interaction_mode == "lasso":
-            if button == Qt.MouseButton.LeftButton:
-                self._lasso_points.append((x, y))
-                xs = [p[0] for p in self._lasso_points]
-                ys = [p[1] for p in self._lasso_points]
-                if self._lasso_line_item is None:
-                    self._lasso_line_item = pg.PlotDataItem(pen=pg.mkPen(0, 212, 255, width=2))
-                    self._plot.addItem(self._lasso_line_item)
-                self._lasso_line_item.setData(xs, ys)
-                if is_double and len(self._lasso_points) >= 3:
-                    self._finish_lasso()
-            elif button == Qt.MouseButton.RightButton:
-                self._finish_lasso()
-            return
 
         if self._interaction_mode == "drift":
             if button == Qt.MouseButton.LeftButton:

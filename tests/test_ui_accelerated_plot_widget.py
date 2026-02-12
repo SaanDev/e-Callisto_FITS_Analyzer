@@ -99,3 +99,12 @@ def test_pyqtgraph_image_export_not_empty():
         exporter.export(str(out))
         assert out.exists()
         assert out.stat().st_size > 0
+
+
+def test_accelerated_widget_lasso_capture_api_no_crash():
+    _app()
+    widget = AcceleratedPlotWidget()
+    if not widget.is_available:
+        pytest.skip("pyqtgraph not available in test environment")
+    widget.begin_lasso_capture()
+    widget.stop_interaction_capture()

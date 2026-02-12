@@ -2355,7 +2355,7 @@ class MainWindow(QMainWindow):
         if self._hardware_mode_enabled():
             self.lasso_active = True
             self.accel_canvas.begin_lasso_capture()
-            self.statusBar().showMessage("Draw around the burst (right-click to finish).", 5000)
+            self.statusBar().showMessage("Press, drag around the burst, and release to isolate.", 5000)
             return
 
         self.canvas.mpl_disconnect(self._cid_press)
@@ -2383,10 +2383,22 @@ class MainWindow(QMainWindow):
             print("Lasso used before data was prepared. Ignoring.")
             return
 
-        path = Path(verts)
+        verts_arr = np.asarray(verts, dtype=float)
+        if verts_arr.ndim != 2 or verts_arr.shape[0] < 3 or verts_arr.shape[1] != 2:
+            print("Invalid lasso selection. Ignoring.")
+            return
+        if not np.allclose(verts_arr[0], verts_arr[-1]):
+            verts_arr = np.vstack([verts_arr, verts_arr[0]])
+
+        path = Path(verts_arr, closed=True)
 
         ny, nx = self.noise_reduced_data.shape
-        y = np.linspace(self.freqs[0], self.freqs[-1], ny)
+        # Hardware view uses an inverted Y-axis transform; map rows accordingly
+        # so the lasso mask aligns with what the user actually drew.
+        if self._hardware_mode_enabled():
+            y = np.linspace(self.freqs[-1], self.freqs[0], ny)
+        else:
+            y = np.linspace(self.freqs[0], self.freqs[-1], ny)
         x = np.linspace(0, self.time[-1], nx)
         X, Y = np.meshgrid(x, y)
 
