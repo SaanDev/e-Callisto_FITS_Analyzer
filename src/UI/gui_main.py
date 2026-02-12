@@ -3245,6 +3245,45 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Reset to raw", 3000)
         self._sync_toolbar_enabled_states()
 
+    def _clear_drift_overlays(self, keep_view: bool = True) -> bool:
+        had_drift_points = bool(getattr(self, "drift_points", []))
+        self.drift_points = []
+
+        if self._hardware_mode_enabled():
+            try:
+                self.accel_canvas.stop_interaction_capture()
+            except Exception:
+                pass
+            try:
+                self.accel_canvas.show_drift_points([], with_segments=False)
+                self.accel_canvas.clear_overlays()
+            except Exception:
+                pass
+            return had_drift_points
+
+        # Matplotlib path
+        cid = getattr(self, "drift_click_cid", None)
+        if cid is not None:
+            try:
+                self.canvas.mpl_disconnect(cid)
+            except Exception:
+                pass
+            self.drift_click_cid = None
+
+        if had_drift_points and self.raw_data is not None:
+            data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
+            self.plot_data(data, title=self.current_plot_type, keep_view=keep_view)
+            return True
+
+        try:
+            legend = self.canvas.ax.get_legend()
+            if legend is not None:
+                legend.remove()
+                self.canvas.draw_idle()
+        except Exception:
+            pass
+        return had_drift_points
+
     def show_about_dialog(self):
         QMessageBox.information(
             self,
@@ -3257,6 +3296,8 @@ class MainWindow(QMainWindow):
         )
 
     def reset_selection(self):
+        had_drift_points = self._clear_drift_overlays(keep_view=True)
+
         if self.noise_reduced_original is not None:
             self._push_undo_state()
             self.noise_reduced_data = self.noise_reduced_original.copy()
@@ -3264,11 +3305,15 @@ class MainWindow(QMainWindow):
                 self.plot_data(self.noise_reduced_data, title="Background Subtracted")
             self.lasso_mask = None
             self.lasso = None
-            self.statusBar().showMessage("Selection Reset", 4000)
+            if had_drift_points:
+                self.statusBar().showMessage("Selection reset (drift markers cleared)", 4000)
+            else:
+                self.statusBar().showMessage("Selection Reset", 4000)
             print("Lasso selection reset. Original noise-reduced data restored.")
             self._sync_toolbar_enabled_states()
         else:
             # If no selection exists, treat this as a "reset view" (home) action after zoom/pan.
+            view_reset = False
             try:
                 cur_view = self._capture_view()
                 home_view = getattr(self, "_home_view", None)
@@ -3279,7 +3324,13 @@ class MainWindow(QMainWindow):
                         self._show_accel_canvas()
                     else:
                         self.canvas.draw_idle()
-                    self.statusBar().showMessage("View reset", 2500)
+                    view_reset = True
+                    if had_drift_points:
+                        self.statusBar().showMessage("View reset (drift markers cleared)", 2500)
+                    else:
+                        self.statusBar().showMessage("View reset", 2500)
+                elif had_drift_points:
+                    self.statusBar().showMessage("Drift markers reset", 2500)
                 else:
                     print("No noise-reduced backup found. Reset skipped.")
             finally:
