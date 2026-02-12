@@ -2562,6 +2562,9 @@ class MainWindow(QMainWindow):
 
     def _pixmap_to_rgba_array(self, pixmap: QPixmap) -> np.ndarray:
         image = pixmap.toImage().convertToFormat(QImage.Format_RGBA8888)
+        return self._qimage_to_rgba_array(image)
+
+    def _qimage_to_rgba_array(self, image: QImage) -> np.ndarray:
         width = image.width()
         height = image.height()
         ptr = image.bits()
@@ -2570,50 +2573,114 @@ class MainWindow(QMainWindow):
         return arr[:, : width * 4].reshape((height, width, 4)).copy()
 
     def _export_hardware_visible_plot(self, file_path: str, ext_final: str) -> None:
+        ext = str(ext_final or "").lower()
+        plot_item = self.accel_canvas.export_plot_item()
+        if plot_item is None:
+            raise RuntimeError("Hardware plot is not available for export.")
+
+        try:
+            import pyqtgraph.exporters as pg_exporters
+        except Exception:
+            pg_exporters = None
+
+        if pg_exporters is not None:
+            raster_exts = {"png", "tif", "tiff", "jpg", "jpeg", "bmp", "webp"}
+            if ext in raster_exts:
+                exporter = pg_exporters.ImageExporter(plot_item)
+                try:
+                    params = exporter.parameters()
+                    width = max(1, int(self.accel_canvas.width() * self.accel_canvas.devicePixelRatioF()))
+                    params["width"] = max(width, 1400)
+                except Exception:
+                    pass
+                exporter.export(file_path)
+                return
+
+            if ext == "svg":
+                exporter = pg_exporters.SVGExporter(plot_item)
+                exporter.export(file_path)
+                return
+
+            if ext in {"pdf", "eps"}:
+                temp_png = None
+                try:
+                    fd, temp_png = tempfile.mkstemp(suffix=".png")
+                    os.close(fd)
+                    exporter = pg_exporters.ImageExporter(plot_item)
+                    try:
+                        params = exporter.parameters()
+                        width = max(1, int(self.accel_canvas.width() * self.accel_canvas.devicePixelRatioF()))
+                        params["width"] = max(width, 1800)
+                    except Exception:
+                        pass
+                    exporter.export(temp_png)
+
+                    img = QImage(temp_png)
+                    if img.isNull():
+                        raise RuntimeError("Failed to capture hardware plot image.")
+
+                    if ext == "pdf":
+                        writer = QPdfWriter(file_path)
+                        writer.setResolution(300)
+                        painter = QPainter(writer)
+                        target = writer.pageLayout().paintRectPixels(writer.resolution())
+                        scaled = img.scaled(target.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                        x = target.x() + (target.width() - scaled.width()) // 2
+                        y = target.y() + (target.height() - scaled.height()) // 2
+                        painter.drawImage(x, y, scaled)
+                        painter.end()
+                        return
+
+                    rgba = self._qimage_to_rgba_array(img.convertToFormat(QImage.Format_RGBA8888))
+                    fig = Figure(figsize=(rgba.shape[1] / 300.0, rgba.shape[0] / 300.0), dpi=300)
+                    ax = fig.add_axes([0, 0, 1, 1])
+                    ax.imshow(rgba)
+                    ax.axis("off")
+                    fig.savefig(file_path, dpi=300, bbox_inches="tight", pad_inches=0, format="eps")
+                    return
+                finally:
+                    if temp_png:
+                        try:
+                            os.remove(temp_png)
+                        except Exception:
+                            pass
+
+        # Last-resort fallback (can be blank on some OpenGL drivers)
         pixmap = self.accel_canvas.grab()
         if pixmap.isNull():
             raise RuntimeError("Could not capture the accelerated plot image.")
+        if not pixmap.save(file_path, ext.upper() if ext else "PNG"):
+            raise RuntimeError(f"Failed to save image as {ext}.")
 
-        ext = str(ext_final or "").lower()
-        if ext in {"png", "tif", "tiff", "jpg", "jpeg", "bmp", "webp"}:
-            if not pixmap.save(file_path, ext.upper()):
-                raise RuntimeError(f"Failed to save image as {ext}.")
-            return
+    def _pick_export_path_for_figure(self, caption: str, default_name: str, filters: str, default_filter: str = None):
+        """
+        Hardware-acceleration mode uses native save dialog directly because
+        some Linux/OpenGL combinations can hang with the non-native dialog.
+        """
+        if self._hardware_mode_enabled():
+            path, chosen_filter = QFileDialog.getSaveFileName(
+                self,
+                caption,
+                default_name,
+                filters,
+                default_filter or "",
+            )
+            if not path:
+                return "", ""
 
-        if ext == "pdf":
-            writer = QPdfWriter(file_path)
-            writer.setResolution(300)
-            painter = QPainter(writer)
-            target = writer.pageLayout().paintRectPixels(writer.resolution())
-            painter.drawPixmap(target, pixmap)
-            painter.end()
-            return
+            ext = os.path.splitext(path)[1].lstrip(".").lower()
+            if not ext:
+                ext = _ext_from_filter(chosen_filter) or "png"
+                path = f"{path}.{ext}"
+            return path, ext
 
-        if ext == "svg":
-            try:
-                from PySide6.QtSvg import QSvgGenerator
-            except Exception as e:
-                raise RuntimeError(f"SVG export unavailable: {e}")
-
-            generator = QSvgGenerator()
-            generator.setFileName(file_path)
-            generator.setSize(pixmap.size())
-            generator.setViewBox(pixmap.rect())
-            painter = QPainter(generator)
-            painter.drawPixmap(0, 0, pixmap)
-            painter.end()
-            return
-
-        if ext == "eps":
-            rgba = self._pixmap_to_rgba_array(pixmap)
-            fig = Figure(figsize=(rgba.shape[1] / 300.0, rgba.shape[0] / 300.0), dpi=300)
-            ax = fig.add_axes([0, 0, 1, 1])
-            ax.imshow(rgba)
-            ax.axis("off")
-            fig.savefig(file_path, dpi=300, bbox_inches="tight", pad_inches=0, format="eps")
-            return
-
-        raise RuntimeError(f"Unsupported export format in hardware mode: {ext}")
+        return pick_export_path(
+            self,
+            caption,
+            default_name,
+            filters,
+            default_filter=default_filter,
+        )
 
     def export_figure(self):
 
@@ -2623,14 +2690,17 @@ class MainWindow(QMainWindow):
 
         formats = "PNG (*.png);;PDF (*.pdf);;EPS (*.eps);;SVG (*.svg);;TIFF (*.tiff)"
 
-        default_name = self._sanitize_export_stem(self._current_graph_title_for_export())
+        if self._hardware_mode_enabled():
+            base_title = str(self.graph_title_override or self._default_graph_title(self.current_plot_type)).strip()
+            default_name = self._sanitize_export_stem(base_title)
+        else:
+            default_name = self._sanitize_export_stem(self._current_graph_title_for_export())
 
-        file_path, ext = pick_export_path(
-            self,
+        file_path, ext = self._pick_export_path_for_figure(
             "Export Figure",
             default_name,
             formats,
-            default_filter="PNG (*.png)"
+            default_filter="PNG (*.png)",
         )
 
         if not file_path:

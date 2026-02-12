@@ -410,6 +410,11 @@ class AcceleratedPlotWidget(QWidget):
         self._clear_lasso_overlay()
         self._clear_drift_overlay()
 
+    def export_plot_item(self):
+        if not self.is_available:
+            return None
+        return self._plot
+
     def update_image(
         self,
         data: np.ndarray,
