@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 1.7.7
+Version 2.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -265,6 +265,9 @@ class DownloaderImportWorker(QObject):
 
 class MainWindow(QMainWindow):
     DB_SCALE = 2500.0 / 255.0 / 25.4
+    HW_DEFAULT_TICK_FONT_PX = 14
+    HW_DEFAULT_AXIS_FONT_PX = 16
+    HW_DEFAULT_TITLE_FONT_PX = 22
 
     def __init__(self, theme=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -276,7 +279,7 @@ class MainWindow(QMainWindow):
         #Linux Messagebox Fix
         _install_linux_msgbox_fixer()
 
-        self.setWindowTitle("e-CALLISTO FITS Analyzer 1.7.7")
+        self.setWindowTitle("e-CALLISTO FITS Analyzer 2.0")
         #self.resize(1000, 700)
         self.setMinimumSize(1000, 700)
 
@@ -302,6 +305,7 @@ class MainWindow(QMainWindow):
         self.tick_font_px = 11
         self.axis_label_font_px = 12
         self.title_font_px = 14
+        self._hw_default_font_sizes_active = True
 
         self._colorbar_label_text = ""
 
@@ -354,7 +358,7 @@ class MainWindow(QMainWindow):
 
         # Hardware-accelerated plotting canvas (full graph area when enabled)
         self.accel_canvas = AcceleratedPlotWidget(self)
-        self.use_hw_live_preview = False
+        self.use_hw_live_preview = bool(self.accel_canvas.is_available)
         if self.accel_canvas.is_available:
             self.accel_canvas.mousePositionChanged.connect(self.on_accel_mouse_motion_status)
             self.accel_canvas.viewInteractionFinished.connect(self._on_accel_view_interaction_finished)
@@ -714,7 +718,7 @@ class MainWindow(QMainWindow):
         self.plot_stack.setSpacing(0)
         self.plot_stack.addWidget(self.canvas)
         self.plot_stack.addWidget(self.accel_canvas)
-        self.plot_stack.setCurrentWidget(self.canvas)
+        self.plot_stack.setCurrentWidget(self.accel_canvas if self.use_hw_live_preview else self.canvas)
 
         main_layout.addWidget(self.side_scroll, 0)
         main_layout.addWidget(self.sidebar_toggle_strip, 0)
@@ -851,7 +855,7 @@ class MainWindow(QMainWindow):
         processing_menu = menubar.addMenu("Processing")
         hw_menu = processing_menu.addMenu("Hardware Acceleration")
         self.hw_live_preview_action = QAction("Enable", self, checkable=True)
-        self.hw_live_preview_action.setChecked(False)
+        self.hw_live_preview_action.setChecked(self.use_hw_live_preview)
         self.hw_live_preview_action.setEnabled(bool(self.accel_canvas.is_available))
         hw_menu.addAction(self.hw_live_preview_action)
 
@@ -892,8 +896,12 @@ class MainWindow(QMainWindow):
         self.open_project_action.triggered.connect(self.open_project)
         self.save_project_action.triggered.connect(self.save_project)
         self.save_project_as_action.triggered.connect(self.save_project_as)
-        self.units_digits_radio.toggled.connect(self.update_units)
-        self.units_db_radio.toggled.connect(self.update_units)
+        self.units_digits_radio.toggled.connect(
+            lambda checked: checked and self.set_units_mode(False)
+        )
+        self.units_db_radio.toggled.connect(
+            lambda checked: checked and self.set_units_mode(True)
+        )
 
         self.time_sec_radio.toggled.connect(
             lambda checked: checked and self.set_axis_to_seconds()
@@ -908,9 +916,9 @@ class MainWindow(QMainWindow):
         # Real-time graph properties (non-colormap)
         self.title_edit.textChanged.connect(self.apply_graph_properties_live)
         self.font_combo.currentTextChanged.connect(self.apply_graph_properties_live)
-        self.tick_font_spin.valueChanged.connect(self.apply_graph_properties_live)
-        self.axis_font_spin.valueChanged.connect(self.apply_graph_properties_live)
-        self.title_font_spin.valueChanged.connect(self.apply_graph_properties_live)
+        self.tick_font_spin.valueChanged.connect(self._on_tick_font_spin_changed)
+        self.axis_font_spin.valueChanged.connect(self._on_axis_font_spin_changed)
+        self.title_font_spin.valueChanged.connect(self._on_title_font_spin_changed)
 
         # Real-time style toggles
         self.remove_titles_chk.toggled.connect(self.apply_graph_properties_live)
@@ -963,6 +971,7 @@ class MainWindow(QMainWindow):
 
         # Ensure project actions reflect initial state
         self._sync_project_actions()
+        self.set_hardware_live_preview_enabled(self.use_hw_live_preview)
 
     def _is_dark_ui(self) -> bool:
         # Prefer theme manager if available
@@ -1300,11 +1309,18 @@ class MainWindow(QMainWindow):
 
         extent = [0, self.time[-1], self.freqs[-1], self.freqs[0]]
         cbar_label = "" if self.remove_titles else ("Intensity [Digits]" if not self.use_db else "Intensity [dB]")
+        tick_font_px = self.tick_font_px
+        axis_label_font_px = self.axis_label_font_px
+        title_font_px = self.title_font_px
+        if getattr(self, "_hw_default_font_sizes_active", False):
+            tick_font_px = self.HW_DEFAULT_TICK_FONT_PX
+            axis_label_font_px = self.HW_DEFAULT_AXIS_FONT_PX
+            title_font_px = self.HW_DEFAULT_TITLE_FONT_PX
         self.accel_canvas.set_text_style(
             font_family=self.graph_font_family,
-            tick_font_px=self.tick_font_px,
-            axis_label_font_px=self.axis_label_font_px,
-            title_font_px=self.title_font_px,
+            tick_font_px=tick_font_px,
+            axis_label_font_px=axis_label_font_px,
+            title_font_px=title_font_px,
             title_bold=self.title_bold,
             title_italic=self.title_italic,
             axis_bold=self.axis_bold,
@@ -1648,6 +1664,18 @@ class MainWindow(QMainWindow):
         self.canvas.draw_idle()
         self._refresh_accel_plot(preserve_view=True)
 
+    def _on_tick_font_spin_changed(self, _value):
+        self._hw_default_font_sizes_active = False
+        self.apply_graph_properties_live()
+
+    def _on_axis_font_spin_changed(self, _value):
+        self._hw_default_font_sizes_active = False
+        self.apply_graph_properties_live()
+
+    def _on_title_font_spin_changed(self, _value):
+        self._hw_default_font_sizes_active = False
+        self.apply_graph_properties_live()
+
     def load_file(self):
         if not self._maybe_prompt_save_dirty():
             return
@@ -1754,10 +1782,10 @@ class MainWindow(QMainWindow):
         return (vmin * self.DB_SCALE, vmax * self.DB_SCALE) if self.use_db else (vmin, vmax)
 
     def update_units(self):
-        if self.units_db_radio.isChecked():
-            self.use_db = True
-        else:
-            self.use_db = False
+        self.set_units_mode(bool(self.units_db_radio.isChecked()))
+
+    def set_units_mode(self, use_db: bool):
+        self.use_db = bool(use_db)
 
         if self.raw_data is None:
             return
@@ -3389,7 +3417,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "About e-Callisto FITS Analyzer",
-            "e-CALLISTO FITS Analyzer version 1.7.7.\n\n"
+            "e-CALLISTO FITS Analyzer version 2.0.\n\n"
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"
@@ -3470,6 +3498,8 @@ class MainWindow(QMainWindow):
         # If you are using radio buttons, store them as these names (optional)
         self._set_checked_if_exists("xaxis_sec_radio", True)
         self._set_checked_if_exists("xaxis_ut_radio", False)
+        self._set_checked_if_exists("time_sec_radio", True)
+        self._set_checked_if_exists("time_ut_radio", False)
 
         if self.raw_data is not None:
             self._mark_project_dirty()
@@ -3486,6 +3516,8 @@ class MainWindow(QMainWindow):
         # If you are using radio buttons, store them as these names (optional)
         self._set_checked_if_exists("xaxis_sec_radio", False)
         self._set_checked_if_exists("xaxis_ut_radio", True)
+        self._set_checked_if_exists("time_sec_radio", False)
+        self._set_checked_if_exists("time_ut_radio", True)
 
         if self.raw_data is not None:
             self._mark_project_dirty()
@@ -4279,6 +4311,7 @@ class MainWindow(QMainWindow):
 
             # Graph properties
             graph = meta.get("graph", {}) or {}
+            self._hw_default_font_sizes_active = False
             try:
                 self.remove_titles_chk.blockSignals(True)
                 self.title_bold_chk.blockSignals(True)
@@ -4732,7 +4765,7 @@ class MaxIntensityPlotDialog(QDialog):
         QMessageBox.information(
             self,
             "About e-Callisto FITS Analyzer",
-            "e-CALLISTO FITS Analyzer version 1.7.7.\n\n"
+            "e-CALLISTO FITS Analyzer version 2.0.\n\n"
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"

@@ -1,11 +1,11 @@
 # e-CALLISTO FITS Analyzer
 A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data.
 
-Version **1.7.7**
+Version **2.0**
 
 ---
 
-## 🆕 What's New (v1.7.7)
+## 🆕 What's New (v2.0)
 
 ### Core workflow
 - Added **session/project save and load** support to restore analysis state.

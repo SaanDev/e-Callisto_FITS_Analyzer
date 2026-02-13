@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 1.7.7
+Version 2.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -11,7 +11,7 @@ from setuptools import setup
 
 HERE = os.path.abspath(os.path.dirname(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
-APP_VERSION = "1.7.7"
+APP_VERSION = "2.0"
 
 LZMA_CANDIDATES = [
     "/opt/homebrew/opt/xz/lib/liblzma.5.dylib",
