@@ -24,8 +24,13 @@ packages = [
     "beautifulsoup4",
     "netCDF4",
     "cftime",
-    "setuptools"
+    "setuptools",
+    "pyinstaller",
+    "pyinstaller-hooks-contrib",
 ]
+
+if sys.platform == "darwin":
+    packages.append("py2app")
 
 def install(pkg):
     print(f"Installing {pkg} ...")

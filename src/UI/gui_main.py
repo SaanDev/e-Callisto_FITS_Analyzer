@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from PySide6.QtGui import QAction, QPixmap, QImage, QGuiApplication, QIcon, QFontDatabase, QActionGroup, QPalette, QPainter, QPdfWriter
-from PySide6.QtCore import Qt, QTimer, QSize, QObject, QEvent, QThread, Signal, Slot
+from PySide6.QtCore import Qt, QTimer, QSize, QObject, QEvent, QThread, Signal, Slot, QSettings
 from src.UI.callisto_downloader import CallistoDownloaderApp
 from src.UI.goes_xrs_gui import MainWindow as GoesXrsWindow
 #from soho_lasco_viewer import CMEViewer as CMEViewerWindow
@@ -275,6 +275,14 @@ class MainWindow(QMainWindow):
         self.theme = QApplication.instance().property("theme_manager") if QApplication.instance() else None
         if self.theme and hasattr(self.theme, "themeChanged"):
             self.theme.themeChanged.connect(self._on_theme_changed)
+        if self.theme and hasattr(self.theme, "viewModeChanged"):
+            self.theme.viewModeChanged.connect(lambda _mode: self._sync_view_mode_actions())
+        self._ui_settings = QSettings("SaanDev", "e-CALLISTO FITS Analyzer")
+        self._view_mode = (
+            self._normalize_view_mode(self.theme.view_mode())
+            if (self.theme and hasattr(self.theme, "view_mode"))
+            else self._normalize_view_mode(self._ui_settings.value("ui/view_mode", "modern"))
+        )
 
         #Linux Messagebox Fix
         _install_linux_msgbox_fixer()
@@ -416,11 +424,12 @@ class MainWindow(QMainWindow):
         self.upper_slider.setValue(0)
 
         slider_group = QGroupBox("Noise Clipping Thresholds")
+        self.slider_group = slider_group
         slider_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 
         slider_layout = QVBoxLayout(slider_group)
-        slider_layout.setContentsMargins(10, 10, 10, 10)
-        slider_layout.setSpacing(6)
+        slider_layout.setContentsMargins(12, 12, 12, 12)
+        slider_layout.setSpacing(8)
 
         lbl_low = QLabel("Lower Threshold")
         lbl_low.setAlignment(Qt.AlignLeft)
@@ -439,16 +448,16 @@ class MainWindow(QMainWindow):
         self.units_group_box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 
         units_layout = QVBoxLayout(self.units_group_box)
-        units_layout.setContentsMargins(10, 10, 10, 10)
-        units_layout.setSpacing(8)
+        units_layout.setContentsMargins(12, 12, 12, 12)
+        units_layout.setSpacing(10)
 
         # ---- Horizontal container for Intensity + Time ----
         units_row = QHBoxLayout()
-        units_row.setSpacing(20)
+        units_row.setSpacing(24)
 
         # ===== Intensity column =====
         intensity_col = QVBoxLayout()
-        intensity_col.setSpacing(8)
+        intensity_col.setSpacing(6)
 
         intensity_label = QLabel("Intensity")
         intensity_label.setProperty("section", True)
@@ -506,7 +515,7 @@ class MainWindow(QMainWindow):
             w = QWidget()
             row = QHBoxLayout(w)
             row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(6)
+            row.setSpacing(8)
 
             label = QLabel(label_text)
             label.setWordWrap(False)
@@ -523,7 +532,7 @@ class MainWindow(QMainWindow):
             w = QWidget()
             row = QHBoxLayout(w)
             row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(6)
+            row.setSpacing(8)
 
             label = QLabel(label_text)
             label.setWordWrap(False)
@@ -539,8 +548,8 @@ class MainWindow(QMainWindow):
         self.graph_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 
         graph_layout = QVBoxLayout(self.graph_group)
-        graph_layout.setContentsMargins(10, 10, 10, 10)
-        graph_layout.setSpacing(6)
+        graph_layout.setContentsMargins(12, 12, 12, 12)
+        graph_layout.setSpacing(8)
 
         # Appearance
         graph_layout.addWidget(_section_label("Appearance"))
@@ -561,6 +570,8 @@ class MainWindow(QMainWindow):
         graph_layout.addWidget(QLabel("Font family"))
         graph_layout.addWidget(self.font_combo)
 
+        graph_layout.addSpacing(8)
+
         # Text
         graph_layout.addWidget(_section_label("Text"))
 
@@ -572,6 +583,8 @@ class MainWindow(QMainWindow):
 
         self.remove_titles_chk = QCheckBox("Remove Titles")
         graph_layout.addWidget(self.remove_titles_chk)
+
+        graph_layout.addSpacing(8)
 
         # Font sizes
         graph_layout.addWidget(_section_label("Font sizes"))
@@ -590,6 +603,8 @@ class MainWindow(QMainWindow):
         self.title_font_spin.setRange(6, 80)
         self.title_font_spin.setValue(self.title_font_px)
         graph_layout.addWidget(_spin_row("Title (px)", self.title_font_spin))
+
+        graph_layout.addSpacing(8)
 
         # Text style
         graph_layout.addWidget(_section_label("Text style"))
@@ -614,8 +629,8 @@ class MainWindow(QMainWindow):
         # -------------------------
         side_panel_widget = QWidget()
         side_panel_layout = QVBoxLayout(side_panel_widget)
-        side_panel_layout.setContentsMargins(8, 8, 8, 8)
-        side_panel_layout.setSpacing(10)
+        side_panel_layout.setContentsMargins(10, 10, 10, 10)
+        side_panel_layout.setSpacing(12)
 
         side_panel_layout.addWidget(slider_group)
         side_panel_layout.addWidget(self.units_group_box)
@@ -643,7 +658,6 @@ class MainWindow(QMainWindow):
         self.sidebar_toggle_btn.setFixedSize(12, 22)
         self.sidebar_toggle_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.sidebar_toggle_btn.setFocusPolicy(Qt.NoFocus)
-        self.sidebar_toggle_btn.setStyleSheet("QPushButton#SidebarToggleButton { font-size: 10px; padding: 0px; }")
         self.sidebar_toggle_btn.clicked.connect(self.toggle_left_sidebar)
 
         self.sidebar_toggle_strip = QWidget()
@@ -660,50 +674,11 @@ class MainWindow(QMainWindow):
         # -------------------------
         # Style (safe sizes, no tiny max-heights)
         # -------------------------
-        sidebar_style = """
-        QGroupBox {
-            font-weight: bold;
-        }
-        QLabel {
-            font-size: 12px;
-        }
-        QLabel[section="true"] {
-            font-weight: bold;
-            color: #444;
-            margin-top: 6px;
-        }
-        QLabel#SectionLabel {
-            font-weight: bold;
-            color: #555;
-            margin-top: 8px;
-            margin-bottom: 4px;
-        }
-        
-        QLineEdit, QComboBox {
-            min-height: 24px;
-            padding: 4px 6px;
-            font-size: 12px;
-        }
-
-        QSpinBox {
-            min-height: 32px;      /* REQUIRED for Windows */
-            min-width: 90px;
-            padding-left: 6px;
-            font-size: 12px;
-        }
-
-        QCheckBox {
-            spacing: 6px;
-            font-size: 12px;
-            margin-top: 10px;
-            margin-bottom: 10px;
-            margin-right: 10px;
-            
-        }
-        """
-        slider_group.setStyleSheet(sidebar_style)
-        self.units_group_box.setStyleSheet(sidebar_style)
-        self.graph_group.setStyleSheet(sidebar_style)
+        if not (self.theme and hasattr(self.theme, "set_view_mode")):
+            sidebar_style = self._classic_sidebar_qss()
+            slider_group.setStyleSheet(sidebar_style)
+            self.units_group_box.setStyleSheet(sidebar_style)
+            self.graph_group.setStyleSheet(sidebar_style)
 
         # -------------------------
         # Main layout with scrollable sidebar + canvas
@@ -841,16 +816,24 @@ class MainWindow(QMainWindow):
         # View Menu
         view_menu = menubar.addMenu("View")
         theme_menu = view_menu.addMenu("Theme")
+        mode_menu = view_menu.addMenu("Mode")
 
         self.theme_action_system = QAction("System", self, checkable=True)
         self.theme_action_light = QAction("Light", self, checkable=True)
         self.theme_action_dark = QAction("Dark", self, checkable=True)
+        self.mode_action_classic = QAction("Classic", self, checkable=True)
+        self.mode_action_modern = QAction("Modern", self, checkable=True)
 
         theme_group = QActionGroup(self)
         theme_group.setExclusive(True)
         for a in (self.theme_action_system, self.theme_action_light, self.theme_action_dark):
             theme_group.addAction(a)
             theme_menu.addAction(a)
+        view_mode_group = QActionGroup(self)
+        view_mode_group.setExclusive(True)
+        for a in (self.mode_action_classic, self.mode_action_modern):
+            view_mode_group.addAction(a)
+            mode_menu.addAction(a)
 
         processing_menu = menubar.addMenu("Processing")
         hw_menu = processing_menu.addMenu("Hardware Acceleration")
@@ -865,11 +848,18 @@ class MainWindow(QMainWindow):
             self.theme_action_system.setChecked(m == "system")
             self.theme_action_light.setChecked(m == "light")
             self.theme_action_dark.setChecked(m == "dark")
+        else:
+            self.theme_action_system.setChecked(True)
+            self.theme_action_light.setEnabled(False)
+            self.theme_action_dark.setEnabled(False)
+        self._sync_view_mode_actions()
 
         # Connect changes
-        self.theme_action_system.triggered.connect(lambda: self.theme.set_mode("system"))
-        self.theme_action_light.triggered.connect(lambda: self.theme.set_mode("light"))
-        self.theme_action_dark.triggered.connect(lambda: self.theme.set_mode("dark"))
+        self.theme_action_system.triggered.connect(lambda: self.theme and self.theme.set_mode("system"))
+        self.theme_action_light.triggered.connect(lambda: self.theme and self.theme.set_mode("light"))
+        self.theme_action_dark.triggered.connect(lambda: self.theme and self.theme.set_mode("dark"))
+        self.mode_action_classic.triggered.connect(lambda checked: checked and self.set_view_mode("classic"))
+        self.mode_action_modern.triggered.connect(lambda checked: checked and self.set_view_mode("modern"))
         self.hw_live_preview_action.toggled.connect(self.set_hardware_live_preview_enabled)
 
         # About Menu
@@ -957,21 +947,340 @@ class MainWindow(QMainWindow):
         self.lasso_mask = None
         self.noise_reduced_data = None
 
-        self.setStyleSheet("""
-            QLabel {
-                font-size: 13px;
-            }
-            QGroupBox {
-                font-weight: bold;
-                font-size: 14px;
-            }
-        """)
+        if not (self.theme and hasattr(self.theme, "set_view_mode")):
+            self._apply_view_mode_styling()
 
         self.noise_reduced_original = None  # backup before lasso
 
         # Ensure project actions reflect initial state
         self._sync_project_actions()
         self.set_hardware_live_preview_enabled(self.use_hw_live_preview)
+
+    def _normalize_view_mode(self, mode) -> str:
+        text = str(mode or "").strip().lower()
+        if text in {"classic", "modern"}:
+            return text
+        return "modern"
+
+    def _sync_view_mode_actions(self):
+        if self.theme and hasattr(self.theme, "view_mode"):
+            self._view_mode = self._normalize_view_mode(self.theme.view_mode())
+        classic = getattr(self, "mode_action_classic", None)
+        modern = getattr(self, "mode_action_modern", None)
+        if classic is not None:
+            blocked = classic.blockSignals(True)
+            classic.setChecked(self._view_mode == "classic")
+            classic.blockSignals(blocked)
+        if modern is not None:
+            blocked = modern.blockSignals(True)
+            modern.setChecked(self._view_mode == "modern")
+            modern.blockSignals(blocked)
+
+    def set_view_mode(self, mode: str):
+        normalized = self._normalize_view_mode(mode)
+        if self.theme and hasattr(self.theme, "set_view_mode"):
+            self.theme.set_view_mode(normalized)
+            self._view_mode = self._normalize_view_mode(self.theme.view_mode())
+        else:
+            if normalized == getattr(self, "_view_mode", "modern"):
+                return
+            self._view_mode = normalized
+            if hasattr(self, "_ui_settings") and self._ui_settings is not None:
+                self._ui_settings.setValue("ui/view_mode", self._view_mode)
+            self._apply_view_mode_styling()
+        self._sync_view_mode_actions()
+
+        status = self.statusBar()
+        if status is not None:
+            status.showMessage(f"UI mode: {self._view_mode.capitalize()}", 2500)
+
+    def _apply_view_mode_styling(self):
+        mode = getattr(self, "_view_mode", "modern")
+        dark = self._is_dark_ui()
+        if mode == "classic":
+            main_qss = self._classic_main_qss()
+            sidebar_qss = self._classic_sidebar_qss()
+        else:
+            main_qss = self._modern_main_qss(dark)
+            sidebar_qss = self._modern_sidebar_qss(dark)
+
+        self.setStyleSheet(main_qss)
+        for widget in (
+                getattr(self, "slider_group", None),
+                getattr(self, "units_group_box", None),
+                getattr(self, "graph_group", None),
+        ):
+            if widget is not None:
+                widget.setStyleSheet(sidebar_qss)
+
+    def _classic_main_qss(self) -> str:
+        return """
+        QLabel {
+            font-size: 13px;
+        }
+        QGroupBox {
+            font-weight: bold;
+            font-size: 14px;
+        }
+        QPushButton#SidebarToggleButton {
+            font-size: 10px;
+            padding: 0px;
+            min-width: 12px;
+            max-width: 12px;
+        }
+        """
+
+    def _classic_sidebar_qss(self) -> str:
+        return """
+        QGroupBox {
+            font-weight: bold;
+        }
+        QLabel {
+            font-size: 12px;
+        }
+        QLabel[section="true"] {
+            font-weight: bold;
+            color: #444;
+            margin-top: 6px;
+        }
+        QLabel#SectionLabel {
+            font-weight: bold;
+            color: #555;
+            margin-top: 8px;
+            margin-bottom: 4px;
+        }
+
+        QLineEdit, QComboBox {
+            min-height: 24px;
+            padding: 4px 6px;
+            font-size: 12px;
+        }
+
+        QSpinBox {
+            min-height: 32px;
+            min-width: 90px;
+            padding-left: 6px;
+            font-size: 12px;
+        }
+
+        QCheckBox {
+            spacing: 6px;
+            font-size: 12px;
+            margin-top: 10px;
+            margin-bottom: 10px;
+            margin-right: 10px;
+        }
+        """
+
+    def _modern_main_qss(self, dark: bool) -> str:
+        if dark:
+            window_bg = "#151b23"
+            surface_bg = "#1d2631"
+            border = "#334154"
+            text = "#e8edf5"
+            muted = "#a7b3c5"
+            hover = "#2b384a"
+            pressed = "#36485f"
+            accent = "#58a6ff"
+        else:
+            window_bg = "#eef2f7"
+            surface_bg = "#ffffff"
+            border = "#d4dde9"
+            text = "#1f2937"
+            muted = "#6b7c93"
+            hover = "#edf3ff"
+            pressed = "#dde9ff"
+            accent = "#0f7ae5"
+
+        return f"""
+        QMainWindow {{
+            background-color: {window_bg};
+        }}
+        QMenuBar {{
+            background-color: {surface_bg};
+            border-bottom: 1px solid {border};
+            padding: 2px 6px;
+        }}
+        QMenuBar::item {{
+            color: {text};
+            padding: 6px 10px;
+            border-radius: 6px;
+            background: transparent;
+        }}
+        QMenuBar::item:selected {{
+            background: {hover};
+        }}
+        QMenu {{
+            background-color: {surface_bg};
+            color: {text};
+            border: 1px solid {border};
+            border-radius: 8px;
+            padding: 6px;
+        }}
+        QMenu::item {{
+            padding: 6px 16px 6px 10px;
+            border-radius: 6px;
+        }}
+        QMenu::item:selected {{
+            background: {hover};
+        }}
+        QMenu::separator {{
+            height: 1px;
+            background: {border};
+            margin: 5px 8px;
+        }}
+        QToolBar {{
+            background-color: {surface_bg};
+            border: none;
+            border-bottom: 1px solid {border};
+            spacing: 6px;
+            padding: 6px 8px;
+        }}
+        QToolButton {{
+            border: 1px solid transparent;
+            border-radius: 10px;
+            padding: 4px;
+            background: transparent;
+        }}
+        QToolButton:hover {{
+            background: {hover};
+            border-color: {border};
+        }}
+        QToolButton:pressed {{
+            background: {pressed};
+        }}
+        QToolButton:disabled {{
+            color: {muted};
+        }}
+        QStatusBar {{
+            background-color: {surface_bg};
+            border-top: 1px solid {border};
+        }}
+        QStatusBar QLabel {{
+            color: {muted};
+        }}
+        QProgressBar {{
+            border: 1px solid {border};
+            border-radius: 6px;
+            background-color: {window_bg};
+            text-align: center;
+            min-height: 18px;
+        }}
+        QProgressBar::chunk {{
+            background-color: {accent};
+            border-radius: 5px;
+        }}
+        QPushButton#SidebarToggleButton {{
+            font-size: 10px;
+            padding: 0px;
+            min-width: 12px;
+            max-width: 12px;
+            border: 1px solid {border};
+            border-radius: 6px;
+            color: {text};
+            background-color: {surface_bg};
+        }}
+        QPushButton#SidebarToggleButton:hover {{
+            background-color: {hover};
+        }}
+        QPushButton#SidebarToggleButton:pressed {{
+            background-color: {pressed};
+        }}
+        """
+
+    def _modern_sidebar_qss(self, dark: bool) -> str:
+        if dark:
+            panel_bg = "#1d2631"
+            field_bg = "#141b24"
+            border = "#3a485d"
+            text = "#e8edf5"
+            muted = "#a7b3c5"
+            accent = "#58a6ff"
+        else:
+            panel_bg = "#ffffff"
+            field_bg = "#f7faff"
+            border = "#d4dde9"
+            text = "#1f2937"
+            muted = "#6b7c93"
+            accent = "#0f7ae5"
+
+        return f"""
+        QGroupBox {{
+            font-weight: 600;
+            font-size: 13px;
+            border: 1px solid {border};
+            border-radius: 10px;
+            margin-top: 12px;
+            padding: 10px;
+            background-color: {panel_bg};
+            color: {text};
+        }}
+        QGroupBox::title {{
+            subcontrol-origin: margin;
+            left: 10px;
+            padding: 0 4px;
+            color: {text};
+        }}
+        QLabel {{
+            font-size: 12px;
+            color: {text};
+        }}
+        QLabel[section="true"] {{
+            font-weight: 600;
+            color: {muted};
+            margin-top: 8px;
+        }}
+        QLabel#SectionLabel {{
+            font-weight: 600;
+            color: {muted};
+            margin-top: 10px;
+            margin-bottom: 4px;
+        }}
+        QLineEdit, QComboBox, QSpinBox {{
+            min-height: 30px;
+            border: 1px solid {border};
+            border-radius: 8px;
+            padding: 4px 8px;
+            font-size: 12px;
+            background-color: {field_bg};
+            color: {text};
+            selection-background-color: {accent};
+        }}
+        QComboBox::drop-down {{
+            border: none;
+            width: 20px;
+        }}
+        QComboBox QAbstractItemView {{
+            border: 1px solid {border};
+            border-radius: 6px;
+            padding: 4px;
+            background-color: {panel_bg};
+            color: {text};
+            selection-background-color: {accent};
+        }}
+        QSpinBox {{
+            min-width: 90px;
+        }}
+        QCheckBox, QRadioButton {{
+            spacing: 6px;
+            font-size: 12px;
+            color: {text};
+            margin-top: 6px;
+            margin-bottom: 6px;
+            margin-right: 8px;
+        }}
+        QSlider::groove:horizontal {{
+            height: 6px;
+            border-radius: 3px;
+            background: {border};
+        }}
+        QSlider::handle:horizontal {{
+            width: 14px;
+            margin: -5px 0;
+            border-radius: 7px;
+            background: {accent};
+        }}
+        """
 
     def _is_dark_ui(self) -> bool:
         # Prefer theme manager if available
@@ -1423,6 +1732,7 @@ class MainWindow(QMainWindow):
                 act.setIcon(self._icon(fname))
 
     def _on_theme_changed(self, dark: bool):
+        self._sync_view_mode_actions()
         self._refresh_toolbar_icons()
 
         # If you already added MPL theme syncing earlier, keep it too:
@@ -4607,12 +4917,6 @@ class MaxIntensityPlotDialog(QDialog):
         layout.addWidget(self.status)
         self.setLayout(layout)
 
-        # Styling
-        self.setStyleSheet("""
-            QPushButton { font-size: 13px; padding: 6px 12px; }
-            QLabel { font-size: 13px; }
-        """)
-
         # Restore optional session state (radio selections + analyzer state)
         if isinstance(session, dict):
             try:
@@ -4947,20 +5251,6 @@ class AnalyzeDialog(QDialog):
         main_with_status.addLayout(main_layout)
         main_with_status.addWidget(self.status)
         self.setLayout(main_with_status)
-
-        # Styling
-        self.setStyleSheet("""
-            QLabel {
-                font-size: 13px;
-                padding: 2px;
-            }
-            QLabel#value {
-                font-weight: bold;
-            }
-            QPushButton {
-                padding: 6px;
-            }
-        """)
 
         if isinstance(session, dict):
             try:

@@ -8,13 +8,19 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
 
-# Import backend modules that exist on Windows
+# Import backend modules so PyInstaller collects exporter backends
 from matplotlib.backends import backend_pdf, backend_svg, backend_ps, backend_pgf
 
 # FITS_Analyzer.spec is in: <root>/src/Installation/
-HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[1]          # <root>/src
-PROJECT = ROOT.parent           # <root>
+if "SPECPATH" in globals():
+    HERE = Path(SPECPATH).resolve()            # <root>/src/Installation
+elif "__file__" in globals():
+    HERE = Path(__file__).resolve().parent     # fallback for direct execution
+else:
+    HERE = Path.cwd().resolve()
+
+PROJECT = HERE.parents[1]                      # <root>
+ROOT = PROJECT / "src"                         # <root>/src
 
 MAIN = PROJECT / "src" / "UI" / "main.py"
 
@@ -22,6 +28,11 @@ MAIN = PROJECT / "src" / "UI" / "main.py"
 ASSETS_DIR = PROJECT / "assets"
 if not ASSETS_DIR.exists():
     ASSETS_DIR = PROJECT / "assests"
+
+if not MAIN.exists():
+    raise SystemExit(f"MAIN entry script not found: {MAIN}")
+if not ASSETS_DIR.exists():
+    raise SystemExit(f"Assets directory not found: {ASSETS_DIR}")
 
 a = Analysis(
     [str(MAIN)],
@@ -78,6 +89,8 @@ a = Analysis(
         "src.UI.accelerated_plot_widget",
         "src.UI.soho_lasco_viewer",
         "src.UI.goes_xrs_gui",
+        "src.UI.goes_sgps_gui",
+        "src.UI.fits_header_viewer",
         "src.UI.theme_manager",
         "src.UI.mpl_style",
 
@@ -91,7 +104,7 @@ a = Analysis(
     ],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],   # removed Linux-only hook
+    runtime_hooks=[],
     excludes=[],
     noarchive=False,
     optimize=0,

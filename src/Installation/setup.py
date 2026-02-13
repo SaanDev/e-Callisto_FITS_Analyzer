@@ -7,6 +7,7 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
 import os
 import sys
+from glob import glob
 from setuptools import setup
 
 HERE = os.path.abspath(os.path.dirname(__file__))
@@ -22,6 +23,13 @@ LZMA_FRAMEWORKS = [path for path in LZMA_CANDIDATES if os.path.exists(path)]
 def R(*parts: str) -> str:
     return os.path.join(PROJECT_ROOT, *parts)
 
+
+def SVG_FILES(folder: str):
+    files = sorted(glob(R("assets", folder, "*.svg")))
+    if not files:
+        raise SystemExit(f"No SVG files found under assets/{folder}")
+    return files
+
 # Ensure project root is importable so py2app can find src.*
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
@@ -29,39 +37,12 @@ if PROJECT_ROOT not in sys.path:
 APP = [R("src", "UI", "main.py")]
 
 DATA_FILES = [
-    ("assets", [R("assets", "icon.icns")]),
-    ("assets/icons", [
-        R("assets", "icons", "open.svg"),
-        R("assets", "icons", "export.svg"),
-        R("assets", "icons", "export_fits.svg"),
-        R("assets", "icons", "undo.svg"),
-        R("assets", "icons", "redo.svg"),
-        R("assets", "icons", "download.svg"),
-        R("assets", "icons", "drift.svg"),
-        R("assets", "icons", "isolate.svg"),
-        R("assets", "icons", "max.svg"),
-        R("assets", "icons", "zoom.svg"),
-        R("assets", "icons", "lock.svg"),
-        R("assets", "icons", "unlock.svg"),
-        R("assets", "icons", "reset_selection.svg"),
-        R("assets", "icons", "reset_all.svg"),
+    ("assets", [
+        R("assets", "icon.icns"),
+        R("assets", "FITS_analyzer.png"),
     ]),
-    ("assets/icons_dark", [
-        R("assets", "icons_dark", "open.svg"),
-        R("assets", "icons_dark", "export.svg"),
-        R("assets", "icons_dark", "export_fits.svg"),
-        R("assets", "icons_dark", "undo.svg"),
-        R("assets", "icons_dark", "redo.svg"),
-        R("assets", "icons_dark", "download.svg"),
-        R("assets", "icons_dark", "drift.svg"),
-        R("assets", "icons_dark", "isolate.svg"),
-        R("assets", "icons_dark", "max.svg"),
-        R("assets", "icons_dark", "zoom.svg"),
-        R("assets", "icons_dark", "lock.svg"),
-        R("assets", "icons_dark", "unlock.svg"),
-        R("assets", "icons_dark", "reset_selection.svg"),
-        R("assets", "icons_dark", "reset_all.svg"),
-    ]),
+    ("assets/icons", SVG_FILES("icons")),
+    ("assets/icons_dark", SVG_FILES("icons_dark")),
 ]
 
 OPTIONS = {
@@ -91,6 +72,7 @@ OPTIONS = {
         "PySide6.QtWebEngineWidgets",
         "PySide6.QtWebChannel",
         "PySide6.QtNetwork",
+        "PySide6.QtPrintSupport",
         "PySide6.QtSvg",
         "PySide6.QtSvgWidgets",
         "matplotlib.backends.backend_qtagg",
@@ -127,6 +109,8 @@ OPTIONS = {
         "src.UI.callisto_downloader",
         "src.UI.theme_manager",
         "src.UI.mpl_style",
+        "src.UI.fits_header_viewer",
+        "src.UI.goes_sgps_gui",
         "src.Backend.burst_processor",
         "src.UI.gui_main",
         "src.UI.matplotlib_widget",

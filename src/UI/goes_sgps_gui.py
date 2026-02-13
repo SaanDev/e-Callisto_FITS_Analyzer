@@ -613,6 +613,10 @@ class MainWindow(QMainWindow):
         self._apply_theme_to_panels()
 
     def _apply_theme_to_panels(self):
+        if self.theme and hasattr(self.theme, "view_mode") and self.theme.view_mode() == "modern":
+            self.top_panel.setAutoFillBackground(False)
+            return
+
         pal = self.top_panel.palette()
         app_pal = QApplication.instance().palette()
         pal.setColor(QPalette.Window, app_pal.color(QPalette.AlternateBase))

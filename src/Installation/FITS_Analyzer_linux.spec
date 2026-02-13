@@ -80,6 +80,8 @@ a = Analysis(
         "src.UI.accelerated_plot_widget",
         "src.UI.soho_lasco_viewer",
         "src.UI.goes_xrs_gui",
+        "src.UI.goes_sgps_gui",
+        "src.UI.fits_header_viewer",
         "src.UI.theme_manager",
         "src.UI.mpl_style",
 
@@ -94,7 +96,7 @@ a = Analysis(
     ],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[str(PROJECT / "src" / "Installation" / "pyi_rth_qtwebengine_linux.py")],
     excludes=[],
     noarchive=False,
     optimize=0,

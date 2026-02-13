@@ -30,6 +30,14 @@ Version **2.0**
 ### UI/UX
 - Added a **collapsible left sidebar**.
 - When collapsed, the graph area expands to use the full available width.
+- Added **View -> Mode** with **Classic** and **Modern** UI modes.
+- Modern mode is now applied consistently across main and auxiliary windows.
+- Improved modern sidebar layout spacing for cleaner section grouping.
+- Fixed modern-mode **combo box** and **spin box** arrow visibility/styling.
+
+### Build and packaging reliability
+- Updated platform build configs for v2.0 UI assets and modern theme resources.
+- Aligned PyInstaller and py2app manifests so all icon packs are bundled consistently.
 
 ---
 
@@ -312,6 +320,36 @@ Features:
 
 ### Example: GOES X-Ray Viewer
 ![GOES X-Ray](assets/screenshots/goes_xray.png)
+
+---
+
+## 🛠️ Build and Packaging (v2.0)
+
+### Prerequisites
+- Python 3.10+ (recommended: same version used for your target build machine)
+- Install runtime dependencies:
+  - `python src/Installation/install_requirements.py`
+- Install build tooling:
+  - `python -m pip install pyinstaller pyinstaller-hooks-contrib`
+  - macOS only: `python -m pip install py2app`
+
+### Windows (PyInstaller + optional Inno Setup installer)
+- Build app:
+  - `pyinstaller src/Installation/FITS_Analyzer_win.spec`
+- Optional installer:
+  - Compile `src/Installation/FITS_Analyzer_InnoSetup.iss` with Inno Setup.
+
+### Linux (PyInstaller)
+- Build app:
+  - `pyinstaller src/Installation/FITS_Analyzer_linux.spec`
+
+### macOS (py2app)
+- Build app bundle:
+  - `python src/Installation/setup.py py2app`
+
+### Generic cross-platform spec
+- Alternative build entry:
+  - `pyinstaller src/Installation/FITS_Analyzer.spec`
 
 ---
 
