@@ -1,3 +1,10 @@
+"""
+e-CALLISTO FITS Analyzer
+Version 2.0
+Sahan S Liyanage (sahanslst@gmail.com)
+Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
+"""
+
 import io
 import json
 import zipfile
@@ -48,4 +55,3 @@ def test_read_project_rejects_magic(tmp_path):
 
     with pytest.raises(ProjectFormatError):
         read_project(str(path))
-
