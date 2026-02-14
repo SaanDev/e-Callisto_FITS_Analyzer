@@ -3,20 +3,36 @@
 #define AppPublisher "Sahan S. Liyanage"
 
 ; Override this at compile time if needed:
-; iscc /DSourceDir="C:\Users\kavin\Projects\e-Callisto_FITS_Analyzer" FITS_Analyzer_InnoSetup.iss
-#ifndef SourceDir
-  #define SourceDir "..\.."
+; iscc /DRepoRoot="C:\Users\kavin\Projects\e-Callisto_FITS_Analyzer" FITS_Analyzer_InnoSetup.iss
+; If not provided, resolve repo root from this script path: <repo>\src\Installation\*.iss -> <repo>
+#ifndef RepoRoot
+  #ifdef SourceDir
+    ; Backward compatibility with old /DSourceDir override.
+    #define RepoRoot SourceDir
+  #else
+    #define RepoRoot SourcePath + "..\.."
+  #endif
 #endif
 
-; Auto-detect the PyInstaller output folder/exe so packaging works for either spec naming.
-#ifexist "{#SourceDir}\dist\e-Callisto FITS Analyzer\e-Callisto FITS Analyzer.exe"
-  #define DistSubdir "e-Callisto FITS Analyzer"
+; Auto-detect PyInstaller output for either onedir/onefile and naming variants.
+#ifexist "{#RepoRoot}\dist\e-Callisto FITS Analyzer\e-Callisto FITS Analyzer.exe"
+  #define DistSource RepoRoot + "\dist\e-Callisto FITS Analyzer\*"
+  #define DistFlags "ignoreversion recursesubdirs createallsubdirs"
   #define AppExeName "e-Callisto FITS Analyzer.exe"
-#elifexist "{#SourceDir}\dist\e-callisto-fits-analyzer\e-callisto-fits-analyzer.exe"
-  #define DistSubdir "e-callisto-fits-analyzer"
+#elifexist "{#RepoRoot}\dist\e-callisto-fits-analyzer\e-callisto-fits-analyzer.exe"
+  #define DistSource RepoRoot + "\dist\e-callisto-fits-analyzer\*"
+  #define DistFlags "ignoreversion recursesubdirs createallsubdirs"
+  #define AppExeName "e-callisto-fits-analyzer.exe"
+#elifexist "{#RepoRoot}\dist\e-Callisto FITS Analyzer.exe"
+  #define DistSource RepoRoot + "\dist\e-Callisto FITS Analyzer.exe"
+  #define DistFlags "ignoreversion"
+  #define AppExeName "e-Callisto FITS Analyzer.exe"
+#elifexist "{#RepoRoot}\dist\e-callisto-fits-analyzer.exe"
+  #define DistSource RepoRoot + "\dist\e-callisto-fits-analyzer.exe"
+  #define DistFlags "ignoreversion"
   #define AppExeName "e-callisto-fits-analyzer.exe"
 #else
-  #error "PyInstaller output not found under dist\. Build the app first using FITS_Analyzer_win.spec."
+  #error "PyInstaller output not found under <repo>\dist. Build first, or pass /DRepoRoot=<repo path>."
 #endif
 
 [Setup]
@@ -26,7 +42,7 @@ AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
-OutputDir={#SourceDir}\dist
+OutputDir={#RepoRoot}\dist
 OutputBaseFilename=e-CALLISTO_FITS_Analyzer_v{#AppVersion}_Setup
 Compression=lzma2
 SolidCompression=yes
@@ -34,7 +50,7 @@ WizardStyle=modern
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-SetupIconFile={#SourceDir}\icon.ico
+SetupIconFile={#RepoRoot}\icon.ico
 UninstallDisplayIcon={app}\{#AppExeName}
 CloseApplications=yes
 
@@ -45,7 +61,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked
 
 [Files]
-Source: "{#SourceDir}\dist\{#DistSubdir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#DistSource}"; DestDir: "{app}"; Flags: {#DistFlags}
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"

@@ -93,7 +93,7 @@ if (-not $IsccPath) {
     throw "ISCC.exe not found. Install Inno Setup 6 and rerun, or use -SkipInstaller."
 }
 
-& $IsccPath ("/DSourceDir={0}" -f $Root) $IssPath
+& $IsccPath ("/DRepoRoot={0}" -f $Root) $IssPath
 
 if (Test-Path $OutputInstaller) {
     Write-Host "Built installer: $OutputInstaller"
