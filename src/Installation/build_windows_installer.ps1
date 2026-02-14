@@ -46,6 +46,26 @@ function Find-Iscc {
     return $null
 }
 
+function Find-PythonBootstrap {
+    $candidates = @(
+        @{ Name = "py"; Args = @("-3") },
+        @{ Name = "python"; Args = @() },
+        @{ Name = "python3"; Args = @() }
+    )
+
+    foreach ($candidate in $candidates) {
+        $cmd = Get-Command $candidate.Name -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($cmd) {
+            return @{
+                Command = $cmd.Source
+                Args = $candidate.Args
+            }
+        }
+    }
+
+    return $null
+}
+
 $Root = Resolve-RepoRoot -RequestedRoot $Root
 $AppId = "e-callisto-fits-analyzer"
 $SpecPath = Join-Path $Root "src\Installation\FITS_Analyzer_win.spec"
@@ -64,9 +84,14 @@ if (-not (Test-Path $IssPath) -and -not $SkipInstaller) { throw "Missing Inno Se
 # 1) Build app folder with PyInstaller
 $VenvDir = Join-Path $Root ".venv"
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
+$PythonBootstrap = Find-PythonBootstrap
+
+if (-not $PythonBootstrap) {
+    throw "Python launcher not found in PATH. Install Python and ensure one of: py, python, python3."
+}
 
 if (-not (Test-Path $VenvPython)) {
-    py -3 -m venv $VenvDir
+    & $PythonBootstrap.Command @($PythonBootstrap.Args + @("-m", "venv", $VenvDir))
 }
 if (-not (Test-Path $VenvPython)) {
     throw "Python venv was not created correctly: $VenvPython"
