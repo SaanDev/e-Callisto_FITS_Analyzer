@@ -1,12 +1,22 @@
 #define AppName "e-CALLISTO FITS Analyzer"
 #define AppVersion "2.0"
 #define AppPublisher "Sahan S. Liyanage"
-#define AppExeName "e-Callisto FITS Analyzer.exe"
 
 ; Override this at compile time if needed:
 ; iscc /DSourceDir="C:\Users\kavin\Projects\e-Callisto_FITS_Analyzer" FITS_Analyzer_InnoSetup.iss
 #ifndef SourceDir
   #define SourceDir "..\.."
+#endif
+
+; Auto-detect the PyInstaller output folder/exe so packaging works for either spec naming.
+#ifexist "{#SourceDir}\dist\e-Callisto FITS Analyzer\e-Callisto FITS Analyzer.exe"
+  #define DistSubdir "e-Callisto FITS Analyzer"
+  #define AppExeName "e-Callisto FITS Analyzer.exe"
+#elifexist "{#SourceDir}\dist\e-callisto-fits-analyzer\e-callisto-fits-analyzer.exe"
+  #define DistSubdir "e-callisto-fits-analyzer"
+  #define AppExeName "e-callisto-fits-analyzer.exe"
+#else
+  #error "PyInstaller output not found under dist\. Build the app first using FITS_Analyzer_win.spec."
 #endif
 
 [Setup]
@@ -35,7 +45,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked
 
 [Files]
-Source: "{#SourceDir}\dist\e-Callisto FITS Analyzer\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceDir}\dist\{#DistSubdir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
