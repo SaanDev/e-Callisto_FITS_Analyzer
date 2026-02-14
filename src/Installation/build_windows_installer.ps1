@@ -62,7 +62,7 @@ if (-not (Test-Path $InstallRequirements)) { throw "Missing dependency script: $
 if (-not (Test-Path $IssPath) -and -not $SkipInstaller) { throw "Missing Inno Setup script: $IssPath" }
 
 # 1) Build app folder with PyInstaller
-$VenvDir = Join-Path $Root ".venv"
+$VenvDir = Join-Path $Root "venv"
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
 
 if (-not (Test-Path $VenvPython)) {
