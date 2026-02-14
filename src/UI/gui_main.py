@@ -1616,7 +1616,10 @@ class MainWindow(QMainWindow):
             x_label = "Time [UT]" if (self.use_utc and self.ut_start_sec is not None) else "Time [s]"
             y_label = "Frequency [MHz]"
 
-        extent = [0, self.time[-1], self.freqs[-1], self.freqs[0]]
+        # Hardware canvas uses a Cartesian Y axis (increasing upward), so use
+        # top-to-bottom frequency extent to keep the spectrum orientation
+        # consistent with the previous display.
+        extent = [0, self.time[-1], self.freqs[0], self.freqs[-1]]
         cbar_label = "" if self.remove_titles else ("Intensity [Digits]" if not self.use_db else "Intensity [dB]")
         tick_font_px = self.tick_font_px
         axis_label_font_px = self.axis_label_font_px
@@ -2820,12 +2823,7 @@ class MainWindow(QMainWindow):
         path = Path(verts_arr, closed=True)
 
         ny, nx = self.noise_reduced_data.shape
-        # Hardware view uses an inverted Y-axis transform; map rows accordingly
-        # so the lasso mask aligns with what the user actually drew.
-        if self._hardware_mode_enabled():
-            y = np.linspace(self.freqs[-1], self.freqs[0], ny)
-        else:
-            y = np.linspace(self.freqs[0], self.freqs[-1], ny)
+        y = np.linspace(self.freqs[0], self.freqs[-1], ny)
         x = np.linspace(0, self.time[-1], nx)
         X, Y = np.meshgrid(x, y)
 

@@ -165,7 +165,8 @@ class AcceleratedPlotWidget(QWidget):
         self._plot = self._graphics.addPlot(axisItems={"bottom": self._bottom_axis})
         self._plot.hideButtons()
         self._plot.setMenuEnabled(False)
-        self._plot.invertY(True)
+        # Keep Y increasing upward so axis ticks match Matplotlib ordering.
+        self._plot.invertY(False)
         self._plot.setLabel("left", "Frequency [MHz]")
         self._plot.setLabel("bottom", "Time [s]")
 
@@ -470,7 +471,10 @@ class AcceleratedPlotWidget(QWidget):
 
         x0, x1, y0, y1 = (float(extent[0]), float(extent[1]), float(extent[2]), float(extent[3]))
         self._image.setRect(QRectF(x0, y0, x1 - x0, y1 - y0))
-        self._full_view = {"xlim": (x0, x1), "ylim": (y0, y1)}
+        self._full_view = {
+            "xlim": (min(x0, x1), max(x0, x1)),
+            "ylim": (min(y0, y1), max(y0, y1)),
+        }
 
         finite = np.isfinite(arr)
         if np.any(finite):
