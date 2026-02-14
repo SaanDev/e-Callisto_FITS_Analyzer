@@ -1,14 +1,14 @@
 # e-CALLISTO FITS Analyzer
 A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data.
 
-Version **2.0**
+Version **2.0** (current release)
 
 ---
 
 ## 🆕 What's New (v2.0)
 
 ### Core workflow
-- Added **session/project save and load** support to restore analysis state.
+- Added **session/project save and load** support (`.efaproj`) to restore analysis state.
 - Introduced a unified, more robust FITS I/O layer across loading/downloading/combining workflows.
 - Improved FITS parsing for `.fit`, `.fits`, `.fit.gz`, `.fits.gz`, swapped axes, and missing/alternate axis tables.
 - Added **FITS View → View FITS Header** with header inspection and save-to-`.txt`.
@@ -30,7 +30,7 @@ Version **2.0**
 ### UI/UX
 - Added a **collapsible left sidebar**.
 - When collapsed, the graph area expands to use the full available width.
-- Added **View -> Mode** with **Classic** and **Modern** UI modes.
+- Added **View → Mode** with **Classic** and **Modern** UI modes.
 - Modern mode is now applied consistently across main and auxiliary windows.
 - Improved modern sidebar layout spacing for cleaner section grouping.
 - Fixed modern-mode **combo box** and **spin box** arrow visibility/styling.
@@ -62,8 +62,8 @@ The main functions are available through a compact **icon toolbar** for quick ac
 
 You can load:
 
-- **Compressed FITS:** `*.fit.gz`
-- **Uncompressed FITS:** `*.fit`
+- **Compressed FITS:** `*.fit.gz`, `*.fits.gz`
+- **Uncompressed FITS:** `*.fit`, `*.fits`
 
 This supports observers who work directly with uncompressed raw data.
 
@@ -224,7 +224,7 @@ Export options:
 
 # 13. FITS Downloader
 
-Open via **Download → FITS Downloader**.
+Open via **Download → Launch FITS Downloader**.
 
 Features:
 
@@ -259,15 +259,33 @@ Combined data can be imported directly into the Analyzer.
 
 ---
 
-# 15. Export Data as FITS
+# 15. Save and Reopen Analysis Projects
+
+You can save the full analysis state to a project file and restore it later.
+
+Path:
+
+- **File → Save Project**
+- **File → Save Project As...**
+- **File → Open Project...**
+
+Project format:
+
+- **e-CALLISTO Project:** `*.efaproj`
+
+Saved state includes plot view, thresholds, units, colormap, graph properties, loaded/combined data, and analysis-session state.
+
+---
+
+# 16. Export Data as FITS
 
 You can now export processed data as a new FITS file with a modified header. This is useful for downstream analysis and **Machine Learning** workflows.
 
 Export options:
 
-- **Raw**
-- **Combined**
-- **Background-subtracted**
+- **Raw view**
+- **Background-subtracted view**
+- **Combined datasets** (time/frequency) with compatibility-preserving metadata updates
 
 Path:
 
@@ -275,7 +293,7 @@ Path:
 
 ---
 
-# 16. Saving and Exporting Plots
+# 17. Saving and Exporting Plots
 
 All figures across the application can be exported in:
 
@@ -294,7 +312,7 @@ This supports publication workflows across operating systems.
 
 ---
 
-# 17. CME Catalog Viewer (SOHO/LASCO)
+# 18. CME Catalog Viewer (SOHO/LASCO)
 
 Features:
 
@@ -308,7 +326,7 @@ Features:
 
 ---
 
-# 18. GOES X-Ray Flux Viewer
+# 19. GOES X-Ray Flux Viewer
 
 Features:
 
@@ -327,6 +345,15 @@ Features:
 
 ### Prerequisites
 - Python 3.10+ (recommended: same version used for your target build machine)
+
+### Run from Source (development)
+- Create and activate a virtual environment.
+- Install dependencies:
+  - `python src/Installation/install_requirements.py`
+- Start the app:
+  - `python src/UI/main.py`
+
+### Build dependencies
 - Install runtime dependencies:
   - `python src/Installation/install_requirements.py`
 - Install build tooling:
@@ -334,13 +361,17 @@ Features:
   - macOS only: `python -m pip install py2app`
 
 ### Windows (PyInstaller + optional Inno Setup installer)
-- Build app:
-  - `pyinstaller src/Installation/FITS_Analyzer_win.spec`
-- Optional installer:
-  - Compile `src/Installation/FITS_Analyzer_InnoSetup.iss` with Inno Setup.
+- Recommended scripted build:
+  - `powershell -ExecutionPolicy Bypass -File .\src\Installation\build_windows_installer.ps1`
+- Optional app-folder-only build:
+  - `powershell -ExecutionPolicy Bypass -File .\src\Installation\build_windows_installer.ps1 -SkipInstaller`
+- Manual installer script:
+  - `src/Installation/FITS_Analyzer_InnoSetup.iss`
 
-### Linux (PyInstaller)
-- Build app:
+### Linux (.deb + PyInstaller)
+- Recommended `.deb` packaging workflow:
+  - `bash src/Installation/build_deb_linux.sh`
+- Manual PyInstaller build:
   - `pyinstaller src/Installation/FITS_Analyzer_linux.spec`
 
 ### macOS (py2app)
@@ -355,12 +386,14 @@ Features:
 
 ## 📄 Notes
 
-- Supports both `.fit` and `.fit.gz` files
+- Supports `.fit`, `.fits`, `.fit.gz`, and `.fits.gz`
+- Project save/load format: `.efaproj`
 - Live noise reduction with preserved zoom, pan, and axis format
 - Cursor-based data readout for time, frequency, and intensity
 - Improved plotting area for clearer scientific visualization
 - Robust export system with OS-aware save handling
 - Major plots are publication ready
+- Linux fallback for problematic GPU stacks: `CALLISTO_FORCE_SOFTWARE_OPENGL=1`
 
 ---
 
