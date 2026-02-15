@@ -12,7 +12,6 @@ from setuptools import setup
 
 HERE = os.path.abspath(os.path.dirname(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
-APP_VERSION = "2.0"
 
 LZMA_CANDIDATES = [
     "/opt/homebrew/opt/xz/lib/liblzma.5.dylib",
@@ -33,6 +32,8 @@ def SVG_FILES(folder: str):
 # Ensure project root is importable so py2app can find src.*
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
+
+from src.version import APP_VERSION
 
 APP = [R("src", "UI", "main.py")]
 
@@ -71,6 +72,8 @@ OPTIONS = {
         "PySide6.QtWebEngineCore",
         "PySide6.QtWebEngineWidgets",
         "PySide6.QtWebChannel",
+        "PySide6.QtMultimedia",
+        "PySide6.QtMultimediaWidgets",
         "PySide6.QtNetwork",
         "PySide6.QtPrintSupport",
         "PySide6.QtSvg",
@@ -116,14 +119,19 @@ OPTIONS = {
         "src.UI.matplotlib_widget",
         "src.UI.accelerated_plot_widget",
         "src.UI.soho_lasco_viewer",
+        "src.UI.cme_movie_helper",
+        "src.UI.utils.cme_helper_client",
+        "src.UI.utils.cme_ipc_protocol",
         "src.UI.goes_xrs_gui",
+        "src.UI.utils.cme_launcher",
+        "src.UI.utils.url_opener",
 
         # Encoding
         "charset_normalizer",
         "chardet",
     ],
 
-    "qt_plugins": ["platforms", "imageformats", "iconengines", "styles"],
+    "qt_plugins": ["platforms", "imageformats", "iconengines", "styles", "multimedia", "webengine"],
 
     "iconfile": R("assets", "icon.icns"),
 

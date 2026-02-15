@@ -1,0 +1,6 @@
+# Build tooling (pinned)
+setuptools==80.9.0
+wheel==0.45.1
+pyinstaller==6.19.0
+pyinstaller-hooks-contrib==2026.0
+py2app==0.28.10 ; sys_platform == \"darwin\"

@@ -5,6 +5,7 @@ Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
 
+import argparse
 import faulthandler
 import os
 import platform
@@ -19,6 +20,16 @@ def _force_software_opengl() -> bool:
 FORCE_SOFTWARE_OPENGL = _force_software_opengl()
 
 
+def _is_cme_helper_mode_argv(argv: list[str]) -> bool:
+    tokens = [str(item or "").strip() for item in list(argv or [])]
+    for idx, token in enumerate(tokens):
+        if token.startswith("--mode="):
+            return token.split("=", 1)[1].strip() == "cme-helper"
+        if token == "--mode" and idx + 1 < len(tokens):
+            return tokens[idx + 1].strip() == "cme-helper"
+    return False
+
+
 def _project_base_path() -> str:
     # py2app executable lives in .../e-CALLISTO FITS Analyzer.app/Contents/MacOS
     if getattr(sys, "frozen", False):
@@ -28,20 +39,21 @@ def _project_base_path() -> str:
 
 def _configure_platform_env() -> None:
     if sys.platform.startswith("linux"):
-        os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
+        helper_mode = _is_cme_helper_mode_argv(sys.argv)
         if FORCE_SOFTWARE_OPENGL:
             os.environ.setdefault("QT_OPENGL", "software")
             os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
-
-        extra = (
-            "--disable-gpu "
-            "--disable-gpu-compositing "
-            "--disable-features=VaapiVideoDecoder "
-            "--disable-dev-shm-usage "
-        )
-        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
-            (os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "") + " " + extra).strip()
-        )
+        if helper_mode:
+            os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
+            extra = (
+                "--disable-gpu "
+                "--disable-gpu-compositing "
+                "--disable-features=VaapiVideoDecoder "
+                "--disable-dev-shm-usage "
+            )
+            os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
+                (os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "") + " " + extra).strip()
+            )
         return
 
     if sys.platform == "darwin" and getattr(sys, "frozen", False):
@@ -65,9 +77,6 @@ _configure_platform_env()
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
-from src.UI.mpl_style import apply_origin_style
-from src.UI.gui_main import MainWindow
-from src.UI.theme_manager import AppTheme
 
 
 # Must be set before QApplication is created.
@@ -107,11 +116,21 @@ def _load_app_icon() -> QIcon:
     return QIcon()
 
 
-def main() -> int:
-    if platform.system() != "Windows":
-        faulthandler.enable()
+def _parse_cli_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--mode", choices=["main", "cme-helper"], default="main")
+    parser.add_argument("--movie-url", default="")
+    parser.add_argument("--movie-title", default="")
+    parser.add_argument("--movie-direct-url", default="")
+    parser.add_argument("--ipc-name", default="")
+    return parser.parse_known_args(argv[1:])
 
-    app = QApplication(sys.argv)
+
+def _run_main_mode(app: QApplication) -> int:
+    from src.UI.gui_main import MainWindow
+    from src.UI.mpl_style import apply_origin_style
+    from src.UI.theme_manager import AppTheme
+
     if sys.platform.startswith("win"):
         app.setStyle("Fusion")
         app_icon = _load_app_icon()
@@ -131,5 +150,58 @@ def main() -> int:
     return app.exec()
 
 
+def _run_cme_helper_mode(
+    app: QApplication,
+    movie_url: str,
+    movie_title: str,
+    movie_direct_url: str,
+    ipc_name: str,
+) -> int:
+    from src.UI.cme_movie_helper import launch_cme_movie_helper
+    from src.UI.mpl_style import apply_origin_style
+    from src.UI.theme_manager import AppTheme
+
+    if sys.platform.startswith("win"):
+        app.setStyle("Fusion")
+        app_icon = _load_app_icon()
+        if not app_icon.isNull():
+            app.setWindowIcon(app_icon)
+
+    apply_origin_style()
+    theme = AppTheme(app)
+    app.setProperty("theme_manager", theme)
+
+    return launch_cme_movie_helper(
+        app,
+        movie_url=movie_url,
+        movie_title=movie_title,
+        direct_movie_url=movie_direct_url,
+        theme=theme,
+        ipc_name=ipc_name,
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(argv or sys.argv)
+    args, qt_args = _parse_cli_args(argv)
+
+    if platform.system() != "Windows":
+        faulthandler.enable()
+
+    qt_argv = [argv[0], *qt_args]
+    app = QApplication(qt_argv)
+
+    if args.mode == "cme-helper":
+        return _run_cme_helper_mode(
+            app,
+            movie_url=str(args.movie_url or ""),
+            movie_title=str(args.movie_title or ""),
+            movie_direct_url=str(args.movie_direct_url or ""),
+            ipc_name=str(args.ipc_name or ""),
+        )
+
+    return _run_main_mode(app)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv))

@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build a .deb package for Ubuntu/Linux (v2.0)
+# Build a .deb package for Ubuntu/Linux (v2.1)
 # Usage:
 #   bash src/Installation/build_deb_linux.sh
 # Optional overrides:
-#   ROOT=/path/to/repo VERSION=2.0 bash src/Installation/build_deb_linux.sh
+#   ROOT=/path/to/repo VERSION=2.1 bash src/Installation/build_deb_linux.sh
 
 ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 APP_ID="e-callisto-fits-analyzer"
 APP_NAME="e-CALLISTO FITS Analyzer"
-VERSION="${VERSION:-2.0}"
+VERSION="${VERSION:-2.1}"
 ARCH="$(dpkg --print-architecture)"
 OUT_DEB="$ROOT/dist/${APP_ID}_${VERSION}_${ARCH}.deb"
+RUNTIME_REQUIREMENTS="$ROOT/src/Installation/requirements-runtime.txt"
+BUILD_REQUIREMENTS="$ROOT/src/Installation/requirements-build.txt"
 
 cd "$ROOT"
 
@@ -20,10 +22,20 @@ echo "==> Project root: $ROOT"
 echo "==> Building version: $VERSION ($ARCH)"
 
 # 1) Build app folder with PyInstaller
-python3 -m venv "$ROOT/.venv"
-source "$ROOT/.venv/bin/activate"
-python -m pip install --upgrade pip wheel setuptools pyinstaller pyinstaller-hooks-contrib
-python "$ROOT/src/Installation/install_requirements.py"
+if [ ! -f "$RUNTIME_REQUIREMENTS" ]; then
+  echo "Missing runtime requirements file: $RUNTIME_REQUIREMENTS" >&2
+  exit 1
+fi
+if [ ! -f "$BUILD_REQUIREMENTS" ]; then
+  echo "Missing build requirements file: $BUILD_REQUIREMENTS" >&2
+  exit 1
+fi
+
+python3 -m venv "$ROOT/.venv-build"
+source "$ROOT/.venv-build/bin/activate"
+python -m pip install --upgrade pip
+python -m pip install --requirement "$BUILD_REQUIREMENTS"
+python -m pip install --requirement "$RUNTIME_REQUIREMENTS"
 pyinstaller --clean --noconfirm "$ROOT/src/Installation/FITS_Analyzer_linux.spec"
 
 # 2) Install fpm (packager) if missing

@@ -1,11 +1,18 @@
 # e-CALLISTO FITS Analyzer
 A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data.
 
-Version **2.0** (current release)
+Version **2.1** (current release)
 
 ---
 
-## 🆕 What's New (v2.0)
+## 🆕 What's New (v2.1)
+
+### Application updates
+- Added **About → Check for Updates...** to search online for newer application releases.
+- Update checks run in the background and keep the UI responsive.
+- The dialog now downloads the installer/package **inside the app** (with progress + cancel), and still provides a release page link.
+
+### v2.0 highlights
 
 ### Core workflow
 - Added **session/project save and load** support (`.efaproj`) to restore analysis state.
@@ -341,7 +348,18 @@ Features:
 
 ---
 
-## 🛠️ Build and Packaging (v2.0)
+## 20. Check for Updates
+
+Use **About → Check for Updates...** to query the latest release from GitHub.
+
+- If a newer version is available, the app shows current/latest versions and a direct download action.
+- Downloads run in-app and save the installer/package to your selected location.
+- If you are up to date, the app confirms your current version.
+- If the check fails (for example, no network), the app shows a clear error message.
+
+---
+
+## 🛠️ Build and Packaging (v2.1)
 
 ### Prerequisites
 - Python 3.10+ (recommended: same version used for your target build machine)

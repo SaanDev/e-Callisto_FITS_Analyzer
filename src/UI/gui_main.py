@@ -10,6 +10,8 @@ import os
 import tempfile
 import re
 import gc
+from datetime import datetime, timezone
+from urllib.parse import unquote, urlparse
 import requests
 from PySide6.QtWidgets import (
     QMainWindow, QSlider, QDialog, QMenuBar, QMessageBox, QLabel, QFormLayout, QGroupBox,
@@ -20,8 +22,8 @@ from PySide6.QtWidgets import (
     QInputDialog,
 )
 
-from PySide6.QtGui import QAction, QPixmap, QImage, QGuiApplication, QIcon, QFontDatabase, QActionGroup, QPalette, QPainter, QPdfWriter
-from PySide6.QtCore import Qt, QTimer, QSize, QObject, QEvent, QThread, Signal, Slot, QSettings
+from PySide6.QtGui import QAction, QPixmap, QImage, QGuiApplication, QIcon, QFontDatabase, QActionGroup, QPalette, QPainter, QPdfWriter, QDesktopServices
+from PySide6.QtCore import Qt, QTimer, QSize, QObject, QEvent, QThread, Signal, Slot, QSettings, QUrl, QStandardPaths
 from src.UI.callisto_downloader import CallistoDownloaderApp
 from src.UI.goes_xrs_gui import MainWindow as GoesXrsWindow
 #from soho_lasco_viewer import CMEViewer as CMEViewerWindow
@@ -43,7 +45,10 @@ from src.UI.mpl_style import style_axes
 from src.UI.accelerated_plot_widget import AcceleratedPlotWidget
 from src.Backend.project_session import ProjectFormatError, read_project, write_project
 from src.Backend.fits_io import build_combined_header, extract_ut_start_sec, load_callisto_fits
+from src.Backend.update_checker import check_for_updates
 from src.UI.fits_header_viewer import FitsHeaderViewerDialog
+from src.UI.utils.cme_helper_client import CMEHelperClient
+from src.version import APP_NAME, APP_ORG, APP_VERSION
 #from PySide6.QtCore import QObject, QEvent
 #from PySide6.QtWidgets import QLayout
 
@@ -263,6 +268,102 @@ class DownloaderImportWorker(QObject):
             self.failed.emit(f"An error occurred while combining files:\n{e}")
 
 
+class UpdateCheckWorker(QObject):
+    finished = Signal(object)
+
+    def __init__(self, current_version: str):
+        super().__init__()
+        self.current_version = str(current_version or "").strip()
+
+    @Slot()
+    def run(self):
+        result = check_for_updates(self.current_version)
+        self.finished.emit(result)
+
+
+class UpdateDownloadWorker(QObject):
+    progress = Signal(int, int)  # downloaded_bytes, total_bytes (0 if unknown)
+    finished = Signal(str)       # destination path
+    failed = Signal(str)
+    cancelled = Signal()
+
+    def __init__(self, url: str, destination_path: str):
+        super().__init__()
+        self.url = str(url or "").strip()
+        self.destination_path = str(destination_path or "").strip()
+        self._cancel_requested = False
+
+    @Slot()
+    def request_cancel(self):
+        self._cancel_requested = True
+
+    @Slot()
+    def run(self):
+        if not self.url:
+            self.failed.emit("Missing update download URL.")
+            return
+        if not self.destination_path:
+            self.failed.emit("Missing destination path for update download.")
+            return
+
+        temp_path = f"{self.destination_path}.part"
+        try:
+            dest_dir = os.path.dirname(self.destination_path)
+            if dest_dir:
+                os.makedirs(dest_dir, exist_ok=True)
+
+            with requests.get(self.url, stream=True, timeout=30) as response:
+                response.raise_for_status()
+                total_raw = str(response.headers.get("Content-Length", "0") or "0").strip()
+                try:
+                    total_bytes = max(0, int(total_raw))
+                except Exception:
+                    total_bytes = 0
+
+                downloaded = 0
+                self.progress.emit(downloaded, total_bytes)
+
+                with open(temp_path, "wb") as f:
+                    for chunk in response.iter_content(chunk_size=1024 * 128):
+                        if self._cancel_requested:
+                            try:
+                                f.close()
+                            except Exception:
+                                pass
+                            try:
+                                if os.path.exists(temp_path):
+                                    os.remove(temp_path)
+                            except Exception:
+                                pass
+                            self.cancelled.emit()
+                            return
+
+                        if not chunk:
+                            continue
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        self.progress.emit(downloaded, total_bytes)
+
+            if self._cancel_requested:
+                try:
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                except Exception:
+                    pass
+                self.cancelled.emit()
+                return
+
+            os.replace(temp_path, self.destination_path)
+            self.finished.emit(self.destination_path)
+        except Exception as e:
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except Exception:
+                pass
+            self.failed.emit(str(e))
+
+
 class MainWindow(QMainWindow):
     DB_SCALE = 2500.0 / 255.0 / 25.4
     HW_DEFAULT_TICK_FONT_PX = 14
@@ -277,17 +378,19 @@ class MainWindow(QMainWindow):
             self.theme.themeChanged.connect(self._on_theme_changed)
         if self.theme and hasattr(self.theme, "viewModeChanged"):
             self.theme.viewModeChanged.connect(lambda _mode: self._sync_view_mode_actions())
-        self._ui_settings = QSettings("SaanDev", "e-CALLISTO FITS Analyzer")
+        self._ui_settings = QSettings(APP_ORG, APP_NAME)
         self._view_mode = (
             self._normalize_view_mode(self.theme.view_mode())
             if (self.theme and hasattr(self.theme, "view_mode"))
             else self._normalize_view_mode(self._ui_settings.value("ui/view_mode", "modern"))
         )
+        self._cme_helper_client = CMEHelperClient(theme_manager=self.theme, parent=self)
+        self._cme_viewer = None
 
         #Linux Messagebox Fix
         _install_linux_msgbox_fixer()
 
-        self.setWindowTitle("e-CALLISTO FITS Analyzer 2.0")
+        self.setWindowTitle(f"{APP_NAME} {APP_VERSION}")
         #self.resize(1000, 700)
         self.setMinimumSize(1000, 700)
 
@@ -358,6 +461,11 @@ class MainWindow(QMainWindow):
 
         self._import_thread = None
         self._import_worker = None
+        self._update_thread = None
+        self._update_worker = None
+        self._update_download_thread = None
+        self._update_download_worker = None
+        self._update_download_progress_dialog = None
         self._import_progress_dialog = None
 
         # Canvas
@@ -864,9 +972,14 @@ class MainWindow(QMainWindow):
 
         # About Menu
         about_menu = menubar.addMenu("About")
+        self.check_updates_action = QAction("Check for Updates...", self)
+        self.check_updates_action.setMenuRole(QAction.NoRole)
+        about_menu.addAction(self.check_updates_action)
+        about_menu.addSeparator()
         about_action = QAction("About", self)
         about_action.setMenuRole(QAction.NoRole)
         about_menu.addAction(about_action)
+        self.check_updates_action.triggered.connect(self.check_for_app_updates)
         about_action.triggered.connect(self.show_about_dialog)
 
         # (OPTIONAL) Connect them later like:
@@ -3721,11 +3834,392 @@ class MainWindow(QMainWindow):
             pass
         return had_drift_points
 
+    def check_for_app_updates(self):
+        if self._update_thread is not None:
+            self.statusBar().showMessage("Update check is already running...", 3000)
+            return
+
+        self.statusBar().showMessage("Checking for updates...", 0)
+        if hasattr(self, "check_updates_action"):
+            self.check_updates_action.setEnabled(False)
+
+        self._update_thread = QThread(self)
+        self._update_worker = UpdateCheckWorker(APP_VERSION)
+        self._update_worker.moveToThread(self._update_thread)
+
+        self._update_thread.started.connect(self._update_worker.run)
+        self._update_worker.finished.connect(self._on_update_check_finished)
+        self._update_worker.finished.connect(self._update_thread.quit)
+        self._update_thread.finished.connect(self._on_update_check_thread_finished)
+        self._update_thread.finished.connect(self._update_worker.deleteLater)
+        self._update_thread.finished.connect(self._update_thread.deleteLater)
+        self._update_thread.start()
+
+    def _on_update_check_thread_finished(self):
+        self._update_worker = None
+        self._update_thread = None
+        if hasattr(self, "check_updates_action"):
+            self.check_updates_action.setEnabled(True)
+
+    def _release_notes_preview(self, notes: str, limit: int = 1400) -> str:
+        raw = re.sub(r"\r\n?", "\n", str(notes or "")).strip()
+        if not raw:
+            return ""
+
+        section = self._extract_whats_new_section(raw)
+        clean = self._markdown_to_plain_text(section)
+        if len(clean) <= limit:
+            return clean
+        return f"{clean[:limit].rstrip()}..."
+
+    def _extract_whats_new_section(self, markdown_text: str) -> str:
+        """
+        Return the "What's New" section (if present) from markdown release notes.
+        Fallback: return the original markdown text.
+        """
+        text = re.sub(r"\r\n?", "\n", str(markdown_text or "")).strip()
+        if not text:
+            return ""
+
+        lines = text.split("\n")
+        start = None
+        start_level = None
+
+        for i, line in enumerate(lines):
+            m = re.match(r"^\s*(#{1,6})\s*(.+?)\s*$", line)
+            if not m:
+                continue
+            heading_text = m.group(2).strip().lower()
+            heading_text = re.sub(r"[^a-z0-9 ]+", " ", heading_text)
+            heading_text = re.sub(r"\s+", " ", heading_text).strip()
+            if "what s new" in heading_text or "whats new" in heading_text:
+                start = i
+                start_level = len(m.group(1))
+                break
+
+        if start is None:
+            return text
+
+        end = len(lines)
+        for j in range(start + 1, len(lines)):
+            m = re.match(r"^\s*(#{1,6})\s+(.+?)\s*$", lines[j])
+            if not m:
+                continue
+            level = len(m.group(1))
+            if level <= int(start_level or 6):
+                end = j
+                break
+
+        return "\n".join(lines[start:end]).strip()
+
+    def _markdown_to_plain_text(self, markdown_text: str) -> str:
+        """
+        Convert common markdown patterns into readable plain text.
+        """
+        text = re.sub(r"\r\n?", "\n", str(markdown_text or ""))
+        if not text:
+            return ""
+
+        # Remove fenced code blocks fully.
+        text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+        # Inline code.
+        text = re.sub(r"`([^`]*)`", r"\1", text)
+        # Images.
+        text = re.sub(r"!\[([^\]]*)\]\([^)]+\)", "", text)
+        # Links -> keep link text only.
+        text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+        # Headings.
+        text = re.sub(r"^\s*#{1,6}\s*", "", text, flags=re.MULTILINE)
+        # Emphasis / strong.
+        text = re.sub(r"(\*\*|__)(.*?)\1", r"\2", text)
+        text = re.sub(r"(\*|_)(.*?)\1", r"\2", text)
+        # Block quotes.
+        text = re.sub(r"^\s*>\s?", "", text, flags=re.MULTILINE)
+        # Horizontal rules.
+        text = re.sub(r"^\s*[-*_]{3,}\s*$", "", text, flags=re.MULTILINE)
+        # Normalize bullets.
+        text = re.sub(r"^\s*[-*+]\s+", "- ", text, flags=re.MULTILINE)
+
+        # Collapse extra blank lines and trim.
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    def _format_bytes(self, n_bytes: int) -> str:
+        value = float(max(0, int(n_bytes)))
+        units = ["B", "KB", "MB", "GB", "TB"]
+        unit_index = 0
+        while value >= 1024.0 and unit_index < (len(units) - 1):
+            value /= 1024.0
+            unit_index += 1
+        if unit_index == 0:
+            return f"{int(value)} {units[unit_index]}"
+        return f"{value:.1f} {units[unit_index]}"
+
+    def _suggest_update_filename(self, url: str, latest_version: str | None = None) -> str:
+        try:
+            parsed = urlparse(str(url or "").strip())
+            basename = unquote(os.path.basename(parsed.path))
+            if basename and basename not in {".", "/"}:
+                return basename
+        except Exception:
+            pass
+
+        version = str(latest_version or APP_VERSION).strip() or APP_VERSION
+        if sys.platform.startswith("win"):
+            ext = ".exe"
+        elif sys.platform == "darwin":
+            ext = ".dmg"
+        elif sys.platform.startswith("linux"):
+            ext = ".deb"
+        else:
+            ext = ".bin"
+        return f"e-CALLISTO_FITS_Analyzer_v{version}{ext}"
+
+    def _default_download_dir(self) -> str:
+        candidates = [
+            QStandardPaths.writableLocation(QStandardPaths.DownloadLocation),
+            os.path.expanduser("~/Downloads"),
+            os.path.expanduser("~"),
+            os.getcwd(),
+        ]
+        for path in candidates:
+            p = str(path or "").strip()
+            if p and os.path.isdir(p):
+                return p
+        return os.getcwd()
+
+    def _open_update_url(self, url: str) -> None:
+        text = str(url or "").strip()
+        if not text:
+            return
+        if not QDesktopServices.openUrl(QUrl(text)):
+            QMessageBox.warning(self, "Open URL Failed", f"Could not open URL:\n{text}")
+
+    def _show_update_download_progress_dialog(self):
+        self._close_update_download_progress_dialog()
+        dlg = QProgressDialog("Downloading update...", "Cancel", 0, 0, self)
+        dlg.setWindowTitle("Downloading Update")
+        dlg.setWindowModality(Qt.ApplicationModal)
+        dlg.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        dlg.setValue(0)
+        dlg.canceled.connect(self._cancel_update_download)
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+        self._update_download_progress_dialog = dlg
+
+    def _close_update_download_progress_dialog(self):
+        dlg = getattr(self, "_update_download_progress_dialog", None)
+        if dlg is None:
+            return
+        try:
+            dlg.close()
+            dlg.deleteLater()
+        except Exception:
+            pass
+        self._update_download_progress_dialog = None
+
+    def _cancel_update_download(self):
+        worker = getattr(self, "_update_download_worker", None)
+        if worker is None:
+            return
+        try:
+            worker.request_cancel()
+        except Exception:
+            pass
+
+    @Slot(int, int)
+    def _on_update_download_progress(self, downloaded_bytes: int, total_bytes: int):
+        dlg = getattr(self, "_update_download_progress_dialog", None)
+        if dlg is None:
+            return
+
+        downloaded = max(0, int(downloaded_bytes))
+        total = max(0, int(total_bytes))
+        if total > 0:
+            if dlg.minimum() != 0 or dlg.maximum() != total:
+                dlg.setRange(0, total)
+            dlg.setValue(min(downloaded, total))
+            percent = (100.0 * downloaded / total) if total > 0 else 0.0
+            dlg.setLabelText(
+                f"Downloading update... {percent:.1f}% "
+                f"({self._format_bytes(downloaded)} / {self._format_bytes(total)})"
+            )
+        else:
+            dlg.setRange(0, 0)
+            if downloaded > 0:
+                dlg.setLabelText(f"Downloading update... {self._format_bytes(downloaded)}")
+            else:
+                dlg.setLabelText("Downloading update...")
+
+    @Slot(str)
+    def _on_update_download_finished(self, path: str):
+        self._close_update_download_progress_dialog()
+        out_path = str(path or "").strip()
+        self.statusBar().showMessage("Update downloaded successfully.", 5000)
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Update Downloaded")
+        msg.setIcon(QMessageBox.Information)
+        msg.setText("The update was downloaded successfully.")
+        msg.setInformativeText(
+            f"Saved to:\n{out_path}\n\n"
+            "Close the app and run this installer/package to complete the update."
+        )
+        open_file_btn = msg.addButton("Open File", QMessageBox.ActionRole)
+        open_folder_btn = msg.addButton("Open Folder", QMessageBox.ActionRole)
+        msg.addButton(QMessageBox.Ok)
+        msg.exec()
+
+        clicked = msg.clickedButton()
+        if clicked == open_file_btn and out_path:
+            url = QUrl.fromLocalFile(out_path)
+            if not QDesktopServices.openUrl(url):
+                QMessageBox.warning(self, "Open File Failed", f"Could not open file:\n{out_path}")
+        elif clicked == open_folder_btn and out_path:
+            folder = os.path.dirname(out_path) or out_path
+            url = QUrl.fromLocalFile(folder)
+            if not QDesktopServices.openUrl(url):
+                QMessageBox.warning(self, "Open Folder Failed", f"Could not open folder:\n{folder}")
+
+    @Slot(str)
+    def _on_update_download_failed(self, message: str):
+        self._close_update_download_progress_dialog()
+        self.statusBar().showMessage("Update download failed.", 5000)
+        QMessageBox.critical(
+            self,
+            "Update Download Failed",
+            f"Could not download the update.\n\n{str(message or 'Unknown error.')}",
+        )
+
+    @Slot()
+    def _on_update_download_cancelled(self):
+        self._close_update_download_progress_dialog()
+        self.statusBar().showMessage("Update download cancelled.", 5000)
+
+    def _on_update_download_thread_finished(self):
+        self._update_download_worker = None
+        self._update_download_thread = None
+
+    def _start_update_download(self, result):
+        if self._update_download_thread is not None:
+            QMessageBox.information(self, "Update Download", "An update download is already in progress.")
+            return
+
+        download_url = str(getattr(result, "download_url", "") or "").strip()
+        if not download_url:
+            QMessageBox.warning(self, "Update Download", "No download URL is available for this update.")
+            return
+
+        default_name = self._suggest_update_filename(
+            download_url,
+            latest_version=getattr(result, "latest_version", None),
+        )
+        default_path = os.path.join(self._default_download_dir(), default_name)
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Update Installer",
+            default_path,
+            "Installer files (*.exe *.msi *.dmg *.pkg *.deb *.appimage *.zip *.tar.gz);;All files (*)",
+        )
+        if not path:
+            return
+
+        save_path = str(path).strip()
+        if not save_path:
+            return
+        if os.path.isdir(save_path):
+            QMessageBox.warning(self, "Invalid Path", "Please choose a file path, not a folder.")
+            return
+
+        self._show_update_download_progress_dialog()
+        self._update_download_thread = QThread(self)
+        self._update_download_worker = UpdateDownloadWorker(download_url, save_path)
+        self._update_download_worker.moveToThread(self._update_download_thread)
+
+        self._update_download_thread.started.connect(self._update_download_worker.run)
+        self._update_download_worker.progress.connect(self._on_update_download_progress)
+        self._update_download_worker.finished.connect(self._on_update_download_finished)
+        self._update_download_worker.failed.connect(self._on_update_download_failed)
+        self._update_download_worker.cancelled.connect(self._on_update_download_cancelled)
+
+        self._update_download_worker.finished.connect(self._update_download_thread.quit)
+        self._update_download_worker.failed.connect(self._update_download_thread.quit)
+        self._update_download_worker.cancelled.connect(self._update_download_thread.quit)
+        self._update_download_thread.finished.connect(self._on_update_download_thread_finished)
+        self._update_download_thread.finished.connect(self._update_download_worker.deleteLater)
+        self._update_download_thread.finished.connect(self._update_download_thread.deleteLater)
+        self._update_download_thread.start()
+
+    def _show_update_available_dialog(self, result):
+        lines = [
+            f"Current version: v{result.current_version}",
+            f"Latest version: v{result.latest_version}",
+        ]
+        if result.published_at:
+            lines.append(f"Published: {result.published_at[:10]}")
+
+        notes_preview = self._release_notes_preview(result.notes)
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Update Available")
+        msg.setIcon(QMessageBox.Information)
+        msg.setText(f"A newer version of {APP_NAME} is available.")
+        msg.setInformativeText("\n".join(lines))
+        if notes_preview:
+            msg.setDetailedText(notes_preview)
+
+        download_btn = msg.addButton("Download", QMessageBox.AcceptRole)
+        notes_btn = None
+        if result.release_url and result.release_url != result.download_url:
+            notes_btn = msg.addButton("Release Page", QMessageBox.ActionRole)
+        msg.addButton(QMessageBox.Close)
+
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked == download_btn and result.download_url:
+            self._start_update_download(result)
+        elif notes_btn is not None and clicked == notes_btn and result.release_url:
+            self._open_update_url(result.release_url)
+
+    def _on_update_check_finished(self, result):
+        now_utc = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        self._ui_settings.setValue("updates/last_checked_at", now_utc)
+
+        if getattr(result, "is_error", False):
+            self.statusBar().showMessage("Update check failed.", 5000)
+            QMessageBox.warning(
+                self,
+                "Update Check Failed",
+                f"Could not check for updates.\n\n{result.error or 'Unknown error.'}",
+            )
+            return
+
+        if getattr(result, "update_available", False):
+            self._ui_settings.setValue("updates/last_seen_version", result.latest_version or "")
+            self.statusBar().showMessage(
+                f"Update available: v{result.latest_version}",
+                5000,
+            )
+            self._show_update_available_dialog(result)
+            return
+
+        self.statusBar().showMessage("You are already using the latest version.", 5000)
+        QMessageBox.information(
+            self,
+            "Up to Date",
+            f"You are using the latest version.\n\nCurrent: v{APP_VERSION}",
+        )
+
     def show_about_dialog(self):
         QMessageBox.information(
             self,
-            "About e-Callisto FITS Analyzer",
-            "e-CALLISTO FITS Analyzer version 2.0.\n\n"
+            f"About {APP_NAME}",
+            f"{APP_NAME} version {APP_VERSION}.\n\n"
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"
@@ -4807,12 +5301,32 @@ class MainWindow(QMainWindow):
             self.noise_commit_timer.stop()
         except Exception:
             pass
+        try:
+            if self._update_thread is not None:
+                self._update_thread.quit()
+                self._update_thread.wait(500)
+        except Exception:
+            pass
+        try:
+            if self._update_download_thread is not None:
+                if self._update_download_worker is not None:
+                    self._update_download_worker.request_cancel()
+                self._update_download_thread.quit()
+                self._update_download_thread.wait(800)
+        except Exception:
+            pass
+        try:
+            if self._cme_helper_client is not None:
+                self._cme_helper_client.shutdown()
+        except Exception:
+            pass
+        self._close_update_download_progress_dialog()
         super().closeEvent(event)
 
 
     def open_cme_viewer(self):
         from src.UI.soho_lasco_viewer import CMEViewer  # import here, not at top
-        self._cme_viewer = CMEViewer(parent=self)
+        self._cme_viewer = CMEViewer(parent=self, helper_client=self._cme_helper_client)
         self._cme_viewer.show()
 
 
@@ -5066,8 +5580,8 @@ class MaxIntensityPlotDialog(QDialog):
     def show_about_dialog(self):
         QMessageBox.information(
             self,
-            "About e-Callisto FITS Analyzer",
-            "e-CALLISTO FITS Analyzer version 2.0.\n\n"
+            f"About {APP_NAME}",
+            f"{APP_NAME} version {APP_VERSION}.\n\n"
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"

@@ -11,6 +11,7 @@ import sys
 from PySide6.QtCore import QObject, Signal, QSettings
 from PySide6.QtGui import QPalette, QColor, QGuiApplication, QIcon
 from PySide6.QtCore import Qt
+from src.version import APP_NAME, APP_ORG
 
 
 class AppTheme(QObject):
@@ -26,7 +27,7 @@ class AppTheme(QObject):
     themeChanged = Signal(bool)
     viewModeChanged = Signal(str)
 
-    def __init__(self, app, org_name="SaanDev", app_name="e-CALLISTO FITS Analyzer"):
+    def __init__(self, app, org_name=APP_ORG, app_name=APP_NAME):
         super().__init__()
         self._app = app
         self._settings = QSettings(org_name, app_name)

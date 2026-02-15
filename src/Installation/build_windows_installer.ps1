@@ -1,18 +1,18 @@
 <#
-Build a Windows distributable for e-CALLISTO FITS Analyzer (v2.0).
+Build a Windows distributable for e-CALLISTO FITS Analyzer (v2.1).
 
 Usage:
   powershell -ExecutionPolicy Bypass -File .\src\Installation\build_windows_installer.ps1
 
 Optional:
-  powershell -ExecutionPolicy Bypass -File .\src\Installation\build_windows_installer.ps1 -Root "C:\path\to\repo" -Version "2.0"
+  powershell -ExecutionPolicy Bypass -File .\src\Installation\build_windows_installer.ps1 -Root "C:\path\to\repo" -Version "2.1"
   powershell -ExecutionPolicy Bypass -File .\src\Installation\build_windows_installer.ps1 -SkipInstaller
 #>
 
 [CmdletBinding()]
 param(
     [string]$Root = "",
-    [string]$Version = "2.0",
+    [string]$Version = "2.1",
     [switch]$SkipInstaller
 )
 
@@ -49,7 +49,8 @@ function Find-Iscc {
 $Root = Resolve-RepoRoot -RequestedRoot $Root
 $AppId = "e-callisto-fits-analyzer"
 $SpecPath = Join-Path $Root "src\Installation\FITS_Analyzer_win.spec"
-$InstallRequirements = Join-Path $Root "src\Installation\install_requirements.py"
+$RuntimeRequirements = Join-Path $Root "src\Installation\requirements-runtime.txt"
+$BuildRequirements = Join-Path $Root "src\Installation\requirements-build.txt"
 $IssPath = Join-Path $Root "src\Installation\FITS_Analyzer_InnoSetup.iss"
 $DistAppDir = Join-Path $Root "dist\e-Callisto FITS Analyzer"
 $OutputInstaller = Join-Path $Root ("dist\e-CALLISTO_FITS_Analyzer_v{0}_Setup.exe" -f $Version)
@@ -58,11 +59,12 @@ Write-Host "==> Project root: $Root"
 Write-Host "==> Building version: $Version"
 
 if (-not (Test-Path $SpecPath)) { throw "Missing spec file: $SpecPath" }
-if (-not (Test-Path $InstallRequirements)) { throw "Missing dependency script: $InstallRequirements" }
+if (-not (Test-Path $RuntimeRequirements)) { throw "Missing runtime requirements file: $RuntimeRequirements" }
+if (-not (Test-Path $BuildRequirements)) { throw "Missing build requirements file: $BuildRequirements" }
 if (-not (Test-Path $IssPath) -and -not $SkipInstaller) { throw "Missing Inno Setup script: $IssPath" }
 
 # 1) Build app folder with PyInstaller
-$VenvDir = Join-Path $Root "venv"
+$VenvDir = Join-Path $Root ".venv-build"
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
 
 if (-not (Test-Path $VenvPython)) {
@@ -72,8 +74,9 @@ if (-not (Test-Path $VenvPython)) {
     throw "Python venv was not created correctly: $VenvPython"
 }
 
-& $VenvPython -m pip install --upgrade pip wheel setuptools pyinstaller pyinstaller-hooks-contrib
-& $VenvPython $InstallRequirements
+& $VenvPython -m pip install --upgrade pip
+& $VenvPython -m pip install --requirement $BuildRequirements
+& $VenvPython -m pip install --requirement $RuntimeRequirements
 & $VenvPython -m PyInstaller --clean --noconfirm $SpecPath
 
 if (-not (Test-Path $DistAppDir)) {
