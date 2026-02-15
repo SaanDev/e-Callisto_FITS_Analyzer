@@ -187,6 +187,8 @@ def normalize_session(session: Mapping[str, Any] | None) -> dict[str, Any] | Non
                 (session.get("ui") or {}).get("restore_analyzer_window", has_analyzer),
                 has_analyzer,
             ),
+            "auto_outlier_cleaned": _safe_bool((session.get("ui") or {}).get("auto_outlier_cleaned", False), False),
+            "auto_removed_count": max(0, _safe_int((session.get("ui") or {}).get("auto_removed_count", 0), 0)),
         },
         "updated_at": str(session.get("updated_at") or _now_iso()),
     }

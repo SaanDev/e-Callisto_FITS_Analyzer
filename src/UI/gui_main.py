@@ -501,6 +501,9 @@ class MainWindow(QMainWindow):
         if self.theme and hasattr(self.theme, "viewModeChanged"):
             self.theme.viewModeChanged.connect(lambda _mode: self._sync_view_mode_actions())
         self._ui_settings = QSettings(APP_ORG, APP_NAME)
+        self._max_auto_clean_isolated = bool(
+            self._ui_settings.value("processing/max_auto_clean_isolated", True, type=bool)
+        )
         self._view_mode = (
             self._normalize_view_mode(self.theme.view_mode())
             if (self.theme and hasattr(self.theme, "view_mode"))
@@ -1170,6 +1173,11 @@ class MainWindow(QMainWindow):
         presets_menu.addAction(self.preset_apply_action)
         presets_menu.addAction(self.preset_delete_action)
 
+        max_menu = processing_menu.addMenu("Maximum Intensity")
+        self.max_auto_clean_isolated_action = QAction("Auto-Clean Isolated Burst Outliers", self, checkable=True)
+        self.max_auto_clean_isolated_action.setChecked(bool(getattr(self, "_max_auto_clean_isolated", True)))
+        max_menu.addAction(self.max_auto_clean_isolated_action)
+
         analysis_menu = processing_menu.addMenu("Analysis Session")
         self.open_restored_analysis_action = QAction("Open Restored Analysis", self)
         analysis_menu.addAction(self.open_restored_analysis_action)
@@ -1255,6 +1263,7 @@ class MainWindow(QMainWindow):
         self.preset_save_action.triggered.connect(self.save_current_preset)
         self.preset_apply_action.triggered.connect(self.apply_saved_preset)
         self.preset_delete_action.triggered.connect(self.delete_saved_preset)
+        self.max_auto_clean_isolated_action.toggled.connect(self.set_max_auto_clean_isolated_enabled)
         self.open_restored_analysis_action.triggered.connect(self.open_restored_analysis_windows)
 
         # Real-time graph properties (non-colormap)
@@ -2148,6 +2157,15 @@ class MainWindow(QMainWindow):
 
         return txt
 
+    def set_max_auto_clean_isolated_enabled(self, enabled: bool):
+        self._max_auto_clean_isolated = bool(enabled)
+        try:
+            self._ui_settings.setValue("processing/max_auto_clean_isolated", self._max_auto_clean_isolated)
+        except Exception:
+            pass
+        state = "enabled" if self._max_auto_clean_isolated else "disabled"
+        self.statusBar().showMessage(f"Isolated max-intensity auto-clean {state}.", 3000)
+
     def _default_graph_title(self, plot_type: str | None = None) -> str:
         normalized = self._normalize_plot_type(plot_type if plot_type is not None else self.current_plot_type)
         base = str(getattr(self, "filename", "") or "").strip() or "Untitled"
@@ -2486,6 +2504,36 @@ class MainWindow(QMainWindow):
 
         return None
 
+    def _is_isolated_burst_plot(self) -> bool:
+        plot_type = self._normalize_plot_type(getattr(self, "current_plot_type", ""))
+        txt = str(plot_type or "").strip().lower()
+        return txt in {"isolated burst", "isolated"}
+
+    def _auto_filter_isolated_maxima(
+        self,
+        time_channels: np.ndarray,
+        max_freqs: np.ndarray,
+        source_data: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, int]:
+        vals = np.nanmax(np.asarray(source_data, dtype=float), axis=0)
+        finite = np.isfinite(vals)
+        positive = vals[finite & (vals > 0)]
+
+        if positive.size > 0:
+            base = float(np.nanpercentile(positive, 10))
+            threshold = max(1e-12, base * 0.15)
+            valid = finite & (vals > threshold)
+            if int(np.count_nonzero(valid)) < 3:
+                valid = finite & (vals > 0)
+        else:
+            valid = finite & (vals > 0)
+
+        if int(np.count_nonzero(valid)) < 3:
+            return time_channels, max_freqs, 0
+
+        removed = int(time_channels.size - int(np.count_nonzero(valid)))
+        return time_channels[valid], max_freqs[valid], max(0, removed)
+
     def _build_analysis_seed_from_current_data(self) -> dict | None:
         if self.freqs is None:
             return None
@@ -2502,6 +2550,16 @@ class MainWindow(QMainWindow):
             return None
         peak_indices = np.argmax(data, axis=0)
         max_freqs = freqs[peak_indices]
+        auto_removed = 0
+        auto_outlier_cleaned = False
+
+        if self._is_isolated_burst_plot() and bool(getattr(self, "_max_auto_clean_isolated", True)):
+            time_channels, max_freqs, auto_removed = self._auto_filter_isolated_maxima(
+                time_channels,
+                max_freqs,
+                data,
+            )
+            auto_outlier_cleaned = bool(auto_removed > 0)
 
         payload = {
             "source": self._analysis_source_context(),
@@ -2512,7 +2570,12 @@ class MainWindow(QMainWindow):
                 "harmonic": False,
             },
             "analyzer": {"fold": 1},
-            "ui": {"restore_max_window": True, "restore_analyzer_window": False},
+            "ui": {
+                "restore_max_window": True,
+                "restore_analyzer_window": False,
+                "auto_outlier_cleaned": bool(auto_outlier_cleaned),
+                "auto_removed_count": int(auto_removed),
+            },
         }
         return normalize_analysis_session(payload)
 
@@ -2574,6 +2637,12 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Analysis window requires a plotted dynamic spectrum.", 4000)
             return None
 
+        ui_block = dict(candidate.get("ui") or {})
+        auto_outlier_mode = bool(
+            (prefer_current_plot and self._is_isolated_burst_plot() and bool(getattr(self, "_max_auto_clean_isolated", True)))
+            or ui_block.get("auto_outlier_cleaned", False)
+        )
+
         max_block = dict(candidate.get("max_intensity") or {})
         time_channels = max_block.get("time_channels")
         freqs = max_block.get("freqs")
@@ -2588,6 +2657,7 @@ class MainWindow(QMainWindow):
                 self.filename,
                 parent=self,
                 session=candidate,
+                auto_outlier_mode=auto_outlier_mode,
             )
             dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
             dialog.sessionChanged.connect(lambda payload: self._on_analysis_session_changed(payload, source="max"))
@@ -2597,6 +2667,7 @@ class MainWindow(QMainWindow):
             dialog.show()
         else:
             try:
+                self._max_intensity_dialog.set_auto_outlier_mode(auto_outlier_mode)
                 self._max_intensity_dialog.restore_session(candidate, emit_change=False)
             except Exception:
                 pass
@@ -2605,6 +2676,15 @@ class MainWindow(QMainWindow):
         self._max_intensity_dialog.raise_()
         self._max_intensity_dialog.activateWindow()
         self._on_analysis_session_changed(candidate, source="max", log_message=False, mark_dirty=False)
+        if auto_outlier_mode:
+            removed = int((ui_block.get("auto_removed_count", 0) or 0))
+            if removed > 0:
+                self.statusBar().showMessage(
+                    f"Auto-cleaned isolated burst maxima: removed {removed} outlier columns.",
+                    4500,
+                )
+            else:
+                self.statusBar().showMessage("Auto-cleaned isolated burst maxima.", 3000)
 
         if auto_open_analyzer:
             QTimer.singleShot(0, lambda: self._open_or_focus_analyzer_dialog(candidate))
@@ -3701,6 +3781,7 @@ class MainWindow(QMainWindow):
 
         # Replace display data with isolated data
         self.noise_reduced_data = burst_isolated
+        self.current_plot_type = "Isolated Burst"
 
         self.statusBar().showMessage("Burst isolated using lasso", 4000)
 
@@ -6926,7 +7007,7 @@ class MaxIntensityPlotDialog(QDialog):
     sessionChanged = Signal(dict)
     requestOpenAnalyzer = Signal(dict)
 
-    def __init__(self, time_channels, max_freqs, filename, parent=None, session=None):
+    def __init__(self, time_channels, max_freqs, filename, parent=None, session=None, auto_outlier_mode: bool = False):
         super().__init__(parent)
         self.setWindowTitle("Maximum Intensities for Each Time Channel")
         self.resize(1000, 700)
@@ -6934,6 +7015,7 @@ class MaxIntensityPlotDialog(QDialog):
         self.current_plot_type = "MaxIntensityPlot"
         self._analyzer_state = None
         self._suppress_emit = False
+        self._auto_outlier_mode = bool(auto_outlier_mode)
 
         # Data
         self.time_channels = np.asarray(time_channels, dtype=float).reshape(-1)
@@ -6984,6 +7066,7 @@ class MaxIntensityPlotDialog(QDialog):
         # Status bar
         self.status = QStatusBar()
         self.status.showMessage("Ready")
+        self.set_auto_outlier_mode(self._auto_outlier_mode)
 
         # Menubar
         menubar = QMenuBar(self)
@@ -7022,6 +7105,16 @@ class MaxIntensityPlotDialog(QDialog):
         # Restore optional session state
         if isinstance(session, dict):
             self.restore_session(session, emit_change=False)
+
+    def set_auto_outlier_mode(self, enabled: bool):
+        self._auto_outlier_mode = bool(enabled)
+        manual_enabled = not self._auto_outlier_mode
+        self.select_button.setVisible(manual_enabled)
+        self.remove_button.setVisible(manual_enabled)
+        self.select_button.setEnabled(manual_enabled)
+        self.remove_button.setEnabled(manual_enabled)
+        if self._auto_outlier_mode:
+            self.status.showMessage("Auto outlier cleaning enabled for isolated burst.", 3500)
 
     def _redraw_points(self, title: str):
         self.canvas.ax.clear()
@@ -7083,6 +7176,9 @@ class MaxIntensityPlotDialog(QDialog):
             self._emit_session_changed()
 
     def activate_lasso(self):
+        if self._auto_outlier_mode:
+            self.status.showMessage("Manual outlier tools are disabled in isolated auto-clean mode.", 3000)
+            return
         self.canvas.ax.set_title("Draw around outliers to remove")
         self.canvas.draw()
 
@@ -7101,6 +7197,9 @@ class MaxIntensityPlotDialog(QDialog):
         self.status.showMessage(f"{np.sum(self.selected_mask)} points selected", 3000)
 
     def remove_selected_outliers(self):
+        if self._auto_outlier_mode:
+            self.status.showMessage("Manual outlier tools are disabled in isolated auto-clean mode.", 3000)
+            return
         if not np.any(self.selected_mask):
             self.status.showMessage("No points selected for removal", 3000)
             return
