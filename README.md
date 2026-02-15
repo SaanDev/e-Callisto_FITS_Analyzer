@@ -1,16 +1,24 @@
 # e-CALLISTO FITS Analyzer
 A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data.
 
-Version **2.1** (current release)
+Current stable release: **2.0**  
+Upcoming version: **2.1** *(in development)*
 
 ---
 
-## 🆕 What's New (v2.1)
+## 🚧 Upcoming Features (v2.1 - In Development)
 
-### Application updates
-- Added **About → Check for Updates...** to search online for newer application releases.
-- Update checks run in the background and keep the UI responsive.
-- The dialog now downloads the installer/package **inside the app** (with progress + cancel), and still provides a release page link.
+The items below are planned/in-progress for **v2.1** and are not yet a final public release.
+
+### Planned application updates
+- **Update Checker**: **About → Check for Updates...** to search online for newer releases.
+- **Background update checks**: checks run without blocking the UI.
+- **In-app update download flow**: download installer/package inside the app with progress and cancel support, plus release page link.
+
+### Planned CME viewer enhancements
+- **Enhanced CME Viewer** with a more stable, isolated playback flow.
+- Improved interactive CME playback for running-difference movies with GOES X-ray context.
+- Better failure handling and fallback behavior to avoid main-window crashes.
 
 ### v2.0 highlights
 
