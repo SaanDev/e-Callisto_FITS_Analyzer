@@ -7,24 +7,55 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
+def _to_jsonable(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+
+    if isinstance(value, Path):
+        return str(value)
+
+    if isinstance(value, Mapping):
+        return {str(k): _to_jsonable(v) for k, v in value.items()}
+
+    if isinstance(value, (list, tuple, set)):
+        return [_to_jsonable(v) for v in value]
+
+    # NumPy arrays/scalars and similar objects with tolist()/item()
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        try:
+            return _to_jsonable(tolist())
+        except Exception:
+            pass
+
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            return _to_jsonable(item())
+        except Exception:
+            pass
+
+    return str(value)
+
+
 def build_provenance_payload(context: dict[str, Any]) -> dict[str, Any]:
     payload = {
         "generated_at": _now_iso(),
-        "app": dict(context.get("app") or {}),
-        "data_source": dict(context.get("data_source") or {}),
-        "processing": dict(context.get("processing") or {}),
-        "rfi": dict(context.get("rfi") or {}),
-        "annotations": list(context.get("annotations") or []),
-        "max_intensity": context.get("max_intensity"),
-        "time_sync": dict(context.get("time_sync") or {}),
-        "operation_log": list(context.get("operation_log") or []),
+        "app": _to_jsonable(dict(context.get("app") or {})),
+        "data_source": _to_jsonable(dict(context.get("data_source") or {})),
+        "processing": _to_jsonable(dict(context.get("processing") or {})),
+        "rfi": _to_jsonable(dict(context.get("rfi") or {})),
+        "annotations": _to_jsonable(list(context.get("annotations") or [])),
+        "max_intensity": _to_jsonable(context.get("max_intensity")),
+        "time_sync": _to_jsonable(dict(context.get("time_sync") or {})),
+        "operation_log": _to_jsonable(list(context.get("operation_log") or [])),
     }
     return payload
 
@@ -92,7 +123,7 @@ def payload_to_markdown(payload: dict[str, Any]) -> str:
 
 
 def dump_json(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False)
+    return json.dumps(_to_jsonable(payload), indent=2, sort_keys=True, ensure_ascii=False)
 
 
 def write_provenance_files(base_path: str, payload: dict[str, Any]) -> tuple[str, str]:

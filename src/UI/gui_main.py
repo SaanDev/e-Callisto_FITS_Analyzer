@@ -50,6 +50,13 @@ from src.Backend.project_session import ProjectFormatError, read_project, write_
 from src.Backend.fits_io import build_combined_header, extract_ut_start_sec, load_callisto_fits
 from src.Backend.update_checker import check_for_updates
 from src.Backend.annotations import make_annotation, normalize_annotations, toggle_all_visibility
+from src.Backend.analysis_log import append_csv_log, append_txt_summary, build_log_row
+from src.Backend.analysis_session import (
+    from_legacy_max_intensity,
+    normalize_session as normalize_analysis_session,
+    to_project_payload as analysis_session_to_project_payload,
+    validate_session_for_source,
+)
 from src.Backend.presets import (
     PRESET_SCHEMA_VERSION,
     build_preset,
@@ -542,6 +549,7 @@ class MainWindow(QMainWindow):
         self.noise_vmax = None
 
         self.current_display_data = None
+        self._current_plot_source_data = None
 
         # --- Graph Properties: style flags ---
         self.title_bold = False
@@ -884,6 +892,15 @@ class MainWindow(QMainWindow):
 
         graph_layout.addStretch(1)
 
+        self.analysis_summary_group = QGroupBox("Analysis Summary")
+        self.analysis_summary_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        analysis_summary_layout = QVBoxLayout(self.analysis_summary_group)
+        analysis_summary_layout.setContentsMargins(12, 12, 12, 12)
+        analysis_summary_layout.setSpacing(6)
+        self.analysis_summary_label = QLabel("No analysis session loaded.")
+        self.analysis_summary_label.setWordWrap(True)
+        analysis_summary_layout.addWidget(self.analysis_summary_label)
+
         # -------------------------
         # Build the LEFT PANEL as a widget, then put it in a ScrollArea
         # This is the key fix for Windows (no overlaps, no clipping).
@@ -896,6 +913,7 @@ class MainWindow(QMainWindow):
         side_panel_layout.addWidget(slider_group)
         side_panel_layout.addWidget(self.units_group_box)
         side_panel_layout.addWidget(self.graph_group)
+        side_panel_layout.addWidget(self.analysis_summary_group)
         side_panel_layout.addStretch(1)
 
         # Consistent width for all groups (better on Windows DPI scaling)
@@ -903,6 +921,7 @@ class MainWindow(QMainWindow):
         slider_group.setMaximumWidth(SIDEBAR_W)
         self.units_group_box.setMaximumWidth(SIDEBAR_W)
         self.graph_group.setMaximumWidth(SIDEBAR_W)
+        self.analysis_summary_group.setMaximumWidth(SIDEBAR_W)
 
         self.side_scroll = QScrollArea()
         self.side_scroll.setWidgetResizable(True)
@@ -940,6 +959,7 @@ class MainWindow(QMainWindow):
             slider_group.setStyleSheet(sidebar_style)
             self.units_group_box.setStyleSheet(sidebar_style)
             self.graph_group.setStyleSheet(sidebar_style)
+            self.analysis_summary_group.setStyleSheet(sidebar_style)
 
         # -------------------------
         # Main layout with scrollable sidebar + canvas
@@ -1016,6 +1036,10 @@ class MainWindow(QMainWindow):
         self.export_provenance_action = QAction("Export Provenance Report...", self)
         export_menu.addAction(self.export_provenance_action)
         self.export_provenance_action.triggered.connect(self.export_provenance_report)
+
+        self.export_analysis_log_action = QAction("Export Analysis Log...", self)
+        export_menu.addAction(self.export_analysis_log_action)
+        self.export_analysis_log_action.triggered.connect(self.export_analysis_log)
 
         # Edit Menu
         edit_menu = menubar.addMenu("Edit")
@@ -1146,6 +1170,10 @@ class MainWindow(QMainWindow):
         presets_menu.addAction(self.preset_apply_action)
         presets_menu.addAction(self.preset_delete_action)
 
+        analysis_menu = processing_menu.addMenu("Analysis Session")
+        self.open_restored_analysis_action = QAction("Open Restored Analysis", self)
+        analysis_menu.addAction(self.open_restored_analysis_action)
+
         # Set initial checks from saved mode
         if self.theme:
             m = self.theme.mode()
@@ -1227,6 +1255,7 @@ class MainWindow(QMainWindow):
         self.preset_save_action.triggered.connect(self.save_current_preset)
         self.preset_apply_action.triggered.connect(self.apply_saved_preset)
         self.preset_delete_action.triggered.connect(self.delete_saved_preset)
+        self.open_restored_analysis_action.triggered.connect(self.open_restored_analysis_windows)
 
         # Real-time graph properties (non-colormap)
         self.title_edit.textChanged.connect(self.apply_graph_properties_live)
@@ -1259,6 +1288,11 @@ class MainWindow(QMainWindow):
         self._project_dirty = False
         self._loading_project = False
         self._max_intensity_state = None  # populated after Max-Intensity dialog closes
+        self._analysis_session = None
+        self._max_intensity_dialog = None
+        self._analyze_dialog = None
+        self._analysis_sync_guard = False
+        self._pending_analysis_restore = {"open_max": False, "open_analyzer": False, "warning": ""}
 
         # FITS export metadata
         self._fits_header0 = None  # primary header template
@@ -1280,6 +1314,7 @@ class MainWindow(QMainWindow):
         # Ensure project actions reflect initial state
         self._sync_project_actions()
         self.set_hardware_live_preview_enabled(self.use_hw_live_preview)
+        self._refresh_analysis_summary_panel()
         QTimer.singleShot(300, self._prompt_recovery_if_needed)
 
     def _normalize_view_mode(self, mode) -> str:
@@ -1335,6 +1370,7 @@ class MainWindow(QMainWindow):
                 getattr(self, "slider_group", None),
                 getattr(self, "units_group_box", None),
                 getattr(self, "graph_group", None),
+                getattr(self, "analysis_summary_group", None),
         ):
             if widget is not None:
                 widget.setStyleSheet(sidebar_qss)
@@ -1931,6 +1967,7 @@ class MainWindow(QMainWindow):
 
         display_data = self._intensity_for_display(data)
         self.current_display_data = display_data
+        self._current_plot_source_data = np.asarray(data)
 
         plot_type = self._normalize_plot_type(title if title is not None else self.current_plot_type)
         if self.remove_titles:
@@ -2315,7 +2352,375 @@ class MainWindow(QMainWindow):
         self._hw_default_font_sizes_active = False
         self.apply_graph_properties_live()
 
+    def _analysis_source_context(self) -> dict:
+        shape = None
+        if getattr(self, "raw_data", None) is not None:
+            try:
+                shape = [int(self.raw_data.shape[0]), int(self.raw_data.shape[1])]
+            except Exception:
+                shape = None
+        return {
+            "filename": str(getattr(self, "filename", "") or ""),
+            "is_combined": bool(getattr(self, "_is_combined", False)),
+            "combined_mode": getattr(self, "_combined_mode", None),
+            "combined_sources": list(getattr(self, "_combined_sources", []) or []),
+            "shape": shape,
+        }
+
+    def _session_to_legacy_max_state(self, session: dict | None) -> dict | None:
+        normalized = normalize_analysis_session(session)
+        if normalized is None:
+            return None
+        max_block = dict(normalized.get("max_intensity") or {})
+        t = max_block.get("time_channels")
+        f = max_block.get("freqs")
+        if t is None or f is None:
+            return None
+        analyzer = dict(normalized.get("analyzer") or {})
+        return {
+            "time_channels": np.asarray(t, dtype=float),
+            "freqs": np.asarray(f, dtype=float),
+            "fundamental": bool(max_block.get("fundamental", True)),
+            "harmonic": bool(max_block.get("harmonic", False)),
+            "analyzer": analyzer,
+            "source_filename": str((normalized.get("source") or {}).get("filename") or self.filename or ""),
+        }
+
+    def _dialog_alive(self, dialog) -> bool:
+        if dialog is None:
+            return False
+        try:
+            _ = dialog.windowTitle()
+            return True
+        except Exception:
+            return False
+
+    def _refresh_analysis_summary_panel(self):
+        lbl = getattr(self, "analysis_summary_label", None)
+        if lbl is None:
+            return
+
+        session = normalize_analysis_session(getattr(self, "_analysis_session", None))
+        if session is None:
+            lbl.setText("No analysis session loaded.")
+            return
+
+        analyzer = dict(session.get("analyzer") or {})
+        fit = dict(analyzer.get("fit_params") or {})
+        shock = dict(analyzer.get("shock_summary") or {})
+        fold = int(analyzer.get("fold", shock.get("fold", 1) or 1))
+
+        lines = ["Session restored and synced."]
+        if fit.get("a") is not None and fit.get("b") is not None:
+            try:
+                lines.append(f"Fit: f(t) = {float(fit['a']):.2f} * t^{float(fit['b']):.2f}")
+            except Exception:
+                pass
+        if fit.get("r2") is not None:
+            try:
+                lines.append(f"R2: {float(fit['r2']):.4f}")
+            except Exception:
+                pass
+        lines.append(f"Fold: {fold}")
+        if shock.get("avg_shock_speed_km_s") is not None:
+            try:
+                lines.append(f"Avg shock speed: {float(shock['avg_shock_speed_km_s']):.2f} km/s")
+            except Exception:
+                pass
+        if shock.get("avg_shock_height_rs") is not None:
+            try:
+                lines.append(f"Avg shock height: {float(shock['avg_shock_height_rs']):.3f} Rs")
+            except Exception:
+                pass
+        lbl.setText("\n".join(lines))
+
+    def _close_analysis_windows(self):
+        if self._dialog_alive(getattr(self, "_analyze_dialog", None)):
+            try:
+                self._analyze_dialog.close()
+            except Exception:
+                pass
+        self._analyze_dialog = None
+
+        if self._dialog_alive(getattr(self, "_max_intensity_dialog", None)):
+            try:
+                self._max_intensity_dialog.close()
+            except Exception:
+                pass
+        self._max_intensity_dialog = None
+
+    def _clear_analysis_session_state(self, *, close_windows: bool = True):
+        if close_windows:
+            self._close_analysis_windows()
+        self._analysis_session = None
+        self._max_intensity_state = None
+        self._pending_analysis_restore = {"open_max": False, "open_analyzer": False, "warning": ""}
+        self._refresh_analysis_summary_panel()
+
+    def _current_dynamic_spectrum_source_data(self) -> np.ndarray | None:
+        data = getattr(self, "_current_plot_source_data", None)
+        if data is not None:
+            arr = np.asarray(data)
+            if arr.ndim == 2 and arr.shape[1] > 0:
+                return arr
+
+        if self.current_display_data is not None:
+            try:
+                arr = np.asarray(self.current_display_data, dtype=float)
+                if arr.ndim == 2 and arr.shape[1] > 0:
+                    if self.use_db:
+                        return arr / float(self.DB_SCALE)
+                    return arr
+            except Exception:
+                pass
+
+        if self.noise_reduced_data is not None:
+            arr = np.asarray(self.noise_reduced_data)
+            if arr.ndim == 2 and arr.shape[1] > 0:
+                return arr
+
+        if self.raw_data is not None:
+            arr = np.asarray(self.raw_data)
+            if arr.ndim == 2 and arr.shape[1] > 0:
+                return arr
+
+        return None
+
+    def _build_analysis_seed_from_current_data(self) -> dict | None:
+        if self.freqs is None:
+            return None
+        data = self._current_dynamic_spectrum_source_data()
+        if data is None:
+            return None
+        data = np.asarray(data)
+        if data.ndim != 2 or data.shape[1] == 0:
+            return None
+        nx = int(data.shape[1])
+        time_channels = np.arange(nx, dtype=float)
+        freqs = np.asarray(self.freqs, dtype=float)
+        if freqs.ndim != 1 or len(freqs) == 0:
+            return None
+        peak_indices = np.argmax(data, axis=0)
+        max_freqs = freqs[peak_indices]
+
+        payload = {
+            "source": self._analysis_source_context(),
+            "max_intensity": {
+                "time_channels": time_channels,
+                "freqs": max_freqs,
+                "fundamental": True,
+                "harmonic": False,
+            },
+            "analyzer": {"fold": 1},
+            "ui": {"restore_max_window": True, "restore_analyzer_window": False},
+        }
+        return normalize_analysis_session(payload)
+
+    def _analysis_session_with_context(self, payload: dict | None) -> dict | None:
+        normalized = normalize_analysis_session(payload)
+        if normalized is None:
+            return None
+        normalized["source"] = self._analysis_source_context()
+        return normalize_analysis_session(normalized)
+
+    def _best_available_analysis_session(self) -> dict | None:
+        session = self._analysis_session_with_context(getattr(self, "_analysis_session", None))
+        if session is not None:
+            return session
+
+        legacy = getattr(self, "_max_intensity_state", None)
+        if isinstance(legacy, dict):
+            session = normalize_analysis_session(
+                {
+                    "source": self._analysis_source_context(),
+                    "max_intensity": {
+                        "time_channels": legacy.get("time_channels"),
+                        "freqs": legacy.get("freqs"),
+                        "fundamental": bool(legacy.get("fundamental", True)),
+                        "harmonic": bool(legacy.get("harmonic", False)),
+                    },
+                    "analyzer": dict(legacy.get("analyzer") or {}),
+                    "ui": {"restore_max_window": True, "restore_analyzer_window": bool(legacy.get("analyzer"))},
+                }
+            )
+            if session is not None:
+                return session
+        return None
+
+    def _open_or_focus_max_dialog(
+        self,
+        session: dict | None = None,
+        auto_open_analyzer: bool = False,
+        *,
+        prefer_current_plot: bool = False,
+    ):
+        if not self._dialog_alive(getattr(self, "_max_intensity_dialog", None)):
+            self._max_intensity_dialog = None
+        if not self._dialog_alive(getattr(self, "_analyze_dialog", None)):
+            self._analyze_dialog = None
+
+        candidate = None
+        if prefer_current_plot:
+            candidate = self._build_analysis_seed_from_current_data()
+
+        if candidate is None:
+            candidate = self._analysis_session_with_context(session) or self._analysis_session_with_context(
+                getattr(self, "_analysis_session", None)
+            )
+        if candidate is None:
+            candidate = self._build_analysis_seed_from_current_data()
+
+        if candidate is None:
+            self.statusBar().showMessage("Analysis window requires a plotted dynamic spectrum.", 4000)
+            return None
+
+        max_block = dict(candidate.get("max_intensity") or {})
+        time_channels = max_block.get("time_channels")
+        freqs = max_block.get("freqs")
+        if time_channels is None or freqs is None:
+            self.statusBar().showMessage("Analysis session has no max-intensity vectors.", 4000)
+            return None
+
+        if self._max_intensity_dialog is None:
+            dialog = MaxIntensityPlotDialog(
+                time_channels,
+                freqs,
+                self.filename,
+                parent=self,
+                session=candidate,
+            )
+            dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            dialog.sessionChanged.connect(lambda payload: self._on_analysis_session_changed(payload, source="max"))
+            dialog.requestOpenAnalyzer.connect(lambda payload: self._open_or_focus_analyzer_dialog(payload))
+            dialog.finished.connect(lambda _code: setattr(self, "_max_intensity_dialog", None))
+            self._max_intensity_dialog = dialog
+            dialog.show()
+        else:
+            try:
+                self._max_intensity_dialog.restore_session(candidate, emit_change=False)
+            except Exception:
+                pass
+            self._max_intensity_dialog.show()
+
+        self._max_intensity_dialog.raise_()
+        self._max_intensity_dialog.activateWindow()
+        self._on_analysis_session_changed(candidate, source="max", log_message=False, mark_dirty=False)
+
+        if auto_open_analyzer:
+            QTimer.singleShot(0, lambda: self._open_or_focus_analyzer_dialog(candidate))
+        return self._max_intensity_dialog
+
+    def _open_or_focus_analyzer_dialog(self, session: dict | None = None):
+        if not self._dialog_alive(getattr(self, "_analyze_dialog", None)):
+            self._analyze_dialog = None
+
+        candidate = self._analysis_session_with_context(session) or self._analysis_session_with_context(
+            getattr(self, "_analysis_session", None)
+        )
+        if candidate is None:
+            candidate = self._build_analysis_seed_from_current_data()
+        if candidate is None:
+            self.statusBar().showMessage("Analyzer requires max-intensity data first.", 4000)
+            return None
+
+        max_block = dict(candidate.get("max_intensity") or {})
+        analyzer_state = dict(candidate.get("analyzer") or {})
+        time_channels = max_block.get("time_channels")
+        freqs = max_block.get("freqs")
+        if time_channels is None or freqs is None:
+            self.statusBar().showMessage("Analyzer requires max-intensity vectors.", 4000)
+            return None
+
+        if self._analyze_dialog is None:
+            dialog = AnalyzeDialog(
+                time_channels,
+                freqs,
+                self.filename,
+                fundamental=bool(max_block.get("fundamental", True)),
+                harmonic=bool(max_block.get("harmonic", False)),
+                parent=self,
+                session={"max_intensity": max_block, "analyzer": analyzer_state},
+            )
+            dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            dialog.sessionChanged.connect(lambda payload: self._on_analysis_session_changed(payload, source="analyzer"))
+            dialog.finished.connect(lambda _code: setattr(self, "_analyze_dialog", None))
+            self._analyze_dialog = dialog
+            dialog.show()
+        else:
+            try:
+                self._analyze_dialog.restore_session({"max_intensity": max_block, "analyzer": analyzer_state}, emit_change=False)
+            except Exception:
+                pass
+            self._analyze_dialog.show()
+
+        self._analyze_dialog.raise_()
+        self._analyze_dialog.activateWindow()
+        return self._analyze_dialog
+
+    def _on_analysis_session_changed(
+        self,
+        payload: dict | None,
+        *,
+        source: str = "",
+        log_message: bool = True,
+        mark_dirty: bool = True,
+    ):
+        if self._analysis_sync_guard:
+            return
+
+        session = self._analysis_session_with_context(payload)
+        if session is None:
+            return
+
+        self._analysis_sync_guard = True
+        try:
+            self._analysis_session = session
+            self._max_intensity_state = self._session_to_legacy_max_state(session)
+            self._refresh_analysis_summary_panel()
+
+            if source == "analyzer" and self._dialog_alive(getattr(self, "_max_intensity_dialog", None)):
+                try:
+                    self._max_intensity_dialog.restore_session(session, emit_change=False)
+                except Exception:
+                    pass
+            elif source == "max" and self._dialog_alive(getattr(self, "_analyze_dialog", None)):
+                try:
+                    self._analyze_dialog.restore_session(session, emit_change=False)
+                except Exception:
+                    pass
+        finally:
+            self._analysis_sync_guard = False
+
+        if mark_dirty:
+            self._mark_project_dirty()
+        if log_message:
+            source_tag = source or "session"
+            self._log_operation(f"Updated analysis session ({source_tag}).")
+
+    def _apply_pending_analysis_restore(self):
+        pending = dict(getattr(self, "_pending_analysis_restore", {}) or {})
+        warning = str(pending.get("warning", "") or "").strip()
+        open_max = bool(pending.get("open_max", False))
+        open_analyzer = bool(pending.get("open_analyzer", False))
+
+        if warning:
+            self.statusBar().showMessage(warning, 5500)
+        if open_max:
+            self._open_or_focus_max_dialog(self._analysis_session, auto_open_analyzer=open_analyzer)
+        elif open_analyzer:
+            self._open_or_focus_analyzer_dialog(self._analysis_session)
+
+        self._pending_analysis_restore = {"open_max": False, "open_analyzer": False, "warning": ""}
+
+    def open_restored_analysis_windows(self):
+        session = self._best_available_analysis_session()
+        if session is None:
+            self.statusBar().showMessage("No saved analysis session is available.", 4000)
+            return
+        self._open_or_focus_max_dialog(session, auto_open_analyzer=True)
+
     def _reset_feature_state_for_new_data(self):
+        self._clear_analysis_session_state(close_windows=True)
         self._reset_annotation_mode()
         self._rfi_preview_data = None
         self._rfi_preview_masked = []
@@ -2383,13 +2788,13 @@ class MainWindow(QMainWindow):
             self.noise_vmin = None
             self.noise_vmax = None
             self.current_display_data = None
+            self._current_plot_source_data = None
             self._undo_stack.clear()
             self._redo_stack.clear()
             self._reset_feature_state_for_new_data()
 
             self.plot_data(self.raw_data, title="Raw")
             self._project_path = None
-            self._max_intensity_state = None
             self._mark_project_dirty()
             self._log_operation(f"Loaded FITS file: {self.filename}")
             return
@@ -2430,7 +2835,6 @@ class MainWindow(QMainWindow):
 
             self.load_combined_into_main(combined)
             self._project_path = None
-            self._max_intensity_state = None
             self._mark_project_dirty()
             self.statusBar().showMessage(f"Loaded {len(file_paths)} files (combined)", 5000)
             self._log_operation(f"Loaded combined FITS set ({len(file_paths)} files).")
@@ -2532,16 +2936,17 @@ class MainWindow(QMainWindow):
         self.noise_reduced_data = None
         self.noise_reduced_original = None
         self.lasso_mask = None
+        self._clear_analysis_session_state(close_windows=True)
         self.noise_vmin = None
         self.noise_vmax = None
         self.current_display_data = None
+        self._current_plot_source_data = None
         self._undo_stack.clear()
         self._redo_stack.clear()
         self._reset_feature_state_for_new_data()
 
         self.plot_data(self.raw_data, title="Raw")
         self._project_path = None
-        self._max_intensity_state = None
         self._mark_project_dirty()
         self._log_operation(f"Loaded FITS into main: {self.filename}")
 
@@ -2560,6 +2965,7 @@ class MainWindow(QMainWindow):
         self.noise_vmin = None
         self.noise_vmax = None
         self.current_display_data = None
+        self._current_plot_source_data = None
         self._undo_stack.clear()
         self._redo_stack.clear()
         self._reset_feature_state_for_new_data()
@@ -2584,7 +2990,6 @@ class MainWindow(QMainWindow):
 
         self.plot_data(self.raw_data)
         self._project_path = None
-        self._max_intensity_state = None
         self._mark_project_dirty()
         self._log_operation("Loaded combined dataset into main window.")
 
@@ -2776,6 +3181,7 @@ class MainWindow(QMainWindow):
         display_data = self._intensity_for_display(data)
 
         self.current_display_data = display_data
+        self._current_plot_source_data = np.asarray(data)
 
         im = self.canvas.ax.imshow(display_data, aspect='auto', extent=extent, cmap=cmap)
 
@@ -3263,6 +3669,7 @@ class MainWindow(QMainWindow):
         )
 
         self.current_display_data = display_burst
+        self._current_plot_source_data = np.asarray(burst_isolated)
 
         # Create new colorbar
         self.current_colorbar = self.canvas.figure.colorbar(im, cax=cax)
@@ -3306,59 +3713,7 @@ class MainWindow(QMainWindow):
                 pass
             self.lasso = None
 
-        if self.noise_reduced_data is None:
-            print("No burst-isolated data available.")
-            return
-
-        # Diagnostics
-        print("🖥️ Screens:", QGuiApplication.screens())
-        print("🎯 Creating MaxIntensityPlotDialog...")
-
-        try:
-            session = None
-            cached = getattr(self, "_max_intensity_state", None)
-            if (
-                isinstance(cached, dict)
-                and cached.get("time_channels") is not None
-                and cached.get("freqs") is not None
-                and (cached.get("source_filename") in (None, self.filename))
-            ):
-                time_channel_number = np.asarray(cached["time_channels"], dtype=float)
-                max_intensity_freqs = np.asarray(cached["freqs"], dtype=float)
-                session = cached
-            else:
-                data = self.noise_reduced_data
-                _ny, nx = data.shape
-                time_channel_number = np.linspace(0, nx, nx)
-                max_intensity_freqs = self.freqs[np.argmax(data, axis=0)]
-
-            # Safely create the dialog
-            dialog = MaxIntensityPlotDialog(
-                time_channel_number,
-                max_intensity_freqs,
-                self.filename,
-                parent=self,
-                session=session,
-            )
-            dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-
-            # Connect to GC after close
-            dialog.finished.connect(lambda: gc.collect())
-
-            dialog.exec()
-
-            try:
-                self._max_intensity_state = dialog.session_state()
-                if isinstance(self._max_intensity_state, dict):
-                    self._max_intensity_state["source_filename"] = self.filename
-            except Exception:
-                pass
-
-            self._mark_project_dirty()
-            gc.collect()
-
-        except Exception as e:
-            print(f"❌ Error showing MaxIntensityPlotDialog: {e}")
+        self._open_or_focus_max_dialog(auto_open_analyzer=False, prefer_current_plot=True)
 
     def _pixmap_to_rgba_array(self, pixmap: QPixmap) -> np.ndarray:
         image = pixmap.toImage().convertToFormat(QImage.Format_RGBA8888)
@@ -3939,6 +4294,7 @@ class MainWindow(QMainWindow):
         self.lasso_mask = None
         self.current_plot_type = "Raw"
         self.current_display_data = None
+        self._current_plot_source_data = None
         self.noise_vmin = None
         self.noise_vmax = None
         self._rfi_preview_data = None
@@ -3967,7 +4323,7 @@ class MainWindow(QMainWindow):
             self.canvas.ax.set_xlim(0, 1)
             self.canvas.ax.set_ylim(1, 0)
 
-        self._max_intensity_state = None
+        self._clear_analysis_session_state(close_windows=True)
         self._active_preset_snapshot = None
         self._set_project_clean(None)
 
@@ -4731,12 +5087,13 @@ class MainWindow(QMainWindow):
         self.noise_vmin = None
         self.noise_vmax = None
         self.current_display_data = None
+        self._current_plot_source_data = None
         self._undo_stack.clear()
         self._redo_stack.clear()
+        self._reset_feature_state_for_new_data()
 
         self.plot_data(self.raw_data, title="Raw")
         self._project_path = None
-        self._max_intensity_state = None
         self._mark_project_dirty()
 
     @Slot(object)
@@ -5925,6 +6282,98 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Export Provenance Failed", str(e))
 
+    def _analysis_station_name(self) -> str:
+        name = str(getattr(self, "filename", "") or "")
+        if not name:
+            return ""
+        token = os.path.basename(name).split("_")[0]
+        return token.strip()
+
+    def _analysis_date_obs(self) -> str:
+        obs_date = self._extract_observation_date()
+        if obs_date is None:
+            return ""
+        return obs_date.isoformat()
+
+    def export_analysis_log(self):
+        if self.raw_data is None:
+            QMessageBox.information(self, "Export Analysis Log", "Load a FITS file first.")
+            return
+
+        default_dir = ""
+        if getattr(self, "_project_path", None):
+            default_dir = os.path.dirname(self._project_path)
+        elif getattr(self, "_fits_source_path", None):
+            default_dir = os.path.dirname(self._fits_source_path)
+
+        stem = self._sanitize_export_stem(self._current_graph_title_for_export())
+        default_name = f"{stem}"
+        if default_dir:
+            default_name = os.path.join(default_dir, default_name)
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Analysis Log",
+            default_name,
+            "CSV (*.csv);;Text (*.txt);;All Files (*)",
+        )
+        if not path:
+            return
+
+        stem_path = os.path.splitext(path)[0]
+        csv_path = f"{stem_path}_analysis_log.csv"
+        txt_path = f"{stem_path}_analysis_log.txt"
+
+        session = self._analysis_session_with_context(getattr(self, "_analysis_session", None))
+        if session is None and isinstance(getattr(self, "_max_intensity_state", None), dict):
+            session = normalize_analysis_session(
+                {
+                    "source": self._analysis_source_context(),
+                    "max_intensity": {
+                        "time_channels": self._max_intensity_state.get("time_channels"),
+                        "freqs": self._max_intensity_state.get("freqs"),
+                        "fundamental": bool(self._max_intensity_state.get("fundamental", True)),
+                        "harmonic": bool(self._max_intensity_state.get("harmonic", False)),
+                    },
+                    "analyzer": dict(self._max_intensity_state.get("analyzer") or {}),
+                }
+            )
+
+        fits_sources = list(getattr(self, "_combined_sources", []) or [])
+        if not fits_sources and getattr(self, "_fits_source_path", None):
+            fits_sources = [self._fits_source_path]
+
+        row = build_log_row(
+            project_path=getattr(self, "_project_path", None),
+            fits_primary=getattr(self, "_fits_source_path", None) or getattr(self, "filename", ""),
+            fits_sources=fits_sources,
+            combined_mode=getattr(self, "_combined_mode", None),
+            station=self._analysis_station_name(),
+            date_obs=self._analysis_date_obs(),
+            session=session,
+        )
+
+        try:
+            append_csv_log(csv_path, row)
+            append_txt_summary(txt_path, row)
+        except Exception as e:
+            QMessageBox.critical(self, "Export Analysis Log Failed", str(e))
+            return
+
+        analyzer = dict((session or {}).get("analyzer") or {})
+        fit = dict(analyzer.get("fit_params") or {})
+        if not fit:
+            self.statusBar().showMessage(
+                "Analysis log exported, but analyzer fit state was missing (blank fields written).",
+                5000,
+            )
+        else:
+            self.statusBar().showMessage(
+                f"Analysis log exported: {os.path.basename(csv_path)}, {os.path.basename(txt_path)}",
+                5000,
+            )
+        self._log_operation("Exported analysis log (CSV + TXT).")
+
     def _mark_project_dirty(self):
         if getattr(self, "_loading_project", False):
             return
@@ -6042,18 +6491,42 @@ class MainWindow(QMainWindow):
             "time_sync": dict(getattr(self, "_last_time_sync_context", {}) or {}),
         }
 
-        # Optional derived analysis state (populated after dialogs)
-        if getattr(self, "_max_intensity_state", None):
-            meta["max_intensity"] = {"present": True}
-            arrays.update({
-                "max_time_channels": self._max_intensity_state.get("time_channels"),
-                "max_freqs": self._max_intensity_state.get("freqs"),
-            })
-            meta["max_intensity"].update({
-                "fundamental": bool(self._max_intensity_state.get("fundamental", True)),
-                "harmonic": bool(self._max_intensity_state.get("harmonic", False)),
-                "analyzer": self._max_intensity_state.get("analyzer"),
-            })
+        # Canonical analysis session (v2.1)
+        session = self._analysis_session_with_context(getattr(self, "_analysis_session", None))
+        if session is None:
+            session = normalize_analysis_session(
+                {
+                    "source": self._analysis_source_context(),
+                    "max_intensity": {
+                        "time_channels": (getattr(self, "_max_intensity_state", {}) or {}).get("time_channels"),
+                        "freqs": (getattr(self, "_max_intensity_state", {}) or {}).get("freqs"),
+                        "fundamental": bool((getattr(self, "_max_intensity_state", {}) or {}).get("fundamental", True)),
+                        "harmonic": bool((getattr(self, "_max_intensity_state", {}) or {}).get("harmonic", False)),
+                    },
+                    "analyzer": dict((getattr(self, "_max_intensity_state", {}) or {}).get("analyzer") or {}),
+                    "ui": {"restore_max_window": True, "restore_analyzer_window": True},
+                }
+            )
+
+        if session is not None:
+            session_meta, session_arrays = analysis_session_to_project_payload(session)
+            if session_meta is not None:
+                meta["analysis_session"] = session_meta
+            arrays.update(session_arrays)
+
+            # Legacy compatibility payload retained for older builds.
+            legacy = self._session_to_legacy_max_state(session)
+            if legacy is not None:
+                meta["max_intensity"] = {
+                    "present": True,
+                    "fundamental": bool(legacy.get("fundamental", True)),
+                    "harmonic": bool(legacy.get("harmonic", False)),
+                    "analyzer": legacy.get("analyzer"),
+                }
+                arrays.update({
+                    "max_time_channels": legacy.get("time_channels"),
+                    "max_freqs": legacy.get("freqs"),
+                })
 
         return meta, arrays
 
@@ -6063,6 +6536,7 @@ class MainWindow(QMainWindow):
             # Clear undo/redo stacks on project load
             self._undo_stack.clear()
             self._redo_stack.clear()
+            self._close_analysis_windows()
 
             self.raw_data = arrays.get("raw_data", None)
             self._invalidate_noise_cache()
@@ -6195,17 +6669,52 @@ class MainWindow(QMainWindow):
                 self.axis_font_spin.blockSignals(False)
                 self.title_font_spin.blockSignals(False)
 
-            # Derived analysis state (optional)
+            # Analysis session restore (canonical + legacy fallback)
+            self._analysis_session = None
             self._max_intensity_state = None
-            if (meta.get("max_intensity") or {}).get("present"):
-                self._max_intensity_state = {
-                    "time_channels": arrays.get("max_time_channels", None),
-                    "freqs": arrays.get("max_freqs", None),
-                    "fundamental": bool((meta.get("max_intensity") or {}).get("fundamental", True)),
-                    "harmonic": bool((meta.get("max_intensity") or {}).get("harmonic", False)),
-                    "analyzer": (meta.get("max_intensity") or {}).get("analyzer"),
-                    "source_filename": self.filename,
-                }
+            pending_open_max = False
+            pending_open_analyzer = False
+            pending_warning = ""
+
+            analysis_meta = meta.get("analysis_session")
+            loaded_session = None
+            if isinstance(analysis_meta, dict):
+                session_payload = dict(analysis_meta)
+                max_block = dict(session_payload.get("max_intensity") or {})
+                max_block["time_channels"] = arrays.get("analysis_time_channels", None)
+                max_block["freqs"] = arrays.get("analysis_freqs", None)
+                session_payload["max_intensity"] = max_block
+                loaded_session = normalize_analysis_session(session_payload)
+
+            if loaded_session is None:
+                loaded_session = from_legacy_max_intensity(meta, arrays)
+
+            if loaded_session is not None:
+                current_shape = None
+                if self.raw_data is not None:
+                    try:
+                        current_shape = (int(self.raw_data.shape[0]), int(self.raw_data.shape[1]))
+                    except Exception:
+                        current_shape = None
+
+                ok, reason = validate_session_for_source(loaded_session, current_shape=current_shape)
+                loaded_session = self._analysis_session_with_context(loaded_session)
+                self._analysis_session = loaded_session
+                self._max_intensity_state = self._session_to_legacy_max_state(loaded_session)
+
+                if ok:
+                    ui_block = dict((loaded_session or {}).get("ui") or {})
+                    pending_open_max = bool(ui_block.get("restore_max_window", True))
+                    pending_open_analyzer = bool(ui_block.get("restore_analyzer_window", False))
+                else:
+                    pending_warning = f"Analysis restore loaded with warning: {reason}"
+
+            self._pending_analysis_restore = {
+                "open_max": bool(pending_open_max),
+                "open_analyzer": bool(pending_open_analyzer),
+                "warning": str(pending_warning or ""),
+            }
+            self._refresh_analysis_summary_panel()
 
             if self._rfi_dialog is not None:
                 try:
@@ -6225,6 +6734,7 @@ class MainWindow(QMainWindow):
                 self.graph_group.setEnabled(True)
                 self._sync_toolbar_enabled_states()
                 QTimer.singleShot(0, self._render_annotations)
+                QTimer.singleShot(0, self._apply_pending_analysis_restore)
         finally:
             self._loading_project = False
             self._sync_project_actions()
@@ -6378,6 +6888,10 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
+            self._close_analysis_windows()
+        except Exception:
+            pass
+        try:
             self._ui_settings.setValue("runtime/clean_exit", True)
         except Exception:
             pass
@@ -6409,6 +6923,9 @@ class MainWindow(QMainWindow):
 
 
 class MaxIntensityPlotDialog(QDialog):
+    sessionChanged = Signal(dict)
+    requestOpenAnalyzer = Signal(dict)
+
     def __init__(self, time_channels, max_freqs, filename, parent=None, session=None):
         super().__init__(parent)
         self.setWindowTitle("Maximum Intensities for Each Time Channel")
@@ -6416,10 +6933,11 @@ class MaxIntensityPlotDialog(QDialog):
         self.filename = filename
         self.current_plot_type = "MaxIntensityPlot"
         self._analyzer_state = None
+        self._suppress_emit = False
 
         # Data
-        self.time_channels = np.array(time_channels)
-        self.freqs = np.array(max_freqs)
+        self.time_channels = np.asarray(time_channels, dtype=float).reshape(-1)
+        self.freqs = np.asarray(max_freqs, dtype=float).reshape(-1)
         self.selected_mask = np.zeros_like(self.time_channels, dtype=bool)
         self.lasso = None
 
@@ -6428,11 +6946,7 @@ class MaxIntensityPlotDialog(QDialog):
         self.canvas.figure.clf()
         self.canvas.ax = self.canvas.figure.add_subplot(111)
         style_axes(self.canvas.ax)
-        self.canvas.ax.scatter(self.time_channels, self.freqs, marker="o", s=5, color='red')
-        self.canvas.ax.set_xlabel("Time Channel Number")
-        self.canvas.ax.set_ylabel("Frequency (MHz)")
-        self.canvas.ax.set_title("Maximum Intensity for Each Time Channel")
-        self.canvas.draw()
+        self._redraw_points("Maximum Intensity for Each Time Channel")
 
         # Buttons
         self.select_button = QPushButton("Select Outliers")
@@ -6454,11 +6968,9 @@ class MaxIntensityPlotDialog(QDialog):
         self.analyze_button.setMinimumWidth(150)
         self.select_button.clicked.connect(self.activate_lasso)
         self.remove_button.clicked.connect(self.remove_selected_outliers)
-
-        self.analyze_button.clicked.connect(lambda: self.open_analyze_window(
-            fundamental=self.fundamental_radio.isChecked(),
-            harmonic=self.harmonic_radio.isChecked()
-        ))
+        self.fundamental_radio.toggled.connect(self._on_mode_toggled)
+        self.harmonic_radio.toggled.connect(self._on_mode_toggled)
+        self.analyze_button.clicked.connect(self.open_analyze_window)
 
         # Layouts
         button_layout = QHBoxLayout()
@@ -6507,17 +7019,68 @@ class MaxIntensityPlotDialog(QDialog):
         layout.addWidget(self.status)
         self.setLayout(layout)
 
-        # Restore optional session state (radio selections + analyzer state)
+        # Restore optional session state
         if isinstance(session, dict):
-            try:
-                self._analyzer_state = session.get("analyzer", None)
-                harmonic = bool(session.get("harmonic", False))
-                if harmonic:
-                    self.harmonic_radio.setChecked(True)
-                else:
-                    self.fundamental_radio.setChecked(True)
-            except Exception:
-                pass
+            self.restore_session(session, emit_change=False)
+
+    def _redraw_points(self, title: str):
+        self.canvas.ax.clear()
+        self.canvas.figure.clf()
+        self.canvas.ax = self.canvas.figure.add_subplot(111)
+        style_axes(self.canvas.ax)
+        self.canvas.ax.scatter(self.time_channels, self.freqs, marker="o", s=5, color="red")
+        self.canvas.ax.set_xlabel("Time Channel Number")
+        self.canvas.ax.set_ylabel("Frequency (MHz)")
+        self.canvas.ax.set_title(title)
+        self.canvas.draw()
+
+    def _on_mode_toggled(self, _checked=False):
+        self._emit_session_changed()
+
+    def _emit_session_changed(self):
+        if self._suppress_emit:
+            return
+        try:
+            self.sessionChanged.emit(self.session_state())
+        except Exception:
+            pass
+
+    def restore_session(self, session: dict, *, emit_change: bool = False):
+        max_state = dict(session.get("max_intensity") or session) if isinstance(session, dict) else {}
+        analyzer_state = None
+        if isinstance(session, dict):
+            analyzer_state = session.get("analyzer", None)
+            if analyzer_state is None:
+                analyzer_state = max_state.get("analyzer", None)
+
+        t = max_state.get("time_channels", None)
+        f = max_state.get("freqs", None)
+        if t is not None and f is not None:
+            t_arr = np.asarray(t, dtype=float).reshape(-1)
+            f_arr = np.asarray(f, dtype=float).reshape(-1)
+            if len(t_arr) == len(f_arr) and len(t_arr) > 0:
+                self.time_channels = t_arr
+                self.freqs = f_arr
+                self.selected_mask = np.zeros_like(self.time_channels, dtype=bool)
+
+        self._suppress_emit = True
+        try:
+            harmonic = bool(max_state.get("harmonic", False))
+            if harmonic:
+                self.harmonic_radio.setChecked(True)
+            else:
+                self.fundamental_radio.setChecked(True)
+        finally:
+            self._suppress_emit = False
+
+        if isinstance(analyzer_state, dict):
+            self._analyzer_state = dict(analyzer_state)
+        elif analyzer_state is None:
+            self._analyzer_state = None
+
+        self._redraw_points("Maximum Intensity for Each Time Channel")
+        if emit_change:
+            self._emit_session_changed()
 
     def activate_lasso(self):
         self.canvas.ax.set_title("Draw around outliers to remove")
@@ -6547,45 +7110,32 @@ class MaxIntensityPlotDialog(QDialog):
         self.selected_mask = np.zeros_like(self.time_channels, dtype=bool)
         self._analyzer_state = None
 
-        self.canvas.ax.clear()
-        self.canvas.figure.clf()
-        self.canvas.ax = self.canvas.figure.add_subplot(111)
-        style_axes(self.canvas.ax)
-
-        self.canvas.ax.scatter(self.time_channels, self.freqs, marker="o", s=5, color='red')
-        self.canvas.ax.set_xlabel("Time Channel Number")
-        self.canvas.ax.set_ylabel("Frequency (MHz)")
-        self.canvas.ax.set_title("Filtered Max Intensities")
-        self.canvas.draw()
-
+        self._redraw_points("Filtered Max Intensities")
         self.status.showMessage("Selected outliers removed", 3000)
+        self._emit_session_changed()
 
     def session_state(self) -> dict:
         return {
-            "time_channels": np.asarray(self.time_channels, dtype=float),
-            "freqs": np.asarray(self.freqs, dtype=float),
-            "fundamental": bool(self.fundamental_radio.isChecked()),
-            "harmonic": bool(self.harmonic_radio.isChecked()),
-            "analyzer": self._analyzer_state,
+            "source": {"filename": str(self.filename or "")},
+            "max_intensity": {
+                "time_channels": np.asarray(self.time_channels, dtype=float),
+                "freqs": np.asarray(self.freqs, dtype=float),
+                "fundamental": bool(self.fundamental_radio.isChecked()),
+                "harmonic": bool(self.harmonic_radio.isChecked()),
+            },
+            "analyzer": dict(self._analyzer_state or {}),
+            "ui": {
+                "restore_max_window": True,
+                "restore_analyzer_window": bool(self._analyzer_state),
+            },
         }
 
     def reset_all(self):
-        # Clear canvas
-        self.canvas.ax.clear()
-        self.canvas.draw()
-
-        # Clear internal variables
-        self.raw_data = None
-        self.freqs = None
-        self.time = None
-        self.filename = ""
-        self.noise_reduced_data = None
-        self.lasso_mask = None
-        self.current_plot_type = "Raw"
-
-        self.statusBar().showMessage("All reset", 4000)
-
-        print("Application reset to initial state.")
+        self.selected_mask = np.zeros_like(self.time_channels, dtype=bool)
+        self._analyzer_state = None
+        self._redraw_points("Maximum Intensity for Each Time Channel")
+        self.status.showMessage("Reset selections.", 3000)
+        self._emit_session_changed()
 
     def save_as_csv(self):
         file_path, _ = QFileDialog.getSaveFileName(self, "Save CSV File", "", "CSV files (*.csv)")
@@ -6635,13 +7185,12 @@ class MaxIntensityPlotDialog(QDialog):
             return
 
         try:
-            # ✅ If user didn't type an extension, add the one from ext
             root, current_ext = os.path.splitext(file_path)
             if current_ext == "":
-                ext = ext.lower().lstrip(".")  # ext should be like "png"
+                ext = ext.lower().lstrip(".")
                 file_path = f"{file_path}.{ext}"
             else:
-                ext = current_ext.lower().lstrip(".")  # use what user typed
+                ext = current_ext.lower().lstrip(".")
 
             self.canvas.figure.savefig(
                 file_path,
@@ -6671,6 +7220,11 @@ class MaxIntensityPlotDialog(QDialog):
             fundamental = bool(self.fundamental_radio.isChecked())
             harmonic = bool(self.harmonic_radio.isChecked())
 
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "_open_or_focus_analyzer_dialog"):
+            self.requestOpenAnalyzer.emit(self.session_state())
+            return
+
         dialog = AnalyzeDialog(
             self.time_channels,
             self.freqs,
@@ -6678,17 +7232,20 @@ class MaxIntensityPlotDialog(QDialog):
             fundamental=bool(fundamental),
             harmonic=bool(harmonic),
             parent=self,
-            session=self._analyzer_state,
+            session={"max_intensity": self.session_state().get("max_intensity"), "analyzer": self._analyzer_state},
         )
         dialog.exec()
         try:
-            self._analyzer_state = dialog.session_state()
+            restored = dialog.session_state()
+            self._analyzer_state = dict((restored or {}).get("analyzer") or {})
+            self._emit_session_changed()
         except Exception:
             pass
 
     def closeEvent(self, event):
         try:
-            if hasattr(self.canvas, 'ax'):
+            self._emit_session_changed()
+            if hasattr(self.canvas, "ax"):
                 self.canvas.ax.clear()
             self.canvas.figure.clf()
             self.canvas.deleteLater()
@@ -6696,8 +7253,8 @@ class MaxIntensityPlotDialog(QDialog):
             if self.lasso:
                 self.lasso.disconnect_events()
                 self.lasso = None
-        except Exception as e:
-            print(f"Cleanup error: {e}")
+        except Exception:
+            pass
         event.accept()
 
 from PySide6.QtWidgets import (
@@ -6713,6 +7270,8 @@ from sklearn.metrics import r2_score, mean_squared_error
 
 
 class AnalyzeDialog(QDialog):
+    sessionChanged = Signal(dict)
+
     def __init__(self, time_channels, freqs, filename, fundamental=True, harmonic=False, parent=None, session=None):
         super().__init__(parent)
         self.fundamental = fundamental
@@ -6721,10 +7280,14 @@ class AnalyzeDialog(QDialog):
         self.setWindowTitle("Analyzer")
         self.resize(1100, 700)
 
-        self.time = np.array(time_channels) * 0.25
-        self.freq = np.array(freqs)
+        self.time_channels = np.asarray(time_channels, dtype=float).reshape(-1)
+        self.time = self.time_channels * 0.25
+        self.freq = np.asarray(freqs, dtype=float).reshape(-1)
         self.filename = filename.split(".")[0]
         self.current_plot_title = f"{self.filename}_Best_Fit"
+        self._fit_params = None
+        self._shock_summary = {}
+        self._suppress_emit = False
 
         # Canvas
         self.canvas = MplCanvas(self, width=8, height=5)
@@ -6844,9 +7407,53 @@ class AnalyzeDialog(QDialog):
 
         if isinstance(session, dict):
             try:
-                self.restore_session(session)
+                self.restore_session(session, emit_change=False)
             except Exception:
                 pass
+
+    def _emit_session_changed(self):
+        if self._suppress_emit:
+            return
+        try:
+            self.sessionChanged.emit(self.session_state())
+        except Exception:
+            pass
+
+    def _set_summary_labels_from_dict(self, summary: dict):
+        if not isinstance(summary, dict):
+            return
+        fold = int(summary.get("fold", self._selected_fold()) or self._selected_fold())
+        self.shock_header.setText(f"<b>Shock Parameters (Newkirk {fold}-fold):</b>")
+
+        def _f(v, digits=2):
+            if v is None:
+                return ""
+            try:
+                return f"{float(v):.{digits}f}"
+            except Exception:
+                return ""
+
+        self.avg_freq_display.setText(
+            f"Average Frequency: <b>{_f(summary.get('avg_freq_mhz'), 2)} ± {_f(summary.get('avg_freq_err_mhz'), 2)}</b> MHz"
+        )
+        self.drift_display.setText(
+            f"Average Drift Rate: <b>{_f(summary.get('avg_drift_mhz_s'), 4)} ± {_f(summary.get('avg_drift_err_mhz_s'), 4)}</b> MHz/s"
+        )
+        self.start_freq_display.setText(
+            f"Starting Frequency: <b>{_f(summary.get('start_freq_mhz'), 2)} ± {_f(summary.get('start_freq_err_mhz'), 2)}</b> MHz"
+        )
+        self.initial_shock_speed_display.setText(
+            f"Initial Shock Speed: <b>{_f(summary.get('initial_shock_speed_km_s'), 2)} ± {_f(summary.get('initial_shock_speed_err_km_s'), 2)}</b> km/s"
+        )
+        self.initial_shock_height_display.setText(
+            f"Initial Shock Height: <b>{_f(summary.get('initial_shock_height_rs'), 3)} ± {_f(summary.get('initial_shock_height_err_rs'), 3)}</b> Rₛ"
+        )
+        self.avg_shock_speed_display.setText(
+            f"Average Shock Speed: <b>{_f(summary.get('avg_shock_speed_km_s'), 2)} ± {_f(summary.get('avg_shock_speed_err_km_s'), 2)}</b> km/s"
+        )
+        self.avg_shock_height_display.setText(
+            f"Average Shock Height: <b>{_f(summary.get('avg_shock_height_rs'), 3)} ± {_f(summary.get('avg_shock_height_err_rs'), 3)}</b> Rₛ"
+        )
 
     def plot_max(self):
         self.canvas.ax.clear()
@@ -6934,51 +7541,95 @@ class AnalyzeDialog(QDialog):
         self._update_shock_parameters(self._selected_fold())
 
         self.status.showMessage("Best fit plotted successfully!", 3000)
+        self._emit_session_changed()
 
     def session_state(self) -> dict:
-        state = {
-            "fundamental": bool(getattr(self, "fundamental", True)),
-            "harmonic": bool(getattr(self, "harmonic", False)),
-            "fold": int(self._selected_fold()),
+        fold = int(self._selected_fold())
+        fit = dict(getattr(self, "_fit_params", None) or {})
+        shock = dict(getattr(self, "_shock_summary", {}) or {})
+        if shock:
+            shock["fold"] = int(shock.get("fold", fold) or fold)
+            shock["fundamental"] = bool(shock.get("fundamental", self.fundamental))
+            shock["harmonic"] = bool(shock.get("harmonic", self.harmonic))
+
+        return {
+            "source": {"filename": str(self.filename or "")},
+            "max_intensity": {
+                "time_channels": np.asarray(self.time_channels, dtype=float),
+                "freqs": np.asarray(self.freq, dtype=float),
+                "fundamental": bool(self.fundamental),
+                "harmonic": bool(self.harmonic),
+            },
+            "analyzer": {
+                "fit_params": fit,
+                "fold": fold,
+                "shock_summary": shock,
+            },
+            "ui": {
+                "restore_max_window": True,
+                "restore_analyzer_window": True,
+            },
         }
-        fit = getattr(self, "_fit_params", None)
-        if isinstance(fit, dict):
-            state["fit_params"] = fit
-        return state
 
-    def restore_session(self, state: dict):
+    def restore_session(self, state: dict, *, emit_change: bool = True):
+        self._suppress_emit = True
         try:
-            fold = int(state.get("fold", 1))
-        except Exception:
-            fold = 1
-        fold = max(1, min(4, fold))
-        try:
-            self.fold_combo.setCurrentIndex(fold - 1)
-        except Exception:
-            pass
+            max_block = dict(state.get("max_intensity") or state) if isinstance(state, dict) else {}
+            analyzer = dict(state.get("analyzer") or state) if isinstance(state, dict) else {}
+            fit = analyzer.get("fit_params", None)
+            shock = analyzer.get("shock_summary", None)
 
-        fit = state.get("fit_params", None)
-        if not isinstance(fit, dict):
-            return
+            if max_block.get("time_channels") is not None and max_block.get("freqs") is not None:
+                try:
+                    t_arr = np.asarray(max_block.get("time_channels"), dtype=float).reshape(-1)
+                    f_arr = np.asarray(max_block.get("freqs"), dtype=float).reshape(-1)
+                    if len(t_arr) == len(f_arr) and len(t_arr) > 0:
+                        self.time_channels = t_arr
+                        self.time = self.time_channels * 0.25
+                        self.freq = f_arr
+                except Exception:
+                    pass
 
-        if "a" not in fit or "b" not in fit:
-            return
+            self.fundamental = bool(max_block.get("fundamental", self.fundamental))
+            self.harmonic = bool(max_block.get("harmonic", self.harmonic))
 
-        try:
-            a = float(fit["a"])
-            b = float(fit["b"])
-        except Exception:
-            return
-
-        std_errs = fit.get("std_errs", None)
-        std_errs_arr = None
-        if isinstance(std_errs, (list, tuple)) and len(std_errs) >= 2:
             try:
-                std_errs_arr = np.array([float(std_errs[0]), float(std_errs[1])], dtype=float)
+                fold = int(analyzer.get("fold", 1))
             except Exception:
-                std_errs_arr = None
+                fold = 1
+            fold = max(1, min(4, fold))
+            try:
+                self.fold_combo.setCurrentIndex(fold - 1)
+            except Exception:
+                pass
 
-        self.plot_fit(params=(a, b), std_errs=std_errs_arr)
+            if not isinstance(fit, dict):
+                fit = None
+
+            if fit is not None and ("a" in fit and "b" in fit):
+                try:
+                    a = float(fit["a"])
+                    b = float(fit["b"])
+                except Exception:
+                    a = None
+                    b = None
+
+                if a is not None and b is not None:
+                    std_errs = fit.get("std_errs", None)
+                    std_errs_arr = None
+                    if isinstance(std_errs, (list, tuple)) and len(std_errs) >= 2:
+                        try:
+                            std_errs_arr = np.array([float(std_errs[0]), float(std_errs[1])], dtype=float)
+                        except Exception:
+                            std_errs_arr = None
+                    self.plot_fit(params=(a, b), std_errs=std_errs_arr)
+            elif isinstance(shock, dict):
+                self._shock_summary = dict(shock)
+                self._set_summary_labels_from_dict(self._shock_summary)
+        finally:
+            self._suppress_emit = False
+        if emit_change:
+            self._emit_session_changed()
 
     def _selected_fold(self):
         try:
@@ -6995,6 +7646,7 @@ class AnalyzeDialog(QDialog):
         n = self._selected_fold()
         self._update_shock_parameters(n)
         self.status.showMessage(f"Updated using Newkirk {n}-fold model.", 3000)
+        self._emit_session_changed()
 
     def _update_shock_parameters(self, n):
         # Your updated n-fold formulas
@@ -7046,23 +7698,27 @@ class AnalyzeDialog(QDialog):
         self.start_freq = start_freq
         self.start_height = start_height
 
-        # Optional but helpful to show which model is used
-        self.shock_header.setText(f"<b>Shock Parameters (Newkirk {n}-fold):</b>")
+        self._shock_summary = {
+            "avg_freq_mhz": float(avg_freq),
+            "avg_freq_err_mhz": float(avg_freq_err),
+            "avg_drift_mhz_s": float(avg_drift),
+            "avg_drift_err_mhz_s": float(avg_drift_err),
+            "start_freq_mhz": float(start_freq),
+            "start_freq_err_mhz": float(self.freq_err),
+            "initial_shock_speed_km_s": float(start_shock_speed),
+            "initial_shock_speed_err_km_s": float(shock_speed_err),
+            "initial_shock_height_rs": float(start_height),
+            "initial_shock_height_err_rs": float(Rp_err),
+            "avg_shock_speed_km_s": float(avg_speed),
+            "avg_shock_speed_err_km_s": float(avg_speed_err),
+            "avg_shock_height_rs": float(avg_height),
+            "avg_shock_height_err_rs": float(avg_height_err),
+            "fold": int(n),
+            "fundamental": bool(self.fundamental),
+            "harmonic": bool(self.harmonic),
+        }
 
-        # Update the right-panel text
-        self.avg_freq_display.setText(f"Average Frequency: <b>{avg_freq:.2f} ± {avg_freq_err:.2f}</b> MHz")
-        self.drift_display.setText(f"Average Drift Rate: <b>{avg_drift:.4f} ± {avg_drift_err:.4f}</b> MHz/s")
-        self.start_freq_display.setText(f"Starting Frequency: <b>{start_freq:.2f} ± {self.freq_err:.2f}</b> MHz")
-        self.initial_shock_speed_display.setText(
-            f"Initial Shock Speed: <b>{start_shock_speed:.2f} ± {shock_speed_err:.2f}</b> km/s"
-        )
-        self.initial_shock_height_display.setText(
-            f"Initial Shock Height: <b>{start_height:.3f} ± {Rp_err:.3f}</b> Rₛ"
-        )
-        self.avg_shock_speed_display.setText(f"Average Shock Speed: <b>{avg_speed:.2f} ± {avg_speed_err:.2f}</b> km/s")
-        self.avg_shock_height_display.setText(
-            f"Average Shock Height: <b>{avg_height:.3f} ± {avg_height_err:.3f}</b> Rₛ"
-        )
+        self._set_summary_labels_from_dict(self._shock_summary)
 
     def save_graph(self):
         plot_name = getattr(self, "current_plot_title", None) or f"{self.filename}_Plot"
@@ -7259,6 +7915,10 @@ class AnalyzeDialog(QDialog):
         self.canvas.ax.grid(True)
         self.canvas.draw()
 
+    def closeEvent(self, event):
+        self._emit_session_changed()
+        super().closeEvent(event)
+
 
 class CombineFrequencyDialog(QDialog):
     def __init__(self, main_window, parent=None):
@@ -7427,12 +8087,12 @@ class CombineFrequencyDialog(QDialog):
         self.main_window.noise_vmin = None
         self.main_window.noise_vmax = None
         self.main_window.current_display_data = None
+        self.main_window._current_plot_source_data = None
         self.main_window._undo_stack.clear()
         self.main_window._redo_stack.clear()
         self.main_window._reset_feature_state_for_new_data()
 
         self.main_window._project_path = None
-        self.main_window._max_intensity_state = None
         self.main_window._mark_project_dirty()
 
         self.main_window.plot_data(self.combined_data, title="Raw")
@@ -7622,12 +8282,12 @@ class CombineTimeDialog(QDialog):
             self.main_window.noise_vmin = None
             self.main_window.noise_vmax = None
             self.main_window.current_display_data = None
+            self.main_window._current_plot_source_data = None
             self.main_window._undo_stack.clear()
             self.main_window._redo_stack.clear()
             self.main_window._reset_feature_state_for_new_data()
 
             self.main_window._project_path = None
-            self.main_window._max_intensity_state = None
             self.main_window._mark_project_dirty()
 
             self.main_window.plot_data(self.combined_data, title="Raw")
