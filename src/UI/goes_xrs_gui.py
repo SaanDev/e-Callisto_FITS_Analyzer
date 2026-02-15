@@ -490,6 +490,46 @@ class MainWindow(QMainWindow):
         self.end_hour.setCurrentIndex(23);  self.end_min.setCurrentIndex(59)
         self.sb.showMessage("Preset applied: Whole day 00:00–23:59")
 
+    def set_time_window(self, start_dt: datetime, end_dt: datetime, auto_plot: bool = True) -> bool:
+        """Programmatically set the GOES time range from an external caller."""
+        try:
+            if end_dt <= start_dt:
+                self.sb.showMessage("Sync skipped: End time must be after start time.")
+                return False
+            if (start_dt.year, start_dt.month, start_dt.day) != (end_dt.year, end_dt.month, end_dt.day):
+                self.sb.showMessage("Sync skipped: GOES view currently supports same-day windows only.")
+                return False
+
+            self.start_date.setDate(QDate(start_dt.year, start_dt.month, start_dt.day))
+            self.end_date.setDate(QDate(end_dt.year, end_dt.month, end_dt.day))
+
+            i = self.start_hour.findData(int(start_dt.hour))
+            if i >= 0:
+                self.start_hour.setCurrentIndex(i)
+            i = self.start_min.findData(int(start_dt.minute))
+            if i >= 0:
+                self.start_min.setCurrentIndex(i)
+
+            i = self.end_hour.findData(int(end_dt.hour))
+            if i >= 0:
+                self.end_hour.setCurrentIndex(i)
+            i = self.end_min.findData(int(end_dt.minute))
+            if i >= 0:
+                self.end_min.setCurrentIndex(i)
+
+            self.current_start_dt = start_dt
+            self.current_end_dt = end_dt
+            self.sb.showMessage(
+                f"Synced time window: {start_dt:%Y-%m-%d %H:%M} - {end_dt:%H:%M} UTC"
+            )
+
+            if auto_plot:
+                self.on_plot_clicked()
+            return True
+        except Exception as e:
+            self.sb.showMessage(f"Sync failed: {e}")
+            return False
+
     def on_plot_clicked(self):
         try:
             start_dt = _get_dt(self.start_date, self.start_hour, self.start_min)

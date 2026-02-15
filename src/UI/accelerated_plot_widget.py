@@ -140,6 +140,7 @@ class AcceleratedPlotWidget(QWidget):
         self._drift_points = []
         self._drift_scatter_item = None
         self._drift_line_item = None
+        self._annotation_items = []
         self._scene_filter = None
 
         self._interaction_timer = QTimer(self)
@@ -442,6 +443,7 @@ class AcceleratedPlotWidget(QWidget):
         self._interaction_mode = None
         self._clear_lasso_overlay()
         self._clear_drift_overlay()
+        self._clear_annotation_overlay()
 
     def export_plot_item(self):
         if not self.is_available:
@@ -557,6 +559,60 @@ class AcceleratedPlotWidget(QWidget):
             self._drift_line_item.setData(pts[:, 0], pts[:, 1])
         elif self._drift_line_item is not None:
             self._drift_line_item.setData([], [])
+
+    def _clear_annotation_overlay(self) -> None:
+        if not self.is_available:
+            return
+        for item in self._annotation_items:
+            try:
+                self._plot.removeItem(item)
+            except Exception:
+                pass
+        self._annotation_items = []
+
+    def set_annotations(self, serialized_annotations) -> None:
+        """Render non-interactive annotation overlays."""
+        if not self.is_available:
+            return
+        self._clear_annotation_overlay()
+
+        for ann in serialized_annotations or []:
+            try:
+                if not isinstance(ann, dict):
+                    continue
+                if not bool(ann.get("visible", True)):
+                    continue
+
+                kind = str(ann.get("kind", "")).strip().lower()
+                points = ann.get("points") or []
+                color = str(ann.get("color") or "#00d4ff")
+                width = float(ann.get("line_width", 1.5))
+                pen = pg.mkPen(color=color, width=max(1.0, width))
+
+                if kind in {"polygon", "line"}:
+                    if len(points) < 2:
+                        continue
+                    xs = [float(p[0]) for p in points]
+                    ys = [float(p[1]) for p in points]
+                    if kind == "polygon":
+                        xs.append(xs[0])
+                        ys.append(ys[0])
+                    item = pg.PlotDataItem(xs, ys, pen=pen)
+                    self._plot.addItem(item)
+                    self._annotation_items.append(item)
+                    continue
+
+                if kind == "text":
+                    if not points:
+                        continue
+                    x, y = points[0]
+                    txt = str(ann.get("text") or "")
+                    item = pg.TextItem(text=txt, color=color, anchor=(0, 1))
+                    item.setPos(float(x), float(y))
+                    self._plot.addItem(item)
+                    self._annotation_items.append(item)
+            except Exception:
+                continue
 
     def _scene_to_plot_xy(self, scene_pos):
         if not self.is_available:

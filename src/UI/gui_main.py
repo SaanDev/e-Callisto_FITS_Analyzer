@@ -10,16 +10,19 @@ import os
 import tempfile
 import re
 import gc
-from datetime import datetime, timezone
+import json
+import platform
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import unquote, urlparse
 import requests
 from PySide6.QtWidgets import (
     QMainWindow, QSlider, QDialog, QMenuBar, QMessageBox, QLabel, QFormLayout, QGroupBox,
     QStatusBar, QProgressBar, QApplication, QMenu, QCheckBox, QRadioButton, QButtonGroup, QComboBox, QToolBar,
-    QLineEdit, QSpinBox, QScrollArea, QFrame, QVBoxLayout, QWidget, QFileDialog, QHBoxLayout, QSizePolicy, QLayout,
+    QLineEdit, QSpinBox, QDoubleSpinBox, QScrollArea, QFrame, QVBoxLayout, QWidget, QFileDialog, QHBoxLayout, QSizePolicy, QLayout,
     QStackedLayout,
     QProgressDialog,
     QInputDialog,
+    QPushButton,
 )
 
 from PySide6.QtGui import QAction, QPixmap, QImage, QGuiApplication, QIcon, QFontDatabase, QActionGroup, QPalette, QPainter, QPdfWriter, QDesktopServices
@@ -46,6 +49,23 @@ from src.UI.accelerated_plot_widget import AcceleratedPlotWidget
 from src.Backend.project_session import ProjectFormatError, read_project, write_project
 from src.Backend.fits_io import build_combined_header, extract_ut_start_sec, load_callisto_fits
 from src.Backend.update_checker import check_for_updates
+from src.Backend.annotations import make_annotation, normalize_annotations, toggle_all_visibility
+from src.Backend.presets import (
+    PRESET_SCHEMA_VERSION,
+    build_preset,
+    delete_preset,
+    dump_presets_json,
+    parse_presets_json,
+    upsert_preset,
+)
+from src.Backend.provenance import build_provenance_payload, write_provenance_files
+from src.Backend.recovery_manager import (
+    DEFAULT_MAX_SNAPSHOTS,
+    latest_snapshot_path,
+    load_recovery_snapshot,
+    save_recovery_snapshot,
+)
+from src.Backend.rfi_filters import clean_rfi, config_dict as rfi_config_dict
 from src.UI.fits_header_viewer import FitsHeaderViewerDialog
 from src.UI.utils.cme_helper_client import CMEHelperClient
 from src.version import APP_NAME, APP_ORG, APP_VERSION
@@ -182,6 +202,101 @@ class MplCanvas(FigureCanvas):
         super().__init__(self.fig)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.updateGeometry()
+
+
+class RFIControlDialog(QDialog):
+    previewRequested = Signal(object)
+    applyRequested = Signal(object)
+    resetRequested = Signal()
+
+    def __init__(self, initial: dict | None = None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("RFI Cleaning")
+        self.setModal(False)
+        self.resize(420, 280)
+
+        cfg = dict(initial or {})
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.enabled_chk = QCheckBox("Enable RFI cleaning")
+        self.enabled_chk.setChecked(bool(cfg.get("enabled", True)))
+
+        self.kernel_time_spin = QSpinBox()
+        self.kernel_time_spin.setRange(1, 31)
+        self.kernel_time_spin.setSingleStep(2)
+        self.kernel_time_spin.setValue(int(cfg.get("kernel_time", 3)))
+
+        self.kernel_freq_spin = QSpinBox()
+        self.kernel_freq_spin.setRange(1, 31)
+        self.kernel_freq_spin.setSingleStep(2)
+        self.kernel_freq_spin.setValue(int(cfg.get("kernel_freq", 3)))
+
+        self.z_thresh_spin = QDoubleSpinBox()
+        self.z_thresh_spin.setRange(0.5, 20.0)
+        self.z_thresh_spin.setSingleStep(0.5)
+        self.z_thresh_spin.setDecimals(2)
+        self.z_thresh_spin.setValue(float(cfg.get("channel_z_threshold", 6.0)))
+
+        self.percentile_spin = QDoubleSpinBox()
+        self.percentile_spin.setRange(90.0, 99.99)
+        self.percentile_spin.setSingleStep(0.1)
+        self.percentile_spin.setDecimals(2)
+        self.percentile_spin.setValue(float(cfg.get("percentile_clip", 99.5)))
+
+        self.masked_label = QLabel("Masked channels: 0")
+        self.masked_label.setWordWrap(True)
+
+        form.addRow(self.enabled_chk)
+        form.addRow("Kernel (time)", self.kernel_time_spin)
+        form.addRow("Kernel (freq)", self.kernel_freq_spin)
+        form.addRow("Channel Z threshold", self.z_thresh_spin)
+        form.addRow("Percentile clip", self.percentile_spin)
+        form.addRow(self.masked_label)
+        layout.addLayout(form)
+
+        buttons = QHBoxLayout()
+        self.preview_btn = QPushButton("Preview")
+        self.apply_btn = QPushButton("Apply")
+        self.reset_btn = QPushButton("Reset")
+        self.close_btn = QPushButton("Close")
+        buttons.addWidget(self.preview_btn)
+        buttons.addWidget(self.apply_btn)
+        buttons.addWidget(self.reset_btn)
+        buttons.addStretch(1)
+        buttons.addWidget(self.close_btn)
+        layout.addLayout(buttons)
+
+        self.preview_btn.clicked.connect(self._emit_preview)
+        self.apply_btn.clicked.connect(self._emit_apply)
+        self.reset_btn.clicked.connect(self.resetRequested.emit)
+        self.close_btn.clicked.connect(self.close)
+
+    def values(self) -> dict:
+        return {
+            "enabled": bool(self.enabled_chk.isChecked()),
+            "kernel_time": int(self.kernel_time_spin.value()),
+            "kernel_freq": int(self.kernel_freq_spin.value()),
+            "channel_z_threshold": float(self.z_thresh_spin.value()),
+            "percentile_clip": float(self.percentile_spin.value()),
+        }
+
+    def set_masked_channels(self, indices: list[int] | None) -> None:
+        count = len(indices or [])
+        if count == 0:
+            self.masked_label.setText("Masked channels: 0")
+        else:
+            show = ", ".join(str(i) for i in (indices or [])[:8])
+            if count > 8:
+                show += ", ..."
+            self.masked_label.setText(f"Masked channels: {count} ({show})")
+
+    def _emit_preview(self):
+        self.previewRequested.emit(self.values())
+
+    def _emit_apply(self):
+        self.applyRequested.emit(self.values())
 
 
 class DownloaderImportWorker(QObject):
@@ -467,6 +582,44 @@ class MainWindow(QMainWindow):
         self._update_download_worker = None
         self._update_download_progress_dialog = None
         self._import_progress_dialog = None
+        self._goes_window = None
+
+        # Processing audit + derived state
+        self._processing_log = []
+        self._last_time_sync_context = {}
+        self._active_preset_snapshot = None
+
+        # RFI state
+        self._rfi_dialog = None
+        self._rfi_config = rfi_config_dict(
+            enabled=True,
+            kernel_time=3,
+            kernel_freq=3,
+            channel_z_threshold=6.0,
+            percentile_clip=99.5,
+            masked_channel_indices=[],
+            applied=False,
+        )
+        self._rfi_preview_data = None
+        self._rfi_preview_masked = []
+
+        # Annotation state
+        self._annotations = []
+        self._annotations_visible = True
+        self._annotation_mode = None
+        self._annotation_click_points = []
+        self._annotation_pending_text = ""
+        self._annotation_mpl_cid = None
+        self._annotation_artists = []
+        self._annotation_style_defaults = {"color": "#00d4ff", "line_width": 1.5}
+
+        # Autosave / crash-recovery state
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setInterval(180000)
+        self._autosave_timer.timeout.connect(self._perform_autosave)
+        self._autosave_timer.start()
+        self._previous_clean_exit = bool(self._ui_settings.value("runtime/clean_exit", True, type=bool))
+        self._ui_settings.setValue("runtime/clean_exit", False)
 
         # Canvas
         self.canvas = MplCanvas(self, width=10, height=6)
@@ -838,6 +991,9 @@ class MainWindow(QMainWindow):
         self.save_project_as_action.setShortcut("Ctrl+Shift+S")
         file_menu.addAction(self.save_project_as_action)
 
+        self.recover_last_session_action = QAction("Recover Last Session...", self)
+        file_menu.addAction(self.recover_last_session_action)
+
         file_menu.addSeparator()
 
         # --- Save As (disabled for main window) ---
@@ -856,6 +1012,10 @@ class MainWindow(QMainWindow):
         self.export_fits_action = QAction("Export to FIT", self)
         export_menu.addAction(self.export_fits_action)
         self.export_fits_action.triggered.connect(self.export_to_fits)
+
+        self.export_provenance_action = QAction("Export Provenance Report...", self)
+        export_menu.addAction(self.export_provenance_action)
+        self.export_provenance_action.triggered.connect(self.export_provenance_report)
 
         # Edit Menu
         edit_menu = menubar.addMenu("Edit")
@@ -913,6 +1073,11 @@ class MainWindow(QMainWindow):
         radio_action.triggered.connect(self.launch_downloader)
         radio_submenu.addAction(radio_action)
 
+        solar_events_menu.addSeparator()
+        self.sync_time_window_action = QAction("Sync Current Time Window", self)
+        self.sync_time_window_action.triggered.connect(self.sync_current_time_window_to_solar_events)
+        solar_events_menu.addAction(self.sync_time_window_action)
+
         # FITS View Menu
         fits_view_menu = menubar.addMenu("FITS View")
         self.view_fits_header_action = QAction("View FITS Header", self)
@@ -949,6 +1114,37 @@ class MainWindow(QMainWindow):
         self.hw_live_preview_action.setChecked(self.use_hw_live_preview)
         self.hw_live_preview_action.setEnabled(bool(self.accel_canvas.is_available))
         hw_menu.addAction(self.hw_live_preview_action)
+
+        rfi_menu = processing_menu.addMenu("RFI Cleaning")
+        self.rfi_open_action = QAction("Open RFI Panel", self)
+        self.rfi_apply_action = QAction("Apply RFI", self)
+        self.rfi_reset_action = QAction("Reset RFI", self)
+        rfi_menu.addAction(self.rfi_open_action)
+        rfi_menu.addAction(self.rfi_apply_action)
+        rfi_menu.addAction(self.rfi_reset_action)
+
+        ann_menu = processing_menu.addMenu("Annotations")
+        self.ann_add_polygon_action = QAction("Add Polygon", self)
+        self.ann_add_line_action = QAction("Add Line", self)
+        self.ann_add_text_action = QAction("Add Text", self)
+        self.ann_toggle_visibility_action = QAction("Toggle Visibility", self)
+        self.ann_delete_last_action = QAction("Delete Last", self)
+        self.ann_clear_action = QAction("Clear All", self)
+        ann_menu.addAction(self.ann_add_polygon_action)
+        ann_menu.addAction(self.ann_add_line_action)
+        ann_menu.addAction(self.ann_add_text_action)
+        ann_menu.addSeparator()
+        ann_menu.addAction(self.ann_toggle_visibility_action)
+        ann_menu.addAction(self.ann_delete_last_action)
+        ann_menu.addAction(self.ann_clear_action)
+
+        presets_menu = processing_menu.addMenu("Presets")
+        self.preset_save_action = QAction("Save Current as Preset...", self)
+        self.preset_apply_action = QAction("Apply Preset...", self)
+        self.preset_delete_action = QAction("Delete Preset...", self)
+        presets_menu.addAction(self.preset_save_action)
+        presets_menu.addAction(self.preset_apply_action)
+        presets_menu.addAction(self.preset_delete_action)
 
         # Set initial checks from saved mode
         if self.theme:
@@ -999,6 +1195,7 @@ class MainWindow(QMainWindow):
         self.open_project_action.triggered.connect(self.open_project)
         self.save_project_action.triggered.connect(self.save_project)
         self.save_project_as_action.triggered.connect(self.save_project_as)
+        self.recover_last_session_action.triggered.connect(self.recover_last_session)
         self.units_digits_radio.toggled.connect(
             lambda checked: checked and self.set_units_mode(False)
         )
@@ -1015,6 +1212,21 @@ class MainWindow(QMainWindow):
 
         # Keep existing colormap live behavior
         self.cmap_combo.currentTextChanged.connect(self.change_cmap)
+
+        self.rfi_open_action.triggered.connect(self.open_rfi_panel)
+        self.rfi_apply_action.triggered.connect(self.apply_rfi_now)
+        self.rfi_reset_action.triggered.connect(self.reset_rfi)
+
+        self.ann_add_polygon_action.triggered.connect(self.start_annotation_polygon)
+        self.ann_add_line_action.triggered.connect(self.start_annotation_line)
+        self.ann_add_text_action.triggered.connect(self.start_annotation_text)
+        self.ann_toggle_visibility_action.triggered.connect(self.toggle_annotations_visibility)
+        self.ann_delete_last_action.triggered.connect(self.delete_last_annotation)
+        self.ann_clear_action.triggered.connect(self.clear_annotations)
+
+        self.preset_save_action.triggered.connect(self.save_current_preset)
+        self.preset_apply_action.triggered.connect(self.apply_saved_preset)
+        self.preset_delete_action.triggered.connect(self.delete_saved_preset)
 
         # Real-time graph properties (non-colormap)
         self.title_edit.textChanged.connect(self.apply_graph_properties_live)
@@ -1068,6 +1280,7 @@ class MainWindow(QMainWindow):
         # Ensure project actions reflect initial state
         self._sync_project_actions()
         self.set_hardware_live_preview_enabled(self.use_hw_live_preview)
+        QTimer.singleShot(300, self._prompt_recovery_if_needed)
 
     def _normalize_view_mode(self, mode) -> str:
         text = str(mode or "").strip().lower()
@@ -2102,6 +2315,31 @@ class MainWindow(QMainWindow):
         self._hw_default_font_sizes_active = False
         self.apply_graph_properties_live()
 
+    def _reset_feature_state_for_new_data(self):
+        self._reset_annotation_mode()
+        self._rfi_preview_data = None
+        self._rfi_preview_masked = []
+        self._rfi_config = rfi_config_dict(
+            enabled=True,
+            kernel_time=3,
+            kernel_freq=3,
+            channel_z_threshold=6.0,
+            percentile_clip=99.5,
+            masked_channel_indices=[],
+            applied=False,
+        )
+        if self._rfi_dialog is not None:
+            try:
+                self._rfi_dialog.set_masked_channels([])
+            except Exception:
+                pass
+
+        self._annotations = []
+        self._annotations_visible = True
+        self._annotation_style_defaults = {"color": "#00d4ff", "line_width": 1.5}
+        self._active_preset_snapshot = None
+        self._render_annotations()
+
     def load_file(self):
         if not self._maybe_prompt_save_dirty():
             return
@@ -2147,11 +2385,13 @@ class MainWindow(QMainWindow):
             self.current_display_data = None
             self._undo_stack.clear()
             self._redo_stack.clear()
+            self._reset_feature_state_for_new_data()
 
             self.plot_data(self.raw_data, title="Raw")
             self._project_path = None
             self._max_intensity_state = None
             self._mark_project_dirty()
+            self._log_operation(f"Loaded FITS file: {self.filename}")
             return
 
         from src.Backend.burst_processor import (
@@ -2193,6 +2433,7 @@ class MainWindow(QMainWindow):
             self._max_intensity_state = None
             self._mark_project_dirty()
             self.statusBar().showMessage(f"Loaded {len(file_paths)} files (combined)", 5000)
+            self._log_operation(f"Loaded combined FITS set ({len(file_paths)} files).")
         except Exception as e:
             QMessageBox.critical(self, "Combine Error", f"An error occurred while combining files:\n{e}")
             return
@@ -2296,11 +2537,13 @@ class MainWindow(QMainWindow):
         self.current_display_data = None
         self._undo_stack.clear()
         self._redo_stack.clear()
+        self._reset_feature_state_for_new_data()
 
         self.plot_data(self.raw_data, title="Raw")
         self._project_path = None
         self._max_intensity_state = None
         self._mark_project_dirty()
+        self._log_operation(f"Loaded FITS into main: {self.filename}")
 
     def load_combined_into_main(self, combined):
         self.raw_data = combined["data"]
@@ -2319,6 +2562,7 @@ class MainWindow(QMainWindow):
         self.current_display_data = None
         self._undo_stack.clear()
         self._redo_stack.clear()
+        self._reset_feature_state_for_new_data()
 
         # metadata for Export to FITS
         self._is_combined = True
@@ -2342,6 +2586,7 @@ class MainWindow(QMainWindow):
         self._project_path = None
         self._max_intensity_state = None
         self._mark_project_dirty()
+        self._log_operation("Loaded combined dataset into main window.")
 
     def schedule_noise_update(self):
         if self.raw_data is None:
@@ -2569,6 +2814,7 @@ class MainWindow(QMainWindow):
             self._refresh_accel_plot(data=data, title=plot_type, view=view, preserve_view=(view is not None))
         except Exception:
             pass
+        self._render_annotations()
 
         self.current_plot_type = plot_type
         if self._hardware_mode_enabled():
@@ -2662,6 +2908,10 @@ class MainWindow(QMainWindow):
 
     def _on_accel_lasso_finished(self, verts):
         if not self._hardware_mode_enabled():
+            return
+        if self._annotation_mode == "polygon":
+            self._on_annotation_polygon_finished(list(verts or []))
+            self.lasso_active = False
             return
         if not self.lasso_active:
             return
@@ -3691,6 +3941,10 @@ class MainWindow(QMainWindow):
         self.current_display_data = None
         self.noise_vmin = None
         self.noise_vmax = None
+        self._rfi_preview_data = None
+        self._rfi_preview_masked = []
+        self._annotations = []
+        self._annotation_artists = []
 
         # FITS metadata / provenance
         self._fits_header0 = None
@@ -3714,6 +3968,7 @@ class MainWindow(QMainWindow):
             self.canvas.ax.set_ylim(1, 0)
 
         self._max_intensity_state = None
+        self._active_preset_snapshot = None
         self._set_project_clean(None)
 
         print("Application reset to initial state.")
@@ -3779,6 +4034,10 @@ class MainWindow(QMainWindow):
         self.lasso_mask = None
         self.noise_vmin = None
         self.noise_vmax = None
+        self._rfi_preview_data = None
+        self._rfi_preview_masked = []
+        if isinstance(self._rfi_config, dict):
+            self._rfi_config["applied"] = False
 
         self.lower_slider.blockSignals(True)
         self.upper_slider.blockSignals(True)
@@ -4697,8 +4956,24 @@ class MainWindow(QMainWindow):
         self.downloader_dialog.exec()
 
     def open_goes_xrs_window(self):
-        self.goes_window = GoesXrsWindow()
-        self.goes_window.show()
+        try:
+            alive = self._goes_window is not None
+            if alive:
+                _ = self._goes_window.windowTitle()
+        except Exception:
+            alive = False
+        if not alive:
+            self._goes_window = GoesXrsWindow()
+        self._goes_window.show()
+        self._goes_window.raise_()
+        self._goes_window.activateWindow()
+
+        window = self._current_time_window_utc()
+        if window and hasattr(self._goes_window, "set_time_window"):
+            try:
+                self._goes_window.set_time_window(window[0], window[1], auto_plot=True)
+            except Exception:
+                pass
 
     def open_soho_lasco_window(self):
         self.open_cme_viewer()
@@ -4900,12 +5175,764 @@ class MainWindow(QMainWindow):
     # Project/session Save + Load
     # -----------------------------
 
+    def _log_operation(self, message: str) -> None:
+        msg = str(message or "").strip()
+        if not msg:
+            return
+        self._processing_log.append(
+            {
+                "ts": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+                "msg": msg,
+            }
+        )
+        if len(self._processing_log) > 500:
+            self._processing_log = self._processing_log[-500:]
+
+    def _perform_autosave(self):
+        if getattr(self, "raw_data", None) is None:
+            return
+        if not getattr(self, "_project_dirty", False):
+            return
+
+        try:
+            meta, arrays = self._capture_project_payload()
+            save_recovery_snapshot(
+                meta=meta,
+                arrays=arrays,
+                source_project_path=getattr(self, "_project_path", None),
+                reason="timer",
+                max_snapshots=DEFAULT_MAX_SNAPSHOTS,
+            )
+            self.statusBar().showMessage("Autosaved recovery snapshot.", 2500)
+        except Exception as e:
+            self.statusBar().showMessage(f"Autosave failed: {e}", 4000)
+
+    def _load_snapshot_path(self, path: str, *, mark_dirty: bool = True) -> bool:
+        if not path:
+            return False
+        try:
+            payload = load_recovery_snapshot(path)
+        except Exception as e:
+            QMessageBox.warning(self, "Recovery Failed", f"Could not open recovery snapshot:\n{e}")
+            return False
+
+        self._apply_project_payload(payload.meta, payload.arrays)
+        self._set_project_clean(None)
+        if mark_dirty:
+            self._mark_project_dirty()
+        self.statusBar().showMessage(f"Recovered session from {os.path.basename(path)}", 5000)
+        self._log_operation(f"Recovered snapshot: {os.path.basename(path)}")
+        return True
+
+    def _prompt_recovery_if_needed(self):
+        clean_exit = bool(getattr(self, "_previous_clean_exit", True))
+        if clean_exit:
+            return
+
+        path = latest_snapshot_path()
+        if not path:
+            return
+
+        resp = QMessageBox.question(
+            self,
+            "Recover Last Session",
+            "An unclean exit was detected. Recover the latest autosave snapshot?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if resp == QMessageBox.StandardButton.Yes:
+            self._load_snapshot_path(path, mark_dirty=True)
+
+    def recover_last_session(self):
+        path = latest_snapshot_path()
+        if not path:
+            QMessageBox.information(self, "Recover Last Session", "No recovery snapshot was found.")
+            return
+        self._load_snapshot_path(path, mark_dirty=True)
+
+    def _ensure_rfi_dialog(self):
+        if self._rfi_dialog is not None:
+            return self._rfi_dialog
+        self._rfi_dialog = RFIControlDialog(initial=self._rfi_config, parent=self)
+        self._rfi_dialog.previewRequested.connect(self._preview_rfi_from_dialog)
+        self._rfi_dialog.applyRequested.connect(self._apply_rfi_from_dialog)
+        self._rfi_dialog.resetRequested.connect(self.reset_rfi)
+        return self._rfi_dialog
+
+    def _rfi_source_data(self):
+        if self.noise_reduced_data is not None:
+            return self.noise_reduced_data
+        return self.raw_data
+
+    def _preview_rfi_from_dialog(self, cfg: dict):
+        self._rfi_config.update(dict(cfg or {}))
+        src = self._rfi_source_data()
+        if src is None:
+            QMessageBox.information(self, "RFI Cleaning", "Load a FITS file first.")
+            return
+
+        try:
+            result = clean_rfi(
+                src,
+                kernel_time=int(self._rfi_config.get("kernel_time", 3)),
+                kernel_freq=int(self._rfi_config.get("kernel_freq", 3)),
+                channel_z_threshold=float(self._rfi_config.get("channel_z_threshold", 6.0)),
+                percentile_clip=float(self._rfi_config.get("percentile_clip", 99.5)),
+                enabled=bool(self._rfi_config.get("enabled", True)),
+            )
+            self._rfi_preview_data = result.data
+            self._rfi_preview_masked = list(result.masked_channel_indices)
+            self._rfi_config = rfi_config_dict(
+                enabled=bool(self._rfi_config.get("enabled", True)),
+                kernel_time=int(self._rfi_config.get("kernel_time", 3)),
+                kernel_freq=int(self._rfi_config.get("kernel_freq", 3)),
+                channel_z_threshold=float(self._rfi_config.get("channel_z_threshold", 6.0)),
+                percentile_clip=float(self._rfi_config.get("percentile_clip", 99.5)),
+                masked_channel_indices=self._rfi_preview_masked,
+                applied=False,
+            )
+            if self._rfi_dialog is not None:
+                self._rfi_dialog.set_masked_channels(self._rfi_preview_masked)
+
+            self.plot_data(self._rfi_preview_data, title=self.current_plot_type, keep_view=True)
+            self.statusBar().showMessage("RFI preview updated.", 3000)
+        except Exception as e:
+            QMessageBox.warning(self, "RFI Preview Failed", str(e))
+
+    def _apply_rfi_from_dialog(self, cfg: dict):
+        self._rfi_config.update(dict(cfg or {}))
+        self.apply_rfi_now()
+
+    def open_rfi_panel(self):
+        if self.raw_data is None:
+            QMessageBox.information(self, "RFI Cleaning", "Load a FITS file first.")
+            return
+        dlg = self._ensure_rfi_dialog()
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def apply_rfi_now(self):
+        src = self._rfi_source_data()
+        if src is None:
+            QMessageBox.information(self, "Apply RFI", "Load a FITS file first.")
+            return
+
+        cfg = dict(self._rfi_config or {})
+        if self._rfi_preview_data is None:
+            self._preview_rfi_from_dialog(cfg)
+        if self._rfi_preview_data is None:
+            return
+
+        self._push_undo_state()
+        self.noise_reduced_data = np.asarray(self._rfi_preview_data, dtype=np.float32).copy()
+        self.noise_reduced_original = self.noise_reduced_data.copy()
+        self.current_plot_type = "RFI Cleaned"
+        self._rfi_config = rfi_config_dict(
+            enabled=bool(cfg.get("enabled", True)),
+            kernel_time=int(cfg.get("kernel_time", 3)),
+            kernel_freq=int(cfg.get("kernel_freq", 3)),
+            channel_z_threshold=float(cfg.get("channel_z_threshold", 6.0)),
+            percentile_clip=float(cfg.get("percentile_clip", 99.5)),
+            masked_channel_indices=list(self._rfi_preview_masked),
+            applied=True,
+        )
+        if self._rfi_dialog is not None:
+            self._rfi_dialog.set_masked_channels(self._rfi_preview_masked)
+
+        self.plot_data(self.noise_reduced_data, title="RFI Cleaned", keep_view=True)
+        self._mark_project_dirty()
+        self._log_operation(
+            f"Applied RFI cleaning (kT={self._rfi_config['kernel_time']}, "
+            f"kF={self._rfi_config['kernel_freq']}, "
+            f"z>{self._rfi_config['channel_z_threshold']}, "
+            f"pct={self._rfi_config['percentile_clip']})."
+        )
+
+    def reset_rfi(self):
+        self._rfi_preview_data = None
+        self._rfi_preview_masked = []
+        self._rfi_config = rfi_config_dict(
+            enabled=True,
+            kernel_time=3,
+            kernel_freq=3,
+            channel_z_threshold=6.0,
+            percentile_clip=99.5,
+            masked_channel_indices=[],
+            applied=False,
+        )
+        if self._rfi_dialog is not None:
+            try:
+                self._rfi_dialog.enabled_chk.setChecked(True)
+                self._rfi_dialog.kernel_time_spin.setValue(3)
+                self._rfi_dialog.kernel_freq_spin.setValue(3)
+                self._rfi_dialog.z_thresh_spin.setValue(6.0)
+                self._rfi_dialog.percentile_spin.setValue(99.5)
+                self._rfi_dialog.set_masked_channels([])
+            except Exception:
+                pass
+        if self.raw_data is not None:
+            base = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
+            self.plot_data(base, title=self.current_plot_type, keep_view=True)
+        self.statusBar().showMessage("RFI settings reset.", 2500)
+
+    def _annotation_disconnect_mpl(self):
+        if self._annotation_mpl_cid is not None:
+            try:
+                self.canvas.mpl_disconnect(self._annotation_mpl_cid)
+            except Exception:
+                pass
+            self._annotation_mpl_cid = None
+
+    def _reset_annotation_mode(self):
+        self._annotation_mode = None
+        self._annotation_click_points = []
+        self._annotation_pending_text = ""
+        self.lasso_active = False
+        self._annotation_disconnect_mpl()
+        if self._hardware_mode_enabled():
+            try:
+                self.accel_canvas.stop_interaction_capture()
+            except Exception:
+                pass
+        else:
+            try:
+                self.canvas.mpl_disconnect(self._cid_press)
+            except Exception:
+                pass
+            try:
+                self.canvas.mpl_disconnect(self._cid_motion)
+            except Exception:
+                pass
+            try:
+                self.canvas.mpl_disconnect(self._cid_release)
+            except Exception:
+                pass
+            self._cid_press = self.canvas.mpl_connect("button_press_event", self.on_mouse_press)
+            self._cid_motion = self.canvas.mpl_connect("motion_notify_event", self.on_mouse_move)
+            self._cid_release = self.canvas.mpl_connect("button_release_event", self.on_mouse_release)
+
+    def _render_annotations(self):
+        # Matplotlib overlay
+        try:
+            ax = self.canvas.ax
+            stale = getattr(self, "_annotation_artists", None) or []
+            for artist in stale:
+                try:
+                    artist.remove()
+                except Exception:
+                    pass
+            artists = []
+            for ann in self._annotations:
+                if not ann.get("visible", True):
+                    continue
+                kind = ann.get("kind")
+                pts = ann.get("points") or []
+                color = ann.get("color", "#00d4ff")
+                lw = float(ann.get("line_width", 1.5))
+                if kind in {"polygon", "line"} and len(pts) >= 2:
+                    xs = [float(p[0]) for p in pts]
+                    ys = [float(p[1]) for p in pts]
+                    if kind == "polygon":
+                        xs.append(xs[0]); ys.append(ys[0])
+                    line = ax.plot(xs, ys, color=color, linewidth=lw, alpha=0.95)[0]
+                    artists.append(line)
+                elif kind == "text" and len(pts) >= 1:
+                    x, y = pts[0]
+                    text_artist = ax.text(
+                        float(x),
+                        float(y),
+                        str(ann.get("text", "")),
+                        color=color,
+                        fontsize=10,
+                        ha="left",
+                        va="bottom",
+                    )
+                    artists.append(text_artist)
+            self._annotation_artists = artists
+            self.canvas.draw_idle()
+        except Exception:
+            pass
+
+        # Hardware overlay
+        try:
+            self.accel_canvas.set_annotations(self._annotations if self._annotations_visible else [])
+        except Exception:
+            pass
+
+    def _add_annotation(self, ann: dict):
+        self._annotations.append(ann)
+        self._render_annotations()
+        self._mark_project_dirty()
+        self._log_operation(f"Added annotation: {ann.get('kind')}")
+
+    def start_annotation_polygon(self):
+        if self.raw_data is None:
+            QMessageBox.information(self, "Annotations", "Load a FITS file first.")
+            return
+        self._reset_annotation_mode()
+        self._annotation_mode = "polygon"
+        if self._hardware_mode_enabled():
+            self.lasso_active = True
+            self.accel_canvas.begin_lasso_capture()
+            self.statusBar().showMessage("Draw polygon annotation and release mouse.", 5000)
+            return
+
+        try:
+            self.canvas.mpl_disconnect(self._cid_press)
+            self.canvas.mpl_disconnect(self._cid_motion)
+            self.canvas.mpl_disconnect(self._cid_release)
+        except Exception:
+            pass
+        self._annotation_mpl_cid = self.canvas.mpl_connect("button_press_event", self._on_annotation_mpl_click)
+        self.statusBar().showMessage(
+            "Click points for polygon. Right-click to finish.", 5000
+        )
+
+    def start_annotation_line(self):
+        if self.raw_data is None:
+            QMessageBox.information(self, "Annotations", "Load a FITS file first.")
+            return
+        if self._hardware_mode_enabled():
+            self._show_plot_canvas()
+        self._reset_annotation_mode()
+        self._annotation_mode = "line"
+        self._annotation_click_points = []
+        try:
+            self.canvas.mpl_disconnect(self._cid_press)
+            self.canvas.mpl_disconnect(self._cid_motion)
+            self.canvas.mpl_disconnect(self._cid_release)
+        except Exception:
+            pass
+        self._annotation_mpl_cid = self.canvas.mpl_connect("button_press_event", self._on_annotation_mpl_click)
+        self.statusBar().showMessage("Click start and end points for line annotation.", 5000)
+
+    def start_annotation_text(self):
+        if self.raw_data is None:
+            QMessageBox.information(self, "Annotations", "Load a FITS file first.")
+            return
+        if self._hardware_mode_enabled():
+            self._show_plot_canvas()
+        txt, ok = QInputDialog.getText(self, "Add Text Annotation", "Annotation text:")
+        if not ok or not str(txt).strip():
+            return
+        self._reset_annotation_mode()
+        self._annotation_mode = "text"
+        self._annotation_pending_text = str(txt).strip()
+        try:
+            self.canvas.mpl_disconnect(self._cid_press)
+            self.canvas.mpl_disconnect(self._cid_motion)
+            self.canvas.mpl_disconnect(self._cid_release)
+        except Exception:
+            pass
+        self._annotation_mpl_cid = self.canvas.mpl_connect("button_press_event", self._on_annotation_mpl_click)
+        self.statusBar().showMessage("Click where to place text annotation.", 5000)
+
+    def _on_annotation_mpl_click(self, event):
+        if event.inaxes != self.canvas.ax:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+
+        x = float(event.xdata)
+        y = float(event.ydata)
+
+        if self._annotation_mode == "line":
+            self._annotation_click_points.append([x, y])
+            if len(self._annotation_click_points) >= 2:
+                ann = make_annotation(
+                    kind="line",
+                    points=self._annotation_click_points[:2],
+                    color=self._annotation_style_defaults["color"],
+                    line_width=self._annotation_style_defaults["line_width"],
+                    visible=self._annotations_visible,
+                )
+                self._add_annotation(ann)
+                self._reset_annotation_mode()
+            return
+
+        if self._annotation_mode == "text":
+            ann = make_annotation(
+                kind="text",
+                points=[[x, y]],
+                text=self._annotation_pending_text,
+                color=self._annotation_style_defaults["color"],
+                line_width=self._annotation_style_defaults["line_width"],
+                visible=self._annotations_visible,
+            )
+            self._add_annotation(ann)
+            self._reset_annotation_mode()
+            return
+
+        if self._annotation_mode == "polygon":
+            if event.button == 3 and len(self._annotation_click_points) >= 3:
+                ann = make_annotation(
+                    kind="polygon",
+                    points=self._annotation_click_points,
+                    color=self._annotation_style_defaults["color"],
+                    line_width=self._annotation_style_defaults["line_width"],
+                    visible=self._annotations_visible,
+                )
+                self._add_annotation(ann)
+                self._reset_annotation_mode()
+                return
+            self._annotation_click_points.append([x, y])
+
+    def _on_annotation_polygon_finished(self, verts):
+        if self._annotation_mode != "polygon":
+            return
+        if not verts or len(verts) < 3:
+            self._reset_annotation_mode()
+            return
+        ann = make_annotation(
+            kind="polygon",
+            points=verts,
+            color=self._annotation_style_defaults["color"],
+            line_width=self._annotation_style_defaults["line_width"],
+            visible=self._annotations_visible,
+        )
+        self._add_annotation(ann)
+        self._reset_annotation_mode()
+
+    def toggle_annotations_visibility(self):
+        self._annotations_visible = not bool(self._annotations_visible)
+        self._annotations = toggle_all_visibility(self._annotations, self._annotations_visible)
+        self._render_annotations()
+        self._mark_project_dirty()
+        state = "shown" if self._annotations_visible else "hidden"
+        self.statusBar().showMessage(f"Annotations {state}.", 2500)
+
+    def delete_last_annotation(self):
+        if not self._annotations:
+            self.statusBar().showMessage("No annotations to delete.", 2500)
+            return
+        self._annotations.pop()
+        self._render_annotations()
+        self._mark_project_dirty()
+        self.statusBar().showMessage("Deleted last annotation.", 2500)
+
+    def clear_annotations(self):
+        self._annotations = []
+        self._render_annotations()
+        self._mark_project_dirty()
+        self.statusBar().showMessage("Cleared annotations.", 2500)
+
+    def _preset_settings_payload(self) -> dict:
+        return {
+            "lower_slider": int(self.lower_slider.value()),
+            "upper_slider": int(self.upper_slider.value()),
+            "use_db": bool(self.use_db),
+            "use_utc": bool(self.use_utc),
+            "cmap": str(self.current_cmap_name or "Custom"),
+            "graph": {
+                "remove_titles": bool(getattr(self, "remove_titles", False)),
+                "title_bold": bool(getattr(self, "title_bold", False)),
+                "title_italic": bool(getattr(self, "title_italic", False)),
+                "axis_bold": bool(getattr(self, "axis_bold", False)),
+                "axis_italic": bool(getattr(self, "axis_italic", False)),
+                "ticks_bold": bool(getattr(self, "ticks_bold", False)),
+                "ticks_italic": bool(getattr(self, "ticks_italic", False)),
+                "title_override": str(getattr(self, "graph_title_override", "")),
+                "font_family": str(getattr(self, "graph_font_family", "")),
+                "tick_font_px": int(getattr(self, "tick_font_px", 11)),
+                "axis_label_font_px": int(getattr(self, "axis_label_font_px", 12)),
+                "title_font_px": int(getattr(self, "title_font_px", 14)),
+            },
+            "rfi": dict(self._rfi_config or {}),
+            "annotation_style_defaults": dict(self._annotation_style_defaults or {}),
+        }
+
+    def _load_global_presets(self) -> list[dict]:
+        raw = self._ui_settings.value("processing/presets_json", "", type=str)
+        return parse_presets_json(raw)
+
+    def _save_global_presets(self, presets: list[dict]):
+        self._ui_settings.setValue("processing/presets_json", dump_presets_json(presets))
+
+    def save_current_preset(self):
+        name, ok = QInputDialog.getText(self, "Save Preset", "Preset name:")
+        if not ok or not str(name).strip():
+            return
+        preset = build_preset(str(name).strip(), self._preset_settings_payload())
+        presets = self._load_global_presets()
+        merged, replaced = upsert_preset(presets, preset)
+        self._save_global_presets(merged)
+        self._active_preset_snapshot = preset
+        self._mark_project_dirty()
+        verb = "Updated" if replaced else "Saved"
+        self.statusBar().showMessage(f"{verb} preset '{preset['name']}'.", 3000)
+
+    def _apply_preset_payload(self, preset: dict) -> bool:
+        try:
+            version = int((preset or {}).get("version", PRESET_SCHEMA_VERSION))
+        except Exception:
+            version = PRESET_SCHEMA_VERSION
+        if version != PRESET_SCHEMA_VERSION:
+            QMessageBox.warning(
+                self,
+                "Preset Version Unsupported",
+                f"Preset version {version} is not supported by this build.",
+            )
+            return False
+
+        settings = dict((preset or {}).get("settings") or {})
+        self._active_preset_snapshot = dict(preset)
+
+        try:
+            self.lower_slider.blockSignals(True)
+            self.upper_slider.blockSignals(True)
+            self.lower_slider.setValue(int(settings.get("lower_slider", self.lower_slider.value())))
+            self.upper_slider.setValue(int(settings.get("upper_slider", self.upper_slider.value())))
+        finally:
+            self.lower_slider.blockSignals(False)
+            self.upper_slider.blockSignals(False)
+
+        self.set_units_mode(bool(settings.get("use_db", False)))
+        if bool(settings.get("use_utc", False)):
+            self.set_axis_to_utc()
+        else:
+            self.set_axis_to_seconds()
+
+        cmap = str(settings.get("cmap") or "Custom")
+        self.current_cmap_name = cmap
+        self.cmap_combo.setCurrentText(cmap)
+
+        self._rfi_config = dict(settings.get("rfi") or self._rfi_config)
+        self._annotation_style_defaults = dict(settings.get("annotation_style_defaults") or self._annotation_style_defaults)
+
+        graph = dict(settings.get("graph") or {})
+        self.remove_titles_chk.setChecked(bool(graph.get("remove_titles", self.remove_titles_chk.isChecked())))
+        self.title_bold_chk.setChecked(bool(graph.get("title_bold", self.title_bold_chk.isChecked())))
+        self.title_italic_chk.setChecked(bool(graph.get("title_italic", self.title_italic_chk.isChecked())))
+        self.axis_bold_chk.setChecked(bool(graph.get("axis_bold", self.axis_bold_chk.isChecked())))
+        self.axis_italic_chk.setChecked(bool(graph.get("axis_italic", self.axis_italic_chk.isChecked())))
+        self.ticks_bold_chk.setChecked(bool(graph.get("ticks_bold", self.ticks_bold_chk.isChecked())))
+        self.ticks_italic_chk.setChecked(bool(graph.get("ticks_italic", self.ticks_italic_chk.isChecked())))
+        self.title_edit.setText(str(graph.get("title_override", self.title_edit.text())))
+        self.font_combo.setCurrentText(str(graph.get("font_family", self.font_combo.currentText() or "Default")))
+        self.tick_font_spin.setValue(int(graph.get("tick_font_px", self.tick_font_spin.value())))
+        self.axis_font_spin.setValue(int(graph.get("axis_label_font_px", self.axis_font_spin.value())))
+        self.title_font_spin.setValue(int(graph.get("title_font_px", self.title_font_spin.value())))
+
+        if self.raw_data is not None:
+            data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
+            self.plot_data(data, title=self.current_plot_type, keep_view=True)
+
+        self._mark_project_dirty()
+        self._log_operation(f"Applied preset: {preset.get('name', 'Unnamed')}")
+        return True
+
+    def apply_saved_preset(self):
+        presets = self._load_global_presets()
+        if not presets:
+            QMessageBox.information(self, "Apply Preset", "No presets have been saved yet.")
+            return
+        names = [p["name"] for p in presets]
+        choice, ok = QInputDialog.getItem(self, "Apply Preset", "Choose preset:", names, 0, False)
+        if not ok or not choice:
+            return
+        selected = next((p for p in presets if p["name"] == choice), None)
+        if not selected:
+            return
+        self._apply_preset_payload(selected)
+
+    def delete_saved_preset(self):
+        presets = self._load_global_presets()
+        if not presets:
+            QMessageBox.information(self, "Delete Preset", "No presets are available.")
+            return
+        names = [p["name"] for p in presets]
+        choice, ok = QInputDialog.getItem(self, "Delete Preset", "Choose preset:", names, 0, False)
+        if not ok or not choice:
+            return
+        updated, removed = delete_preset(presets, str(choice))
+        if removed:
+            self._save_global_presets(updated)
+            self.statusBar().showMessage(f"Deleted preset '{choice}'.", 2500)
+
+    def _extract_observation_date(self) -> date | None:
+        hdr = getattr(self, "_fits_header0", None)
+        for key in ("DATE-OBS", "DATEOBS"):
+            try:
+                raw = str(hdr.get(key, "")).strip()
+            except Exception:
+                raw = ""
+            if raw:
+                try:
+                    return datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
+                except Exception:
+                    try:
+                        return datetime.strptime(raw[:10], "%Y-%m-%d").date()
+                    except Exception:
+                        pass
+
+        # Fallback: parse YYYYMMDD from filename
+        m = re.search(r"(\d{8})", str(getattr(self, "filename", "")))
+        if m:
+            try:
+                return datetime.strptime(m.group(1), "%Y%m%d").date()
+            except Exception:
+                pass
+        return None
+
+    def _current_time_window_utc(self) -> tuple[datetime, datetime] | None:
+        if self.time is None:
+            return None
+        if self.ut_start_sec is None:
+            return None
+        obs_date = self._extract_observation_date()
+        if obs_date is None:
+            return None
+
+        view = self._capture_view() or {}
+        xlim = view.get("xlim")
+        if not xlim:
+            return None
+        x0 = float(min(xlim[0], xlim[1]))
+        x1 = float(max(xlim[0], xlim[1]))
+        if x1 <= x0:
+            return None
+
+        base = datetime(
+            obs_date.year,
+            obs_date.month,
+            obs_date.day,
+            tzinfo=timezone.utc,
+        )
+        start_dt = base + timedelta(seconds=float(self.ut_start_sec) + x0)
+        end_dt = base + timedelta(seconds=float(self.ut_start_sec) + x1)
+        return start_dt, end_dt
+
+    def _sync_window_to_goes(self, start_dt: datetime, end_dt: datetime, *, auto_plot: bool = True) -> bool:
+        if self._goes_window is None:
+            return False
+        if not hasattr(self._goes_window, "set_time_window"):
+            return False
+        try:
+            return bool(self._goes_window.set_time_window(start_dt, end_dt, auto_plot=auto_plot))
+        except Exception:
+            return False
+
+    def _sync_window_to_cme(self, target_dt: datetime, *, auto_search: bool = True) -> bool:
+        if self._cme_viewer is None:
+            return False
+        if not hasattr(self._cme_viewer, "set_target_datetime"):
+            return False
+        try:
+            self._cme_viewer.set_target_datetime(
+                target_dt,
+                auto_search=auto_search,
+                auto_select_nearest=True,
+            )
+            return True
+        except Exception:
+            return False
+
+    def sync_current_time_window_to_solar_events(self):
+        window = self._current_time_window_utc()
+        if not window:
+            self.statusBar().showMessage("Time sync skipped: current UTC context is unavailable.", 4000)
+            return
+        start_dt, end_dt = window
+        mid_dt = start_dt + (end_dt - start_dt) / 2
+
+        goes_ok = self._sync_window_to_goes(start_dt, end_dt, auto_plot=True)
+        cme_ok = self._sync_window_to_cme(mid_dt, auto_search=True)
+
+        self._last_time_sync_context = {
+            "start_utc": start_dt.isoformat(timespec="seconds"),
+            "end_utc": end_dt.isoformat(timespec="seconds"),
+            "target_utc": mid_dt.isoformat(timespec="seconds"),
+            "goes_synced": bool(goes_ok),
+            "cme_synced": bool(cme_ok),
+        }
+        self._log_operation("Synced current time window to Solar Events panels.")
+        if not goes_ok and not cme_ok:
+            self.statusBar().showMessage("No open GOES/CME windows to sync.", 4000)
+        else:
+            self.statusBar().showMessage("Synced current time window to Solar Events.", 4000)
+
+    def _build_provenance_context(self) -> dict:
+        shape = None
+        if self.raw_data is not None:
+            try:
+                shape = [int(self.raw_data.shape[0]), int(self.raw_data.shape[1])]
+            except Exception:
+                shape = None
+        freq_range = None
+        if self.freqs is not None and len(self.freqs) > 0:
+            freq_range = [float(np.nanmin(self.freqs)), float(np.nanmax(self.freqs))]
+        time_range = None
+        if self.time is not None and len(self.time) > 0:
+            time_range = [float(np.nanmin(self.time)), float(np.nanmax(self.time))]
+
+        context = {
+            "app": {
+                "name": APP_NAME,
+                "version": APP_VERSION,
+                "platform": platform.platform(),
+            },
+            "data_source": {
+                "filename": self.filename,
+                "is_combined": bool(self._is_combined),
+                "combined_mode": self._combined_mode,
+                "shape": shape,
+                "freq_range_mhz": freq_range,
+                "time_range_s": time_range,
+                "sources": list(self._combined_sources or ([self._fits_source_path] if self._fits_source_path else [])),
+            },
+            "processing": {
+                "plot_type": self.current_plot_type,
+                "use_db": bool(self.use_db),
+                "use_utc": bool(self.use_utc),
+                "slider_low": int(self.lower_slider.value()),
+                "slider_high": int(self.upper_slider.value()),
+                "cmap": self.current_cmap_name,
+                "graph": self._preset_settings_payload().get("graph", {}),
+                "active_preset": dict(self._active_preset_snapshot or {}),
+            },
+            "rfi": dict(self._rfi_config or {}),
+            "annotations": normalize_annotations(self._annotations),
+            "max_intensity": self._max_intensity_state,
+            "time_sync": dict(self._last_time_sync_context or {}),
+            "operation_log": list(self._processing_log or []),
+        }
+        return context
+
+    def export_provenance_report(self):
+        if self.raw_data is None:
+            QMessageBox.information(self, "Export Provenance", "Load a FITS file first.")
+            return
+        default_stem = self._sanitize_export_stem(self._current_graph_title_for_export())
+        default_name = f"{default_stem}_provenance"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Provenance Report",
+            default_name,
+            "Provenance JSON (*.json);;Markdown (*.md);;All Files (*)",
+        )
+        if not path:
+            return
+        stem = os.path.splitext(path)[0]
+        payload = build_provenance_payload(self._build_provenance_context())
+        try:
+            json_path, md_path = write_provenance_files(stem, payload)
+            self.statusBar().showMessage(
+                f"Provenance exported: {os.path.basename(json_path)}, {os.path.basename(md_path)}",
+                5000,
+            )
+            self._log_operation("Exported provenance report (JSON + Markdown).")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Provenance Failed", str(e))
+
     def _mark_project_dirty(self):
         if getattr(self, "_loading_project", False):
             return
         if getattr(self, "raw_data", None) is None:
             return
         self._project_dirty = True
+        if getattr(self, "_autosave_timer", None) is not None and not self._autosave_timer.isActive():
+            self._autosave_timer.start()
         self._sync_project_actions()
 
     def _set_project_clean(self, path: str | None):
@@ -5008,6 +6035,11 @@ class MainWindow(QMainWindow):
             "combined_mode": getattr(self, "_combined_mode", None),
             "combined_sources": list(getattr(self, "_combined_sources", []) or []),
             "graph": graph,
+            "rfi": dict(getattr(self, "_rfi_config", {}) or {}),
+            "annotations": normalize_annotations(getattr(self, "_annotations", [])),
+            "active_preset": dict(getattr(self, "_active_preset_snapshot", {}) or {}),
+            "processing_log": list(getattr(self, "_processing_log", []) or []),
+            "time_sync": dict(getattr(self, "_last_time_sync_context", {}) or {}),
         }
 
         # Optional derived analysis state (populated after dialogs)
@@ -5064,6 +6096,11 @@ class MainWindow(QMainWindow):
             self._is_combined = bool(meta.get("is_combined", False))
             self._combined_mode = meta.get("combined_mode", None)
             self._combined_sources = list(meta.get("combined_sources", []) or [])
+            self._rfi_config = dict(meta.get("rfi") or self._rfi_config)
+            self._annotations = normalize_annotations(meta.get("annotations", []))
+            self._active_preset_snapshot = dict(meta.get("active_preset") or {})
+            self._processing_log = list(meta.get("processing_log") or [])
+            self._last_time_sync_context = dict(meta.get("time_sync") or {})
 
             header_txt = meta.get("fits_header", None)
             self._fits_header0 = None
@@ -5170,12 +6207,24 @@ class MainWindow(QMainWindow):
                     "source_filename": self.filename,
                 }
 
+            if self._rfi_dialog is not None:
+                try:
+                    self._rfi_dialog.enabled_chk.setChecked(bool(self._rfi_config.get("enabled", True)))
+                    self._rfi_dialog.kernel_time_spin.setValue(int(self._rfi_config.get("kernel_time", 3)))
+                    self._rfi_dialog.kernel_freq_spin.setValue(int(self._rfi_config.get("kernel_freq", 3)))
+                    self._rfi_dialog.z_thresh_spin.setValue(float(self._rfi_config.get("channel_z_threshold", 6.0)))
+                    self._rfi_dialog.percentile_spin.setValue(float(self._rfi_config.get("percentile_clip", 99.5)))
+                    self._rfi_dialog.set_masked_channels(self._rfi_config.get("masked_channel_indices", []))
+                except Exception:
+                    pass
+
             # Redraw
             if self.raw_data is not None:
                 data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
                 self.plot_data(data, title=self.current_plot_type, restore_view=meta.get("view"))
                 self.graph_group.setEnabled(True)
                 self._sync_toolbar_enabled_states()
+                QTimer.singleShot(0, self._render_annotations)
         finally:
             self._loading_project = False
             self._sync_project_actions()
@@ -5197,6 +6246,7 @@ class MainWindow(QMainWindow):
 
         self._set_project_clean(self._project_path)
         self.statusBar().showMessage(f"Project saved: {os.path.basename(self._project_path)}", 5000)
+        self._log_operation(f"Saved project: {os.path.basename(self._project_path)}")
         return True
 
     def save_project_as(self) -> bool:
@@ -5232,6 +6282,7 @@ class MainWindow(QMainWindow):
 
         self._set_project_clean(path)
         self.statusBar().showMessage(f"Project saved: {os.path.basename(path)}", 5000)
+        self._log_operation(f"Saved project: {os.path.basename(path)}")
         return True
 
     def open_project(self):
@@ -5265,6 +6316,7 @@ class MainWindow(QMainWindow):
         self._apply_project_payload(payload.meta, payload.arrays)
         self._set_project_clean(path)
         self.statusBar().showMessage(f"Project loaded: {os.path.basename(path)}", 5000)
+        self._log_operation(f"Loaded project: {os.path.basename(path)}")
 
     def open_fits_header_viewer(self):
         if getattr(self, "raw_data", None) is None:
@@ -5320,14 +6372,40 @@ class MainWindow(QMainWindow):
                 self._cme_helper_client.shutdown()
         except Exception:
             pass
+        try:
+            if self._autosave_timer is not None:
+                self._autosave_timer.stop()
+        except Exception:
+            pass
+        try:
+            self._ui_settings.setValue("runtime/clean_exit", True)
+        except Exception:
+            pass
         self._close_update_download_progress_dialog()
         super().closeEvent(event)
 
 
     def open_cme_viewer(self):
         from src.UI.soho_lasco_viewer import CMEViewer  # import here, not at top
-        self._cme_viewer = CMEViewer(parent=self, helper_client=self._cme_helper_client)
+        try:
+            alive = self._cme_viewer is not None
+            if alive:
+                _ = self._cme_viewer.windowTitle()
+        except Exception:
+            alive = False
+        if not alive:
+            self._cme_viewer = CMEViewer(parent=self, helper_client=self._cme_helper_client)
         self._cme_viewer.show()
+        self._cme_viewer.raise_()
+        self._cme_viewer.activateWindow()
+
+        window = self._current_time_window_utc()
+        if window and hasattr(self._cme_viewer, "set_target_datetime"):
+            try:
+                mid = window[0] + (window[1] - window[0]) / 2
+                self._cme_viewer.set_target_datetime(mid, auto_search=True, auto_select_nearest=True)
+            except Exception:
+                pass
 
 
 class MaxIntensityPlotDialog(QDialog):
@@ -6351,6 +7429,7 @@ class CombineFrequencyDialog(QDialog):
         self.main_window.current_display_data = None
         self.main_window._undo_stack.clear()
         self.main_window._redo_stack.clear()
+        self.main_window._reset_feature_state_for_new_data()
 
         self.main_window._project_path = None
         self.main_window._max_intensity_state = None
@@ -6545,6 +7624,7 @@ class CombineTimeDialog(QDialog):
             self.main_window.current_display_data = None
             self.main_window._undo_stack.clear()
             self.main_window._redo_stack.clear()
+            self.main_window._reset_feature_state_for_new_data()
 
             self.main_window._project_path = None
             self.main_window._max_intensity_state = None

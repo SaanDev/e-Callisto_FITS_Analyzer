@@ -14,6 +14,12 @@ The items below are in-progress for **v2.1** and are not yet a final public rele
 - **Update Checker**: **About → Check for Updates...** to search online for newer releases.
 - **Background update checks**: checks run without blocking the UI.
 - **In-app update download flow**: download installer/package inside the app with progress and cancel support, plus release page link.
+- **Autosave + crash recovery**: rolling recovery snapshots with **File → Recover Last Session...**.
+- **RFI cleaning toolkit**: median filtering, robust channel masking, percentile clip with preview/apply/reset workflow.
+- **Annotation layer**: polygon/line/text annotations persisted in project files.
+- **Cross-panel time sync**: sync active analyzer time window to GOES/CME windows.
+- **Processing presets**: save/apply/delete named presets (global + project snapshot support).
+- **Provenance report export**: one-click Markdown + JSON metadata reports for reproducibility.
 
 ### Planned CME viewer enhancements
 - **Enhanced CME Viewer** with a more stable, isolated playback flow.

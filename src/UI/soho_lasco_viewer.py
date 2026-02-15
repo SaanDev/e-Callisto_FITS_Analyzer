@@ -496,6 +496,7 @@ class CMEViewer(QMainWindow):
         self._logger = _cme_logger()
         self._rows: List[CMECatalogRow] = []
         self._selected_row: int | None = None
+        self._pending_target_dt: datetime | None = None
         self.fetch_thread: FetchThread | None = None
         self._helper_client = helper_client
 
@@ -592,6 +593,30 @@ class CMEViewer(QMainWindow):
         self._set_action_buttons_enabled(False)
         self._set_movie_status("Select a CME entry and click Play Movie.")
 
+    def set_target_datetime(
+        self,
+        target_dt: datetime,
+        *,
+        auto_search: bool = True,
+        auto_select_nearest: bool = True,
+    ) -> None:
+        """Programmatically set the target CME date/time and optionally search/select."""
+        try:
+            year = f"{int(target_dt.year)}"
+            month = f"{int(target_dt.month):02d}"
+            day = f"{int(target_dt.day):02d}"
+            self.year_combo.setCurrentText(year)
+            self.month_combo.setCurrentText(month)
+            self.day_combo.setCurrentText(day)
+            self._pending_target_dt = target_dt if auto_select_nearest else None
+            self._set_movie_status(
+                f"Synced target CME time: {target_dt:%Y-%m-%d %H:%M:%S} UTC"
+            )
+            if auto_search:
+                self.search_cmes()
+        except Exception as e:
+            self._set_movie_status(f"Failed to sync CME target time: {e}")
+
     def _set_action_buttons_enabled(self, enabled: bool) -> None:
         state = bool(enabled)
         self.play_btn.setEnabled(state)
@@ -640,6 +665,7 @@ class CMEViewer(QMainWindow):
         if not isinstance(outcome_obj, FetchOutcome):
             self.details_text.setText("Unexpected CME fetch result.")
             self._set_movie_status("Unexpected CME fetch result.")
+            self._pending_target_dt = None
             return
 
         outcome = outcome_obj
@@ -654,18 +680,21 @@ class CMEViewer(QMainWindow):
             message = outcome.message or "Catalog for selected month is not published yet."
             self.details_text.setText(message)
             self._set_movie_status(message)
+            self._pending_target_dt = None
             return
 
         if outcome.status == STATUS_FETCH_ERROR:
             message = outcome.message or "Failed to load CME catalog."
             self.details_text.setText(message)
             self._set_movie_status(message)
+            self._pending_target_dt = None
             return
 
         if outcome.status == STATUS_NO_DATA or not outcome.rows:
             message = outcome.message or "No CME data available for selected date."
             self.details_text.setText(message)
             self._set_movie_status(message)
+            self._pending_target_dt = None
             return
 
         self._rows = list(outcome.rows)
@@ -678,6 +707,22 @@ class CMEViewer(QMainWindow):
         self._set_movie_status(
             "CME data loaded. Select a row and click Play Movie to open isolated playback."
         )
+
+        if self._pending_target_dt and self._rows:
+            target_dt = self._pending_target_dt
+            self._pending_target_dt = None
+            try:
+                nearest_idx = min(
+                    range(len(self._rows)),
+                    key=lambda i: abs((self._rows[i].timestamp - target_dt).total_seconds()),
+                )
+                self.table.selectRow(nearest_idx)
+                self.show_cme_details(nearest_idx, 0)
+                self._set_movie_status(
+                    f"Synced CME selection to nearest event at {self._rows[nearest_idx].timestamp:%H:%M:%S} UTC."
+                )
+            except Exception:
+                pass
 
     def show_cme_details(self, row: int, _: int) -> None:
         if row < 0 or row >= len(self._rows):
