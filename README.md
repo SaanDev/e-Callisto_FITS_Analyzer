@@ -8,7 +8,7 @@ Upcoming version: **2.1** *(in development)*
 
 ## 🚧 Upcoming Features (v2.1 - In Development)
 
-The items below are planned/in-progress for **v2.1** and are not yet a final public release.
+The items below are in-progress for **v2.1** and are not yet a final public release.
 
 ### Planned application updates
 - **Update Checker**: **About → Check for Updates...** to search online for newer releases.
