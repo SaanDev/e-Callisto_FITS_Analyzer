@@ -127,7 +127,7 @@ def _parse_cli_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
 
 
 def _run_main_mode(app: QApplication) -> int:
-    from src.UI.gui_main import MainWindow
+    from src.UI.main_window import MainWindow
     from src.UI.mpl_style import apply_origin_style
     from src.UI.theme_manager import AppTheme
 
