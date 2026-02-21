@@ -9,8 +9,10 @@ pytest.importorskip("matplotlib")
 
 from src.Backend.batch_processing import (
     build_unique_output_png_path,
+    convert_digits_to_db,
     list_fit_files,
     save_background_subtracted_png,
+    subtract_background,
     subtract_mean_background,
 )
 
@@ -54,6 +56,33 @@ def test_subtract_mean_background_returns_float32():
     assert np.allclose(result, expected)
 
 
+def test_subtract_background_median_per_row():
+    data = np.array(
+        [
+            [1.0, 2.0, 100.0],
+            [5.0, 7.0, 9.0],
+        ],
+        dtype=np.float32,
+    )
+    result = subtract_background(data, method="median")
+    expected = np.array(
+        [
+            [-1.0, 0.0, 98.0],
+            [-2.0, 0.0, 2.0],
+        ],
+        dtype=np.float32,
+    )
+    assert np.allclose(result, expected)
+
+
+def test_convert_digits_to_db_uses_cold_baseline():
+    data = np.array([[10.0, 20.0]], dtype=np.float32)
+    out = convert_digits_to_db(data, cold_digits=5.0)
+    scale = 2500.0 / 256.0 / 25.4
+    expected = (data - 5.0) * scale
+    assert np.allclose(out, expected)
+
+
 def test_build_unique_output_png_path_avoids_overwrite(tmp_path: Path):
     (tmp_path / "demo.png").write_bytes(b"x")
     (tmp_path / "demo_1.png").write_bytes(b"x")
@@ -82,7 +111,28 @@ def test_save_background_subtracted_png_writes_file(tmp_path: Path):
         output_path=str(out),
         title="demo-Background Subtracted",
         cmap_name="Custom",
+        ut_start_sec=3600.0,
+        cold_digits=1.5,
     )
 
+    assert out.exists()
+    assert out.stat().st_size > 0
+
+
+def test_save_background_subtracted_png_ut_fallback_when_missing_start(tmp_path: Path):
+    data = np.array([[1.0, 2.0], [2.0, 3.0]], dtype=np.float32)
+    freqs = np.array([90.0, 80.0], dtype=float)
+    time = np.array([0.0, 1.0], dtype=float)
+    out = tmp_path / "result_ut_fallback.png"
+    save_background_subtracted_png(
+        data=data,
+        freqs=freqs,
+        time=time,
+        output_path=str(out),
+        title="ut-fallback",
+        cmap_name="inferno",
+        ut_start_sec=None,
+        cold_digits=0.0,
+    )
     assert out.exists()
     assert out.stat().st_size > 0

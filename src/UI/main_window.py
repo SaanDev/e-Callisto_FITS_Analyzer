@@ -4630,6 +4630,7 @@ class MainWindow(QMainWindow):
         if not alive:
             self._batch_processing_dialog = BatchProcessingDialog(
                 cmap_name_provider=lambda: str(self.current_cmap_name or "Custom"),
+                cold_digits_provider=lambda: float(self._db_hot_cold_digits()[0]),
                 parent=self,
             )
             self._batch_processing_dialog.setAttribute(Qt.WA_DeleteOnClose, True)

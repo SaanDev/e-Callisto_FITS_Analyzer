@@ -7,14 +7,15 @@ from __future__ import annotations
 import os
 import tempfile
 
+import numpy as np
 import requests
 from PySide6.QtCore import QObject, Signal, Slot
 
 from src.Backend.batch_processing import (
     build_unique_output_png_path,
+    subtract_background,
     list_fit_files,
     save_background_subtracted_png,
-    subtract_mean_background,
 )
 from src.Backend.fits_io import extract_ut_start_sec, load_callisto_fits
 from src.Backend.update_checker import check_for_updates
@@ -206,11 +207,27 @@ class BatchProcessWorker(QObject):
     finished = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, input_dir: str, output_dir: str, cmap_name: str = "Custom"):
+    def __init__(
+        self,
+        input_dir: str,
+        output_dir: str,
+        cmap_name: str = "Custom",
+        output_mode: str = "background_subtracted",
+        background_method: str = "mean",
+        cold_digits: float = 0.0,
+    ):
         super().__init__()
         self.input_dir = str(input_dir or "").strip()
         self.output_dir = str(output_dir or "").strip()
         self.cmap_name = str(cmap_name or "").strip() or "Custom"
+        mode = str(output_mode or "").strip().lower()
+        self.output_mode = "raw" if mode == "raw" else "background_subtracted"
+        method = str(background_method or "").strip().lower()
+        self.background_method = "median" if method == "median" else "mean"
+        try:
+            self.cold_digits = float(cold_digits)
+        except Exception:
+            self.cold_digits = 0.0
         self._cancel_requested = False
 
     @Slot()
@@ -257,6 +274,10 @@ class BatchProcessWorker(QObject):
                     "succeeded": 0,
                     "failed": 0,
                     "cancelled": False,
+                    "output_mode": self.output_mode,
+                    "background_method": self.background_method,
+                    "cmap_name": self.cmap_name,
+                    "cold_digits": self.cold_digits,
                     "results": [],
                     "errors": [],
                 }
@@ -277,7 +298,14 @@ class BatchProcessWorker(QObject):
 
             try:
                 res = load_callisto_fits(file_path, memmap=False)
-                bg_subtracted = subtract_mean_background(res.data)
+                if self.output_mode == "raw":
+                    out_data = np.asarray(res.data, dtype=np.float32)
+                    title_suffix = "Raw"
+                else:
+                    out_data = subtract_background(res.data, method=self.background_method)
+                    method_label = "Mean" if self.background_method == "mean" else "Median"
+                    title_suffix = f"Background Subtracted ({method_label})"
+
                 out_path = build_unique_output_png_path(self.output_dir, base)
 
                 lower = base.lower()
@@ -292,14 +320,20 @@ class BatchProcessWorker(QObject):
                 else:
                     title_stem = os.path.splitext(base)[0]
 
-                title = f"{title_stem}-Background Subtracted"
+                title = f"{title_stem}-{title_suffix}"
+                ut_start_sec = extract_ut_start_sec(res.header0)
+                if ut_start_sec is None:
+                    ut_start_sec = 0.0
+
                 save_background_subtracted_png(
-                    bg_subtracted,
+                    out_data,
                     res.freqs,
                     res.time,
                     out_path,
                     title,
                     self.cmap_name,
+                    ut_start_sec=ut_start_sec,
+                    cold_digits=self.cold_digits,
                 )
                 results.append({"input_path": file_path, "output_path": out_path})
             except Exception as e:
@@ -323,6 +357,10 @@ class BatchProcessWorker(QObject):
                 "succeeded": len(results),
                 "failed": len(errors),
                 "cancelled": cancelled,
+                "output_mode": self.output_mode,
+                "background_method": self.background_method,
+                "cmap_name": self.cmap_name,
+                "cold_digits": self.cold_digits,
                 "results": results,
                 "errors": errors,
             }

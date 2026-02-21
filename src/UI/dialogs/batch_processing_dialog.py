@@ -9,8 +9,11 @@ from typing import Callable
 
 from PySide6.QtCore import Qt, QThread, Slot
 from PySide6.QtWidgets import (
+    QButtonGroup,
+    QComboBox,
     QDialog,
     QFileDialog,
+    QGroupBox,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -18,6 +21,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QVBoxLayout,
 )
 
@@ -25,12 +29,32 @@ from src.UI.gui_workers import BatchProcessWorker
 
 
 class BatchProcessingDialog(QDialog):
-    def __init__(self, *, cmap_name_provider: Callable[[], str] | None = None, parent=None):
+    _COLORMAP_OPTIONS = (
+        "Custom",
+        "viridis",
+        "plasma",
+        "inferno",
+        "magma",
+        "cividis",
+        "turbo",
+        "RdYlBu",
+        "jet",
+        "cubehelix",
+    )
+
+    def __init__(
+        self,
+        *,
+        cmap_name_provider: Callable[[], str] | None = None,
+        cold_digits_provider: Callable[[], float] | None = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Batch FIT Processing")
-        self.resize(760, 260)
+        self.resize(760, 360)
 
         self._cmap_name_provider = cmap_name_provider
+        self._cold_digits_provider = cold_digits_provider
         self._thread = None
         self._worker = None
         self._close_after_finish = False
@@ -67,6 +91,47 @@ class BatchProcessingDialog(QDialog):
         form.addWidget(self.output_browse_btn, 1, 2)
 
         root.addLayout(form)
+
+        output_group = QGroupBox("Output Type")
+        output_layout = QHBoxLayout(output_group)
+        self.output_mode_group = QButtonGroup(self)
+        self.raw_output_radio = QRadioButton("Raw")
+        self.background_output_radio = QRadioButton("Background Subtracted")
+        self.background_output_radio.setChecked(True)
+        self.output_mode_group.addButton(self.raw_output_radio)
+        self.output_mode_group.addButton(self.background_output_radio)
+        output_layout.addWidget(self.raw_output_radio)
+        output_layout.addWidget(self.background_output_radio)
+        output_layout.addStretch(1)
+        root.addWidget(output_group)
+
+        process_group = QGroupBox("Processing Options")
+        process_layout = QGridLayout(process_group)
+        process_layout.setHorizontalSpacing(8)
+        process_layout.setVerticalSpacing(8)
+
+        self.background_method_label = QLabel("Background Method")
+        self.background_method_combo = QComboBox()
+        self.background_method_combo.addItems(["Mean", "Median"])
+
+        self.colormap_label = QLabel("Colormap")
+        self.colormap_combo = QComboBox()
+        self.colormap_combo.addItems(list(self._COLORMAP_OPTIONS))
+        default_cmap = self._current_cmap_name()
+        if default_cmap in self._COLORMAP_OPTIONS:
+            self.colormap_combo.setCurrentText(default_cmap)
+        else:
+            self.colormap_combo.setCurrentText("Custom")
+
+        process_layout.addWidget(self.background_method_label, 0, 0)
+        process_layout.addWidget(self.background_method_combo, 0, 1)
+        process_layout.addWidget(self.colormap_label, 1, 0)
+        process_layout.addWidget(self.colormap_combo, 1, 1)
+        root.addWidget(process_group)
+
+        self.raw_output_radio.toggled.connect(self._sync_background_method_enabled)
+        self.background_output_radio.toggled.connect(self._sync_background_method_enabled)
+        self._sync_background_method_enabled()
 
         self.status_label = QLabel("Select input/output folders, then click Start.")
         self.status_label.setWordWrap(True)
@@ -117,6 +182,10 @@ class BatchProcessingDialog(QDialog):
         self.output_browse_btn.setEnabled(flag)
         self.start_btn.setEnabled(flag)
         self.close_btn.setEnabled(flag)
+        self.raw_output_radio.setEnabled(flag)
+        self.background_output_radio.setEnabled(flag)
+        self.colormap_combo.setEnabled(flag)
+        self._sync_background_method_enabled()
 
         if self.is_running():
             self.cancel_btn.setText("Cancel Run")
@@ -135,6 +204,20 @@ class BatchProcessingDialog(QDialog):
             except Exception:
                 pass
         return "Custom"
+
+    def _current_cold_digits(self) -> float:
+        provider = self._cold_digits_provider
+        if callable(provider):
+            try:
+                return float(provider())
+            except Exception:
+                pass
+        return 0.0
+
+    def _sync_background_method_enabled(self):
+        enabled = bool(self.background_output_radio.isChecked()) and bool(self.background_output_radio.isEnabled())
+        self.background_method_label.setEnabled(enabled)
+        self.background_method_combo.setEnabled(enabled)
 
     def _browse_input_dir(self):
         start = self.input_dir_edit.text().strip() or os.path.expanduser("~")
@@ -181,12 +264,19 @@ class BatchProcessingDialog(QDialog):
         self.progress_bar.setValue(0)
         self.status_label.setText("Preparing batch processing...")
         self._set_controls_enabled(False)
+        output_mode = "raw" if self.raw_output_radio.isChecked() else "background_subtracted"
+        background_method = self.background_method_combo.currentText().strip().lower() or "mean"
+        cmap_name = self.colormap_combo.currentText().strip() or "Custom"
+        cold_digits = self._current_cold_digits()
 
         self._thread = QThread(self)
         self._worker = BatchProcessWorker(
             input_dir=input_dir,
             output_dir=output_dir,
-            cmap_name=self._current_cmap_name(),
+            cmap_name=cmap_name,
+            output_mode=output_mode,
+            background_method=background_method,
+            cold_digits=cold_digits,
         )
         self._worker.moveToThread(self._thread)
 
@@ -246,6 +336,9 @@ class BatchProcessingDialog(QDialog):
         failed = int(data.get("failed", 0) or 0)
         cancelled = bool(data.get("cancelled", False))
         errors = list(data.get("errors") or [])
+        output_mode = str(data.get("output_mode", "background_subtracted") or "background_subtracted")
+        background_method = str(data.get("background_method", "mean") or "mean")
+        cmap_name = str(data.get("cmap_name", "Custom") or "Custom")
 
         if self.progress_bar.maximum() < max(total, processed):
             self.progress_bar.setMaximum(max(total, processed))
@@ -253,12 +346,17 @@ class BatchProcessingDialog(QDialog):
 
         self._set_controls_enabled(True)
 
+        mode_text = "Raw" if output_mode == "raw" else "Background Subtracted"
+        method_text = "N/A" if output_mode == "raw" else background_method.capitalize()
         summary_lines = [
             f"Total files found: {total}",
             f"Processed: {processed}",
             f"Succeeded: {succeeded}",
             f"Failed: {failed}",
             f"Cancelled: {'Yes' if cancelled else 'No'}",
+            f"Output mode: {mode_text}",
+            f"Background method: {method_text}",
+            f"Colormap: {cmap_name}",
         ]
 
         if errors:
