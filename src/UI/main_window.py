@@ -96,6 +96,7 @@ from src.Backend.rfi_filters import clean_rfi, config_dict as rfi_config_dict
 from src.UI.accelerated_plot_widget import AcceleratedPlotWidget
 from src.UI.callisto_downloader import CallistoDownloaderApp
 from src.UI.dialogs.analyze_dialog import AnalyzeDialog
+from src.UI.dialogs.batch_processing_dialog import BatchProcessingDialog
 from src.UI.dialogs.combine_dialogs import CombineFrequencyDialog, CombineTimeDialog
 from src.UI.dialogs.max_intensity_dialog import MaxIntensityPlotDialog
 from src.UI.dialogs.rfi_control_dialog import RFIControlDialog
@@ -108,7 +109,8 @@ from src.UI.utils.cme_helper_client import CMEHelperClient
 from src.version import APP_NAME, APP_ORG, APP_VERSION
 
 class MainWindow(QMainWindow):
-    DB_SCALE = 2500.0 / 255.0 / 25.4
+    # Convert digit differences (e.g., Ihot - Icold) to dB.
+    DB_SCALE = 2500.0 / 256.0 / 25.4
     HW_DEFAULT_TICK_FONT_PX = 14
     HW_DEFAULT_AXIS_FONT_PX = 16
     HW_DEFAULT_TITLE_FONT_PX = 22
@@ -215,6 +217,7 @@ class MainWindow(QMainWindow):
         self._update_download_progress_dialog = None
         self._import_progress_dialog = None
         self._goes_window = None
+        self._batch_processing_dialog = None
 
         # Processing audit + derived state
         self._processing_log = []
@@ -803,6 +806,10 @@ class MainWindow(QMainWindow):
         self.open_restored_analysis_action = QAction("Open Restored Analysis", self)
         analysis_menu.addAction(self.open_restored_analysis_action)
 
+        batch_menu = processing_menu.addMenu("Batch Processing")
+        self.open_batch_processing_action = QAction("Open Batch Processor", self)
+        batch_menu.addAction(self.open_batch_processing_action)
+
         # Set initial checks from saved mode
         if self.theme:
             m = self.theme.mode()
@@ -886,6 +893,7 @@ class MainWindow(QMainWindow):
         self.preset_delete_action.triggered.connect(self.delete_saved_preset)
         self.max_auto_clean_isolated_action.toggled.connect(self.set_max_auto_clean_isolated_enabled)
         self.open_restored_analysis_action.triggered.connect(self.open_restored_analysis_windows)
+        self.open_batch_processing_action.triggered.connect(self.open_batch_processing_window)
 
         # Real-time graph properties (non-colormap)
         self.title_edit.textChanged.connect(self.apply_graph_properties_live)
@@ -2108,7 +2116,8 @@ class MainWindow(QMainWindow):
                 arr = np.asarray(self.current_display_data, dtype=float)
                 if arr.ndim == 2 and arr.shape[1] > 0:
                     if self.use_db:
-                        return arr / float(self.DB_SCALE)
+                        cold_digits, _ = self._db_hot_cold_digits()
+                        return (arr / float(self.DB_SCALE)) + cold_digits
                     return arr
             except Exception:
                 pass
@@ -2574,15 +2583,29 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Combine Error", f"An error occurred while combining files:\n{e}")
             return
 
+    def _db_hot_cold_digits(self) -> tuple[float, float]:
+        # For Y-factor style conversion use Icold=vmin and Ihot=vmax from scrollbars.
+        cold = float(self.lower_slider.value())
+        hot = float(self.upper_slider.value())
+        if cold > hot:
+            cold, hot = hot, cold
+        return cold, hot
+
     def _intensity_for_display(self, data):
         if data is None:
             return None
-        return data * self.DB_SCALE if self.use_db else data
+        if not self.use_db:
+            return data
+        cold_digits, _ = self._db_hot_cold_digits()
+        return (np.asarray(data, dtype=float) - cold_digits) * self.DB_SCALE
 
     def _intensity_range_for_display(self, vmin, vmax):
         if vmin is None or vmax is None:
             return vmin, vmax
-        return (vmin * self.DB_SCALE, vmax * self.DB_SCALE) if self.use_db else (vmin, vmax)
+        if not self.use_db:
+            return vmin, vmax
+        cold_digits, _ = self._db_hot_cold_digits()
+        return ((vmin - cold_digits) * self.DB_SCALE, (vmax - cold_digits) * self.DB_SCALE)
 
     def update_units(self):
         self.set_units_mode(bool(self.units_db_radio.isChecked()))
@@ -4593,6 +4616,29 @@ class MainWindow(QMainWindow):
         dialog = CombineTimeDialog(self)
         dialog.exec()
 
+    def _on_batch_processing_dialog_destroyed(self, *_):
+        self._batch_processing_dialog = None
+
+    def open_batch_processing_window(self):
+        try:
+            alive = self._batch_processing_dialog is not None
+            if alive:
+                _ = self._batch_processing_dialog.windowTitle()
+        except Exception:
+            alive = False
+
+        if not alive:
+            self._batch_processing_dialog = BatchProcessingDialog(
+                cmap_name_provider=lambda: str(self.current_cmap_name or "Custom"),
+                parent=self,
+            )
+            self._batch_processing_dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+            self._batch_processing_dialog.destroyed.connect(self._on_batch_processing_dialog_destroyed)
+
+        self._batch_processing_dialog.show()
+        self._batch_processing_dialog.raise_()
+        self._batch_processing_dialog.activateWindow()
+
     def _set_checked_if_exists(self, attr_name: str, checked: bool):
         obj = getattr(self, attr_name, None)
         if obj is None:
@@ -6567,6 +6613,12 @@ class MainWindow(QMainWindow):
         try:
             if self._cme_helper_client is not None:
                 self._cme_helper_client.shutdown()
+        except Exception:
+            pass
+        try:
+            if self._batch_processing_dialog is not None:
+                self._batch_processing_dialog.force_shutdown(timeout_ms=2000)
+                self._batch_processing_dialog.close()
         except Exception:
             pass
         try:

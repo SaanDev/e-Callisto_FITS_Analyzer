@@ -16,10 +16,13 @@ def load_fits(filepath):
     return res.data, res.freqs, res.time
 
 def reduce_noise(data, clip_low=-5, clip_high=20):
+    low = float(min(clip_low, clip_high))
+    high = float(max(clip_low, clip_high))
     data = data - data.mean(axis=1, keepdims=True)
     print("Before clip:", data.min(), data.max())
-    data = np.clip(data, clip_low, clip_high)
-    data = data * 2500.0 / 255.0 / 25.4
+    data = np.clip(data, low, high)
+    # Y-factor style conversion where Icold=low threshold and Ihot is signal.
+    data = (data - low) * 2500.0 / 256.0 / 25.4
     return data
 
 def parse_filename(filepath):

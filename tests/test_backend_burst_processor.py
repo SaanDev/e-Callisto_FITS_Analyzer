@@ -56,9 +56,10 @@ def test_load_fits_reads_arrays(monkeypatch):
 
 def test_reduce_noise_applies_mean_clip_and_scale():
     data = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    low, high = -5.0, 20.0
     expected = data - data.mean(axis=1, keepdims=True)
-    expected = np.clip(expected, -5, 20)
-    expected = expected * 2500.0 / 255.0 / 25.4
+    expected = np.clip(expected, low, high)
+    expected = (expected - low) * 2500.0 / 256.0 / 25.4
 
     result = burst_processor.reduce_noise(data)
 

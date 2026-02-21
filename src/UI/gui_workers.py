@@ -10,6 +10,12 @@ import tempfile
 import requests
 from PySide6.QtCore import QObject, Signal, Slot
 
+from src.Backend.batch_processing import (
+    build_unique_output_png_path,
+    list_fit_files,
+    save_background_subtracted_png,
+    subtract_mean_background,
+)
 from src.Backend.fits_io import extract_ut_start_sec, load_callisto_fits
 from src.Backend.update_checker import check_for_updates
 
@@ -191,3 +197,133 @@ class UpdateDownloadWorker(QObject):
             except Exception:
                 pass
             self.failed.emit(str(e))
+
+
+class BatchProcessWorker(QObject):
+    progress_text = Signal(str)
+    progress_range = Signal(int, int)
+    progress_value = Signal(int)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, input_dir: str, output_dir: str, cmap_name: str = "Custom"):
+        super().__init__()
+        self.input_dir = str(input_dir or "").strip()
+        self.output_dir = str(output_dir or "").strip()
+        self.cmap_name = str(cmap_name or "").strip() or "Custom"
+        self._cancel_requested = False
+
+    @Slot()
+    def request_cancel(self):
+        self._cancel_requested = True
+
+    @Slot()
+    def run(self):
+        if not self.input_dir:
+            self.failed.emit("Input folder is required.")
+            return
+        if not self.output_dir:
+            self.failed.emit("Output folder is required.")
+            return
+        if not os.path.isdir(self.input_dir):
+            self.failed.emit("Input folder does not exist.")
+            return
+
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
+        except Exception as e:
+            self.failed.emit(f"Could not create output folder:\n{e}")
+            return
+
+        try:
+            files = list_fit_files(self.input_dir, recursive=False)
+        except Exception as e:
+            self.failed.emit(f"Could not list FIT files:\n{e}")
+            return
+
+        total = len(files)
+        self.progress_range.emit(0, max(0, total))
+        self.progress_value.emit(0)
+
+        if total == 0:
+            self.progress_text.emit("No FIT files found in selected input folder.")
+            self.finished.emit(
+                {
+                    "kind": "batch",
+                    "input_dir": self.input_dir,
+                    "output_dir": self.output_dir,
+                    "total": 0,
+                    "processed": 0,
+                    "succeeded": 0,
+                    "failed": 0,
+                    "cancelled": False,
+                    "results": [],
+                    "errors": [],
+                }
+            )
+            return
+
+        results: list[dict] = []
+        errors: list[dict] = []
+        processed = 0
+
+        for idx, file_path in enumerate(files, start=1):
+            if self._cancel_requested:
+                break
+
+            processed = idx
+            base = os.path.basename(file_path)
+            self.progress_text.emit(f"Processing {base} ({idx}/{total})...")
+
+            try:
+                res = load_callisto_fits(file_path, memmap=False)
+                bg_subtracted = subtract_mean_background(res.data)
+                out_path = build_unique_output_png_path(self.output_dir, base)
+
+                lower = base.lower()
+                if lower.endswith(".fit.gz"):
+                    title_stem = base[:-7]
+                elif lower.endswith(".fits.gz"):
+                    title_stem = base[:-8]
+                elif lower.endswith(".fit"):
+                    title_stem = base[:-4]
+                elif lower.endswith(".fits"):
+                    title_stem = base[:-5]
+                else:
+                    title_stem = os.path.splitext(base)[0]
+
+                title = f"{title_stem}-Background Subtracted"
+                save_background_subtracted_png(
+                    bg_subtracted,
+                    res.freqs,
+                    res.time,
+                    out_path,
+                    title,
+                    self.cmap_name,
+                )
+                results.append({"input_path": file_path, "output_path": out_path})
+            except Exception as e:
+                errors.append({"input_path": file_path, "error": str(e)})
+
+            self.progress_value.emit(idx)
+
+        cancelled = self._cancel_requested and processed < total
+        if cancelled:
+            self.progress_text.emit("Batch processing cancelled.")
+        else:
+            self.progress_text.emit("Batch processing complete.")
+
+        self.finished.emit(
+            {
+                "kind": "batch",
+                "input_dir": self.input_dir,
+                "output_dir": self.output_dir,
+                "total": total,
+                "processed": processed,
+                "succeeded": len(results),
+                "failed": len(errors),
+                "cancelled": cancelled,
+                "results": results,
+                "errors": errors,
+            }
+        )
