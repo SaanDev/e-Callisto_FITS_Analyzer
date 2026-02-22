@@ -36,3 +36,9 @@ htmlcov/
 /Untitled.txt
 /projects/Arecibo-Observatory_20220302_combined_time.efaproj
 /.codex/environments/environment.toml
+
+# Local data folders
+/projects/
+/Projects/
+/testing/
+/Testing/
