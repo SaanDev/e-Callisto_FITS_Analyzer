@@ -61,24 +61,31 @@ function Find-Iscc {
     return $null
 }
 
-function Get-PythonBootstrapCommand {
-    $python = Get-Command python.exe -ErrorAction SilentlyContinue
+function Get-PythonCommand {
+    $pythonExe = Get-Command python.exe -ErrorAction SilentlyContinue
+    if ($pythonExe) {
+        return $pythonExe.Source
+    }
+
+    $python = Get-Command python -ErrorAction SilentlyContinue
     if ($python) {
-        return @{
-            Exe = $python.Source
-            Args = @()
-        }
+        return $python.Source
     }
 
-    $py = Get-Command py.exe -ErrorAction SilentlyContinue
-    if ($py) {
-        return @{
-            Exe = $py.Source
-            Args = @("-3")
-        }
-    }
+    throw "No Python executable found on PATH. Activate your virtual environment first."
+}
 
-    throw "No Python launcher found. Install Python and ensure either 'python.exe' or 'py.exe' is on PATH."
+function Invoke-Native {
+    param(
+        [Parameter(Mandatory=$true)][string]$Exe,
+        [Parameter(Mandatory=$true)][string[]]$Args,
+        [Parameter(Mandatory=$true)][string]$Description
+    )
+
+    & $Exe @Args
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Description failed with exit code $LASTEXITCODE."
+    }
 }
 
 $Root = Resolve-RepoRoot -RequestedRoot $Root
@@ -90,36 +97,52 @@ $SpecPath = Join-Path $Root "src\Installation\FITS_Analyzer_win.spec"
 $RuntimeRequirements = Join-Path $Root "src\Installation\requirements-runtime.txt"
 $BuildRequirements = Join-Path $Root "src\Installation\requirements-build.txt"
 $IssPath = Join-Path $Root "src\Installation\FITS_Analyzer_InnoSetup.iss"
-$DistAppDir = Join-Path $Root "dist\e-Callisto FITS Analyzer"
+$BuildDir = Join-Path $Root "build"
+$DistDir = Join-Path $Root "dist"
 $OutputInstaller = Join-Path $Root ("dist\e-CALLISTO_FITS_Analyzer_v{0}_Setup.exe" -f $Version)
+$PythonExe = Get-PythonCommand
 
 Write-Host "==> Project root: $Root"
 Write-Host "==> Building version: $Version"
+if ($env:VIRTUAL_ENV) {
+    Write-Host "==> Using active virtual environment: $env:VIRTUAL_ENV"
+}
+Write-Host "==> Using Python: $PythonExe"
 
 if (-not (Test-Path $SpecPath)) { throw "Missing spec file: $SpecPath" }
 if (-not (Test-Path $RuntimeRequirements)) { throw "Missing runtime requirements file: $RuntimeRequirements" }
 if (-not (Test-Path $BuildRequirements)) { throw "Missing build requirements file: $BuildRequirements" }
 if (-not (Test-Path $IssPath) -and -not $SkipInstaller) { throw "Missing Inno Setup script: $IssPath" }
 
-# 1) Build app folder with PyInstaller
-$VenvDir = Join-Path $Root ".venv-build"
-$VenvPython = Join-Path $VenvDir "Scripts\python.exe"
-$BootstrapPython = Get-PythonBootstrapCommand
+# 1) Build app folder with PyInstaller (inside project-root build/dist)
+New-Item -ItemType Directory -Path $BuildDir -Force | Out-Null
+New-Item -ItemType Directory -Path $DistDir -Force | Out-Null
 
-if (-not (Test-Path $VenvPython)) {
-    & $BootstrapPython.Exe @($BootstrapPython.Args + @("-m", "venv", $VenvDir))
-}
-if (-not (Test-Path $VenvPython)) {
-    throw "Python venv was not created correctly: $VenvPython"
-}
+Invoke-Native -Exe $PythonExe -Args @("-m", "pip", "install", "--upgrade", "pip") -Description "pip upgrade"
+Invoke-Native -Exe $PythonExe -Args @("-m", "pip", "install", "--requirement", $BuildRequirements) -Description "build dependency install"
+Invoke-Native -Exe $PythonExe -Args @("-m", "pip", "install", "--requirement", $RuntimeRequirements) -Description "runtime dependency install"
+Invoke-Native -Exe $PythonExe -Args @(
+    "-m", "PyInstaller",
+    "--clean",
+    "--noconfirm",
+    "--distpath", $DistDir,
+    "--workpath", $BuildDir,
+    $SpecPath
+) -Description "PyInstaller build"
 
-& $VenvPython -m pip install --upgrade pip
-& $VenvPython -m pip install --requirement $BuildRequirements
-& $VenvPython -m pip install --requirement $RuntimeRequirements
-& $VenvPython -m PyInstaller --clean --noconfirm $SpecPath
+$DistCandidates = @(
+    (Join-Path $DistDir "e-Callisto FITS Analyzer"),
+    (Join-Path $DistDir "e-callisto-fits-analyzer")
+)
+$DistAppDir = $DistCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 
 if (-not (Test-Path $DistAppDir)) {
-    throw "PyInstaller output folder not found: $DistAppDir"
+    $found = @()
+    if (Test-Path $DistDir) {
+        $found = @(Get-ChildItem -Path $DistDir -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+    }
+    $foundText = if ($found.Count -gt 0) { ($found -join "; ") } else { "(none)" }
+    throw "PyInstaller output folder not found under $DistDir. Expected one of: $($DistCandidates -join ', '). Found: $foundText"
 }
 
 Write-Host "Built app folder: $DistAppDir"
@@ -135,7 +158,12 @@ if (-not $IsccPath) {
     throw "ISCC.exe not found. Install Inno Setup 6 and rerun, or use -SkipInstaller."
 }
 
-& $IsccPath ("/DRepoRoot={0}" -f $Root) ("/DAppVersion={0}" -f $Version) $IssPath
+Invoke-Native -Exe $IsccPath -Args @(
+    ("/DRepoRoot={0}" -f $Root),
+    ("/DAppVersion={0}" -f $Version),
+    ("/DDistDir={0}" -f $DistAppDir),
+    $IssPath
+) -Description "Inno Setup build"
 
 if (Test-Path $OutputInstaller) {
     Write-Host "Built installer: $OutputInstaller"

@@ -12,7 +12,9 @@
   #define RepoRoot AddBackslash(SourcePath) + "..\.."
 #endif
 
-#define DistDir RepoRoot + "\dist\e-Callisto FITS Analyzer"
+#ifndef DistDir
+  #define DistDir RepoRoot + "\dist\e-Callisto FITS Analyzer"
+#endif
 
 [Setup]
 AppId={{8D3A5938-5A86-4E5F-B6D9-0F4BE4E2A94D}
