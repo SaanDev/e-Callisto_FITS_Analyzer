@@ -11,6 +11,12 @@ Upcoming version: **2.1** *(in development)*
 The items below are in-progress for **v2.1** and are not yet a final public release.
 
 ### Planned application updates
+- **Batch FIT Processing window**: **Processing → Batch Processing → Open Batch Processor** for folder-based batch export.
+- **Batch output controls**: choose **Raw** or **Background Subtracted** PNG output.
+- **Background subtraction options**: select **Mean** or **Median** subtraction for batch processing.
+- **Batch visualization controls**: select colormap per batch run; output PNGs use **UT** on the x-axis and **dB** on the colorbar.
+- **Batch progress + resilience**: progress bar, per-file continue-on-error behavior, and end-of-run summary.
+- **Report a Bug workflow**: **About → Report a Bug...** with diagnostics ZIP generation and prefilled GitHub issue draft.
 - **Update Checker**: **About → Check for Updates...** to search online for newer releases.
 - **Background update checks**: checks run without blocking the UI.
 - **In-app update download flow**: download installer/package inside the app with progress and cancel support, plus release page link.
