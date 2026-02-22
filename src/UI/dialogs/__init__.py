@@ -1,3 +1,10 @@
+"""
+e-CALLISTO FITS Analyzer
+Version 2.1
+Sahan S Liyanage (sahanslst@gmail.com)
+Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
+"""
+
 """Dialog components for e-CALLISTO FITS Analyzer."""
 
 from src.UI.dialogs.analyze_dialog import AnalyzeDialog

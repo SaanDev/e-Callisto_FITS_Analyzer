@@ -1,9 +1,8 @@
 """
-Smoke checks for packaged artifacts.
-
-This script validates that:
-1) helper mode (`--mode=cme-helper`) starts successfully, and
-2) the normal app mode starts as a separate process.
+e-CALLISTO FITS Analyzer
+Version 2.1
+Sahan S Liyanage (sahanslst@gmail.com)
+Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
 
 from __future__ import annotations

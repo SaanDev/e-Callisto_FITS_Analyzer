@@ -1,4 +1,11 @@
 """
+e-CALLISTO FITS Analyzer
+Version 2.1
+Sahan S Liyanage (sahanslst@gmail.com)
+Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
+"""
+
+"""
 Compatibility facade for legacy imports from src.UI.gui_main.
 """
 

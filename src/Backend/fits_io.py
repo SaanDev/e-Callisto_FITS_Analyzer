@@ -1,11 +1,8 @@
 """
-Central FITS I/O helpers for the e-CALLISTO FITS Analyzer.
-
-Goals:
-  - Robustly read .fit/.fits and their .gz variants
-  - Handle missing axis tables (frequency/time), swapped axes, and extra dimensions
-  - Provide a consistent (freq, time) oriented 2D data array
-  - Build an updated header for combined datasets
+e-CALLISTO FITS Analyzer
+Version 2.1
+Sahan S Liyanage (sahanslst@gmail.com)
+Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
 
 from __future__ import annotations

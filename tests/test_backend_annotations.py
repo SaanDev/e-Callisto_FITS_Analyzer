@@ -1,3 +1,10 @@
+"""
+e-CALLISTO FITS Analyzer
+Version 2.1
+Sahan S Liyanage (sahanslst@gmail.com)
+Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
+"""
+
 from __future__ import annotations
 
 from src.Backend.annotations import make_annotation, normalize_annotations, toggle_all_visibility
