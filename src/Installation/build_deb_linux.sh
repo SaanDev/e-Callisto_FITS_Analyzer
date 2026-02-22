@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build a .deb package for Ubuntu/Linux (v2.1)
+# Build a .deb package for Ubuntu/Linux
 # Usage:
 #   bash src/Installation/build_deb_linux.sh
 # Optional overrides:
@@ -10,7 +10,9 @@ set -euo pipefail
 ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 APP_ID="e-callisto-fits-analyzer"
 APP_NAME="e-CALLISTO FITS Analyzer"
-VERSION="${VERSION:-2.1}"
+VERSION_FILE="$ROOT/src/version.py"
+DEFAULT_VERSION="$(awk -F'\"' '/^APP_VERSION[[:space:]]*=[[:space:]]*\"/{print $2; exit}' "$VERSION_FILE" 2>/dev/null || true)"
+VERSION="${VERSION:-$DEFAULT_VERSION}"
 ARCH="$(dpkg --print-architecture)"
 OUT_DEB="$ROOT/dist/${APP_ID}_${VERSION}_${ARCH}.deb"
 RUNTIME_REQUIREMENTS="$ROOT/src/Installation/requirements-runtime.txt"
@@ -20,6 +22,11 @@ cd "$ROOT"
 
 echo "==> Project root: $ROOT"
 echo "==> Building version: $VERSION ($ARCH)"
+
+if [ -z "${VERSION}" ]; then
+  echo "Could not determine APP_VERSION from $VERSION_FILE. Set VERSION manually." >&2
+  exit 1
+fi
 
 # 1) Build app folder with PyInstaller
 if [ ! -f "$RUNTIME_REQUIREMENTS" ]; then

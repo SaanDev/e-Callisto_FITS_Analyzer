@@ -1,5 +1,7 @@
 #define AppName "e-CALLISTO FITS Analyzer"
-#define AppVersion "2.1"
+#ifndef AppVersion
+  #define AppVersion "2.1"
+#endif
 #define AppPublisher "Sahan S. Liyanage"
 #define AppExeName "e-Callisto FITS Analyzer.exe"
 
@@ -7,7 +9,7 @@
 ; iscc /DRepoRoot="C:\Users\kavin\Projects\e-Callisto_FITS_Analyzer" FITS_Analyzer_InnoSetup.iss
 ; If not provided, use the local default root below.
 #ifndef RepoRoot
-  #define RepoRoot "C:\Users\kavin\Projects\e-Callisto_FITS_Analyzer"
+  #define RepoRoot AddBackslash(SourcePath) + "..\.."
 #endif
 
 #define DistDir RepoRoot + "\dist\e-Callisto FITS Analyzer"

@@ -1,5 +1,5 @@
 <#
-Build a Windows distributable for e-CALLISTO FITS Analyzer (v2.1).
+Build a Windows distributable for e-CALLISTO FITS Analyzer.
 
 Usage:
   powershell -ExecutionPolicy Bypass -File .\src\Installation\build_windows_installer.ps1
@@ -12,7 +12,7 @@ Optional:
 [CmdletBinding()]
 param(
     [string]$Root = "",
-    [string]$Version = "2.1",
+    [string]$Version = "",
     [switch]$SkipInstaller
 )
 
@@ -26,6 +26,21 @@ function Resolve-RepoRoot {
         return (Resolve-Path $RequestedRoot).Path
     }
     return (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+}
+
+function Get-AppVersion {
+    param([string]$RepoRoot)
+
+    $VersionFile = Join-Path $RepoRoot "src\version.py"
+    if (-not (Test-Path $VersionFile)) {
+        throw "Missing version file: $VersionFile"
+    }
+
+    $Match = Select-String -Path $VersionFile -Pattern 'APP_VERSION\s*=\s*"([^"]+)"' | Select-Object -First 1
+    if (-not $Match -or $Match.Matches.Count -eq 0) {
+        throw "Could not parse APP_VERSION from: $VersionFile"
+    }
+    return $Match.Matches[0].Groups[1].Value
 }
 
 function Find-Iscc {
@@ -47,6 +62,9 @@ function Find-Iscc {
 }
 
 $Root = Resolve-RepoRoot -RequestedRoot $Root
+if (-not $Version -or $Version.Trim().Length -eq 0) {
+    $Version = Get-AppVersion -RepoRoot $Root
+}
 $AppId = "e-callisto-fits-analyzer"
 $SpecPath = Join-Path $Root "src\Installation\FITS_Analyzer_win.spec"
 $RuntimeRequirements = Join-Path $Root "src\Installation\requirements-runtime.txt"
@@ -96,7 +114,7 @@ if (-not $IsccPath) {
     throw "ISCC.exe not found. Install Inno Setup 6 and rerun, or use -SkipInstaller."
 }
 
-& $IsccPath ("/DRepoRoot={0}" -f $Root) $IssPath
+& $IsccPath ("/DRepoRoot={0}" -f $Root) ("/DAppVersion={0}" -f $Version) $IssPath
 
 if (Test-Path $OutputInstaller) {
     Write-Host "Built installer: $OutputInstaller"
