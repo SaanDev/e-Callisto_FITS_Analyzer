@@ -61,6 +61,26 @@ function Find-Iscc {
     return $null
 }
 
+function Get-PythonBootstrapCommand {
+    $python = Get-Command python.exe -ErrorAction SilentlyContinue
+    if ($python) {
+        return @{
+            Exe = $python.Source
+            Args = @()
+        }
+    }
+
+    $py = Get-Command py.exe -ErrorAction SilentlyContinue
+    if ($py) {
+        return @{
+            Exe = $py.Source
+            Args = @("-3")
+        }
+    }
+
+    throw "No Python launcher found. Install Python and ensure either 'python.exe' or 'py.exe' is on PATH."
+}
+
 $Root = Resolve-RepoRoot -RequestedRoot $Root
 if (-not $Version -or $Version.Trim().Length -eq 0) {
     $Version = Get-AppVersion -RepoRoot $Root
@@ -84,9 +104,10 @@ if (-not (Test-Path $IssPath) -and -not $SkipInstaller) { throw "Missing Inno Se
 # 1) Build app folder with PyInstaller
 $VenvDir = Join-Path $Root ".venv-build"
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
+$BootstrapPython = Get-PythonBootstrapCommand
 
 if (-not (Test-Path $VenvPython)) {
-    py -3 -m venv $VenvDir
+    & $BootstrapPython.Exe @($BootstrapPython.Args + @("-m", "venv", $VenvDir))
 }
 if (-not (Test-Path $VenvPython)) {
     throw "Python venv was not created correctly: $VenvPython"
