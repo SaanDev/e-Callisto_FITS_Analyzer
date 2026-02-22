@@ -29,6 +29,13 @@ def test_main_window_exposes_check_updates_action():
     assert window.check_updates_action.text() == "Check for Updates..."
 
 
+def test_main_window_exposes_report_bug_action():
+    _app()
+    window = MainWindow(theme=None)
+    assert hasattr(window, "report_bug_action")
+    assert window.report_bug_action.text() == "Report a Bug..."
+
+
 def test_release_notes_preview_truncates_long_text():
     _app()
     window = MainWindow(theme=None)

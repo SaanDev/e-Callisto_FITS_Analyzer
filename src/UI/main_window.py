@@ -93,10 +93,12 @@ from src.Backend.recovery_manager import (
     save_recovery_snapshot,
 )
 from src.Backend.rfi_filters import clean_rfi, config_dict as rfi_config_dict
+from src.Backend.update_checker import GITHUB_REPO
 from src.UI.accelerated_plot_widget import AcceleratedPlotWidget
 from src.UI.callisto_downloader import CallistoDownloaderApp
 from src.UI.dialogs.analyze_dialog import AnalyzeDialog
 from src.UI.dialogs.batch_processing_dialog import BatchProcessingDialog
+from src.UI.dialogs.bug_report_dialog import BugReportDialog
 from src.UI.dialogs.combine_dialogs import CombineFrequencyDialog, CombineTimeDialog
 from src.UI.dialogs.max_intensity_dialog import MaxIntensityPlotDialog
 from src.UI.dialogs.rfi_control_dialog import RFIControlDialog
@@ -218,6 +220,7 @@ class MainWindow(QMainWindow):
         self._import_progress_dialog = None
         self._goes_window = None
         self._batch_processing_dialog = None
+        self._bug_report_dialog = None
 
         # Processing audit + derived state
         self._processing_log = []
@@ -835,11 +838,15 @@ class MainWindow(QMainWindow):
         self.check_updates_action = QAction("Check for Updates...", self)
         self.check_updates_action.setMenuRole(QAction.NoRole)
         about_menu.addAction(self.check_updates_action)
+        self.report_bug_action = QAction("Report a Bug...", self)
+        self.report_bug_action.setMenuRole(QAction.NoRole)
+        about_menu.addAction(self.report_bug_action)
         about_menu.addSeparator()
         about_action = QAction("About", self)
         about_action.setMenuRole(QAction.NoRole)
         about_menu.addAction(about_action)
         self.check_updates_action.triggered.connect(self.check_for_app_updates)
+        self.report_bug_action.triggered.connect(self.open_bug_report_dialog)
         about_action.triggered.connect(self.show_about_dialog)
 
         # (OPTIONAL) Connect them later like:
@@ -4567,6 +4574,76 @@ class MainWindow(QMainWindow):
             "2026©Copyright, All Rights Reserved."
         )
 
+    def _bug_report_default_dir(self) -> str:
+        candidates = [
+            QStandardPaths.writableLocation(QStandardPaths.DownloadLocation),
+            os.path.expanduser("~/Downloads"),
+            os.path.expanduser("~"),
+            os.getcwd(),
+        ]
+        for path in candidates:
+            p = str(path or "").strip()
+            if p and os.path.isdir(p):
+                return p
+        return os.getcwd()
+
+    def _build_bug_report_context(self) -> dict:
+        env = {
+            "app_name": APP_NAME,
+            "app_version": APP_VERSION,
+            "platform": platform.platform(),
+            "python": sys.version.split()[0],
+            "qt_binding": "PySide6",
+        }
+        summary = {
+            "filename": str(getattr(self, "filename", "") or ""),
+            "plot_type": str(getattr(self, "current_plot_type", "") or ""),
+            "cmap": str(getattr(self, "current_cmap_name", "") or ""),
+            "use_db": bool(getattr(self, "use_db", False)),
+            "use_utc": bool(getattr(self, "use_utc", False)),
+        }
+        session = {
+            "is_combined": bool(getattr(self, "_is_combined", False)),
+            "combined_mode": getattr(self, "_combined_mode", None),
+            "source_path": str(getattr(self, "_fits_source_path", "") or ""),
+            "project_path": str(getattr(self, "_project_path", "") or ""),
+        }
+
+        return {
+            "summary": summary,
+            "environment": env,
+            "session": session,
+            "operation_log": list(getattr(self, "_processing_log", []) or []),
+            "processing": dict((self._build_provenance_context() or {}).get("processing") or {}),
+            "rfi": dict(getattr(self, "_rfi_config", {}) or {}),
+        }
+
+    def _on_bug_report_dialog_destroyed(self, *_):
+        self._bug_report_dialog = None
+
+    def open_bug_report_dialog(self):
+        try:
+            alive = self._bug_report_dialog is not None
+            if alive:
+                _ = self._bug_report_dialog.windowTitle()
+        except Exception:
+            alive = False
+
+        if not alive:
+            self._bug_report_dialog = BugReportDialog(
+                repo=GITHUB_REPO,
+                context_provider=self._build_bug_report_context,
+                provenance_provider=lambda: build_provenance_payload(self._build_provenance_context()),
+                default_dir_provider=self._bug_report_default_dir,
+                parent=self,
+            )
+            self._bug_report_dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+            self._bug_report_dialog.destroyed.connect(self._on_bug_report_dialog_destroyed)
+
+        self._bug_report_dialog.show()
+        self._bug_report_dialog.raise_()
+        self._bug_report_dialog.activateWindow()
+
     def reset_selection(self):
         had_drift_points = self._clear_drift_overlays(keep_view=True)
 
@@ -5316,6 +5393,11 @@ class MainWindow(QMainWindow):
         return True
 
     def _prompt_recovery_if_needed(self):
+        # Prevent blocking recovery prompts in automated/headless runs.
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            return
+        if os.environ.get("E_CALLISTO_DISABLE_RECOVERY_PROMPT", "").strip() == "1":
+            return
         clean_exit = bool(getattr(self, "_previous_clean_exit", True))
         if clean_exit:
             return
@@ -6620,6 +6702,11 @@ class MainWindow(QMainWindow):
             if self._batch_processing_dialog is not None:
                 self._batch_processing_dialog.force_shutdown(timeout_ms=2000)
                 self._batch_processing_dialog.close()
+        except Exception:
+            pass
+        try:
+            if self._bug_report_dialog is not None:
+                self._bug_report_dialog.close()
         except Exception:
             pass
         try:

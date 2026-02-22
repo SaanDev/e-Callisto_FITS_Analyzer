@@ -163,27 +163,34 @@ def save_background_subtracted_png(
 
     fig = Figure(figsize=(10, 6))
     FigureCanvasAgg(fig)
-    ax = fig.add_subplot(111)
-    im = ax.imshow(data_db, aspect="auto", extent=extent, cmap=cmap)
-    cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label("Intensity [dB]")
-    ax.set_xlabel("Time [UT]")
-    ax.set_ylabel("Frequency [MHz]")
-    ax.set_title(str(title or "").strip() or "Background Subtracted")
+    try:
+        ax = fig.add_subplot(111)
+        im = ax.imshow(data_db, aspect="auto", extent=extent, cmap=cmap)
+        cbar = fig.colorbar(im, ax=ax)
+        cbar.set_label("Intensity [dB]")
+        ax.set_xlabel("Time [UT]")
+        ax.set_ylabel("Frequency [MHz]")
+        ax.set_title(str(title or "").strip() or "Background Subtracted")
 
-    show_seconds = abs(time_end - time_start) <= 5.0 * 60.0
+        show_seconds = abs(time_end - time_start) <= 5.0 * 60.0
 
-    def _fmt_ut(x: float, _pos: int) -> str:
-        total = int(round(ut_start + float(x)))
-        total %= 24 * 3600
-        hh = (total // 3600) % 24
-        mm = (total % 3600) // 60
-        ss = total % 60
-        if show_seconds:
-            return f"{hh:02d}:{mm:02d}:{ss:02d}"
-        return f"{hh:02d}:{mm:02d}"
+        def _fmt_ut(x: float, _pos: int) -> str:
+            total = int(round(ut_start + float(x)))
+            total %= 24 * 3600
+            hh = (total // 3600) % 24
+            mm = (total % 3600) // 60
+            ss = total % 60
+            if show_seconds:
+                return f"{hh:02d}:{mm:02d}:{ss:02d}"
+            return f"{hh:02d}:{mm:02d}"
 
-    ax.xaxis.set_major_formatter(FuncFormatter(_fmt_ut))
+        ax.xaxis.set_major_formatter(FuncFormatter(_fmt_ut))
 
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    fig.savefig(output_path, dpi=300, bbox_inches="tight", format="png")
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        fig.savefig(output_path, dpi=300, bbox_inches="tight", format="png")
+    finally:
+        # Explicitly clear figure state between files in long batch runs.
+        try:
+            fig.clear()
+        except Exception:
+            pass

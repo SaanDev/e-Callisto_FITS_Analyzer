@@ -213,3 +213,20 @@ def test_isolated_seed_respects_auto_clean_toggle():
     assert bool(ui_block.get("auto_outlier_cleaned")) is False
     assert int(ui_block.get("auto_removed_count", 0)) == 0
     win.close()
+
+
+def test_recovery_prompt_is_skipped_during_pytest(monkeypatch, tmp_path):
+    _app()
+    win = MainWindow(theme=None)
+    win._previous_clean_exit = False
+
+    snap = tmp_path / "dummy_snapshot.npz"
+    snap.write_bytes(b"x")
+    monkeypatch.setattr("src.UI.main_window.latest_snapshot_path", lambda: str(snap))
+    monkeypatch.setattr(
+        "src.UI.main_window.QMessageBox.question",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Recovery prompt should be skipped under pytest")),
+    )
+
+    win._prompt_recovery_if_needed()
+    win.close()
