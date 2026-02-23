@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.1
+Version 2.2-dev
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -48,16 +48,16 @@ def test_suggest_update_filename_uses_url_basename():
     _app()
     window = MainWindow(theme=None)
     name = window._suggest_update_filename(
-        "https://example.com/releases/download/v2.1.0/e-CALLISTO_FITS_Analyzer_v2.1_Setup.exe"
+        "https://example.com/releases/download/v2.2-dev/e-CALLISTO_FITS_Analyzer_v2.2-dev_Setup.exe"
     )
-    assert name == "e-CALLISTO_FITS_Analyzer_v2.1_Setup.exe"
+    assert name == "e-CALLISTO_FITS_Analyzer_v2.2-dev_Setup.exe"
 
 
 def test_extract_whats_new_section_only():
     _app()
     window = MainWindow(theme=None)
     notes = """
-# Release v2.1
+# Release v2.2-dev
 
 ## Overview
 - Background info

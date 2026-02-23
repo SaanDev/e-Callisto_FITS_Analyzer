@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.1
+Version 2.2-dev
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -958,6 +958,7 @@ class MainWindow(QMainWindow):
             self._apply_view_mode_styling()
 
         self.noise_reduced_original = None  # backup before lasso
+        self.noise_reduced_original_plot_type = "Background Subtracted"
 
         # Ensure project actions reflect initial state
         self._sync_project_actions()
@@ -1427,6 +1428,10 @@ class MainWindow(QMainWindow):
         self.tb_export_fits.triggered.connect(self.export_to_fits)
         tb.addAction(self.tb_export_fits)
 
+        self.tb_save_project = QAction(self._icon("export_proj.svg"), "Save Project", self)
+        self.tb_save_project.triggered.connect(self.save_project)
+        tb.addAction(self.tb_save_project)
+
         tb.addSeparator()
 
         self.tb_undo = QAction(self._icon("undo.svg"), "Undo", self)
@@ -1469,6 +1474,10 @@ class MainWindow(QMainWindow):
         self.tb_reset_sel.triggered.connect(self.reset_selection)
         tb.addAction(self.tb_reset_sel)
 
+        self.tb_reset_to_raw = QAction(self._icon("reset_to_raw.svg"), "Reset to Raw", self)
+        self.tb_reset_to_raw.triggered.connect(self.reset_to_raw)
+        tb.addAction(self.tb_reset_to_raw)
+
         self.tb_reset_all = QAction(self._icon("reset_all.svg"), "Reset All", self)
         self.tb_reset_all.triggered.connect(self.reset_all)
         tb.addAction(self.tb_reset_all)
@@ -1500,6 +1509,7 @@ class MainWindow(QMainWindow):
         # Needs a plot / filename
         self.tb_export.setEnabled(bool(filename))
         self.tb_export_fits.setEnabled(bool(filename))
+        self.tb_save_project.setEnabled(has_file)
 
         # Undo/redo availability
         self.tb_undo.setEnabled(has_undo)
@@ -1519,6 +1529,7 @@ class MainWindow(QMainWindow):
         self.tb_isolate.setEnabled(has_noise)
         self.tb_max.setEnabled(has_noise)
         self.tb_reset_sel.setEnabled(has_noise or can_reset_view)
+        self.tb_reset_to_raw.setEnabled(has_file)
         self.tb_reset_all.setEnabled(has_file)
         self._sync_fits_view_actions()
         self._sync_nav_actions()
@@ -1729,6 +1740,7 @@ class MainWindow(QMainWindow):
                 ("tb_open", "open.svg"),
                 ("tb_export", "export.svg"),
                 ("tb_export_fits","export_fits.svg"),
+                ("tb_save_project", "export_proj.svg"),
                 ("tb_undo", "undo.svg"),
                 ("tb_redo", "redo.svg"),
                 ("tb_download", "download.svg"),
@@ -1739,6 +1751,7 @@ class MainWindow(QMainWindow):
                 ("tb_lock", "lock.svg"),
                 ("tb_unlock", "unlock.svg"),
                 ("tb_reset_sel", "reset_selection.svg"),
+                ("tb_reset_to_raw", "reset_to_raw.svg"),
                 ("tb_reset_all", "reset_all.svg"),
         ):
             act = getattr(self, attr, None)
@@ -2468,6 +2481,7 @@ class MainWindow(QMainWindow):
     def _reset_runtime_state_for_loaded_data(self):
         self.noise_reduced_data = None
         self.noise_reduced_original = None
+        self.noise_reduced_original_plot_type = "Background Subtracted"
         self.lasso_mask = None
         self.noise_vmin = None
         self.noise_vmax = None
@@ -2811,6 +2825,7 @@ class MainWindow(QMainWindow):
 
         self.noise_reduced_data = data
         self.noise_reduced_original = data.copy()
+        self.noise_reduced_original_plot_type = "Background Subtracted"
 
         self.noise_vmin = float(np.nanmin(data)) if data.size else None
         self.noise_vmax = float(np.nanmax(data)) if data.size else None
@@ -3354,6 +3369,10 @@ class MainWindow(QMainWindow):
 
     def _plot_isolated_burst(self, mask):
         self._push_undo_state()
+        self.noise_reduced_original = np.asarray(self.noise_reduced_data, dtype=np.float32).copy()
+        self.noise_reduced_original_plot_type = self._normalize_plot_type(
+            getattr(self, "current_plot_type", "Background Subtracted")
+        )
         # Build isolated data array
         burst_isolated = np.zeros_like(self.noise_reduced_data)
         burst_isolated[mask] = self.noise_reduced_data[mask]
@@ -4027,6 +4046,7 @@ class MainWindow(QMainWindow):
         self.filename = ""
         self.noise_reduced_data = None
         self.noise_reduced_original = None
+        self.noise_reduced_original_plot_type = "Background Subtracted"
         self.lasso_mask = None
         self.current_plot_type = "Raw"
         self.current_display_data = None
@@ -4123,6 +4143,7 @@ class MainWindow(QMainWindow):
 
         self.noise_reduced_data = None
         self.noise_reduced_original = None
+        self.noise_reduced_original_plot_type = "Background Subtracted"
         self.lasso_mask = None
         self.noise_vmin = None
         self.noise_vmax = None
@@ -4653,10 +4674,28 @@ class MainWindow(QMainWindow):
         if self.noise_reduced_original is not None:
             self._push_undo_state()
             self.noise_reduced_data = self.noise_reduced_original.copy()
+            restore_title = self._normalize_plot_type(
+                getattr(self, "noise_reduced_original_plot_type", "Background Subtracted")
+            )
+            self.noise_reduced_original_plot_type = restore_title
+            self.current_plot_type = restore_title
             if self.time is not None and self.freqs is not None:
-                self.plot_data(self.noise_reduced_data, title="Background Subtracted")
+                self.plot_data(self.noise_reduced_data, title=restore_title)
             self.lasso_mask = None
             self.lasso = None
+            if isinstance(self._rfi_config, dict):
+                if restore_title == "RFI Cleaned":
+                    self._rfi_config["applied"] = True
+                else:
+                    self._rfi_config["applied"] = False
+                    self._rfi_config["masked_channel_indices"] = []
+                    self._rfi_preview_data = None
+                    self._rfi_preview_masked = []
+                    if self._rfi_dialog is not None:
+                        try:
+                            self._rfi_dialog.set_masked_channels([])
+                        except Exception:
+                            pass
             if had_drift_points:
                 self.statusBar().showMessage("Selection reset (drift markers cleared)", 4000)
             else:
@@ -5155,6 +5194,9 @@ class MainWindow(QMainWindow):
             "raw_data": None if self.raw_data is None else self.raw_data.copy(),
             "noise_reduced_data": None if self.noise_reduced_data is None else self.noise_reduced_data.copy(),
             "noise_reduced_original": None if self.noise_reduced_original is None else self.noise_reduced_original.copy(),
+            "noise_reduced_original_plot_type": str(
+                getattr(self, "noise_reduced_original_plot_type", "Background Subtracted")
+            ),
             "lasso_mask": None if self.lasso_mask is None else self.lasso_mask.copy(),
             "freqs": None if self.freqs is None else self.freqs.copy(),
             "time": None if self.time is None else self.time.copy(),
@@ -5264,6 +5306,9 @@ class MainWindow(QMainWindow):
         self._invalidate_noise_cache()
         self.noise_reduced_data = state["noise_reduced_data"]
         self.noise_reduced_original = state["noise_reduced_original"]
+        self.noise_reduced_original_plot_type = self._normalize_plot_type(
+            state.get("noise_reduced_original_plot_type", "Background Subtracted")
+        )
         self.lasso_mask = state["lasso_mask"]
         self.freqs = state["freqs"]
         self.time = state["time"]
@@ -5500,9 +5545,14 @@ class MainWindow(QMainWindow):
         if self._rfi_preview_data is None:
             return
 
+        backup_before_rfi = np.asarray(src, dtype=np.float32).copy()
+        backup_plot_type = self._normalize_plot_type(
+            getattr(self, "current_plot_type", "Background Subtracted")
+        )
         self._push_undo_state()
         self.noise_reduced_data = np.asarray(self._rfi_preview_data, dtype=np.float32).copy()
-        self.noise_reduced_original = self.noise_reduced_data.copy()
+        self.noise_reduced_original = backup_before_rfi
+        self.noise_reduced_original_plot_type = backup_plot_type
         self.current_plot_type = "RFI Cleaned"
         self._rfi_config = rfi_config_dict(
             enabled=bool(cfg.get("enabled", True)),
@@ -6297,6 +6347,7 @@ class MainWindow(QMainWindow):
             "view": state["view"],
             "noise_vmin": self.noise_vmin,
             "noise_vmax": self.noise_vmax,
+            "noise_reduced_original_plot_type": state["noise_reduced_original_plot_type"],
             "fits_header": header_txt,
             "fits_source_path": getattr(self, "_fits_source_path", None),
             "is_combined": bool(getattr(self, "_is_combined", False)),
@@ -6310,7 +6361,7 @@ class MainWindow(QMainWindow):
             "time_sync": dict(getattr(self, "_last_time_sync_context", {}) or {}),
         }
 
-        # Canonical analysis session (v2.1)
+        # Canonical analysis session (v2.2-dev)
         session = self._analysis_session_with_context(getattr(self, "_analysis_session", None))
         if session is None:
             session = normalize_analysis_session(
@@ -6361,6 +6412,9 @@ class MainWindow(QMainWindow):
             self._invalidate_noise_cache()
             self.noise_reduced_data = arrays.get("noise_reduced_data", None)
             self.noise_reduced_original = arrays.get("noise_reduced_original", None)
+            self.noise_reduced_original_plot_type = self._normalize_plot_type(
+                meta.get("noise_reduced_original_plot_type", "Background Subtracted")
+            )
             self.lasso_mask = arrays.get("lasso_mask", None)
             self.freqs = arrays.get("freqs", None)
             self.time = arrays.get("time", None)

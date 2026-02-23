@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.1
+Version 2.2-dev
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -15,7 +15,7 @@ from src.Backend.provenance import build_provenance_payload, dump_json, payload_
 def test_provenance_payload_and_markdown(tmp_path):
     payload = build_provenance_payload(
         {
-            "app": {"name": "e-CALLISTO FITS Analyzer", "version": "2.1"},
+            "app": {"name": "e-CALLISTO FITS Analyzer", "version": "2.2-dev"},
             "data_source": {"filename": "x.fit", "shape": [10, 20]},
             "processing": {"plot_type": "Raw", "use_db": False},
             "rfi": {"enabled": True},
@@ -40,7 +40,7 @@ def test_provenance_payload_and_markdown(tmp_path):
 def test_provenance_payload_serializes_numpy_values(tmp_path):
     payload = build_provenance_payload(
         {
-            "app": {"name": "e-CALLISTO FITS Analyzer", "version": "2.1"},
+            "app": {"name": "e-CALLISTO FITS Analyzer", "version": "2.2-dev"},
             "data_source": {"filename": "x.fit", "shape": np.array([10, 20], dtype=np.int32)},
             "processing": {"plot_type": "Raw", "use_db": np.bool_(False)},
             "max_intensity": {

@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.1
+Version 2.2-dev
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -59,7 +59,7 @@ def test_open_github_issue_uses_open_url_robust(monkeypatch):
 
     dlg = BugReportDialog(
         repo="SaanDev/e-Callisto_FITS_Analyzer",
-        context_provider=lambda: {"environment": {"app_version": "2.1"}, "summary": {"filename": "demo.fit"}},
+        context_provider=lambda: {"environment": {"app_version": "2.2-dev"}, "summary": {"filename": "demo.fit"}},
         provenance_provider=lambda: {},
         default_dir_provider=lambda: ".",
         parent=None,

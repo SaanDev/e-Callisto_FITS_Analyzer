@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.1
+Version 2.2-dev
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -236,4 +236,59 @@ def test_recovery_prompt_is_skipped_during_pytest(monkeypatch, tmp_path):
     )
 
     win._prompt_recovery_if_needed()
+    win.close()
+
+
+def test_reset_selection_restores_pre_rfi_noise_reduced_data():
+    _app()
+    win = MainWindow(theme=None)
+
+    win.filename = "demo.fit"
+    win.freqs = np.array([100.0, 95.0, 90.0], dtype=float)
+    win.time = np.array([0.0, 1.0, 2.0, 3.0], dtype=float)
+    win.raw_data = np.array(
+        [
+            [1.0, 1.0, 1.0, 1.0],
+            [2.0, 2.0, 2.0, 2.0],
+            [3.0, 3.0, 3.0, 3.0],
+        ],
+        dtype=np.float32,
+    )
+    base_noise_reduced = np.array(
+        [
+            [0.0, 0.5, 0.0, 0.5],
+            [1.0, 1.5, 1.0, 1.5],
+            [2.0, 2.5, 2.0, 2.5],
+        ],
+        dtype=np.float32,
+    )
+    rfi_cleaned = np.array(
+        [
+            [0.0, 0.2, 0.0, 0.2],
+            [0.8, 1.2, 0.8, 1.2],
+            [1.6, 2.0, 1.6, 2.0],
+        ],
+        dtype=np.float32,
+    )
+
+    win.noise_reduced_data = base_noise_reduced.copy()
+    win.noise_reduced_original = base_noise_reduced.copy()
+    win.noise_reduced_original_plot_type = "Background Subtracted"
+    win.current_plot_type = "Background Subtracted"
+
+    win._rfi_preview_data = rfi_cleaned.copy()
+    win._rfi_preview_masked = [1]
+    win.apply_rfi_now()
+
+    assert np.array_equal(win.noise_reduced_data, rfi_cleaned)
+    assert np.array_equal(win.noise_reduced_original, base_noise_reduced)
+    assert win.current_plot_type == "RFI Cleaned"
+    assert bool(win._rfi_config.get("applied", False)) is True
+
+    win.reset_selection()
+
+    assert np.array_equal(win.noise_reduced_data, base_noise_reduced)
+    assert win.current_plot_type == "Background Subtracted"
+    assert bool(win._rfi_config.get("applied", True)) is False
+
     win.close()
