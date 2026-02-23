@@ -1,16 +1,16 @@
 # e-CALLISTO FITS Analyzer
 A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data.
 
-Current stable release: **2.0**  
-Upcoming version: **2.1** *(in development)*
+Current stable release: **2.1**  
+Previous stable release: **2.0**
 
 ---
 
-## 🚧 Upcoming Features (v2.1 - In Development)
+## ✨ What's New in v2.1
 
-The items below are in-progress for **v2.1** and are not yet a final public release.
+The items below are included in the **v2.1** release.
 
-### Planned application updates
+### Application updates
 - **Batch FIT Processing window**: **Processing → Batch Processing → Open Batch Processor** for folder-based batch export.
 - **Batch output controls**: choose **Raw** or **Background Subtracted** PNG output.
 - **Background subtraction options**: select **Mean** or **Median** subtraction for batch processing.
@@ -27,12 +27,12 @@ The items below are in-progress for **v2.1** and are not yet a final public rele
 - **Processing presets**: save/apply/delete named presets (global + project snapshot support).
 - **Provenance report export**: one-click Markdown + JSON metadata reports for reproducibility.
 
-### Planned CME viewer enhancements
+### CME viewer enhancements
 - **Enhanced CME Viewer** with a more stable, isolated playback flow.
 - Improved interactive CME playback for running-difference movies with GOES X-ray context.
 - Better failure handling and fallback behavior to avoid main-window crashes.
 
-### v2.0 highlights
+### v2.0 highlights (previous release)
 
 ### Core workflow
 - Added **session/project save and load** support (`.efaproj`) to restore analysis state.
@@ -112,6 +112,37 @@ Features:
 
 ### Example: Noise Reduction
 ![Noise Reduction](assets/screenshots/noise_reduction.png)
+
+### RFI Cleaning Toolkit (Processing → RFI Cleaning)
+
+RFI cleaning applies a deterministic pipeline to 2D dynamic spectrum data (**frequency × time**).  
+Use **Preview** to inspect results first, then **Apply** to commit.
+
+Processing steps:
+
+1. 2D median smoothing with **Kernel (freq) × Kernel (time)**.
+2. Hot-channel detection using a robust Z-score from each channel's level + variability.
+3. Masked-channel repair by replacing flagged channels from neighboring channels.
+4. Per-channel upper percentile clipping (high outliers only; low side preserved).
+
+Parameter guide:
+
+- **Kernel (time)**: median window along time. Higher values suppress short spikes more, but can blur fast burst structure.
+- **Kernel (freq)**: median window across frequency channels. Higher values reduce narrow-band striping, but can widen spectral features.
+- **Channel Z threshold**: robust outlier cutoff for hot-channel masking. Lower values mask more channels; higher values mask fewer.
+- **Percentile clip**: upper cap per channel. Lower values clip peaks more aggressively; higher values preserve strong peaks.
+- **Masked channels**: count/list of detected hot channel indices shown in the panel after Preview/Apply.
+
+Suggested tuning workflow:
+
+1. Start with defaults: `kernel(time)=3`, `kernel(freq)=3`, `Channel Z threshold=6.0`, `percentile clip=99.5`.
+2. If channel streaks remain, lower **Channel Z threshold** gradually (for example `6.0 → 5.0 → 4.0`).
+3. If burst detail looks over-smoothed, reduce kernel sizes and/or raise **Channel Z threshold**.
+4. Use **Preview** repeatedly, then **Apply** when satisfied.
+5. Use **Reset** in the RFI panel to restore default RFI settings. Use **Edit → Reset to Raw** to fully revert applied data.
+
+### Example: RFI Cleaning
+![RFI Cleaning](assets/screenshots/RFI_cleaning.png)
 
 ---
 
