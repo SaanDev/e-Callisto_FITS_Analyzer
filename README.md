@@ -24,6 +24,7 @@ The items below are included in the **v2.1** release.
 - **RFI cleaning toolkit**: median filtering, robust channel masking, percentile clip with preview/apply/reset workflow.
 - **Annotation layer**: polygon/line/text annotations persisted in project files.
 - **Cross-panel time sync**: sync active analyzer time window to GOES/CME windows.
+- **SunPy Multi-Mission Explorer**: query/download/plot/analyze SDO, SOHO, STEREO-A, and GOES archive products via SunPy.
 - **Processing presets**: save/apply/delete named presets (global + project snapshot support).
 - **Provenance report export**: one-click Markdown + JSON metadata reports for reproducibility.
 
@@ -70,7 +71,7 @@ The items below are included in the **v2.1** release.
 
 ## 📘 User Guide
 
-This guide explains how to use the main features of the **e-CALLISTO FITS Analyzer**, including dynamic spectrum visualization, live noise reduction, burst isolation, drift estimation, maximum intensity extraction, best-fit analysis, FITS export, the FITS downloader, and the built-in CME and GOES modules.
+This guide explains how to use the main features of the **e-CALLISTO FITS Analyzer**, including dynamic spectrum visualization, live noise reduction, burst isolation, drift estimation, maximum intensity extraction, best-fit analysis, FITS export, the FITS downloader, and the built-in CME, GOES, and SunPy modules.
 
 ---
 
@@ -399,7 +400,36 @@ Features:
 
 ---
 
-## 20. Check for Updates
+## 20. SunPy Multi-Mission Explorer
+
+Path:
+
+- **Solar Events → Archives → SunPy Multi-Mission Explorer**
+
+Supported v1 instruments:
+
+- **SDO/AIA** (map products)
+- **SOHO/LASCO C2/C3** (map products)
+- **STEREO-A/EUVI** (map products)
+- **GOES/XRS** (time-series products)
+
+Features:
+
+- Search SunPy archives using spacecraft/instrument/time filters
+- Download selected records into an app-managed cache
+- Plot map products with frame stepping and running-difference mode
+- Compute ROI image statistics (min/max/mean/median/std/P95/P99)
+- Plot GOES/XRS channels and derive basic flare summary metrics
+- Export plots and analysis summaries
+
+Known limitations:
+
+- Requires network access for archive search/download (cached files can be reopened offline)
+- JSOC/HMI workflows are not part of v1
+
+---
+
+## 21. Check for Updates
 
 Use **About → Check for Updates...** to query the latest release from GitHub.
 
@@ -413,7 +443,7 @@ Use **About → Check for Updates...** to query the latest release from GitHub.
 ## 🛠️ Build and Packaging (v2.1)
 
 ### Prerequisites
-- Python 3.10+ (recommended: same version used for your target build machine)
+- Python 3.12+ (SunPy 7.1.x baseline; recommended: same version used for your target build machine)
 
 ### Run from Source (development)
 - Create and activate a virtual environment.

@@ -73,3 +73,29 @@ def test_smoke_script_exists_and_checks_helper_mode():
     )
     assert "--mode=cme-helper" in text
     assert "KNOWN_MOVIE_URL" in text
+
+
+def test_specs_include_sunpy_modules_and_hook_path():
+    spec_paths = [
+        ROOT / "src" / "Installation" / "FITS_Analyzer.spec",
+        ROOT / "src" / "Installation" / "FITS_Analyzer_linux.spec",
+        ROOT / "src" / "Installation" / "FITS_Analyzer_win.spec",
+        ROOT / "src" / "Installation" / "setup.py",
+    ]
+    for path in spec_paths:
+        text = path.read_text(encoding="utf-8")
+        assert "sunpy" in text
+        assert "src.UI.sunpy_solar_viewer" in text
+
+    hook_path = ROOT / "src" / "Installation" / "pyinstaller_hooks" / "hook-sunpy.py"
+    assert hook_path.exists()
+
+
+def test_runtime_requirements_include_sunpy_network_stack():
+    text = (ROOT / "src" / "Installation" / "requirements-runtime.txt").read_text(encoding="utf-8")
+    assert "sunpy[map,net,timeseries]" in text
+    assert "lxml==" in text
+    assert "drms==" in text
+    assert "zeep==" in text
+    assert "reproject==" in text
+    assert "mpl-animators==" in text

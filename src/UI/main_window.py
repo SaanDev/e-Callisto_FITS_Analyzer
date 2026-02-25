@@ -139,6 +139,7 @@ class MainWindow(QMainWindow):
         )
         self._cme_helper_client = CMEHelperClient(theme_manager=self.theme, parent=self)
         self._cme_viewer = None
+        self._sunpy_window = None
 
         #Linux Messagebox Fix
         _install_linux_msgbox_fixer()
@@ -723,6 +724,12 @@ class MainWindow(QMainWindow):
         goes_flux_action = QAction("GOES X-Ray Flux", self)
         goes_flux_action.triggered.connect(self.open_goes_xrs_window)
         flares_submenu.addAction(goes_flux_action)
+
+        # Archives submenu
+        archives_submenu = solar_events_menu.addMenu("Archives")
+        self.open_sunpy_action = QAction("SunPy Multi-Mission Explorer", self)
+        self.open_sunpy_action.triggered.connect(self.open_sunpy_window)
+        archives_submenu.addAction(self.open_sunpy_action)
 
         # Radio submenu
         radio_submenu = solar_events_menu.addMenu("Radio Bursts")
@@ -5188,6 +5195,27 @@ class MainWindow(QMainWindow):
     def open_soho_lasco_window(self):
         self.open_cme_viewer()
 
+    def open_sunpy_window(self):
+        from src.UI.sunpy_solar_viewer import SunPySolarViewer  # import here, not at top
+        try:
+            alive = self._sunpy_window is not None
+            if alive:
+                _ = self._sunpy_window.windowTitle()
+        except Exception:
+            alive = False
+        if not alive:
+            self._sunpy_window = SunPySolarViewer(parent=self)
+        self._sunpy_window.show()
+        self._sunpy_window.raise_()
+        self._sunpy_window.activateWindow()
+
+        window = self._current_time_window_utc()
+        if window and hasattr(self._sunpy_window, "set_time_window"):
+            try:
+                self._sunpy_window.set_time_window(window[0], window[1], auto_query=False)
+            except Exception:
+                pass
+
     def _capture_state(self):
         """Capture the current application state for Undo/Redo."""
         state = {
@@ -6054,6 +6082,16 @@ class MainWindow(QMainWindow):
         except Exception:
             return False
 
+    def _sync_window_to_sunpy(self, start_dt: datetime, end_dt: datetime, *, auto_query: bool = False) -> bool:
+        if self._sunpy_window is None:
+            return False
+        if not hasattr(self._sunpy_window, "set_time_window"):
+            return False
+        try:
+            return bool(self._sunpy_window.set_time_window(start_dt, end_dt, auto_query=auto_query))
+        except Exception:
+            return False
+
     def sync_current_time_window_to_solar_events(self):
         window = self._current_time_window_utc()
         if not window:
@@ -6064,6 +6102,7 @@ class MainWindow(QMainWindow):
 
         goes_ok = self._sync_window_to_goes(start_dt, end_dt, auto_plot=True)
         cme_ok = self._sync_window_to_cme(mid_dt, auto_search=True)
+        sunpy_ok = self._sync_window_to_sunpy(start_dt, end_dt, auto_query=False)
 
         self._last_time_sync_context = {
             "start_utc": start_dt.isoformat(timespec="seconds"),
@@ -6071,10 +6110,11 @@ class MainWindow(QMainWindow):
             "target_utc": mid_dt.isoformat(timespec="seconds"),
             "goes_synced": bool(goes_ok),
             "cme_synced": bool(cme_ok),
+            "sunpy_synced": bool(sunpy_ok),
         }
         self._log_operation("Synced current time window to Solar Events panels.")
-        if not goes_ok and not cme_ok:
-            self.statusBar().showMessage("No open GOES/CME windows to sync.", 4000)
+        if not goes_ok and not cme_ok and not sunpy_ok:
+            self.statusBar().showMessage("No open GOES/CME/SunPy windows to sync.", 4000)
         else:
             self.statusBar().showMessage("Synced current time window to Solar Events.", 4000)
 
@@ -6732,6 +6772,17 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         try:
+            if self._sunpy_window is not None and hasattr(self._sunpy_window, "is_operation_running"):
+                if bool(self._sunpy_window.is_operation_running()):
+                    self.statusBar().showMessage(
+                        "SunPy download is still running. Wait for completion before closing the app.",
+                        6000,
+                    )
+                    event.ignore()
+                    return
+        except Exception:
+            pass
+        try:
             self.noise_smooth_timer.stop()
             self.noise_commit_timer.stop()
         except Exception:
@@ -6773,6 +6824,20 @@ class MainWindow(QMainWindow):
             pass
         try:
             self._close_analysis_windows()
+        except Exception:
+            pass
+        try:
+            if self._sunpy_window is not None:
+                closed = bool(self._sunpy_window.close())
+                if not closed:
+                    self.statusBar().showMessage(
+                        "SunPy window is busy and cannot be closed yet.",
+                        6000,
+                    )
+                    event.ignore()
+                    return
+                self._sunpy_window.deleteLater()
+                self._sunpy_window = None
         except Exception:
             pass
         try:

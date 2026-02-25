@@ -63,8 +63,15 @@ OPTIONS = {
         "sklearn",
         "requests",
         "bs4",
+        "lxml",
+        "drms",
+        "zeep",
+        "reproject",
+        "mpl_animators",
         "netCDF4",
         "cftime",
+        "sunpy",
+        "parfive",
     ],
 
     "includes": [
@@ -132,8 +139,14 @@ OPTIONS = {
         "src.UI.utils.cme_helper_client",
         "src.UI.utils.cme_ipc_protocol",
         "src.UI.goes_xrs_gui",
+        "src.UI.sunpy_solar_viewer",
         "src.UI.utils.cme_launcher",
         "src.UI.utils.url_opener",
+        "src.Backend.sunpy_archive",
+        "src.Backend.sunpy_analysis",
+        "sunpy.map",
+        "sunpy.net",
+        "sunpy.timeseries",
 
         # Encoding
         "charset_normalizer",
