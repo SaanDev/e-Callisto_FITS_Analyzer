@@ -112,8 +112,10 @@ class AnalyzeDialog(QDialog):
         fold_row_layout.addWidget(self.fold_combo)
         fold_row_layout.addWidget(self.fold_calc_button)
 
-        # Optional: keeps it neat
-        self.fold_combo.setFixedWidth(70)
+        # Reserve enough room for the selected fold value across Qt styles/themes.
+        self.fold_combo.setMinimumContentsLength(2)
+        self.fold_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.fold_combo.setMinimumWidth(max(70, self.fold_combo.sizeHint().width()))
 
         self.equation_label = QLabel("Best Fit Equation:")
         self.equation_display = QLabel("")

@@ -61,6 +61,22 @@ def test_analyze_dialog_session_state_contains_canonical_shock_summary():
     dlg.close()
 
 
+def test_analyze_dialog_fold_combo_reserves_space_for_visible_value():
+    _app()
+    dlg = AnalyzeDialog(
+        np.arange(1, 6, dtype=float),
+        np.array([60.0, 55.0, 50.0, 45.0, 40.0], dtype=float),
+        "demo.fit",
+        fundamental=True,
+        harmonic=False,
+    )
+
+    assert dlg.fold_combo.minimumContentsLength() == 2
+    assert dlg.fold_combo.minimumWidth() >= 70
+
+    dlg.close()
+
+
 def test_max_dialog_emits_session_changed_on_mode_toggle():
     _app()
     dlg = MaxIntensityPlotDialog(
