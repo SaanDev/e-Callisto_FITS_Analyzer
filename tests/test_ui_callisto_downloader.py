@@ -16,7 +16,13 @@ pytest.importorskip("bs4")
 pytest.importorskip("astropy")
 pytest.importorskip("matplotlib")
 
-from src.UI.callisto_downloader import FetchWorker, BASE_URL
+from PySide6.QtWidgets import QApplication, QSpinBox
+
+from src.UI.callisto_downloader import FetchWorker, BASE_URL, CallistoDownloaderApp
+
+
+def _app():
+    return QApplication.instance() or QApplication([])
 
 
 def test_fetch_worker_day_url():
@@ -38,3 +44,18 @@ def test_fetch_worker_check_server_handles_status(monkeypatch):
     ok, msg = worker._check_server()
     assert ok is False
     assert "HTTP" in msg
+
+
+def test_downloader_date_edit_shows_full_year():
+    _app()
+    dlg = CallistoDownloaderApp()
+    year_edit = dlg.calendar_popup.findChild(QSpinBox, "qt_calendar_yearedit")
+
+    assert dlg.date_edit.displayFormat() == "yyyy-MM-dd"
+    assert dlg.date_edit.minimumWidth() >= 140
+    assert year_edit is not None
+    assert year_edit.minimumWidth() == 96
+    assert year_edit.maximumWidth() == 96
+    assert year_edit.minimumHeight() == 34
+
+    dlg.close()

@@ -23,7 +23,8 @@ from PySide6.QtCore import (
 from PySide6.QtWidgets import (
     QLabel, QPushButton, QComboBox, QVBoxLayout,
     QHBoxLayout, QDateEdit, QListWidget, QFileDialog, QMessageBox,
-    QListWidgetItem, QProgressBar, QGroupBox, QDialog, QApplication
+    QListWidgetItem, QProgressBar, QGroupBox, QDialog, QApplication,
+    QCalendarWidget, QSpinBox
 )
 
 from matplotlib.figure import Figure
@@ -194,6 +195,17 @@ class PreviewWindow(QDialog):
         self.setAttribute(Qt.WA_DeleteOnClose)
 
 
+class DownloaderCalendarWidget(QCalendarWidget):
+    def __init__(self, configure_hook, parent=None):
+        super().__init__(parent)
+        self._configure_hook = configure_hook
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if callable(self._configure_hook):
+            self._configure_hook(self)
+
+
 # -----------------------------
 # Main downloader dialog
 # -----------------------------
@@ -230,6 +242,11 @@ class CallistoDownloaderApp(QDialog):
 
         self.date_edit = QDateEdit(QDate.currentDate())
         self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.date_edit.setMinimumWidth(max(140, self.date_edit.sizeHint().width()))
+        self.calendar_popup = DownloaderCalendarWidget(self._configure_calendar_popup, self)
+        self.date_edit.setCalendarWidget(self.calendar_popup)
+        self._configure_calendar_popup(self.calendar_popup)
 
         self.station_dropdown = QComboBox()
         self.station_dropdown.addItems([
@@ -299,6 +316,45 @@ class CallistoDownloaderApp(QDialog):
         layout.addWidget(action_group)
         layout.addWidget(self.progress_bar)
         self.setLayout(layout)
+
+    def _configure_calendar_popup(self, calendar: QCalendarWidget):
+        year_edit = calendar.findChild(QSpinBox, "qt_calendar_yearedit")
+        if year_edit is None:
+            return
+
+        year_edit.setMinimumWidth(96)
+        year_edit.setMaximumWidth(96)
+        year_edit.setMinimumHeight(34)
+        year_edit.setAlignment(Qt.AlignCenter)
+        year_edit.setStyleSheet(
+            """
+            QSpinBox {
+                min-height: 34px;
+                padding: 0px 22px 0px 4px;
+            }
+            QSpinBox::up-button,
+            QSpinBox::down-button {
+                width: 20px;
+            }
+            QSpinBox::up-button {
+                height: 16px;
+            }
+            QSpinBox::down-button {
+                height: 16px;
+            }
+            QSpinBox::up-arrow,
+            QSpinBox::down-arrow {
+                width: 10px;
+                height: 10px;
+            }
+            """
+        )
+
+        line_edit = year_edit.lineEdit()
+        if line_edit is not None:
+            line_edit.setAlignment(Qt.AlignCenter)
+            line_edit.setMinimumWidth(60)
+            line_edit.setStyleSheet("border: none; background: transparent; padding: 0px 2px 0px 0px;")
 
     # -----------------------------
     # Fetch list
