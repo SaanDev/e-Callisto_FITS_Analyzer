@@ -2,21 +2,32 @@
 A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data.
 
 Current stable release: **2.1**  
-Previous stable release: **2.0**
+Upcoming version: **2.2** *(in development)*
 
 ---
 
-## ✨ What's New in v2.1
+## 🚧 Upcoming Features (v2.2 - In Development)
 
-The items below are included in the **v2.1** release.
+The items below are in-progress for **v2.2** and are not yet a final public release.
 
-### Application updates
+### Planned application updates
+- **SunPy Multi-Mission Explorer**: **Solar Events → Archives → SunPy Multi-Mission Explorer** for querying, downloading, plotting, and analyzing SDO, SOHO, STEREO-A, and GOES data inside the desktop app.
 - **Batch FIT Processing window**: **Processing → Batch Processing → Open Batch Processor** for folder-based batch export.
 - **Batch output controls**: choose **Raw** or **Background Subtracted** PNG output.
 - **Background subtraction options**: select **Mean** or **Median** subtraction for batch processing.
 - **Batch visualization controls**: select colormap per batch run; output PNGs use **UT** on the x-axis and **dB** on the colorbar.
-- **Batch progress + resilience**: progress bar, per-file continue-on-error behavior, and end-of-run summary.
+- **Batch progress + resilience**: progress bar, cancel support, per-file continue-on-error behavior, and end-of-run summary.
 - **Report a Bug workflow**: **About → Report a Bug...** with diagnostics ZIP generation and prefilled GitHub issue draft.
+- **Expanded time-window sync**: sync the active analyzer time window to GOES, CME, and SunPy windows.
+- **Toolbar workflow polish**: faster access to **Save Project** and **Reset to Raw** from the main toolbar.
+
+### Planned stability and packaging updates
+- **Downloader stability improvements**: safer FITS download/fetch flow plus calendar/date-picker usability fixes.
+- **Analysis dialog UI fix**: fold-selection dropdown sizing is corrected across Qt styles/themes.
+- **RFI reset-state fix**: reset/apply flows restore the correct pre-clean plot state more reliably.
+- **Desktop packaging updates**: SunPy runtime dependencies and packaging hooks are included for local builds, with Python **3.12+** as the `v2.2` development baseline.
+
+### v2.1 highlights (current stable release)
 - **Update Checker**: **About → Check for Updates...** to search online for newer releases.
 - **Background update checks**: checks run without blocking the UI.
 - **In-app update download flow**: download installer/package inside the app with progress and cancel support, plus release page link.
@@ -24,11 +35,10 @@ The items below are included in the **v2.1** release.
 - **RFI cleaning toolkit**: median filtering, robust channel masking, percentile clip with preview/apply/reset workflow.
 - **Annotation layer**: polygon/line/text annotations persisted in project files.
 - **Cross-panel time sync**: sync active analyzer time window to GOES/CME windows.
-- **SunPy Multi-Mission Explorer**: query/download/plot/analyze SDO, SOHO, STEREO-A, and GOES archive products via SunPy.
 - **Processing presets**: save/apply/delete named presets (global + project snapshot support).
 - **Provenance report export**: one-click Markdown + JSON metadata reports for reproducibility.
 
-### CME viewer enhancements
+### v2.1 CME viewer enhancements
 - **Enhanced CME Viewer** with a more stable, isolated playback flow.
 - Improved interactive CME playback for running-difference movies with GOES X-ray context.
 - Better failure handling and fallback behavior to avoid main-window crashes.
@@ -440,7 +450,7 @@ Use **About → Check for Updates...** to query the latest release from GitHub.
 
 ---
 
-## 🛠️ Build and Packaging (v2.1)
+## 🛠️ Build and Packaging (v2.2-dev)
 
 ### Prerequisites
 - Python 3.12+ (SunPy 7.1.x baseline; recommended: same version used for your target build machine)
