@@ -538,7 +538,7 @@ class SunPySolarViewer(QMainWindow):
             return
 
         self.statusBar().showMessage(f"Found {len(result.rows)} records.", 5000)
-        self.analysis_text.setPlainText("Search complete. Select rows and click 'Download && Load Selected'.")
+        self.analysis_text.setPlainText("Search complete. Select rows and click 'Download & Load Selected'.")
 
     @Slot(object, object)
     def _on_load_finished(self, fetch_obj: object, load_obj: object):
