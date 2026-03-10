@@ -201,7 +201,7 @@ function App() {
               aria-label="Select FITS file"
               className="file-input"
               type="file"
-              accept=".fit,.fits,.fit.gz,.fits.gz"
+              accept=".fit,.fits,.fit.gz,.fits.gz,.gz,application/gzip,application/x-gzip"
               onChange={(event) => void handleUpload(event)}
             />
 
@@ -361,10 +361,34 @@ function App() {
                 height: 720,
                 paper_bgcolor: '#fefcf6',
                 plot_bgcolor: '#fffdf8',
-                margin: { l: 68, r: 20, t: 36, b: 56 },
-                title: activeSpectrum?.label ?? 'Waiting for FITS upload',
-                xaxis: { title: 'Time (s)' },
-                yaxis: { title: 'Frequency (MHz)', autorange: 'reversed' },
+                font: { color: '#11212d' },
+                margin: { l: 92, r: 28, t: 52, b: 76 },
+                title: {
+                  text: activeSpectrum?.label ?? 'Waiting for FITS upload',
+                  x: 0.02,
+                  xanchor: 'left',
+                  font: { color: '#11212d', size: 18 },
+                },
+                xaxis: {
+                  title: { text: 'Time [s]', standoff: 16, font: { color: '#11212d', size: 14 } },
+                  tickfont: { color: '#11212d', size: 12 },
+                  showticklabels: true,
+                  showline: true,
+                  linecolor: '#59626b',
+                  ticks: 'outside',
+                  automargin: true,
+                  zeroline: false,
+                },
+                yaxis: {
+                  title: { text: 'Frequency [MHz]', standoff: 16, font: { color: '#11212d', size: 14 } },
+                  tickfont: { color: '#11212d', size: 12 },
+                  showticklabels: true,
+                  showline: true,
+                  linecolor: '#59626b',
+                  ticks: 'outside',
+                  automargin: true,
+                  zeroline: false,
+                },
               }}
               config={{ responsive: true, displaylogo: false }}
               style={{ width: '100%' }}

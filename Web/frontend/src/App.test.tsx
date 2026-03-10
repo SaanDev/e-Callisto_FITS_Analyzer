@@ -3,8 +3,13 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 
+const plotCalls: Array<Record<string, unknown>> = []
+
 vi.mock('react-plotly.js', () => ({
-  default: () => <div data-testid="plotly-stub">plot</div>,
+  default: (props: Record<string, unknown>) => {
+    plotCalls.push(props)
+    return <div data-testid="plotly-stub">plot</div>
+  },
 }))
 
 function jsonResponse(payload: unknown, status = 200) {
@@ -32,6 +37,7 @@ function binaryResponse(
 describe('App', () => {
   beforeEach(() => {
     cleanup()
+    plotCalls.length = 0
     vi.restoreAllMocks()
     vi.stubGlobal('fetch', vi.fn())
     vi.stubGlobal('URL', {
@@ -79,7 +85,10 @@ describe('App', () => {
     render(<App />)
 
     const [input] = await screen.findAllByLabelText('Select FITS file')
-    expect(input).toHaveAttribute('accept', '.fit,.fits,.fit.gz,.fits.gz')
+    expect(input).toHaveAttribute(
+      'accept',
+      '.fit,.fits,.fit.gz,.fits.gz,.gz,application/gzip,application/x-gzip',
+    )
     await userEvent.upload(input, new File(['fit-data'], 'demo.fit', { type: 'application/fits' }))
 
     expect(await screen.findByText('Loaded file: demo.fit')).toBeInTheDocument()
@@ -94,6 +103,16 @@ describe('App', () => {
     expect(screen.queryByText('Analyzer')).not.toBeInTheDocument()
     expect(screen.getByText('Noise Reduction')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Export Processed FITS' })).toBeEnabled()
+
+    const latestPlot = plotCalls.at(-1) as {
+      layout?: {
+        xaxis?: { title?: { text?: string } }
+        yaxis?: { title?: { text?: string }; autorange?: string }
+      }
+    }
+    expect(latestPlot.layout?.xaxis?.title?.text).toBe('Time [s]')
+    expect(latestPlot.layout?.yaxis?.title?.text).toBe('Frequency [MHz]')
+    expect(latestPlot.layout?.yaxis?.autorange).not.toBe('reversed')
   })
 
   it('supports .fit.gz uploads, slider updates, and exports', async () => {
