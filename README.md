@@ -1,16 +1,16 @@
 # e-CALLISTO FITS Analyzer
 A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data.
 
-Current stable release: **2.1**  
-Upcoming version: **2.2** *(in development)*
+Current stable release: **2.2.0**  
+Previous stable release: **2.1**
 
 ---
 
-## 🚧 Upcoming Features (v2.2 - In Development)
+## ✨ What's New in v2.2.0
 
-The items below are in-progress for **v2.2** and are not yet a final public release.
+The items below are included in the finalized **v2.2.0** desktop release.
 
-### Planned application updates
+### Application updates
 - **SunPy Multi-Mission Explorer**: **Solar Events → Archives → SunPy Multi-Mission Explorer** for querying, downloading, plotting, and analyzing SDO, SOHO, STEREO-A, and GOES data inside the desktop app.
 - **Batch FIT Processing window**: **Processing → Batch Processing → Open Batch Processor** for folder-based batch export.
 - **Batch output controls**: choose **Raw** or **Background Subtracted** PNG output.
@@ -21,13 +21,13 @@ The items below are in-progress for **v2.2** and are not yet a final public rele
 - **Expanded time-window sync**: sync the active analyzer time window to GOES, CME, and SunPy windows.
 - **Toolbar workflow polish**: faster access to **Save Project** and **Reset to Raw** from the main toolbar.
 
-### Planned stability and packaging updates
+### Stability and packaging updates
 - **Downloader stability improvements**: safer FITS download/fetch flow plus calendar/date-picker usability fixes.
 - **Analysis dialog UI fix**: fold-selection dropdown sizing is corrected across Qt styles/themes.
 - **RFI reset-state fix**: reset/apply flows restore the correct pre-clean plot state more reliably.
-- **Desktop packaging updates**: SunPy runtime dependencies and packaging hooks are included for local builds, with Python **3.12+** as the `v2.2` development baseline.
+- **Desktop packaging updates**: SunPy runtime dependencies and packaging hooks are included for local builds, with Python **3.12+** as the `v2.2.0` packaging baseline.
 
-### v2.1 highlights (current stable release)
+### v2.1 highlights (previous stable release)
 - **Update Checker**: **About → Check for Updates...** to search online for newer releases.
 - **Background update checks**: checks run without blocking the UI.
 - **In-app update download flow**: download installer/package inside the app with progress and cancel support, plus release page link.
@@ -450,12 +450,12 @@ Use **About → Check for Updates...** to query the latest release from GitHub.
 
 ---
 
-## 🛠️ Build and Packaging (v2.2-dev)
+## 🛠️ Build and Packaging (v2.2.0)
 
 ### Prerequisites
 - Python 3.12+ (SunPy 7.1.x baseline; recommended: same version used for your target build machine)
 
-### Run from Source (development)
+### Run from Source
 - Create and activate a virtual environment.
 - Install dependencies:
   - `python src/Installation/install_requirements.py`

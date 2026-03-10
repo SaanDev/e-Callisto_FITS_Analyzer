@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.2-dev
+Version 2.2.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -24,16 +24,16 @@ class FakeResponse:
 
 
 def test_normalize_version():
-    assert update_checker.normalize_version("v2.2-dev") == (2, 2)
+    assert update_checker.normalize_version("v2.2.0") == (2, 2, 0)
     assert update_checker.normalize_version("release-2.2.3") == (2, 2, 3)
     assert update_checker.normalize_version("invalid") == ()
 
 
 def test_is_newer_version():
-    assert update_checker.is_newer_version("2.0", "2.2-dev")
-    assert update_checker.is_newer_version("2.2-dev", "2.3.0")
-    assert not update_checker.is_newer_version("2.2-dev", "2.2-dev")
-    assert not update_checker.is_newer_version("2.3", "2.2-dev")
+    assert update_checker.is_newer_version("2.0", "2.2.0")
+    assert update_checker.is_newer_version("2.2.0", "2.3.0")
+    assert not update_checker.is_newer_version("2.2.0", "2.2.0")
+    assert not update_checker.is_newer_version("2.3", "2.2.0")
 
 
 def test_select_download_url_by_os():
@@ -51,25 +51,25 @@ def test_check_for_updates_uses_platform_specific_release_tag(monkeypatch):
     releases_payload = [
         {
             "tag_name": "v2.2.0(Windows)",
-            "name": "Windows Release v2.2",
-            "html_url": "https://example.com/release/windows-v2.2",
+            "name": "Windows Release v2.2.0",
+            "html_url": "https://example.com/release/windows-v2.2.0",
             "published_at": "2026-02-02T12:00:00Z",
             "assets": [
                 {
-                    "name": "e-CALLISTO_FITS_Analyzer_v2.2_Setup.exe",
-                    "browser_download_url": "https://example.com/windows-v2.2.exe",
+                    "name": "e-CALLISTO_FITS_Analyzer_v2.2.0_Setup.exe",
+                    "browser_download_url": "https://example.com/windows-v2.2.0.exe",
                 }
             ],
         },
         {
             "tag_name": "v2.2.0(Linux)",
-            "name": "Linux Release v2.2",
-            "html_url": "https://example.com/release/linux-v2.2",
+            "name": "Linux Release v2.2.0",
+            "html_url": "https://example.com/release/linux-v2.2.0",
             "published_at": "2026-02-01T12:00:00Z",
             "assets": [
                 {
-                    "name": "e-callisto-fits-analyzer_2.2_amd64.deb",
-                    "browser_download_url": "https://example.com/linux-v2.2.deb",
+                    "name": "e-callisto-fits-analyzer_2.2.0_amd64.deb",
+                    "browser_download_url": "https://example.com/linux-v2.2.0.deb",
                 }
             ],
         },
@@ -84,8 +84,8 @@ def test_check_for_updates_uses_platform_specific_release_tag(monkeypatch):
     result = update_checker.check_for_updates("2.0", system_name="Linux")
     assert result.status == "update_available"
     assert result.latest_version == "2.2.0"
-    assert result.release_url == "https://example.com/release/linux-v2.2"
-    assert result.download_url == "https://example.com/linux-v2.2.deb"
+    assert result.release_url == "https://example.com/release/linux-v2.2.0"
+    assert result.download_url == "https://example.com/linux-v2.2.0.deb"
 
 
 def test_check_for_updates_ignores_newer_release_from_other_platform(monkeypatch):
@@ -103,14 +103,14 @@ def test_check_for_updates_ignores_newer_release_from_other_platform(monkeypatch
             ],
         },
         {
-            "tag_name": "v2.2-dev(Linux)",
-            "name": "Linux Release v2.2-dev",
-            "html_url": "https://example.com/release/linux-v2.2-dev",
+            "tag_name": "v2.2.0(Linux)",
+            "name": "Linux Release v2.2.0",
+            "html_url": "https://example.com/release/linux-v2.2.0",
             "published_at": "2026-02-01T12:00:00Z",
             "assets": [
                 {
-                    "name": "e-callisto-fits-analyzer_2.2-dev_amd64.deb",
-                    "browser_download_url": "https://example.com/linux-v2.2-dev.deb",
+                    "name": "e-callisto-fits-analyzer_2.2.0_amd64.deb",
+                    "browser_download_url": "https://example.com/linux-v2.2.0.deb",
                 }
             ],
         },
@@ -121,10 +121,10 @@ def test_check_for_updates_ignores_newer_release_from_other_platform(monkeypatch
 
     monkeypatch.setattr(update_checker.requests, "get", fake_get)
 
-    result = update_checker.check_for_updates("2.2-dev", system_name="Linux")
+    result = update_checker.check_for_updates("2.2.0", system_name="Linux")
     assert result.status == "up_to_date"
-    assert result.latest_version == "2.2"
-    assert result.download_url == "https://example.com/linux-v2.2-dev.deb"
+    assert result.latest_version == "2.2.0"
+    assert result.download_url == "https://example.com/linux-v2.2.0.deb"
 
 
 def test_check_for_updates_returns_error_on_request_failure(monkeypatch):
@@ -133,7 +133,7 @@ def test_check_for_updates_returns_error_on_request_failure(monkeypatch):
 
     monkeypatch.setattr(update_checker.requests, "get", fake_get)
 
-    result = update_checker.check_for_updates("2.2-dev")
+    result = update_checker.check_for_updates("2.2.0")
     assert result.status == "error"
     assert "network down" in (result.error or "")
 
@@ -141,15 +141,15 @@ def test_check_for_updates_returns_error_on_request_failure(monkeypatch):
 def test_check_for_updates_returns_error_when_platform_release_missing(monkeypatch):
     releases_payload = [
         {
-            "tag_name": "v2.2-dev(Windows)",
-            "name": "Windows Release v2.2-dev",
+            "tag_name": "v2.2.0(Windows)",
+            "name": "Windows Release v2.2.0",
             "prerelease": False,
             "draft": False,
-            "html_url": "https://example.com/release/windows-v2.2-dev",
+            "html_url": "https://example.com/release/windows-v2.2.0",
             "assets": [
                 {
-                    "name": "e-CALLISTO_FITS_Analyzer_v2.2-dev_Setup.exe",
-                    "browser_download_url": "https://example.com/windows-v2.2-dev.exe",
+                    "name": "e-CALLISTO_FITS_Analyzer_v2.2.0_Setup.exe",
+                    "browser_download_url": "https://example.com/windows-v2.2.0.exe",
                 }
             ],
             "body": "Windows release only.",
@@ -181,15 +181,15 @@ def test_check_for_updates_skips_prerelease_for_platform(monkeypatch):
             ],
         },
         {
-            "tag_name": "v2.2-dev(Linux)",
-            "name": "Linux stable v2.2-dev",
+            "tag_name": "v2.2.0(Linux)",
+            "name": "Linux stable v2.2.0",
             "prerelease": False,
             "draft": False,
-            "html_url": "https://example.com/release/linux-v2.2-dev",
+            "html_url": "https://example.com/release/linux-v2.2.0",
             "assets": [
                 {
-                    "name": "e-callisto-fits-analyzer_2.2-dev_amd64.deb",
-                    "browser_download_url": "https://example.com/linux-v2.2-dev.deb",
+                    "name": "e-callisto-fits-analyzer_2.2.0_amd64.deb",
+                    "browser_download_url": "https://example.com/linux-v2.2.0.deb",
                 }
             ],
             "body": "Stable release.",
@@ -203,5 +203,5 @@ def test_check_for_updates_skips_prerelease_for_platform(monkeypatch):
 
     result = update_checker.check_for_updates("2.0", system_name="Linux")
     assert result.status == "update_available"
-    assert result.latest_version == "2.2"
-    assert result.download_url == "https://example.com/linux-v2.2-dev.deb"
+    assert result.latest_version == "2.2.0"
+    assert result.download_url == "https://example.com/linux-v2.2.0.deb"

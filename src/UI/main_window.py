@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.2-dev
+Version 2.2.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -29,7 +29,6 @@ from PySide6.QtGui import (
     QAction,
     QActionGroup,
     QDesktopServices,
-    QFontDatabase,
     QIcon,
     QImage,
     QPainter,
@@ -45,7 +44,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QFormLayout,
-    QFrame,
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
@@ -59,7 +57,6 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QPushButton,
     QRadioButton,
-    QScrollArea,
     QSizePolicy,
     QSlider,
     QSpinBox,
@@ -105,6 +102,7 @@ from src.UI.dialogs.bug_report_dialog import BugReportDialog
 from src.UI.dialogs.combine_dialogs import CombineFrequencyDialog, CombineTimeDialog
 from src.UI.dialogs.max_intensity_dialog import MaxIntensityPlotDialog
 from src.UI.dialogs.rfi_control_dialog import RFIControlDialog
+from src.UI.dialogs.settings_dialog import SettingsDialog
 from src.UI.fits_header_viewer import FitsHeaderViewerDialog
 from src.UI.goes_xrs_gui import MainWindow as GoesXrsWindow
 from src.UI.gui_shared import MplCanvas, _install_linux_msgbox_fixer, pick_export_path, resource_path
@@ -194,9 +192,21 @@ class MainWindow(QMainWindow):
         self.ticks_italic = False
 
         self.remove_titles = False
-
-        self._build_toolbar()
-        self._refresh_toolbar_icons()
+        self._settings_dialog = SettingsDialog(parent=self)
+        self.graph_group = self._settings_dialog.graph_group
+        self.cmap_combo = self._settings_dialog.cmap_combo
+        self.font_combo = self._settings_dialog.font_combo
+        self.title_edit = self._settings_dialog.title_edit
+        self.remove_titles_chk = self._settings_dialog.remove_titles_chk
+        self.tick_font_spin = self._settings_dialog.tick_font_spin
+        self.axis_font_spin = self._settings_dialog.axis_font_spin
+        self.title_font_spin = self._settings_dialog.title_font_spin
+        self.title_bold_chk = self._settings_dialog.title_bold_chk
+        self.title_italic_chk = self._settings_dialog.title_italic_chk
+        self.axis_bold_chk = self._settings_dialog.axis_bold_chk
+        self.axis_italic_chk = self._settings_dialog.axis_italic_chk
+        self.ticks_bold_chk = self._settings_dialog.ticks_bold_chk
+        self.ticks_italic_chk = self._settings_dialog.ticks_italic_chk
 
         # Debounce timer for smooth slider updates
         self.noise_smooth_timer = QTimer()
@@ -306,17 +316,8 @@ class MainWindow(QMainWindow):
         self.cursor_label.setStyleSheet("padding-right: 8px;")
         self.statusBar().addPermanentWidget(self.cursor_label)
 
-        # =========================
-        # LEFT SIDEBAR (CROSS-PLATFORM SAFE)
-        # Put this whole block where you currently build:
-        #   slider_group, units_group_box, graph_group, main_layout, container
-        #
-        # Required imports (add if missing):
-        #   from PySide6.QtWidgets import QScrollArea, QFrame
-        # =========================
-
         # -------------------------
-        # Noise clipping sliders
+        # Display controls
         # -------------------------
         self.lower_slider = QSlider(Qt.Horizontal)
         self.lower_slider.setRange(-100, 100)
@@ -326,45 +327,6 @@ class MainWindow(QMainWindow):
         self.upper_slider.setRange(-100, 100)
         self.upper_slider.setValue(0)
 
-        slider_group = QGroupBox("Noise Clipping Thresholds")
-        self.slider_group = slider_group
-        slider_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-
-        slider_layout = QVBoxLayout(slider_group)
-        slider_layout.setContentsMargins(12, 12, 12, 12)
-        slider_layout.setSpacing(8)
-
-        lbl_low = QLabel("Lower Threshold")
-        lbl_low.setAlignment(Qt.AlignLeft)
-        slider_layout.addWidget(lbl_low)
-        slider_layout.addWidget(self.lower_slider)
-
-        lbl_high = QLabel("Upper Threshold")
-        lbl_high.setAlignment(Qt.AlignLeft)
-        slider_layout.addWidget(lbl_high)
-        slider_layout.addWidget(self.upper_slider)
-
-        # -------------------------
-        # Units Group (Intensity + Time in one row)
-        # -------------------------
-        self.units_group_box = QGroupBox("Units")
-        self.units_group_box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-
-        units_layout = QVBoxLayout(self.units_group_box)
-        units_layout.setContentsMargins(12, 12, 12, 12)
-        units_layout.setSpacing(10)
-
-        # ---- Horizontal container for Intensity + Time ----
-        units_row = QHBoxLayout()
-        units_row.setSpacing(24)
-
-        # ===== Intensity column =====
-        intensity_col = QVBoxLayout()
-        intensity_col.setSpacing(6)
-
-        intensity_label = QLabel("Intensity")
-        intensity_label.setProperty("section", True)
-
         self.units_digits_radio = QRadioButton("Digits")
         self.units_db_radio = QRadioButton("dB")
         self.units_digits_radio.setChecked(True)
@@ -372,18 +334,6 @@ class MainWindow(QMainWindow):
         self.units_group = QButtonGroup(self)
         self.units_group.addButton(self.units_digits_radio)
         self.units_group.addButton(self.units_db_radio)
-
-        intensity_col.addWidget(intensity_label)
-        intensity_col.addWidget(self.units_digits_radio)
-        intensity_col.addWidget(self.units_db_radio)
-        intensity_col.addStretch(1)
-
-        # ===== Time column =====
-        time_col = QVBoxLayout()
-        time_col.setSpacing(6)
-
-        time_label = QLabel("Time")
-        time_label.setProperty("section", True)
 
         self.time_sec_radio = QRadioButton("Seconds")
         self.time_ut_radio = QRadioButton("UT")
@@ -393,212 +343,15 @@ class MainWindow(QMainWindow):
         self.time_group.addButton(self.time_sec_radio)
         self.time_group.addButton(self.time_ut_radio)
 
-        time_col.addWidget(time_label)
-        time_col.addWidget(self.time_sec_radio)
-        time_col.addWidget(self.time_ut_radio)
-        time_col.addStretch(1)
+        self.analysis_summary_group = None
+        self.analysis_summary_label = None
 
-        # ---- Add both columns to the row ----
-        units_row.addLayout(intensity_col, 1)
-        units_row.addLayout(time_col, 1)
+        self._build_toolbar()
+        self._build_display_controls_host()
+        self._attach_display_controls_to_main_toolbar()
+        self._refresh_toolbar_icons()
 
-        # ---- Add row to Units group ----
-        units_layout.addLayout(units_row)
-        units_layout.addStretch(1)
-
-        # -------------------------
-        # Graph Properties Group
-        # -------------------------
-        def _section_label(text: str) -> QLabel:
-            lbl = QLabel(text)
-            lbl.setObjectName("SectionLabel")
-            return lbl
-
-        def _spin_row(label_text: str, spin: QSpinBox) -> QWidget:
-            w = QWidget()
-            row = QHBoxLayout(w)
-            row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(8)
-
-            label = QLabel(label_text)
-            label.setWordWrap(False)
-            label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-
-            spin.setMinimumWidth(90)
-            spin.setMaximumWidth(110)
-            spin.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-            row.addWidget(label, 1)
-            row.addWidget(spin, 0, Qt.AlignRight)
-            return w
-
-        def _style_row(label_text: str, cb_bold: QCheckBox, cb_italic: QCheckBox) -> QWidget:
-            w = QWidget()
-            row = QHBoxLayout(w)
-            row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(8)
-
-            label = QLabel(label_text)
-            label.setWordWrap(False)
-            label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-
-            row.addWidget(label, 1)
-            row.addWidget(cb_bold, 0)
-            row.addWidget(cb_italic, 0)
-            return w
-
-        self.graph_group = QGroupBox("Graph Properties")
-        self.graph_group.setEnabled(False)
-        self.graph_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-
-        graph_layout = QVBoxLayout(self.graph_group)
-        graph_layout.setContentsMargins(12, 12, 12, 12)
-        graph_layout.setSpacing(8)
-
-        # Appearance
-        graph_layout.addWidget(_section_label("Appearance"))
-
-        self.cmap_combo = QComboBox()
-        self.cmap_combo.addItems([
-            "Custom", "viridis", "plasma", "inferno", "magma",
-            "cividis", "turbo", "RdYlBu", "jet", "cubehelix",
-        ])
-        graph_layout.addWidget(QLabel("Colormap"))
-        graph_layout.addWidget(self.cmap_combo)
-
-        self.font_combo = QComboBox()
-        self.font_combo.addItem("Default")
-        for f in sorted(QFontDatabase.families()):
-            self.font_combo.addItem(f)
-
-        graph_layout.addWidget(QLabel("Font family"))
-        graph_layout.addWidget(self.font_combo)
-
-        graph_layout.addSpacing(8)
-
-        # Text
-        graph_layout.addWidget(_section_label("Text"))
-
-        self.title_edit = QLineEdit()
-        self.title_edit.setPlaceholderText("Custom title (leave empty for default)")
-        self.title_edit.setMinimumHeight(20)
-        graph_layout.addWidget(QLabel("Graph title"))
-        graph_layout.addWidget(self.title_edit)
-
-        self.remove_titles_chk = QCheckBox("Remove Titles")
-        graph_layout.addWidget(self.remove_titles_chk)
-
-        graph_layout.addSpacing(8)
-
-        # Font sizes
-        graph_layout.addWidget(_section_label("Font sizes"))
-
-        self.tick_font_spin = QSpinBox()
-        self.tick_font_spin.setRange(6, 60)
-        self.tick_font_spin.setValue(self.tick_font_px)
-        graph_layout.addWidget(_spin_row("Tick labels (px)", self.tick_font_spin))
-
-        self.axis_font_spin = QSpinBox()
-        self.axis_font_spin.setRange(6, 60)
-        self.axis_font_spin.setValue(self.axis_label_font_px)
-        graph_layout.addWidget(_spin_row("Axis labels (px)", self.axis_font_spin))
-
-        self.title_font_spin = QSpinBox()
-        self.title_font_spin.setRange(6, 80)
-        self.title_font_spin.setValue(self.title_font_px)
-        graph_layout.addWidget(_spin_row("Title (px)", self.title_font_spin))
-
-        graph_layout.addSpacing(8)
-
-        # Text style
-        graph_layout.addWidget(_section_label("Text style"))
-
-        self.title_bold_chk = QCheckBox("Bold")
-        self.title_italic_chk = QCheckBox("Italic")
-        graph_layout.addWidget(_style_row("Title", self.title_bold_chk, self.title_italic_chk))
-
-        self.axis_bold_chk = QCheckBox("Bold")
-        self.axis_italic_chk = QCheckBox("Italic")
-        graph_layout.addWidget(_style_row("Axis labels", self.axis_bold_chk, self.axis_italic_chk))
-
-        self.ticks_bold_chk = QCheckBox("Bold")
-        self.ticks_italic_chk = QCheckBox("Italic")
-        graph_layout.addWidget(_style_row("Tick labels", self.ticks_bold_chk, self.ticks_italic_chk))
-
-        graph_layout.addStretch(1)
-
-        self.analysis_summary_group = QGroupBox("Analysis Summary")
-        self.analysis_summary_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-        analysis_summary_layout = QVBoxLayout(self.analysis_summary_group)
-        analysis_summary_layout.setContentsMargins(12, 12, 12, 12)
-        analysis_summary_layout.setSpacing(6)
-        self.analysis_summary_label = QLabel("No analysis session loaded.")
-        self.analysis_summary_label.setWordWrap(True)
-        analysis_summary_layout.addWidget(self.analysis_summary_label)
-
-        # -------------------------
-        # Build the LEFT PANEL as a widget, then put it in a ScrollArea
-        # This is the key fix for Windows (no overlaps, no clipping).
-        # -------------------------
-        side_panel_widget = QWidget()
-        side_panel_layout = QVBoxLayout(side_panel_widget)
-        side_panel_layout.setContentsMargins(10, 10, 10, 10)
-        side_panel_layout.setSpacing(12)
-
-        side_panel_layout.addWidget(slider_group)
-        side_panel_layout.addWidget(self.units_group_box)
-        side_panel_layout.addWidget(self.graph_group)
-        side_panel_layout.addWidget(self.analysis_summary_group)
-        side_panel_layout.addStretch(1)
-
-        # Consistent width for all groups (better on Windows DPI scaling)
-        SIDEBAR_W = 250
-        slider_group.setMaximumWidth(SIDEBAR_W)
-        self.units_group_box.setMaximumWidth(SIDEBAR_W)
-        self.graph_group.setMaximumWidth(SIDEBAR_W)
-        self.analysis_summary_group.setMaximumWidth(SIDEBAR_W)
-
-        self.side_scroll = QScrollArea()
-        self.side_scroll.setWidgetResizable(True)
-        self.side_scroll.setFrameShape(QFrame.NoFrame)
-        self.side_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.side_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.side_scroll.setMinimumWidth(SIDEBAR_W + 16)  # room for scrollbar
-        self.side_scroll.setMaximumWidth(SIDEBAR_W + 28)
-        self.side_scroll.setWidget(side_panel_widget)
-
-        self.sidebar_toggle_btn = QPushButton("◀")
-        self.sidebar_toggle_btn.setObjectName("SidebarToggleButton")
-        self.sidebar_toggle_btn.setToolTip("Collapse sidebar")
-        self.sidebar_toggle_btn.setFixedSize(12, 22)
-        self.sidebar_toggle_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.sidebar_toggle_btn.setFocusPolicy(Qt.NoFocus)
-        self.sidebar_toggle_btn.clicked.connect(self.toggle_left_sidebar)
-
-        self.sidebar_toggle_strip = QWidget()
-        self.sidebar_toggle_strip.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-        self.sidebar_toggle_strip.setFixedWidth(12)
-        sidebar_toggle_layout = QVBoxLayout(self.sidebar_toggle_strip)
-        sidebar_toggle_layout.setContentsMargins(0, 0, 0, 0)
-        sidebar_toggle_layout.setSpacing(0)
-        sidebar_toggle_layout.addStretch(1)
-        sidebar_toggle_layout.addWidget(self.sidebar_toggle_btn, 0, Qt.AlignHCenter)
-        sidebar_toggle_layout.addStretch(1)
-        self._sidebar_collapsed = False
-
-        # -------------------------
-        # Style (safe sizes, no tiny max-heights)
-        # -------------------------
-        if not (self.theme and hasattr(self.theme, "set_view_mode")):
-            sidebar_style = self._classic_sidebar_qss()
-            slider_group.setStyleSheet(sidebar_style)
-            self.units_group_box.setStyleSheet(sidebar_style)
-            self.graph_group.setStyleSheet(sidebar_style)
-            self.analysis_summary_group.setStyleSheet(sidebar_style)
-
-        # -------------------------
-        # Main layout with scrollable sidebar + canvas
-        # -------------------------
-        main_layout = QHBoxLayout()
+        main_layout = QVBoxLayout()
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.setSpacing(0)
 
@@ -610,15 +363,12 @@ class MainWindow(QMainWindow):
         self.plot_stack.addWidget(self.accel_canvas)
         self.plot_stack.setCurrentWidget(self.accel_canvas if self.use_hw_live_preview else self.canvas)
 
-        main_layout.addWidget(self.side_scroll, 0)
-        main_layout.addWidget(self.sidebar_toggle_strip, 0)
         main_layout.addWidget(self.plot_stack_host, 1)
         self._main_layout = main_layout
 
         container = QWidget()
         container.setLayout(main_layout)
         self.setCentralWidget(container)
-        self._set_sidebar_collapsed(False)
 
         # ----- Menu Bar -----
         menubar = self.menuBar()
@@ -772,6 +522,10 @@ class MainWindow(QMainWindow):
             view_mode_group.addAction(a)
             mode_menu.addAction(a)
 
+        settings_menu = menubar.addMenu("Settings")
+        self.open_settings_action = QAction("Open Settings", self)
+        settings_menu.addAction(self.open_settings_action)
+
         processing_menu = menubar.addMenu("Processing")
         hw_menu = processing_menu.addMenu("Hardware Acceleration")
         self.hw_live_preview_action = QAction("Enable", self, checkable=True)
@@ -841,6 +595,7 @@ class MainWindow(QMainWindow):
         self.theme_action_dark.triggered.connect(lambda: self.theme and self.theme.set_mode("dark"))
         self.mode_action_classic.triggered.connect(lambda checked: checked and self.set_view_mode("classic"))
         self.mode_action_modern.triggered.connect(lambda checked: checked and self.set_view_mode("modern"))
+        self.open_settings_action.triggered.connect(self.open_settings_window)
         self.hw_live_preview_action.toggled.connect(self.set_hardware_live_preview_enabled)
 
         # About Menu
@@ -858,11 +613,6 @@ class MainWindow(QMainWindow):
         self.check_updates_action.triggered.connect(self.check_for_app_updates)
         self.report_bug_action.triggered.connect(self.open_bug_report_dialog)
         about_action.triggered.connect(self.show_about_dialog)
-
-        # (OPTIONAL) Connect them later like:
-        # open_action.triggered.connect(self.open_file)
-
-        self.setCentralWidget(container)
 
         # Signals
         self.lower_slider.valueChanged.connect(self.schedule_noise_update)
@@ -1016,20 +766,18 @@ class MainWindow(QMainWindow):
         dark = self._is_dark_ui()
         if mode == "classic":
             main_qss = self._classic_main_qss()
-            sidebar_qss = self._classic_sidebar_qss()
+            panel_qss = self._classic_panel_qss()
         else:
             main_qss = self._modern_main_qss(dark)
-            sidebar_qss = self._modern_sidebar_qss(dark)
+            panel_qss = self._modern_panel_qss(dark)
 
         self.setStyleSheet(main_qss)
         for widget in (
-                getattr(self, "slider_group", None),
-                getattr(self, "units_group_box", None),
-                getattr(self, "graph_group", None),
-                getattr(self, "analysis_summary_group", None),
+            getattr(self, "graph_group", None),
+            getattr(self, "analysis_summary_group", None),
         ):
             if widget is not None:
-                widget.setStyleSheet(sidebar_qss)
+                widget.setStyleSheet(panel_qss)
 
     def _classic_main_qss(self) -> str:
         return """
@@ -1040,15 +788,40 @@ class MainWindow(QMainWindow):
             font-weight: bold;
             font-size: 14px;
         }
-        QPushButton#SidebarToggleButton {
-            font-size: 10px;
-            padding: 0px;
-            min-width: 12px;
-            max-width: 12px;
+        QToolBar {
+            spacing: 5px;
+            padding: 4px 6px;
+        }
+        QToolButton {
+            padding: 3px;
+            border-radius: 8px;
+        }
+        QToolBar QLabel {
+            font-size: 11px;
+        }
+        QToolBar QRadioButton {
+            font-size: 11px;
+            spacing: 4px;
+        }
+        QGroupBox#DisplayControlSection {
+            font-size: 11px;
+            font-weight: bold;
+            border: 1px solid palette(mid);
+            border-radius: 6px;
+            margin-top: 9px;
+            padding: 4px;
+            background: palette(base);
+        }
+        QLabel#DisplayControlField {
+            font-size: 11px;
+        }
+        QLabel#DisplayControlSubsection {
+            font-size: 11px;
+            font-weight: bold;
         }
         """
 
-    def _classic_sidebar_qss(self) -> str:
+    def _classic_panel_qss(self) -> str:
         return """
         QGroupBox {
             font-weight: bold;
@@ -1151,12 +924,12 @@ class MainWindow(QMainWindow):
             background-color: {surface_bg};
             border: none;
             border-bottom: 1px solid {border};
-            spacing: 6px;
-            padding: 6px 8px;
+            spacing: 5px;
+            padding: 4px 6px;
         }}
         QToolButton {{
             border: 1px solid transparent;
-            border-radius: 10px;
+            border-radius: 8px;
             padding: 4px;
             background: transparent;
         }}
@@ -1169,6 +942,52 @@ class MainWindow(QMainWindow):
         }}
         QToolButton:disabled {{
             color: {muted};
+        }}
+        QToolBar QLabel {{
+            color: {text};
+            font-size: 11px;
+        }}
+        QToolBar QRadioButton {{
+            color: {text};
+            font-size: 11px;
+            spacing: 3px;
+            margin-right: 2px;
+        }}
+        QToolBar QSlider::groove:horizontal {{
+            height: 5px;
+            border-radius: 2px;
+            background: {border};
+        }}
+        QToolBar QSlider::handle:horizontal {{
+            width: 12px;
+            margin: -4px 0;
+            border-radius: 6px;
+            background: {accent};
+        }}
+        QGroupBox#DisplayControlSection {{
+            font-size: 11px;
+            font-weight: 600;
+            border: 1px solid {border};
+            border-radius: 7px;
+            margin-top: 9px;
+            padding: 4px;
+            background-color: {surface_bg};
+            color: {text};
+        }}
+        QGroupBox#DisplayControlSection::title {{
+            subcontrol-origin: margin;
+            left: 7px;
+            padding: 0 2px;
+            color: {muted};
+        }}
+        QLabel#DisplayControlField {{
+            color: {text};
+            font-size: 11px;
+        }}
+        QLabel#DisplayControlSubsection {{
+            color: {muted};
+            font-size: 11px;
+            font-weight: 600;
         }}
         QStatusBar {{
             background-color: {surface_bg};
@@ -1188,25 +1007,9 @@ class MainWindow(QMainWindow):
             background-color: {accent};
             border-radius: 5px;
         }}
-        QPushButton#SidebarToggleButton {{
-            font-size: 10px;
-            padding: 0px;
-            min-width: 12px;
-            max-width: 12px;
-            border: 1px solid {border};
-            border-radius: 6px;
-            color: {text};
-            background-color: {surface_bg};
-        }}
-        QPushButton#SidebarToggleButton:hover {{
-            background-color: {hover};
-        }}
-        QPushButton#SidebarToggleButton:pressed {{
-            background-color: {pressed};
-        }}
         """
 
-    def _modern_sidebar_qss(self, dark: bool) -> str:
+    def _modern_panel_qss(self, dark: bool) -> str:
         if dark:
             panel_bg = "#1d2631"
             field_bg = "#141b24"
@@ -1411,9 +1214,12 @@ class MainWindow(QMainWindow):
 
     def _build_toolbar(self):
         tb = QToolBar("Main Toolbar", self)
+        tb.setObjectName("MainToolbar")
         tb.setMovable(False)
-        tb.setIconSize(QSize(36, 36))
-        self.addToolBar(tb)
+        tb.setIconSize(QSize(34, 34))
+        tb.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.addToolBar(Qt.TopToolBarArea, tb)
+        self.main_toolbar = tb
 
         # --- Actions (toolbar) ---
         self.tb_open = QAction(self._icon("open.svg"), "Open / Load", self)
@@ -1492,6 +1298,99 @@ class MainWindow(QMainWindow):
         # Initial enable/disable states
         self._sync_toolbar_enabled_states()
         self._sync_nav_actions()
+
+    def _build_display_controls_host(self):
+        host = QWidget(self)
+        host.setObjectName("DisplayControlsHost")
+        host.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        host.setMinimumHeight(52)
+        layout = QHBoxLayout(host)
+        layout.setContentsMargins(3, 1, 1, 1)
+        layout.setSpacing(6)
+        layout.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        self.lower_slider.setToolTip("Lower threshold")
+        self.upper_slider.setToolTip("Upper threshold")
+        self.lower_slider.setMinimumWidth(58)
+        self.upper_slider.setMinimumWidth(58)
+        self.lower_slider.setMaximumWidth(76)
+        self.upper_slider.setMaximumWidth(76)
+        self.lower_slider.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.upper_slider.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+        noise_group, noise_layout = self._make_display_control_section("Noise Clipping Thresholds")
+        lower_label = QLabel("Lower")
+        lower_label.setObjectName("DisplayControlField")
+        upper_label = QLabel("Upper")
+        upper_label.setObjectName("DisplayControlField")
+        noise_layout.addWidget(lower_label)
+        noise_layout.addWidget(self.lower_slider)
+        noise_layout.addSpacing(4)
+        noise_layout.addWidget(upper_label)
+        noise_layout.addWidget(self.upper_slider)
+
+        units_group, units_layout = self._make_display_control_section("Units")
+        intensity_col = QWidget(self)
+        intensity_layout = QVBoxLayout(intensity_col)
+        intensity_layout.setContentsMargins(0, 0, 0, 0)
+        intensity_layout.setSpacing(2)
+        intensity_label = QLabel("Intensity")
+        intensity_label.setObjectName("DisplayControlSubsection")
+        intensity_layout.addWidget(intensity_label)
+        intensity_row = QHBoxLayout()
+        intensity_row.setContentsMargins(0, 0, 0, 0)
+        intensity_row.setSpacing(2)
+        intensity_row.addWidget(self.units_digits_radio)
+        intensity_row.addWidget(self.units_db_radio)
+        intensity_layout.addLayout(intensity_row)
+        intensity_col.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+
+        time_col = QWidget(self)
+        time_layout = QVBoxLayout(time_col)
+        time_layout.setContentsMargins(0, 0, 0, 0)
+        time_layout.setSpacing(2)
+        time_label = QLabel("Time")
+        time_label.setObjectName("DisplayControlSubsection")
+        time_layout.addWidget(time_label)
+        time_row = QHBoxLayout()
+        time_row.setContentsMargins(0, 0, 0, 0)
+        time_row.setSpacing(2)
+        time_row.addWidget(self.time_sec_radio)
+        time_row.addWidget(self.time_ut_radio)
+        time_layout.addLayout(time_row)
+        time_col.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+
+        units_layout.addWidget(intensity_col)
+        units_layout.addSpacing(4)
+        units_layout.addWidget(time_col)
+
+        layout.addWidget(noise_group, 0)
+        layout.addWidget(units_group, 0)
+        self.display_toolbar_widget = host
+        self.display_controls_host = host
+
+    def _attach_display_controls_to_main_toolbar(self):
+        tb = getattr(self, "main_toolbar", None)
+        host = getattr(self, "display_controls_host", None)
+        if tb is None or host is None:
+            return
+
+        spacer = QWidget(self)
+        spacer.setObjectName("MainToolbarSpacer")
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        tb.addWidget(spacer)
+        tb.addWidget(host)
+        self.main_toolbar_spacer = spacer
+
+    def _make_display_control_section(self, title: str) -> tuple[QGroupBox, QHBoxLayout]:
+        group = QGroupBox(title, self)
+        group.setObjectName("DisplayControlSection")
+        group.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+
+        row = QHBoxLayout(group)
+        row.setContentsMargins(6, 9, 6, 4)
+        row.setSpacing(6)
+        return group, row
 
     def _sync_toolbar_enabled_states(self):
         has_file = getattr(self, "raw_data", None) is not None
@@ -1773,26 +1672,6 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_apply_mpl_theme"):
             self._apply_mpl_theme()
         self._apply_accel_theme()
-
-    def toggle_left_sidebar(self):
-        self._set_sidebar_collapsed(not bool(getattr(self, "_sidebar_collapsed", False)))
-
-    def _set_sidebar_collapsed(self, collapsed: bool):
-        self._sidebar_collapsed = bool(collapsed)
-        if getattr(self, "side_scroll", None) is None or getattr(self, "sidebar_toggle_btn", None) is None:
-            return
-
-        self.side_scroll.setVisible(not self._sidebar_collapsed)
-        if self._sidebar_collapsed:
-            self.sidebar_toggle_btn.setText("▶")
-            self.sidebar_toggle_btn.setToolTip("Expand sidebar")
-        else:
-            self.sidebar_toggle_btn.setText("◀")
-            self.sidebar_toggle_btn.setToolTip("Collapse sidebar")
-
-        layout = getattr(self, "_main_layout", None)
-        if layout is not None:
-            layout.setSpacing(0)
 
     def _normalize_plot_type(self, title: str | None) -> str:
         txt = str(title or "").strip()
@@ -2643,6 +2522,8 @@ class MainWindow(QMainWindow):
 
     def set_units_mode(self, use_db: bool):
         self.use_db = bool(use_db)
+        self._set_checked_if_exists("units_db_radio", self.use_db)
+        self._set_checked_if_exists("units_digits_radio", not self.use_db)
 
         if self.raw_data is None:
             return
@@ -4675,6 +4556,14 @@ class MainWindow(QMainWindow):
         self._bug_report_dialog.raise_()
         self._bug_report_dialog.activateWindow()
 
+    def open_settings_window(self):
+        dlg = getattr(self, "_settings_dialog", None)
+        if dlg is None:
+            return
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
     def reset_selection(self):
         had_drift_points = self._clear_drift_overlays(keep_view=True)
 
@@ -6401,7 +6290,7 @@ class MainWindow(QMainWindow):
             "time_sync": dict(getattr(self, "_last_time_sync_context", {}) or {}),
         }
 
-        # Canonical analysis session (v2.2-dev)
+        # Canonical analysis session (v2.2.0)
         session = self._analysis_session_with_context(getattr(self, "_analysis_session", None))
         if session is None:
             session = normalize_analysis_session(
@@ -6815,6 +6704,11 @@ class MainWindow(QMainWindow):
         try:
             if self._bug_report_dialog is not None:
                 self._bug_report_dialog.close()
+        except Exception:
+            pass
+        try:
+            if self._settings_dialog is not None:
+                self._settings_dialog.shutdown()
         except Exception:
             pass
         try:
