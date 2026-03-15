@@ -3370,6 +3370,83 @@ class MainWindow(QMainWindow):
         arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, image.bytesPerLine()))
         return arr[:, : width * 4].reshape((height, width, 4)).copy()
 
+    def _qt_image_format_for_ext(self, ext: str) -> str:
+        normalized = str(ext or "").strip().lower().lstrip(".")
+        mapping = {
+            "png": "PNG",
+            "jpg": "JPG",
+            "jpeg": "JPG",
+            "bmp": "BMP",
+            "tif": "TIFF",
+            "tiff": "TIFF",
+            "webp": "WEBP",
+        }
+        return mapping.get(normalized, normalized.upper() or "PNG")
+
+    def _capture_hardware_plot_qimage(self) -> QImage:
+        accel = getattr(self, "accel_canvas", None)
+        if accel is None:
+            return QImage()
+
+        QApplication.processEvents()
+
+        viewport = None
+        graphics = getattr(accel, "_graphics", None)
+        if graphics is not None:
+            try:
+                viewport = graphics.viewport()
+            except Exception:
+                viewport = None
+
+        if viewport is not None:
+            try:
+                grab_framebuffer = getattr(viewport, "grabFramebuffer", None)
+                if callable(grab_framebuffer):
+                    image = grab_framebuffer()
+                    if isinstance(image, QImage) and not image.isNull():
+                        return image
+            except Exception:
+                pass
+
+            try:
+                pixmap = viewport.grab()
+                if not pixmap.isNull():
+                    return pixmap.toImage()
+            except Exception:
+                pass
+
+            try:
+                size = viewport.size()
+                if size.width() > 0 and size.height() > 0:
+                    image = QImage(size, QImage.Format_ARGB32)
+                    image.fill(Qt.transparent)
+                    painter = QPainter(image)
+                    try:
+                        viewport.render(painter)
+                    finally:
+                        painter.end()
+                    if not image.isNull():
+                        return image
+            except Exception:
+                pass
+
+        try:
+            pixmap = accel.grab()
+            if not pixmap.isNull():
+                return pixmap.toImage()
+        except Exception:
+            pass
+
+        return QImage()
+
+    def _save_captured_hardware_plot(self, file_path: str, ext_final: str) -> None:
+        image = self._capture_hardware_plot_qimage()
+        if image.isNull():
+            raise RuntimeError("Could not capture the accelerated plot image.")
+        image_format = self._qt_image_format_for_ext(ext_final)
+        if not image.save(file_path, image_format):
+            raise RuntimeError(f"Failed to save image as {ext_final}.")
+
     def _export_hardware_visible_plot(self, file_path: str, ext_final: str) -> None:
         ext = str(ext_final or "").lower()
         plot_item = self.accel_canvas.export_plot_item()
@@ -3384,14 +3461,17 @@ class MainWindow(QMainWindow):
         if pg_exporters is not None:
             raster_exts = {"png", "tif", "tiff", "jpg", "jpeg", "bmp", "webp"}
             if ext in raster_exts:
-                exporter = pg_exporters.ImageExporter(plot_item)
                 try:
+                    exporter = pg_exporters.ImageExporter(plot_item)
                     params = exporter.parameters()
                     width = max(1, int(self.accel_canvas.width() * self.accel_canvas.devicePixelRatioF()))
                     params["width"] = max(width, 1400)
+                    exporter.export(file_path)
+                    if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                        return
                 except Exception:
                     pass
-                exporter.export(file_path)
+                self._save_captured_hardware_plot(file_path, ext)
                 return
 
             if ext == "svg":
@@ -3401,19 +3481,25 @@ class MainWindow(QMainWindow):
 
             if ext in {"pdf", "eps"}:
                 temp_png = None
+                img = QImage()
                 try:
-                    fd, temp_png = tempfile.mkstemp(suffix=".png")
-                    os.close(fd)
-                    exporter = pg_exporters.ImageExporter(plot_item)
                     try:
-                        params = exporter.parameters()
-                        width = max(1, int(self.accel_canvas.width() * self.accel_canvas.devicePixelRatioF()))
-                        params["width"] = max(width, 1800)
+                        fd, temp_png = tempfile.mkstemp(suffix=".png")
+                        os.close(fd)
+                        exporter = pg_exporters.ImageExporter(plot_item)
+                        try:
+                            params = exporter.parameters()
+                            width = max(1, int(self.accel_canvas.width() * self.accel_canvas.devicePixelRatioF()))
+                            params["width"] = max(width, 1800)
+                        except Exception:
+                            pass
+                        exporter.export(temp_png)
+                        img = QImage(temp_png)
                     except Exception:
-                        pass
-                    exporter.export(temp_png)
+                        img = QImage()
 
-                    img = QImage(temp_png)
+                    if img.isNull():
+                        img = self._capture_hardware_plot_qimage()
                     if img.isNull():
                         raise RuntimeError("Failed to capture hardware plot image.")
 
@@ -3443,7 +3529,11 @@ class MainWindow(QMainWindow):
                         except Exception:
                             pass
 
-        # Last-resort fallback (can be blank on some OpenGL drivers)
+        if ext in {"png", "tif", "tiff", "jpg", "jpeg", "bmp", "webp"}:
+            self._save_captured_hardware_plot(file_path, ext)
+            return
+
+        # Last-resort fallback for non-raster formats remains limited.
         pixmap = self.accel_canvas.grab()
         if pixmap.isNull():
             raise RuntimeError("Could not capture the accelerated plot image.")

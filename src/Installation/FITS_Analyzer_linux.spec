@@ -44,6 +44,9 @@ a = Analysis(
         "PySide6",
         "matplotlib",
         "pyqtgraph",
+        "pyqtgraph.exporters",
+        "pyqtgraph.exporters.ImageExporter",
+        "pyqtgraph.exporters.SVGExporter",
         "matplotlib.backends.backend_qtagg",
         "matplotlib.backends.backend_qt5agg",
 

@@ -55,6 +55,7 @@ OPTIONS = {
         "src.Backend",
         "matplotlib",
         "pyqtgraph",
+        "pyqtgraph.exporters",
         "numpy",
         "pandas",
         "scipy",
@@ -88,6 +89,9 @@ OPTIONS = {
         "PySide6.QtSvgWidgets",
         "matplotlib.backends.backend_qtagg",
         "pyqtgraph",
+        "pyqtgraph.exporters",
+        "pyqtgraph.exporters.ImageExporter",
+        "pyqtgraph.exporters.SVGExporter",
 
         # Standard libs used dynamically
         "csv",
