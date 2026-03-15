@@ -50,6 +50,9 @@ a = Analysis(
         "PySide6",
         "matplotlib",
         "pyqtgraph",
+        "pyqtgraph.exporters",
+        "pyqtgraph.exporters.ImageExporter",
+        "pyqtgraph.exporters.SVGExporter",
 
         # Canvas backends
         "matplotlib.backends.backend_qtagg",

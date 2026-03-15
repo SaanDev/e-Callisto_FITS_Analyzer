@@ -15,7 +15,6 @@ from src.UI.dialogs.bug_report_dialog import BugReportDialog
 from src.UI.dialogs.combine_dialogs import CombineFrequencyDialog, CombineTimeDialog
 from src.UI.dialogs.max_intensity_dialog import MaxIntensityPlotDialog
 from src.UI.dialogs.rfi_control_dialog import RFIControlDialog
-from src.UI.dialogs.settings_dialog import SettingsDialog
 from src.UI.gui_shared import (
     IS_LINUX,
     MplCanvas,
@@ -40,7 +39,6 @@ __all__ = [
     "MaxIntensityPlotDialog",
     "MplCanvas",
     "RFIControlDialog",
-    "SettingsDialog",
     "UpdateCheckWorker",
     "UpdateDownloadWorker",
     "_ext_from_filter",

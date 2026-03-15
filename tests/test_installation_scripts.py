@@ -91,6 +91,20 @@ def test_specs_include_sunpy_modules_and_hook_path():
     assert hook_path.exists()
 
 
+def test_specs_bundle_pyqtgraph_exporters():
+    spec_paths = [
+        ROOT / "src" / "Installation" / "FITS_Analyzer.spec",
+        ROOT / "src" / "Installation" / "FITS_Analyzer_linux.spec",
+        ROOT / "src" / "Installation" / "FITS_Analyzer_win.spec",
+        ROOT / "src" / "Installation" / "setup.py",
+    ]
+    for path in spec_paths:
+        text = path.read_text(encoding="utf-8")
+        assert "pyqtgraph.exporters" in text
+        assert "pyqtgraph.exporters.ImageExporter" in text
+        assert "pyqtgraph.exporters.SVGExporter" in text
+
+
 def test_runtime_requirements_include_sunpy_network_stack():
     text = (ROOT / "src" / "Installation" / "requirements-runtime.txt").read_text(encoding="utf-8")
     assert "sunpy[map,net,timeseries]" in text

@@ -14,7 +14,7 @@ pytest.importorskip("PySide6")
 pytest.importorskip("matplotlib")
 pytest.importorskip("astropy")
 
-from PySide6.QtWidgets import QApplication, QGroupBox, QLabel, QToolBar
+from PySide6.QtWidgets import QApplication, QGroupBox, QScrollArea, QToolBar
 
 from src.Backend.presets import build_preset
 from src.UI.main_window import MainWindow
@@ -41,16 +41,20 @@ def _load_demo_plot(win: MainWindow):
     QApplication.processEvents()
 
 
-def test_main_window_has_no_analysis_summary_panel_or_sidebar():
+def test_main_window_restores_sidebar_and_analysis_summary():
     _app()
     win = MainWindow(theme=None)
     win.show()
     QApplication.processEvents()
 
-    assert hasattr(win, "side_scroll") is False
-    assert hasattr(win, "sidebar_toggle_btn") is False
-    assert win.analysis_summary_group is None
-    assert win.analysis_summary_label is None
+    assert isinstance(win.side_scroll, QScrollArea)
+    assert win.sidebar_toggle_btn is not None
+    assert win.slider_group.title() == "Noise Clipping Thresholds"
+    assert win.units_group_box.title() == "Units"
+    assert win.graph_group.title() == "Graph Properties"
+    assert win.analysis_summary_group.title() == "Analysis Summary"
+    assert hasattr(win, "display_toolbar_widget") is False
+    assert hasattr(win, "_settings_dialog") is False
 
     win._analysis_session = {
         "analyzer": {
@@ -61,25 +65,36 @@ def test_main_window_has_no_analysis_summary_panel_or_sidebar():
     }
     win._refresh_analysis_summary_panel()
 
+    assert "Fit:" in win.analysis_summary_label.text()
+    assert "R2:" in win.analysis_summary_label.text()
     win.close()
 
 
-def test_display_toolbar_row_controls_update_units_and_time_modes():
+def test_sidebar_toggle_and_controls_still_work():
     _app()
     win = MainWindow(theme=None)
+    win.show()
     _load_demo_plot(win)
+    QApplication.processEvents()
 
-    assert win.display_toolbar_widget is not None
-    assert hasattr(win, "display_toolbar") is False
     toolbars = win.findChildren(QToolBar)
     assert len(toolbars) == 1
-    assert toolbars[0] is win.main_toolbar
-    assert win.main_toolbar.iconSize().width() == 34
-    assert win.main_toolbar.iconSize().height() == 34
-    toolbar_texts = {label.text() for label in win.display_toolbar_widget.findChildren(QLabel) if label.text()}
-    section_titles = {group.title() for group in win.display_toolbar_widget.findChildren(QGroupBox) if group.title()}
-    assert {"Noise Clipping Thresholds", "Units"}.issubset(section_titles)
-    assert {"Lower", "Upper", "Intensity", "Time"}.issubset(toolbar_texts)
+    assert toolbars[0].iconSize().width() == 36
+    assert toolbars[0].iconSize().height() == 36
+
+    section_titles = {group.title() for group in win.side_scroll.findChildren(QGroupBox) if group.title()}
+    assert {"Noise Clipping Thresholds", "Units", "Graph Properties", "Analysis Summary"}.issubset(section_titles)
+
+    assert win.side_scroll.isVisible() is True
+    win.toggle_left_sidebar()
+    QApplication.processEvents()
+    assert win.side_scroll.isVisible() is False
+    assert win.sidebar_toggle_btn.text() == "▶"
+
+    win.toggle_left_sidebar()
+    QApplication.processEvents()
+    assert win.side_scroll.isVisible() is True
+    assert win.sidebar_toggle_btn.text() == "◀"
 
     win.units_db_radio.setChecked(True)
     QApplication.processEvents()
@@ -99,50 +114,13 @@ def test_display_toolbar_row_controls_update_units_and_time_modes():
     win.close()
 
 
-def test_settings_menu_reuses_non_modal_window_and_applies_live_changes():
-    _app()
-    win = MainWindow(theme=None)
-
-    dlg = win._settings_dialog
-    assert dlg.isVisible() is False
-    assert dlg.graph_group.isEnabled() is False
-
-    win.open_settings_action.trigger()
-    QApplication.processEvents()
-    assert dlg.isVisible() is True
-
-    dlg.close()
-    QApplication.processEvents()
-    assert dlg.isVisible() is False
-
-    win.open_settings_action.trigger()
-    QApplication.processEvents()
-    assert win._settings_dialog is dlg
-    assert dlg.isVisible() is True
-
-    _load_demo_plot(win)
-    assert dlg.graph_group.isEnabled() is True
-
-    dlg.title_edit.setText("Custom Spectrum")
-    QApplication.processEvents()
-    assert win.canvas.ax.get_title() == "Custom Spectrum"
-
-    dlg.remove_titles_chk.setChecked(True)
-    QApplication.processEvents()
-    assert win.canvas.ax.get_title() == ""
-    assert win.canvas.ax.get_xlabel() == ""
-
-    dlg.close()
-    win.close()
-
-
-def test_apply_preset_updates_rehomed_toolbar_and_settings_controls():
+def test_apply_preset_updates_restored_sidebar_controls():
     _app()
     win = MainWindow(theme=None)
     _load_demo_plot(win)
 
     preset = build_preset(
-        "Compact UI",
+        "Sidebar UI",
         {
             "lower_slider": -5,
             "upper_slider": 12,
