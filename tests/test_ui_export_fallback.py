@@ -18,6 +18,7 @@ pytest.importorskip("astropy")
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication, QWidget
 
+import src.UI.main_window as main_window_module
 from src.UI.main_window import MainWindow
 
 
@@ -73,4 +74,64 @@ def test_hardware_png_export_falls_back_to_framebuffer_capture(tmp_path: Path):
 
     dummy_canvas.close()
     viewport.close()
+    win.close()
+
+
+def test_hardware_pick_export_path_appends_selected_filter_extension(monkeypatch):
+    _app()
+    win = MainWindow(theme=None)
+    monkeypatch.setattr(win, "_hardware_mode_enabled", lambda: True)
+    monkeypatch.setattr(main_window_module.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        main_window_module.QFileDialog,
+        "getSaveFileName",
+        lambda *args, **kwargs: ("/tmp/hardware-export", "PNG (*.png)"),
+    )
+
+    path, ext = win._pick_export_path_for_figure(
+        "Export Figure",
+        "hardware-export",
+        "PNG (*.png);;PDF (*.pdf)",
+        default_filter="PNG (*.png)",
+    )
+
+    assert path == "/tmp/hardware-export.png"
+    assert ext == "png"
+    win.close()
+
+
+def test_linux_hardware_pick_export_path_uses_shared_helper(monkeypatch):
+    _app()
+    win = MainWindow(theme=None)
+    monkeypatch.setattr(win, "_hardware_mode_enabled", lambda: True)
+    monkeypatch.setattr(main_window_module.sys, "platform", "linux")
+
+    called = {}
+
+    def fake_pick_export_path(parent, caption, default_name, filters, default_filter=None):
+        called["args"] = (caption, default_name, filters, default_filter)
+        return "/tmp/hardware-export.pdf", "pdf"
+
+    monkeypatch.setattr(main_window_module, "pick_export_path", fake_pick_export_path)
+    monkeypatch.setattr(
+        main_window_module.QFileDialog,
+        "getSaveFileName",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("native dialog should not be used")),
+    )
+
+    path, ext = win._pick_export_path_for_figure(
+        "Export Figure",
+        "hardware-export",
+        "PNG (*.png);;PDF (*.pdf)",
+        default_filter="PNG (*.png)",
+    )
+
+    assert path == "/tmp/hardware-export.pdf"
+    assert ext == "pdf"
+    assert called["args"] == (
+        "Export Figure",
+        "hardware-export",
+        "PNG (*.png);;PDF (*.pdf)",
+        "PNG (*.png)",
+    )
     win.close()

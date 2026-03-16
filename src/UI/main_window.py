@@ -107,7 +107,13 @@ from src.UI.dialogs.max_intensity_dialog import MaxIntensityPlotDialog
 from src.UI.dialogs.rfi_control_dialog import RFIControlDialog
 from src.UI.fits_header_viewer import FitsHeaderViewerDialog
 from src.UI.goes_xrs_gui import MainWindow as GoesXrsWindow
-from src.UI.gui_shared import MplCanvas, _install_linux_msgbox_fixer, pick_export_path, resource_path
+from src.UI.gui_shared import (
+    MplCanvas,
+    _ext_from_filter,
+    _install_linux_msgbox_fixer,
+    pick_export_path,
+    resource_path,
+)
 from src.UI.gui_workers import DownloaderImportWorker, UpdateCheckWorker, UpdateDownloadWorker
 from src.UI.mpl_style import style_axes
 from src.UI.utils.cme_helper_client import CMEHelperClient
@@ -3709,10 +3715,10 @@ class MainWindow(QMainWindow):
 
     def _pick_export_path_for_figure(self, caption: str, default_name: str, filters: str, default_filter: str = None):
         """
-        Hardware-acceleration mode uses native save dialog directly because
-        some Linux/OpenGL combinations can hang with the non-native dialog.
+        Linux keeps using the shared helper because it preserves the selected
+        name filter reliably in the save dialog.
         """
-        if self._hardware_mode_enabled():
+        if self._hardware_mode_enabled() and not sys.platform.startswith("linux"):
             path, chosen_filter = QFileDialog.getSaveFileName(
                 self,
                 caption,
