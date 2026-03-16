@@ -13,6 +13,7 @@ APP_NAME="e-CALLISTO FITS Analyzer"
 VERSION_FILE="$ROOT/src/version.py"
 DEFAULT_VERSION="$(awk -F'\"' '/^APP_VERSION[[:space:]]*=[[:space:]]*\"/{print $2; exit}' "$VERSION_FILE" 2>/dev/null || true)"
 VERSION="${VERSION:-$DEFAULT_VERSION}"
+PYTHON_BIN="${PYTHON_BIN:-}"
 ARCH="$(dpkg --print-architecture)"
 OUT_DEB="$ROOT/dist/${APP_ID}_${VERSION}_${ARCH}.deb"
 RUNTIME_REQUIREMENTS="$ROOT/src/Installation/requirements-runtime.txt"
@@ -27,6 +28,36 @@ if [ -z "${VERSION}" ]; then
   echo "Could not determine APP_VERSION from $VERSION_FILE. Set VERSION manually." >&2
   exit 1
 fi
+
+if [ -z "$PYTHON_BIN" ]; then
+  if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "${VIRTUAL_ENV}/bin/python" ]; then
+    PYTHON_BIN="${VIRTUAL_ENV}/bin/python"
+  elif [ -x "$ROOT/.venv/bin/python" ]; then
+    PYTHON_BIN="$ROOT/.venv/bin/python"
+  else
+    PYTHON_BIN="$(command -v python3 || true)"
+  fi
+fi
+
+if [ -z "$PYTHON_BIN" ] || [ ! -x "$PYTHON_BIN" ]; then
+  echo "Could not find a usable Python interpreter. Set PYTHON_BIN=/path/to/python3." >&2
+  exit 1
+fi
+
+PYTHON_VERSION="$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")')"
+PYTHON_MM="$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+PYTHON_OK="$("$PYTHON_BIN" -c 'import sys; print(int(sys.version_info >= (3, 11)))')"
+
+if [ "$PYTHON_OK" != "1" ]; then
+  cat >&2 <<EOF
+Python $PYTHON_VERSION is too old for the pinned build requirements.
+Use Python 3.11+ (recommended: 3.12 or 3.13), for example:
+  PYTHON_BIN=/usr/bin/python3.13 bash src/Installation/build_deb_linux.sh
+EOF
+  exit 1
+fi
+
+export PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.org/simple}"
 
 print_python_prereq_help() {
   cat >&2 <<'EOF'
@@ -51,7 +82,10 @@ if [ ! -f "$BUILD_REQUIREMENTS" ]; then
   exit 1
 fi
 
-if ! python3 -m venv "$ROOT/.venv-build"; then
+echo "==> Using Python: $PYTHON_BIN ($PYTHON_VERSION)"
+echo "==> Using package index: $PIP_INDEX_URL"
+
+if ! "$PYTHON_BIN" -m venv "$ROOT/.venv-build"; then
   print_python_prereq_help
   exit 1
 fi

@@ -481,6 +481,11 @@ Use **About → Check for Updates...** to query the latest release from GitHub.
 - Debian/Ubuntu build prerequisites:
   - `sudo apt-get update`
   - `sudo apt-get install -y python3-venv python3-pip`
+- Use Python `3.11+` for packaging. If you already have a working project venv, the script will prefer it automatically.
+- If your machine uses a stale pip mirror, point the build at official PyPI:
+  - `PIP_INDEX_URL=https://pypi.org/simple bash src/Installation/build_deb_linux.sh`
+- If you need a specific interpreter:
+  - `PYTHON_BIN=/usr/bin/python3.13 bash src/Installation/build_deb_linux.sh`
 - Recommended `.deb` packaging workflow:
   - `bash src/Installation/build_deb_linux.sh`
 - Manual PyInstaller build:
