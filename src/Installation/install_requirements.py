@@ -47,7 +47,30 @@ packages = [_package_name(item) for item in runtime_requirements if _package_nam
 build_packages = [_package_name(item) for item in build_requirements if _package_name(item)]
 
 
+def ensure_pip_available() -> None:
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "--version"])
+        return
+    except subprocess.CalledProcessError:
+        pass
+
+    print("pip is not available; attempting to bootstrap with ensurepip ...")
+    try:
+        subprocess.check_call([sys.executable, "-m", "ensurepip", "--upgrade"])
+        subprocess.check_call([sys.executable, "-m", "pip", "--version"])
+        return
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        raise SystemExit(
+            "pip is not available for this Python interpreter.\n"
+            "On Debian/Ubuntu install it with:\n"
+            "  sudo apt-get update\n"
+            "  sudo apt-get install -y python3-venv python3-pip\n"
+            f"Original error: {exc}"
+        ) from exc
+
+
 def install_requirements_file(path: Path) -> None:
+    ensure_pip_available()
     print(f"Installing requirements from {path} ...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "--requirement", str(path)])
 

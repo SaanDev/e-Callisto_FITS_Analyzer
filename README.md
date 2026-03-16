@@ -478,6 +478,9 @@ Use **About → Check for Updates...** to query the latest release from GitHub.
   - `src/Installation/FITS_Analyzer_InnoSetup.iss`
 
 ### Linux (.deb + PyInstaller)
+- Debian/Ubuntu build prerequisites:
+  - `sudo apt-get update`
+  - `sudo apt-get install -y python3-venv python3-pip`
 - Recommended `.deb` packaging workflow:
   - `bash src/Installation/build_deb_linux.sh`
 - Manual PyInstaller build:

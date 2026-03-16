@@ -65,6 +65,16 @@ def test_build_scripts_install_from_pinned_requirements():
     assert "requirements-runtime.txt" in windows_script
     assert "requirements-build.txt" in linux_script
     assert "requirements-runtime.txt" in linux_script
+    assert "ensurepip" in linux_script
+    assert "python3-venv python3-pip" in linux_script
+
+
+def test_install_requirements_bootstraps_pip_or_shows_linux_hint():
+    text = (ROOT / "src" / "Installation" / "install_requirements.py").read_text(
+        encoding="utf-8"
+    )
+    assert "ensurepip" in text
+    assert "python3-venv python3-pip" in text
 
 
 def test_smoke_script_exists_and_checks_helper_mode():

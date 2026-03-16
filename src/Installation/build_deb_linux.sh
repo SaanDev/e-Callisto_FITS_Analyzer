@@ -28,6 +28,19 @@ if [ -z "${VERSION}" ]; then
   exit 1
 fi
 
+print_python_prereq_help() {
+  cat >&2 <<'EOF'
+Python packaging tools are missing for the Linux build environment.
+
+Install them on Debian/Ubuntu with:
+  sudo apt-get update
+  sudo apt-get install -y python3-venv python3-pip
+
+Then rerun:
+  bash src/Installation/build_deb_linux.sh
+EOF
+}
+
 # 1) Build app folder with PyInstaller
 if [ ! -f "$RUNTIME_REQUIREMENTS" ]; then
   echo "Missing runtime requirements file: $RUNTIME_REQUIREMENTS" >&2
@@ -38,8 +51,18 @@ if [ ! -f "$BUILD_REQUIREMENTS" ]; then
   exit 1
 fi
 
-python3 -m venv "$ROOT/.venv-build"
+if ! python3 -m venv "$ROOT/.venv-build"; then
+  print_python_prereq_help
+  exit 1
+fi
 source "$ROOT/.venv-build/bin/activate"
+if ! python -m pip --version >/dev/null 2>&1; then
+  echo "==> pip is missing in .venv-build; attempting ensurepip bootstrap"
+  if ! python -m ensurepip --upgrade >/dev/null 2>&1; then
+    print_python_prereq_help
+    exit 1
+  fi
+fi
 python -m pip install --upgrade pip
 python -m pip install --requirement "$BUILD_REQUIREMENTS"
 python -m pip install --requirement "$RUNTIME_REQUIREMENTS"
