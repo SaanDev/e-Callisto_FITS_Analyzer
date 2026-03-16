@@ -486,6 +486,7 @@ Use **About → Check for Updates...** to query the latest release from GitHub.
   - `PIP_INDEX_URL=https://pypi.org/simple bash src/Installation/build_deb_linux.sh`
 - If you need a specific interpreter:
   - `PYTHON_BIN=/usr/bin/python3.13 bash src/Installation/build_deb_linux.sh`
+  - `PYTHON_BIN="$(pwd)/.venv/bin/python" PIP_INDEX_URL=https://pypi.org/simple bash src/Installation/build_deb_linux.sh`
 - Recommended `.deb` packaging workflow:
   - `bash src/Installation/build_deb_linux.sh`
 - Manual PyInstaller build:
