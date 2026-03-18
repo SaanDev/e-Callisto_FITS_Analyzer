@@ -308,3 +308,79 @@ def test_reset_selection_restores_pre_rfi_noise_reduced_data():
     assert bool(win._rfi_config.get("applied", True)) is False
 
     win.close()
+
+
+def test_noise_threshold_live_update_preserves_zoomed_view():
+    _app()
+    win = MainWindow(theme=None)
+    win.set_hardware_live_preview_enabled(False)
+
+    win.filename = "demo.fit"
+    win.freqs = np.array([100.0, 95.0, 90.0], dtype=float)
+    win.time = np.array([0.0, 1.0, 2.0, 3.0], dtype=float)
+    win.raw_data = np.array(
+        [
+            [1.0, 4.0, 2.0, 5.0],
+            [2.0, 6.0, 3.0, 7.0],
+            [3.0, 8.0, 4.0, 9.0],
+        ],
+        dtype=np.float32,
+    )
+
+    win.plot_data(win.raw_data, title="Raw")
+    QApplication.processEvents()
+
+    expected_xlim = (0.6, 2.4)
+    expected_ylim = (91.5, 98.5)
+    win.canvas.ax.set_xlim(*expected_xlim)
+    win.canvas.ax.set_ylim(*expected_ylim)
+
+    win.lower_slider.setValue(-1)
+    win.upper_slider.setValue(2)
+    win.update_noise_live()
+    QApplication.processEvents()
+
+    assert win.canvas.ax.get_xlim() == pytest.approx(expected_xlim)
+    assert win.canvas.ax.get_ylim() == pytest.approx(expected_ylim)
+    win.close()
+
+
+def test_noise_threshold_commit_preserves_zoomed_view():
+    _app()
+    win = MainWindow(theme=None)
+    win.set_hardware_live_preview_enabled(False)
+
+    win.filename = "demo.fit"
+    win.freqs = np.array([100.0, 95.0, 90.0], dtype=float)
+    win.time = np.array([0.0, 1.0, 2.0, 3.0], dtype=float)
+    win.raw_data = np.array(
+        [
+            [1.0, 4.0, 2.0, 5.0],
+            [2.0, 6.0, 3.0, 7.0],
+            [3.0, 8.0, 4.0, 9.0],
+        ],
+        dtype=np.float32,
+    )
+    win.noise_reduced_data = np.array(
+        [
+            [-1.0, 1.0, -1.0, 1.0],
+            [0.0, 2.0, 0.0, 2.0],
+            [1.0, 3.0, 1.0, 3.0],
+        ],
+        dtype=np.float32,
+    )
+
+    win.plot_data(win.raw_data, title="Raw")
+    QApplication.processEvents()
+
+    expected_xlim = (0.8, 2.2)
+    expected_ylim = (92.0, 99.0)
+    win.canvas.ax.set_xlim(*expected_xlim)
+    win.canvas.ax.set_ylim(*expected_ylim)
+
+    win._commit_noise_live_update()
+    QApplication.processEvents()
+
+    assert win.canvas.ax.get_xlim() == pytest.approx(expected_xlim)
+    assert win.canvas.ax.get_ylim() == pytest.approx(expected_ylim)
+    win.close()

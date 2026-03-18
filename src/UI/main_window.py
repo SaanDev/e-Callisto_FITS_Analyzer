@@ -2864,7 +2864,7 @@ class MainWindow(QMainWindow):
                 self._show_plot_canvas()
             return
 
-        self.plot_data(self.noise_reduced_data, title="Background Subtracted")
+        self.plot_data(self.noise_reduced_data, title="Background Subtracted", keep_view=True)
         self._noise_undo_pending = False
 
     def update_noise_live(self):
@@ -2897,7 +2897,7 @@ class MainWindow(QMainWindow):
             if not self._noise_slider_drag_active:
                 self._commit_noise_live_update()
         else:
-            self.plot_data(data, title="Background Subtracted")
+            self.plot_data(data, title="Background Subtracted", keep_view=True)
             self._noise_undo_pending = False
 
         # enable tools

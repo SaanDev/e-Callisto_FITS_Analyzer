@@ -6,13 +6,24 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
 
 
+import shutil
 import os
+import subprocess
 import sys
 from glob import glob
 from setuptools import setup
 
+try:
+    from py2app.build_app import py2app as py2app_cmd
+except ImportError:
+    py2app_cmd = None
+
 HERE = os.path.abspath(os.path.dirname(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
+
+# py2app walks imports recursively with modulegraph; the scientific stack is deep
+# enough that the default limit can be exceeded during standalone analysis.
+sys.setrecursionlimit(max(sys.getrecursionlimit(), 10000))
 
 LZMA_CANDIDATES = [
     "/opt/homebrew/opt/xz/lib/liblzma.5.dylib",
@@ -29,6 +40,36 @@ def SVG_FILES(folder: str):
     if not files:
         raise SystemExit(f"No SVG files found under assets/{folder}")
     return files
+
+
+def _repair_lzma_signature(app_path: str) -> None:
+    if sys.platform != "darwin":
+        return
+
+    bundled_lzma = os.path.join(app_path, "Contents", "Frameworks", "liblzma.5.dylib")
+    source_lzma = next(
+        (path for path in LZMA_FRAMEWORKS if os.path.basename(path) == os.path.basename(bundled_lzma)),
+        None,
+    )
+
+    if not source_lzma or not os.path.exists(bundled_lzma):
+        return
+
+    shutil.copy2(source_lzma, bundled_lzma)
+    subprocess.run(["codesign", "--force", "--sign", "-", bundled_lzma], check=True)
+    subprocess.run(["codesign", "--force", "--deep", "--sign", "-", app_path], check=True)
+
+
+if py2app_cmd is not None:
+    class Py2AppCommand(py2app_cmd):
+        def run(self):
+            super().run()
+            _repair_lzma_signature(os.path.join(self.dist_dir, f"{self.distribution.get_name()}.app"))
+
+
+    CMDCLASS = {"py2app": Py2AppCommand}
+else:
+    CMDCLASS = {}
 
 # Ensure project root is importable so py2app can find src.*
 if PROJECT_ROOT not in sys.path:
@@ -49,30 +90,11 @@ DATA_FILES = [
 
 OPTIONS = {
     "argv_emulation": False,
+    "strip": False,
     "packages": [
         "src",
-        "src.UI",
-        "src.Backend",
-        "matplotlib",
-        "pyqtgraph",
-        "pyqtgraph.exporters",
-        "numpy",
-        "pandas",
-        "scipy",
-        "openpyxl",
-        "astropy",
-        "sklearn",
-        "requests",
-        "bs4",
-        "lxml",
-        "drms",
-        "zeep",
-        "reproject",
-        "mpl_animators",
         "netCDF4",
         "cftime",
-        "sunpy",
-        "parfive",
     ],
 
     "includes": [
@@ -119,6 +141,9 @@ OPTIONS = {
         "matplotlib.backends.backend_svg",
         "matplotlib.backends.backend_ps",
         "matplotlib.backends.backend_eps",
+
+        # netCDF4 imports sibling modules from its compiled extension at runtime
+        "netCDF4.utils",
 
         # Project modules
         "src.UI.callisto_downloader",
@@ -175,6 +200,7 @@ OPTIONS = {
 
 setup(
     app=APP,
+    cmdclass=CMDCLASS,
     name="e-Callisto FITS Analyzer",
     version=APP_VERSION,
     data_files=DATA_FILES,
