@@ -2,7 +2,7 @@
 A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data.
 
 Current stable release: **2.2.1**  
-Previous stable release: **2.1**
+Previous stable release: **2.2.0**
 
 ---
 
