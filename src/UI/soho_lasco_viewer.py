@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.2.0
+Version 2.2.1
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -216,7 +216,7 @@ def fetch_catalog_outcome(
 ) -> FetchOutcome:
     logger = _cme_logger()
     month_url = build_month_catalog_url(year, month)
-    headers = {"User-Agent": "e-Callisto-FITS-Analyzer/2.2.0"}
+    headers = {"User-Agent": "e-Callisto-FITS-Analyzer/2.2.1"}
 
     logger.info(
         "event=fetch_start year=%s month=%s day=%s month_url=%s",
