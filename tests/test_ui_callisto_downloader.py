@@ -12,13 +12,17 @@ import pytest
 
 pytest.importorskip("PySide6")
 pytest.importorskip("requests")
-pytest.importorskip("bs4")
 pytest.importorskip("astropy")
 pytest.importorskip("matplotlib")
 
 from PySide6.QtWidgets import QApplication, QSpinBox
 
-from src.UI.callisto_downloader import FetchWorker, BASE_URL, CallistoDownloaderApp
+from src.UI.callisto_downloader import (
+    BASE_URL,
+    CallistoDownloaderApp,
+    FetchWorker,
+    extract_fits_links,
+)
 
 
 def _app():
@@ -44,6 +48,23 @@ def test_fetch_worker_check_server_handles_status(monkeypatch):
     ok, msg = worker._check_server()
     assert ok is False
     assert "HTTP" in msg
+
+
+def test_extract_fits_links_filters_and_deduplicates():
+    html = """
+    <html><body>
+    <a href="?C=N;O=D">Sort</a>
+    <a href="ALASKA-ANCHORAGE_20240102_000000_01.fit.gz">First</a>
+    <a href='ALASKA-ANCHORAGE_20240102_001500_01.FIT'>Second</a>
+    <a href="ALASKA-ANCHORAGE_20240102_000000_01.fit.gz#fragment">Duplicate</a>
+    <a href="/solarradio/data/2002-20yy_Callisto/2024/01/02/readme.txt">Ignore</a>
+    </body></html>
+    """
+
+    assert extract_fits_links(html) == [
+        "ALASKA-ANCHORAGE_20240102_000000_01.fit.gz",
+        "ALASKA-ANCHORAGE_20240102_001500_01.FIT",
+    ]
 
 
 def test_downloader_date_edit_shows_full_year():

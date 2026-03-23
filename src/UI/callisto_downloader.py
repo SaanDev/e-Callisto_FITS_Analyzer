@@ -8,11 +8,12 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 from __future__ import annotations
 
 import os
+import re
 import tempfile
+from html import unescape
 from urllib.parse import urljoin
 import numpy as np
 import requests
-from bs4 import BeautifulSoup
 from astropy.io import fits
 from src.Backend.fits_io import load_callisto_fits
 
@@ -31,6 +32,29 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
 BASE_URL = "http://soleil80.cs.technik.fhnw.ch/solarradio/data/2002-20yy_Callisto/"
+_HREF_RE = re.compile(
+    r"""<a\b[^>]*\bhref\s*=\s*(?P<quote>['"]?)(?P<href>[^"' >]+)(?P=quote)""",
+    re.IGNORECASE,
+)
+
+
+def extract_fits_links(html: str) -> list[str]:
+    """Extract FITS file links from a simple directory listing page."""
+    links: list[str] = []
+    seen: set[str] = set()
+
+    for match in _HREF_RE.finditer(str(html or "")):
+        href = unescape(match.group("href")).strip()
+        href = href.split("#", 1)[0].split("?", 1)[0]
+        href_low = href.lower()
+        if not (href_low.endswith(".fit.gz") or href_low.endswith(".fit")):
+            continue
+        if href in seen:
+            continue
+        seen.add(href)
+        links.append(href)
+
+    return links
 
 
 # -----------------------------
@@ -74,17 +98,9 @@ class FetchWorker(QObject):
             if page.status_code >= 400:
                 raise RuntimeError(f"HTTP {page.status_code} for {url_day}")
 
-            soup = BeautifulSoup(page.text, "html.parser")
-
-            # Collect all FITS links (compressed + uncompressed)
-            hrefs = []
-            for a in soup.find_all("a"):
-                href = a.get("href", "")
-                if not href:
-                    continue
-                href_low = href.lower()
-                if href_low.endswith(".fit.gz") or href_low.endswith(".fit"):
-                    hrefs.append(href)
+            # Avoid DOM parsers here; a lightweight href scan is enough for the
+            # Apache directory listings served by the e-CALLISTO archive.
+            hrefs = extract_fits_links(page.text)
 
             self.progressMax.emit(len(hrefs))
 
