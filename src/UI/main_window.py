@@ -20,6 +20,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from astropy.io import fits
 from matplotlib.figure import Figure
+from matplotlib.patches import Polygon
 from matplotlib.path import Path
 from matplotlib.ticker import FuncFormatter, ScalarFormatter
 from matplotlib.widgets import LassoSelector, RectangleSelector
@@ -79,6 +80,7 @@ from src.Backend.analysis_session import (
 )
 from src.Backend.annotations import (
     DEFAULT_ANNOTATION_COLOR,
+    DEFAULT_ARROW_HEAD_SIZE,
     DEFAULT_TEXT_FONT_SIZE,
     make_annotation,
     normalize_annotations,
@@ -106,6 +108,7 @@ from src.Backend.update_checker import GITHUB_REPO
 from src.UI.accelerated_plot_widget import AcceleratedPlotWidget
 from src.UI.callisto_downloader import CallistoDownloaderApp
 from src.UI.dialogs.analyze_dialog import AnalyzeDialog
+from src.UI.dialogs.annotation_arrow_dialog import ArrowAnnotationDialog
 from src.UI.dialogs.annotation_text_dialog import TextAnnotationDialog
 from src.UI.dialogs.batch_processing_dialog import BatchProcessingDialog
 from src.UI.dialogs.bug_report_dialog import BugReportDialog
@@ -265,6 +268,7 @@ class MainWindow(QMainWindow):
         self._annotation_click_points = []
         self._annotation_pending_text = ""
         self._annotation_pending_text_style = {}
+        self._annotation_pending_arrow_style = {}
         self._annotation_target_index = None
         self._annotation_mpl_cid = None
         self._annotation_artists = []
@@ -807,7 +811,9 @@ class MainWindow(QMainWindow):
         ann_menu = processing_menu.addMenu("Annotations")
         self.ann_add_polygon_action = QAction("Add Polygon", self)
         self.ann_add_line_action = QAction("Add Line", self)
+        self.ann_add_arrow_action = QAction("Add Arrow", self)
         self.ann_add_text_action = QAction("Add Text", self)
+        self.ann_edit_arrow_action = QAction("Edit Arrow Style...", self)
         self.ann_edit_text_action = QAction("Edit Text Label...", self)
         self.ann_move_text_action = QAction("Move Text Label...", self)
         self.ann_toggle_visibility_action = QAction("Toggle Visibility", self)
@@ -815,7 +821,9 @@ class MainWindow(QMainWindow):
         self.ann_clear_action = QAction("Clear All", self)
         ann_menu.addAction(self.ann_add_polygon_action)
         ann_menu.addAction(self.ann_add_line_action)
+        ann_menu.addAction(self.ann_add_arrow_action)
         ann_menu.addAction(self.ann_add_text_action)
+        ann_menu.addAction(self.ann_edit_arrow_action)
         ann_menu.addAction(self.ann_edit_text_action)
         ann_menu.addAction(self.ann_move_text_action)
         ann_menu.addSeparator()
@@ -921,7 +929,9 @@ class MainWindow(QMainWindow):
 
         self.ann_add_polygon_action.triggered.connect(self.start_annotation_polygon)
         self.ann_add_line_action.triggered.connect(self.start_annotation_line)
+        self.ann_add_arrow_action.triggered.connect(self.start_annotation_arrow)
         self.ann_add_text_action.triggered.connect(self.start_annotation_text)
+        self.ann_edit_arrow_action.triggered.connect(self.edit_arrow_style)
         self.ann_edit_text_action.triggered.connect(self.edit_text_label)
         self.ann_move_text_action.triggered.connect(self.move_text_label)
         self.ann_toggle_visibility_action.triggered.connect(self.toggle_annotations_visibility)
@@ -3166,6 +3176,26 @@ class MainWindow(QMainWindow):
         self._add_annotation(ann)
         self._reset_annotation_mode()
 
+    def _commit_arrow_annotation(self, points):
+        pts = [[float(x), float(y)] for x, y in list(points or [])[:2]]
+        if len(pts) < 2:
+            self._reset_annotation_mode()
+            return
+        style = dict(self._annotation_pending_arrow_style or self._arrow_annotation_style_defaults())
+        self._remember_arrow_annotation_style(style)
+        ann = make_annotation(
+            kind="arrow",
+            points=pts,
+            color=style["color"],
+            line_width=style["line_width"],
+            arrow_start=style["arrow_start"],
+            arrow_end=style["arrow_end"],
+            arrow_head_size=style["arrow_head_size"],
+            visible=self._annotations_visible,
+        )
+        self._add_annotation(ann)
+        self._reset_annotation_mode()
+
     def _commit_text_annotation(self, point):
         try:
             x, y = point
@@ -3209,6 +3239,9 @@ class MainWindow(QMainWindow):
             return
         if kind_norm == "line":
             self._commit_line_annotation(payload)
+            return
+        if kind_norm == "arrow":
+            self._commit_arrow_annotation(payload)
             return
         if kind_norm == "text":
             self._commit_text_annotation(payload)
@@ -5880,6 +5913,9 @@ class MainWindow(QMainWindow):
         return {
             "color": DEFAULT_ANNOTATION_COLOR,
             "line_width": 1.5,
+            "arrow_head_size": DEFAULT_ARROW_HEAD_SIZE,
+            "arrow_start": False,
+            "arrow_end": True,
             "text_color": DEFAULT_ANNOTATION_COLOR,
             "text_font_family": "",
             "text_font_size": DEFAULT_TEXT_FONT_SIZE,
@@ -5897,6 +5933,12 @@ class MainWindow(QMainWindow):
             out["line_width"] = max(0.5, float(raw.get("line_width", defaults["line_width"])))
         except Exception:
             out["line_width"] = float(defaults["line_width"])
+        try:
+            out["arrow_head_size"] = max(4.0, float(raw.get("arrow_head_size", defaults["arrow_head_size"])))
+        except Exception:
+            out["arrow_head_size"] = float(defaults["arrow_head_size"])
+        out["arrow_start"] = bool(raw.get("arrow_start", defaults["arrow_start"]))
+        out["arrow_end"] = bool(raw.get("arrow_end", defaults["arrow_end"]))
         out["text_color"] = str(raw.get("text_color") or out["color"] or defaults["text_color"])
         out["text_font_family"] = str(raw.get("text_font_family") or defaults["text_font_family"])
         try:
@@ -5906,6 +5948,49 @@ class MainWindow(QMainWindow):
         out["text_bold"] = bool(raw.get("text_bold", defaults["text_bold"]))
         out["text_italic"] = bool(raw.get("text_italic", defaults["text_italic"]))
         return out
+
+    def _arrow_annotation_style_defaults(self) -> dict:
+        merged = self._merge_annotation_style_defaults(self._annotation_style_defaults)
+        return {
+            "color": str(merged.get("color") or DEFAULT_ANNOTATION_COLOR),
+            "line_width": float(merged.get("line_width", 1.5)),
+            "arrow_head_size": float(merged.get("arrow_head_size", DEFAULT_ARROW_HEAD_SIZE)),
+            "arrow_start": bool(merged.get("arrow_start", False)),
+            "arrow_end": bool(merged.get("arrow_end", True)),
+        }
+
+    def _annotation_arrow_style(self, ann: dict | None = None) -> dict:
+        style = self._arrow_annotation_style_defaults()
+        if not isinstance(ann, dict):
+            return style
+        style["color"] = str(ann.get("color") or style["color"])
+        try:
+            style["line_width"] = max(0.5, float(ann.get("line_width", style["line_width"])))
+        except Exception:
+            pass
+        try:
+            style["arrow_head_size"] = max(4.0, float(ann.get("arrow_head_size", style["arrow_head_size"])))
+        except Exception:
+            pass
+        style["arrow_start"] = bool(ann.get("arrow_start", style["arrow_start"]))
+        style["arrow_end"] = bool(ann.get("arrow_end", style["arrow_end"]))
+        return style
+
+    def _remember_arrow_annotation_style(self, style: dict | None) -> None:
+        merged = self._merge_annotation_style_defaults(self._annotation_style_defaults)
+        raw = dict(style or {})
+        merged["color"] = str(raw.get("color") or merged["color"])
+        try:
+            merged["line_width"] = max(0.5, float(raw.get("line_width", merged["line_width"])))
+        except Exception:
+            pass
+        try:
+            merged["arrow_head_size"] = max(4.0, float(raw.get("arrow_head_size", merged["arrow_head_size"])))
+        except Exception:
+            pass
+        merged["arrow_start"] = bool(raw.get("arrow_start", merged["arrow_start"]))
+        merged["arrow_end"] = bool(raw.get("arrow_end", merged["arrow_end"]))
+        self._annotation_style_defaults = merged
 
     def _text_annotation_style_defaults(self) -> dict:
         merged = self._merge_annotation_style_defaults(self._annotation_style_defaults)
@@ -5979,6 +6064,46 @@ class MainWindow(QMainWindow):
                 return int(index)
         return None
 
+    def _arrow_annotation_label(self, index: int, ann: dict) -> str:
+        points = ann.get("points") or []
+        p1 = points[0] if len(points) > 0 else [0.0, 0.0]
+        p2 = points[1] if len(points) > 1 else [0.0, 0.0]
+        heads = []
+        if bool(ann.get("arrow_start", False)):
+            heads.append("start")
+        if bool(ann.get("arrow_end", True)):
+            heads.append("end")
+        head_desc = "/".join(heads) if heads else "none"
+        return (
+            f"#{index + 1} ({float(p1[0]):.2f}, {float(p1[1]):.2f}) -> "
+            f"({float(p2[0]):.2f}, {float(p2[1]):.2f}) [{head_desc}]"
+        )
+
+    def _arrow_annotations_with_indices(self) -> list[tuple[int, dict, str]]:
+        out: list[tuple[int, dict, str]] = []
+        for index, ann in enumerate(list(self._annotations or [])):
+            if str((ann or {}).get("kind", "")).strip().lower() != "arrow":
+                continue
+            out.append((index, ann, self._arrow_annotation_label(index, ann)))
+        return out
+
+    def _choose_arrow_annotation_index(self, *, title: str, prompt: str) -> int | None:
+        rows = self._arrow_annotations_with_indices()
+        if not rows:
+            QMessageBox.information(self, title, "There are no arrows available.")
+            return None
+        if len(rows) == 1:
+            return int(rows[0][0])
+
+        labels = [label for _, _, label in rows]
+        choice, ok = QInputDialog.getItem(self, title, prompt, labels, 0, False)
+        if not ok or not choice:
+            return None
+        for index, _ann, label in rows:
+            if label == choice:
+                return int(index)
+        return None
+
     def _open_text_annotation_dialog(self, *, title: str, text: str = "", style: dict | None = None) -> dict | None:
         dlg = TextAnnotationDialog(
             title=title,
@@ -5989,6 +6114,123 @@ class MainWindow(QMainWindow):
         if dlg.exec() != QDialog.Accepted:
             return None
         return dlg.payload()
+
+    def _open_arrow_annotation_dialog(self, *, title: str, style: dict | None = None) -> dict | None:
+        dlg = ArrowAnnotationDialog(
+            title=title,
+            initial_style=style or self._arrow_annotation_style_defaults(),
+            parent=self,
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return dlg.payload()
+
+    def _build_arrow_overlay_geometry(
+        self,
+        start_xy,
+        end_xy,
+        *,
+        head_size: float,
+        line_width: float,
+        start_head: bool,
+        end_head: bool,
+    ) -> dict | None:
+        start = np.asarray(start_xy, dtype=float)
+        end = np.asarray(end_xy, dtype=float)
+        delta = end - start
+        length = float(np.hypot(delta[0], delta[1]))
+        if length <= 1e-6:
+            return None
+
+        direction = delta / length
+        normal = np.asarray([-direction[1], direction[0]], dtype=float)
+        base_head_length = max(10.0, float(head_size))
+        base_head_width = max(base_head_length * 0.72, 4.0 + float(line_width) * 2.8)
+
+        start_length = base_head_length if start_head else 0.0
+        end_length = base_head_length if end_head else 0.0
+        total_head_length = start_length + end_length
+        if total_head_length > 0.0:
+            max_total = length * 0.82
+            scale = min(1.0, max_total / total_head_length)
+        else:
+            scale = 1.0
+
+        start_length *= scale
+        end_length *= scale
+        head_width = max(4.0 + float(line_width) * 2.0, base_head_width * scale)
+
+        shaft_start = start + (direction * start_length if start_head else 0.0)
+        shaft_end = end - (direction * end_length if end_head else 0.0)
+
+        shaft = None
+        if float(np.hypot(*(shaft_end - shaft_start))) > 1e-6:
+            shaft = (shaft_start, shaft_end)
+
+        heads = []
+        if start_head and start_length > 1e-6:
+            start_base = start + direction * start_length
+            heads.append(
+                np.asarray(
+                    [
+                        start,
+                        start_base + normal * (head_width * 0.5),
+                        start_base - normal * (head_width * 0.5),
+                    ],
+                    dtype=float,
+                )
+            )
+        if end_head and end_length > 1e-6:
+            end_base = end - direction * end_length
+            heads.append(
+                np.asarray(
+                    [
+                        end,
+                        end_base + normal * (head_width * 0.5),
+                        end_base - normal * (head_width * 0.5),
+                    ],
+                    dtype=float,
+                )
+            )
+
+        return {"shaft": shaft, "heads": heads}
+
+    def _mpl_arrow_overlay_geometry(
+        self,
+        ax,
+        start_xy,
+        end_xy,
+        *,
+        head_size: float,
+        line_width: float,
+        start_head: bool,
+        end_head: bool,
+    ) -> dict | None:
+        start_display = np.asarray(ax.transData.transform(start_xy), dtype=float)
+        end_display = np.asarray(ax.transData.transform(end_xy), dtype=float)
+        geometry = self._build_arrow_overlay_geometry(
+            start_display,
+            end_display,
+            head_size=head_size,
+            line_width=line_width,
+            start_head=start_head,
+            end_head=end_head,
+        )
+        if geometry is None:
+            return None
+
+        inverted = ax.transData.inverted()
+        shaft = geometry.get("shaft")
+        shaft_data = None
+        if shaft is not None:
+            shaft_points = inverted.transform(np.vstack([shaft[0], shaft[1]]))
+            shaft_data = np.asarray(shaft_points, dtype=float)
+
+        head_polys = []
+        for head_points in geometry.get("heads", []):
+            head_polys.append(np.asarray(inverted.transform(head_points), dtype=float))
+
+        return {"shaft": shaft_data, "heads": head_polys}
 
     def _replace_annotation(self, index: int, updated: dict, *, status_message: str, log_message: str) -> bool:
         if index < 0 or index >= len(self._annotations):
@@ -6033,6 +6275,7 @@ class MainWindow(QMainWindow):
         self._annotation_click_points = []
         self._annotation_pending_text = ""
         self._annotation_pending_text_style = {}
+        self._annotation_pending_arrow_style = {}
         self._annotation_target_index = None
         self.lasso_active = False
         self._annotation_disconnect_mpl()
@@ -6102,6 +6345,44 @@ class MainWindow(QMainWindow):
                         **text_kwargs,
                     )
                     artists.append(text_artist)
+                elif kind == "arrow" and len(pts) >= 2:
+                    x1, y1 = (float(pts[0][0]), float(pts[0][1]))
+                    x2, y2 = (float(pts[1][0]), float(pts[1][1]))
+                    start_head = bool(ann.get("arrow_start", False))
+                    end_head = bool(ann.get("arrow_end", True))
+                    geometry = self._mpl_arrow_overlay_geometry(
+                        ax,
+                        (x1, y1),
+                        (x2, y2),
+                        head_size=max(4.0, float(ann.get("arrow_head_size", DEFAULT_ARROW_HEAD_SIZE))),
+                        line_width=lw,
+                        start_head=start_head,
+                        end_head=end_head,
+                    )
+                    if geometry is None:
+                        continue
+                    shaft = geometry.get("shaft")
+                    if shaft is not None:
+                        shaft_line = ax.plot(
+                            shaft[:, 0],
+                            shaft[:, 1],
+                            color=color,
+                            linewidth=lw,
+                            alpha=0.95,
+                            solid_capstyle="round",
+                        )[0]
+                        artists.append(shaft_line)
+                    for head_points in geometry.get("heads", []):
+                        head_patch = Polygon(
+                            head_points,
+                            closed=True,
+                            facecolor=color,
+                            edgecolor=color,
+                            linewidth=max(0.5, lw * 0.5),
+                            joinstyle="miter",
+                        )
+                        ax.add_patch(head_patch)
+                        artists.append(head_patch)
             self._annotation_artists = artists
             self.canvas.draw_idle()
         except Exception:
@@ -6166,6 +6447,34 @@ class MainWindow(QMainWindow):
         self._annotation_mpl_cid = self.canvas.mpl_connect("button_press_event", self._on_annotation_mpl_click)
         self.statusBar().showMessage("Click start and end points for line annotation.", 5000)
 
+    def start_annotation_arrow(self):
+        if self.raw_data is None:
+            QMessageBox.information(self, "Annotations", "Load a FITS file first.")
+            return
+        payload = self._open_arrow_annotation_dialog(
+            title="Add Arrow Annotation",
+            style=self._arrow_annotation_style_defaults(),
+        )
+        if not payload:
+            return
+        self._reset_annotation_mode()
+        self._annotation_mode = "arrow"
+        self._annotation_click_points = []
+        self._annotation_pending_arrow_style = dict(payload)
+        if self._hardware_mode_enabled():
+            self._show_accel_canvas()
+            self.accel_canvas.begin_annotation_capture("arrow")
+            self.statusBar().showMessage("Click the start point, then the end point for the arrow.", 5000)
+            return
+        try:
+            self.canvas.mpl_disconnect(self._cid_press)
+            self.canvas.mpl_disconnect(self._cid_motion)
+            self.canvas.mpl_disconnect(self._cid_release)
+        except Exception:
+            pass
+        self._annotation_mpl_cid = self.canvas.mpl_connect("button_press_event", self._on_annotation_mpl_click)
+        self.statusBar().showMessage("Click the start point, then the end point for the arrow.", 5000)
+
     def start_annotation_text(self):
         if self.raw_data is None:
             QMessageBox.information(self, "Annotations", "Load a FITS file first.")
@@ -6207,6 +6516,12 @@ class MainWindow(QMainWindow):
             self._annotation_click_points.append([x, y])
             if len(self._annotation_click_points) >= 2:
                 self._commit_line_annotation(self._annotation_click_points[:2])
+            return
+
+        if self._annotation_mode == "arrow":
+            self._annotation_click_points.append([x, y])
+            if len(self._annotation_click_points) >= 2:
+                self._commit_arrow_annotation(self._annotation_click_points[:2])
             return
 
         if self._annotation_mode == "text":
@@ -6271,6 +6586,34 @@ class MainWindow(QMainWindow):
             ann,
             status_message="Updated text label style.",
             log_message=f"Edited text label: {self._text_annotation_label(index, ann)}",
+        )
+
+    def edit_arrow_style(self):
+        index = self._choose_arrow_annotation_index(
+            title="Edit Arrow Style",
+            prompt="Choose arrow:",
+        )
+        if index is None:
+            return
+        ann = dict(self._annotations[index] or {})
+        payload = self._open_arrow_annotation_dialog(
+            title="Edit Arrow Style",
+            style=self._annotation_arrow_style(ann),
+        )
+        if not payload:
+            return
+
+        ann["color"] = str(payload.get("color") or ann.get("color") or DEFAULT_ANNOTATION_COLOR)
+        ann["line_width"] = float(payload.get("line_width", ann.get("line_width", 1.5)) or 1.5)
+        ann["arrow_head_size"] = float(payload.get("arrow_head_size", ann.get("arrow_head_size", DEFAULT_ARROW_HEAD_SIZE)) or DEFAULT_ARROW_HEAD_SIZE)
+        ann["arrow_start"] = bool(payload.get("arrow_start", ann.get("arrow_start", False)))
+        ann["arrow_end"] = bool(payload.get("arrow_end", ann.get("arrow_end", True)))
+        self._remember_arrow_annotation_style(payload)
+        self._replace_annotation(
+            index,
+            ann,
+            status_message="Updated arrow style.",
+            log_message=f"Edited arrow style: {self._arrow_annotation_label(index, ann)}",
         )
 
     def move_text_label(self):

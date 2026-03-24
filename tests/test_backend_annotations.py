@@ -38,6 +38,24 @@ def test_make_annotation_text_style_schema():
     assert ann["font_italic"] is True
 
 
+def test_make_annotation_arrow_schema():
+    ann = make_annotation(
+        kind="arrow",
+        points=[(1, 2), (5, 6)],
+        color="#ffaa00",
+        line_width=2.5,
+        arrow_start=True,
+        arrow_end=False,
+        arrow_head_size=18,
+    )
+    assert ann["kind"] == "arrow"
+    assert ann["color"] == "#ffaa00"
+    assert ann["line_width"] == 2.5
+    assert ann["arrow_start"] is True
+    assert ann["arrow_end"] is False
+    assert ann["arrow_head_size"] == 18.0
+
+
 def test_normalize_filters_invalid_rows():
     rows = [
         {"kind": "polygon", "points": [[1, 2], [3, 4], [5, 6]]},
@@ -66,3 +84,10 @@ def test_normalize_text_style_defaults_when_missing():
     assert out[0]["font_size"] >= 6
     assert out[0]["font_bold"] is False
     assert out[0]["font_italic"] is False
+
+
+def test_normalize_arrow_defaults_when_missing():
+    out = normalize_annotations([{"kind": "arrow", "points": [[1, 2], [3, 4]]}])
+    assert out[0]["arrow_start"] is False
+    assert out[0]["arrow_end"] is True
+    assert out[0]["arrow_head_size"] >= 1.0

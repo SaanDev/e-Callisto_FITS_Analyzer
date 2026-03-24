@@ -8,9 +8,9 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont
-from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QPolygonF
+from PySide6.QtWidgets import QGraphicsPolygonItem, QLabel, QVBoxLayout, QWidget
 
 try:
     import pyqtgraph as pg
@@ -504,7 +504,7 @@ class AcceleratedPlotWidget(QWidget):
                         line_points.append(self._annotation_capture_points[0])
                 except Exception:
                     pass
-        elif kind == "line":
+        elif kind in {"line", "arrow"}:
             if self._annotation_capture_points:
                 if cursor_xy is not None:
                     try:
@@ -544,7 +544,7 @@ class AcceleratedPlotWidget(QWidget):
         kind_norm = str(kind or "").strip().lower()
         if kind_norm == "polygon":
             out = [(float(x), float(y)) for x, y in list(payload or [])]
-        elif kind_norm == "line":
+        elif kind_norm in {"line", "arrow"}:
             out = [(float(x), float(y)) for x, y in list(payload or [])[:2]]
         else:
             x, y = payload
@@ -673,7 +673,7 @@ class AcceleratedPlotWidget(QWidget):
         if not self.is_available:
             return
         kind_norm = str(kind or "").strip().lower()
-        if kind_norm not in {"polygon", "line", "text"}:
+        if kind_norm not in {"polygon", "line", "text", "arrow"}:
             return
         self._interaction_mode = f"annotation:{kind_norm}"
         self._clear_lasso_overlay()
@@ -721,6 +721,124 @@ class AcceleratedPlotWidget(QWidget):
                 pass
         self._annotation_items = []
 
+    def _build_arrow_overlay_geometry(
+        self,
+        start_xy,
+        end_xy,
+        *,
+        head_size: float,
+        line_width: float,
+        start_head: bool,
+        end_head: bool,
+    ) -> dict | None:
+        start = np.asarray(start_xy, dtype=float)
+        end = np.asarray(end_xy, dtype=float)
+        delta = end - start
+        length = float(np.hypot(delta[0], delta[1]))
+        if length <= 1e-6:
+            return None
+
+        direction = delta / length
+        normal = np.asarray([-direction[1], direction[0]], dtype=float)
+        base_head_length = max(10.0, float(head_size))
+        base_head_width = max(base_head_length * 0.72, 4.0 + float(line_width) * 2.8)
+
+        start_length = base_head_length if start_head else 0.0
+        end_length = base_head_length if end_head else 0.0
+        total_head_length = start_length + end_length
+        if total_head_length > 0.0:
+            max_total = length * 0.82
+            scale = min(1.0, max_total / total_head_length)
+        else:
+            scale = 1.0
+
+        start_length *= scale
+        end_length *= scale
+        head_width = max(4.0 + float(line_width) * 2.0, base_head_width * scale)
+
+        shaft_start = start + (direction * start_length if start_head else 0.0)
+        shaft_end = end - (direction * end_length if end_head else 0.0)
+
+        shaft = None
+        if float(np.hypot(*(shaft_end - shaft_start))) > 1e-6:
+            shaft = (shaft_start, shaft_end)
+
+        heads = []
+        if start_head and start_length > 1e-6:
+            start_base = start + direction * start_length
+            heads.append(
+                np.asarray(
+                    [
+                        start,
+                        start_base + normal * (head_width * 0.5),
+                        start_base - normal * (head_width * 0.5),
+                    ],
+                    dtype=float,
+                )
+            )
+        if end_head and end_length > 1e-6:
+            end_base = end - direction * end_length
+            heads.append(
+                np.asarray(
+                    [
+                        end,
+                        end_base + normal * (head_width * 0.5),
+                        end_base - normal * (head_width * 0.5),
+                    ],
+                    dtype=float,
+                )
+            )
+
+        return {"shaft": shaft, "heads": heads}
+
+    def _scene_to_view_point(self, point_xy):
+        point = self._viewbox.mapSceneToView(QPointF(float(point_xy[0]), float(point_xy[1])))
+        return np.asarray([float(point.x()), float(point.y())], dtype=float)
+
+    def _view_to_scene_point(self, point_xy):
+        point = self._viewbox.mapViewToScene(QPointF(float(point_xy[0]), float(point_xy[1])))
+        return np.asarray([float(point.x()), float(point.y())], dtype=float)
+
+    def _view_arrow_overlay_geometry(
+        self,
+        start_xy,
+        end_xy,
+        *,
+        head_size: float,
+        line_width: float,
+        start_head: bool,
+        end_head: bool,
+    ) -> dict | None:
+        geometry = self._build_arrow_overlay_geometry(
+            self._view_to_scene_point(start_xy),
+            self._view_to_scene_point(end_xy),
+            head_size=head_size,
+            line_width=line_width,
+            start_head=start_head,
+            end_head=end_head,
+        )
+        if geometry is None:
+            return None
+
+        shaft = geometry.get("shaft")
+        shaft_view = None
+        if shaft is not None:
+            shaft_view = np.asarray(
+                [
+                    self._scene_to_view_point(shaft[0]),
+                    self._scene_to_view_point(shaft[1]),
+                ],
+                dtype=float,
+            )
+
+        head_polys = []
+        for head_points in geometry.get("heads", []):
+            head_polys.append(
+                np.asarray([self._scene_to_view_point(point) for point in head_points], dtype=float)
+            )
+
+        return {"shaft": shaft_view, "heads": head_polys}
+
     def set_annotations(self, serialized_annotations) -> None:
         """Render non-interactive annotation overlays."""
         if not self.is_available:
@@ -751,6 +869,49 @@ class AcceleratedPlotWidget(QWidget):
                     item = pg.PlotDataItem(xs, ys, pen=pen)
                     self._plot.addItem(item)
                     self._annotation_items.append(item)
+                    continue
+
+                if kind == "arrow":
+                    if len(points) < 2:
+                        continue
+                    x1, y1 = (float(points[0][0]), float(points[0][1]))
+                    x2, y2 = (float(points[1][0]), float(points[1][1]))
+                    head_size = max(4.0, float(ann.get("arrow_head_size", 14.0)))
+                    geometry = self._view_arrow_overlay_geometry(
+                        (x1, y1),
+                        (x2, y2),
+                        head_size=head_size,
+                        line_width=width,
+                        start_head=bool(ann.get("arrow_start", False)),
+                        end_head=bool(ann.get("arrow_end", True)),
+                    )
+                    if geometry is None:
+                        continue
+                    arrow_pen = pg.mkPen(color=color, width=max(1.0, width))
+                    arrow_brush = pg.mkBrush(color)
+                    shaft = geometry.get("shaft")
+                    if shaft is not None:
+                        line_item = pg.PlotDataItem(
+                            [float(shaft[0][0]), float(shaft[1][0])],
+                            [float(shaft[0][1]), float(shaft[1][1])],
+                            pen=pen,
+                        )
+                        self._plot.addItem(line_item)
+                        self._annotation_items.append(line_item)
+
+                    for head_points in geometry.get("heads", []):
+                        polygon = QPolygonF(
+                            [
+                                QPointF(float(point[0]), float(point[1]))
+                                for point in np.asarray(head_points, dtype=float)
+                            ]
+                        )
+                        head_item = QGraphicsPolygonItem(polygon)
+                        head_item.setPen(arrow_pen)
+                        head_item.setBrush(arrow_brush)
+                        head_item.setZValue(20)
+                        self._plot.addItem(head_item)
+                        self._annotation_items.append(head_item)
                     continue
 
                 if kind == "text":
@@ -907,7 +1068,7 @@ class AcceleratedPlotWidget(QWidget):
             self._append_annotation_capture_point((x, y))
             self._update_annotation_capture_overlay(cursor_xy=(x, y))
 
-            if annotation_kind == "line" and len(self._annotation_capture_points) >= 2:
+            if annotation_kind in {"line", "arrow"} and len(self._annotation_capture_points) >= 2:
                 self._finish_annotation_capture(annotation_kind, self._annotation_capture_points[:2])
             elif annotation_kind == "polygon" and is_double and len(self._annotation_capture_points) >= 3:
                 self._finish_annotation_capture(annotation_kind, list(self._annotation_capture_points))

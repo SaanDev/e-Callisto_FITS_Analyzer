@@ -40,6 +40,23 @@ def test_main_window_hw_annotation_actions_keep_accel_canvas(monkeypatch):
 
     monkeypatch.setattr(
         window,
+        "_open_arrow_annotation_dialog",
+        lambda **_k: {
+            "color": "#ff00aa",
+            "line_width": 2.5,
+            "arrow_head_size": 18.0,
+            "arrow_start": True,
+            "arrow_end": True,
+        },
+    )
+    window._show_plot_canvas()
+    window.start_annotation_arrow()
+    assert window.plot_stack.currentWidget() is window.accel_canvas
+    assert window._annotation_mode == "arrow"
+    assert window._annotation_pending_arrow_style["arrow_head_size"] == 18.0
+
+    monkeypatch.setattr(
+        window,
         "_open_text_annotation_dialog",
         lambda **_k: {
             "text": "Label",
@@ -75,6 +92,34 @@ def test_main_window_hw_annotation_finish_adds_annotation():
     assert len(window._annotations) == 1
     assert window._annotations[0]["kind"] == "line"
     assert window._annotations[0]["points"] == [[1.0, 2.0], [3.0, 4.0]]
+    assert window._annotation_mode is None
+
+    window.close()
+
+
+def test_main_window_hw_arrow_finish_adds_annotation():
+    _app()
+    window = MainWindow(theme=None)
+    if not window.accel_canvas.is_available:
+        pytest.skip("pyqtgraph not available in test environment")
+
+    window.raw_data = np.zeros((2, 2), dtype=np.float32)
+    window.use_hw_live_preview = True
+    window._annotation_mode = "arrow"
+    window._annotation_pending_arrow_style = {
+        "color": "#ffaa00",
+        "line_width": 3.0,
+        "arrow_head_size": 20.0,
+        "arrow_start": False,
+        "arrow_end": True,
+    }
+
+    window._on_accel_annotation_capture_finished("arrow", [(1.0, 2.0), (3.0, 4.0)])
+
+    assert len(window._annotations) == 1
+    assert window._annotations[0]["kind"] == "arrow"
+    assert window._annotations[0]["points"] == [[1.0, 2.0], [3.0, 4.0]]
+    assert window._annotations[0]["arrow_head_size"] == 20.0
     assert window._annotation_mode is None
 
     window.close()
@@ -150,4 +195,79 @@ def test_move_text_label_repositions_selected_label():
 
     assert window._annotations[0]["points"] == [[8.0, 9.0]]
     assert window._annotation_mode is None
+    window.close()
+
+
+def test_edit_arrow_style_updates_annotation(monkeypatch):
+    _app()
+    window = MainWindow(theme=None)
+    window._annotations = [
+        {
+            "id": "ann2",
+            "kind": "arrow",
+            "points": [[1.0, 2.0], [3.0, 4.0]],
+            "text": "",
+            "color": "#00d4ff",
+            "line_width": 1.5,
+            "font_family": "",
+            "font_size": 12,
+            "font_bold": False,
+            "font_italic": False,
+            "arrow_start": False,
+            "arrow_end": True,
+            "arrow_head_size": 14.0,
+            "visible": True,
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+    ]
+    monkeypatch.setattr(window, "_choose_arrow_annotation_index", lambda **_k: 0)
+    monkeypatch.setattr(
+        window,
+        "_open_arrow_annotation_dialog",
+        lambda **_k: {
+            "color": "#ff7700",
+            "line_width": 4.0,
+            "arrow_head_size": 24.0,
+            "arrow_start": True,
+            "arrow_end": False,
+        },
+    )
+
+    window.edit_arrow_style()
+
+    ann = window._annotations[0]
+    assert ann["color"] == "#ff7700"
+    assert ann["line_width"] == 4.0
+    assert ann["arrow_head_size"] == 24.0
+    assert ann["arrow_start"] is True
+    assert ann["arrow_end"] is False
+    window.close()
+
+
+def test_render_annotations_arrow_creates_visible_artists():
+    _app()
+    window = MainWindow(theme=None)
+    window._annotations = [
+        {
+            "id": "ann3",
+            "kind": "arrow",
+            "points": [[1.0, 2.0], [6.0, 8.0]],
+            "text": "",
+            "color": "#ffffff",
+            "line_width": 2.0,
+            "font_family": "",
+            "font_size": 12,
+            "font_bold": False,
+            "font_italic": False,
+            "arrow_start": False,
+            "arrow_end": True,
+            "arrow_head_size": 18.0,
+            "visible": True,
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+    ]
+
+    window._render_annotations()
+
+    assert len(window._annotation_artists) >= 2
     window.close()

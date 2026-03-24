@@ -12,9 +12,10 @@ from typing import Any, Iterable
 from uuid import uuid4
 
 
-ALLOWED_KINDS = {"polygon", "line", "text"}
+ALLOWED_KINDS = {"polygon", "line", "text", "arrow"}
 DEFAULT_ANNOTATION_COLOR = "#00d4ff"
 DEFAULT_TEXT_FONT_SIZE = 12
+DEFAULT_ARROW_HEAD_SIZE = 14
 
 
 def _now_iso() -> str:
@@ -39,6 +40,13 @@ def _norm_int(value: Any, default: int) -> int:
         return int(default)
 
 
+def _norm_float(value: Any, default: float, *, minimum: float = 0.0) -> float:
+    try:
+        return max(float(minimum), float(value))
+    except Exception:
+        return float(default)
+
+
 def make_annotation(
     *,
     kind: str,
@@ -50,6 +58,9 @@ def make_annotation(
     font_size: int = DEFAULT_TEXT_FONT_SIZE,
     font_bold: bool = False,
     font_italic: bool = False,
+    arrow_start: bool = False,
+    arrow_end: bool = True,
+    arrow_head_size: float = DEFAULT_ARROW_HEAD_SIZE,
     visible: bool = True,
 ) -> dict[str, Any]:
     kind_norm = str(kind or "").strip().lower()
@@ -67,6 +78,9 @@ def make_annotation(
         "font_size": _norm_int(font_size, DEFAULT_TEXT_FONT_SIZE),
         "font_bold": bool(font_bold),
         "font_italic": bool(font_italic),
+        "arrow_start": bool(arrow_start),
+        "arrow_end": bool(arrow_end),
+        "arrow_head_size": _norm_float(arrow_head_size, DEFAULT_ARROW_HEAD_SIZE, minimum=1.0),
         "visible": bool(visible),
         "created_at": _now_iso(),
     }
@@ -83,7 +97,7 @@ def normalize_annotations(items: Iterable[dict[str, Any]] | None) -> list[dict[s
             continue
 
         points = _norm_points(raw.get("points", []))
-        if kind in {"polygon", "line"} and len(points) < 2:
+        if kind in {"polygon", "line", "arrow"} and len(points) < 2:
             continue
         if kind == "text" and len(points) < 1:
             continue
@@ -100,6 +114,13 @@ def normalize_annotations(items: Iterable[dict[str, Any]] | None) -> list[dict[s
                 "font_size": _norm_int(raw.get("font_size", DEFAULT_TEXT_FONT_SIZE), DEFAULT_TEXT_FONT_SIZE),
                 "font_bold": bool(raw.get("font_bold", False)),
                 "font_italic": bool(raw.get("font_italic", False)),
+                "arrow_start": bool(raw.get("arrow_start", False)),
+                "arrow_end": bool(raw.get("arrow_end", True)),
+                "arrow_head_size": _norm_float(
+                    raw.get("arrow_head_size", DEFAULT_ARROW_HEAD_SIZE),
+                    DEFAULT_ARROW_HEAD_SIZE,
+                    minimum=1.0,
+                ),
                 "visible": bool(raw.get("visible", True)),
                 "created_at": str(raw.get("created_at") or _now_iso()),
             }
