@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.2.1
+Version 2.3.0-dev
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -283,6 +283,8 @@ class MainWindow(QMainWindow):
             self.accel_canvas.lassoFinished.connect(self._on_accel_lasso_finished)
             self.accel_canvas.driftPointAdded.connect(self._on_accel_drift_point_added)
             self.accel_canvas.driftCaptureFinished.connect(self._on_accel_drift_capture_finished)
+            self.accel_canvas.annotationCaptureFinished.connect(self._on_accel_annotation_capture_finished)
+            self.accel_canvas.annotationCaptureCancelled.connect(self._on_accel_annotation_capture_cancelled)
 
         self.canvas.mpl_connect("scroll_event", self.on_scroll_zoom)
         self._cid_press = self.canvas.mpl_connect("button_press_event", self.on_mouse_press)
@@ -3134,6 +3136,66 @@ class MainWindow(QMainWindow):
             return
         self.on_lasso_select(list(verts))
 
+    def _commit_line_annotation(self, points):
+        pts = [[float(x), float(y)] for x, y in list(points or [])[:2]]
+        if len(pts) < 2:
+            self._reset_annotation_mode()
+            return
+        ann = make_annotation(
+            kind="line",
+            points=pts,
+            color=self._annotation_style_defaults["color"],
+            line_width=self._annotation_style_defaults["line_width"],
+            visible=self._annotations_visible,
+        )
+        self._add_annotation(ann)
+        self._reset_annotation_mode()
+
+    def _commit_text_annotation(self, point):
+        try:
+            x, y = point
+        except Exception:
+            self._reset_annotation_mode()
+            return
+        ann = make_annotation(
+            kind="text",
+            points=[[float(x), float(y)]],
+            text=self._annotation_pending_text,
+            color=self._annotation_style_defaults["color"],
+            line_width=self._annotation_style_defaults["line_width"],
+            visible=self._annotations_visible,
+        )
+        self._add_annotation(ann)
+        self._reset_annotation_mode()
+
+    def _on_accel_annotation_capture_finished(self, kind: str, payload):
+        if not self._hardware_mode_enabled():
+            return
+
+        kind_norm = str(kind or "").strip().lower()
+        if kind_norm != str(self._annotation_mode or "").strip().lower():
+            self._reset_annotation_mode()
+            return
+
+        if kind_norm == "polygon":
+            self._on_annotation_polygon_finished(list(payload or []))
+            return
+        if kind_norm == "line":
+            self._commit_line_annotation(payload)
+            return
+        if kind_norm == "text":
+            self._commit_text_annotation(payload)
+            return
+
+        self._reset_annotation_mode()
+
+    def _on_accel_annotation_capture_cancelled(self, kind: str):
+        kind_norm = str(kind or "").strip().lower()
+        if kind_norm != str(self._annotation_mode or "").strip().lower():
+            return
+        self._reset_annotation_mode()
+        self.statusBar().showMessage(f"Cancelled {kind_norm} annotation.", 2500)
+
     def _on_accel_drift_point_added(self, x: float, y: float):
         self.drift_points.append((float(x), float(y)))
         self.accel_canvas.show_drift_points(self.drift_points, with_segments=False)
@@ -5871,9 +5933,12 @@ class MainWindow(QMainWindow):
         self._reset_annotation_mode()
         self._annotation_mode = "polygon"
         if self._hardware_mode_enabled():
-            self.lasso_active = True
-            self.accel_canvas.begin_lasso_capture()
-            self.statusBar().showMessage("Draw polygon annotation and release mouse.", 5000)
+            self._show_accel_canvas()
+            self.accel_canvas.begin_annotation_capture("polygon")
+            self.statusBar().showMessage(
+                "Left-click to add polygon vertices. Double-click or right-click to finish.",
+                5000,
+            )
             return
 
         try:
@@ -5891,11 +5956,14 @@ class MainWindow(QMainWindow):
         if self.raw_data is None:
             QMessageBox.information(self, "Annotations", "Load a FITS file first.")
             return
-        if self._hardware_mode_enabled():
-            self._show_plot_canvas()
         self._reset_annotation_mode()
         self._annotation_mode = "line"
         self._annotation_click_points = []
+        if self._hardware_mode_enabled():
+            self._show_accel_canvas()
+            self.accel_canvas.begin_annotation_capture("line")
+            self.statusBar().showMessage("Click the start point, then the end point for the line.", 5000)
+            return
         try:
             self.canvas.mpl_disconnect(self._cid_press)
             self.canvas.mpl_disconnect(self._cid_motion)
@@ -5909,14 +5977,17 @@ class MainWindow(QMainWindow):
         if self.raw_data is None:
             QMessageBox.information(self, "Annotations", "Load a FITS file first.")
             return
-        if self._hardware_mode_enabled():
-            self._show_plot_canvas()
         txt, ok = QInputDialog.getText(self, "Add Text Annotation", "Annotation text:")
         if not ok or not str(txt).strip():
             return
         self._reset_annotation_mode()
         self._annotation_mode = "text"
         self._annotation_pending_text = str(txt).strip()
+        if self._hardware_mode_enabled():
+            self._show_accel_canvas()
+            self.accel_canvas.begin_annotation_capture("text")
+            self.statusBar().showMessage("Click where to place the text annotation.", 5000)
+            return
         try:
             self.canvas.mpl_disconnect(self._cid_press)
             self.canvas.mpl_disconnect(self._cid_motion)
@@ -5938,41 +6009,16 @@ class MainWindow(QMainWindow):
         if self._annotation_mode == "line":
             self._annotation_click_points.append([x, y])
             if len(self._annotation_click_points) >= 2:
-                ann = make_annotation(
-                    kind="line",
-                    points=self._annotation_click_points[:2],
-                    color=self._annotation_style_defaults["color"],
-                    line_width=self._annotation_style_defaults["line_width"],
-                    visible=self._annotations_visible,
-                )
-                self._add_annotation(ann)
-                self._reset_annotation_mode()
+                self._commit_line_annotation(self._annotation_click_points[:2])
             return
 
         if self._annotation_mode == "text":
-            ann = make_annotation(
-                kind="text",
-                points=[[x, y]],
-                text=self._annotation_pending_text,
-                color=self._annotation_style_defaults["color"],
-                line_width=self._annotation_style_defaults["line_width"],
-                visible=self._annotations_visible,
-            )
-            self._add_annotation(ann)
-            self._reset_annotation_mode()
+            self._commit_text_annotation((x, y))
             return
 
         if self._annotation_mode == "polygon":
             if event.button == 3 and len(self._annotation_click_points) >= 3:
-                ann = make_annotation(
-                    kind="polygon",
-                    points=self._annotation_click_points,
-                    color=self._annotation_style_defaults["color"],
-                    line_width=self._annotation_style_defaults["line_width"],
-                    visible=self._annotations_visible,
-                )
-                self._add_annotation(ann)
-                self._reset_annotation_mode()
+                self._on_annotation_polygon_finished(self._annotation_click_points)
                 return
             self._annotation_click_points.append([x, y])
 
@@ -6545,7 +6591,7 @@ class MainWindow(QMainWindow):
             "time_sync": dict(getattr(self, "_last_time_sync_context", {}) or {}),
         }
 
-        # Canonical analysis session (v2.2.1)
+        # Canonical analysis session (v2.3.0-dev)
         session = self._analysis_session_with_context(getattr(self, "_analysis_session", None))
         if session is None:
             session = normalize_analysis_session(

@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.2.1
+Version 2.3.0-dev
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -115,4 +115,15 @@ def test_accelerated_widget_lasso_capture_api_no_crash():
     if not widget.is_available:
         pytest.skip("pyqtgraph not available in test environment")
     widget.begin_lasso_capture()
+    widget.stop_interaction_capture()
+
+
+def test_accelerated_widget_annotation_capture_api_no_crash():
+    _app()
+    widget = AcceleratedPlotWidget()
+    if not widget.is_available:
+        pytest.skip("pyqtgraph not available in test environment")
+    widget.begin_annotation_capture("polygon")
+    widget.begin_annotation_capture("line")
+    widget.begin_annotation_capture("text")
     widget.stop_interaction_capture()

@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.2.1
+Version 2.3.0-dev
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 from src.UI.utils.cme_launcher import LaunchResult, launch_cme_helper
 from src.UI.utils.cme_helper_client import CMEHelperClient, HelperOpenResult
 from src.UI.utils.url_opener import OpenResult, open_url_robust
+from src.version import APP_VERSION
 
 CDAW_ROOT = "https://cdaw.gsfc.nasa.gov"
 BASE_URL = f"{CDAW_ROOT}/CME_list/UNIVERSAL_ver2/"
@@ -216,7 +217,7 @@ def fetch_catalog_outcome(
 ) -> FetchOutcome:
     logger = _cme_logger()
     month_url = build_month_catalog_url(year, month)
-    headers = {"User-Agent": "e-Callisto-FITS-Analyzer/2.2.1"}
+    headers = {"User-Agent": f"e-Callisto-FITS-Analyzer/{APP_VERSION}"}
 
     logger.info(
         "event=fetch_start year=%s month=%s day=%s month_url=%s",

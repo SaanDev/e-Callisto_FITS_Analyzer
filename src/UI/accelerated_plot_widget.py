@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.2.1
+Version 2.3.0-dev
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -94,6 +94,8 @@ class AcceleratedPlotWidget(QWidget):
     lassoFinished = Signal(list)
     driftPointAdded = Signal(float, float)
     driftCaptureFinished = Signal(list)
+    annotationCaptureFinished = Signal(str, object)
+    annotationCaptureCancelled = Signal(str)
     viewInteractionFinished = Signal(dict, dict)
     rectZoomFinished = Signal(dict, dict)
 
@@ -141,6 +143,9 @@ class AcceleratedPlotWidget(QWidget):
         self._drift_scatter_item = None
         self._drift_line_item = None
         self._annotation_items = []
+        self._annotation_capture_points = []
+        self._annotation_capture_line_item = None
+        self._annotation_capture_vertex_item = None
         self._scene_filter = None
 
         self._interaction_timer = QTimer(self)
@@ -429,11 +434,142 @@ class AcceleratedPlotWidget(QWidget):
                 pass
             self._drift_line_item = None
 
+    def _annotation_capture_kind(self) -> str | None:
+        mode = str(self._interaction_mode or "")
+        if not mode.startswith("annotation:"):
+            return None
+        return mode.split(":", 1)[1] or None
+
+    def _clear_annotation_capture_overlay(self) -> None:
+        self._annotation_capture_points = []
+        if self._annotation_capture_line_item is not None:
+            try:
+                self._plot.removeItem(self._annotation_capture_line_item)
+            except Exception:
+                pass
+            self._annotation_capture_line_item = None
+        if self._annotation_capture_vertex_item is not None:
+            try:
+                self._plot.removeItem(self._annotation_capture_vertex_item)
+            except Exception:
+                pass
+            self._annotation_capture_vertex_item = None
+
+    def _ensure_annotation_capture_items(self) -> None:
+        if self._annotation_capture_line_item is None:
+            self._annotation_capture_line_item = pg.PlotDataItem(
+                pen=pg.mkPen(0, 212, 255, 220, width=2)
+            )
+            self._plot.addItem(self._annotation_capture_line_item)
+        if self._annotation_capture_vertex_item is None:
+            self._annotation_capture_vertex_item = pg.ScatterPlotItem(
+                size=8,
+                brush=pg.mkBrush(0, 212, 255, 230),
+                pen=pg.mkPen(255, 255, 255, 220, width=1),
+            )
+            self._plot.addItem(self._annotation_capture_vertex_item)
+
+    def _points_close(self, a, b, tol: float = 1e-6) -> bool:
+        try:
+            return ((float(a[0]) - float(b[0])) ** 2 + (float(a[1]) - float(b[1])) ** 2) <= tol
+        except Exception:
+            return False
+
+    def _append_annotation_capture_point(self, xy) -> bool:
+        try:
+            point = (float(xy[0]), float(xy[1]))
+        except Exception:
+            return False
+        if self._annotation_capture_points and self._points_close(self._annotation_capture_points[-1], point):
+            return False
+        self._annotation_capture_points.append(point)
+        return True
+
+    def _update_annotation_capture_overlay(self, cursor_xy=None) -> None:
+        if not self.is_available:
+            return
+        kind = self._annotation_capture_kind()
+        if kind is None:
+            return
+
+        line_points: list[tuple[float, float]] = []
+        vertex_points = list(self._annotation_capture_points)
+
+        if kind == "polygon":
+            line_points = list(self._annotation_capture_points)
+            if cursor_xy is not None and self._annotation_capture_points:
+                try:
+                    line_points.append((float(cursor_xy[0]), float(cursor_xy[1])))
+                    if len(self._annotation_capture_points) >= 2:
+                        line_points.append(self._annotation_capture_points[0])
+                except Exception:
+                    pass
+        elif kind == "line":
+            if self._annotation_capture_points:
+                if cursor_xy is not None:
+                    try:
+                        line_points = [
+                            self._annotation_capture_points[0],
+                            (float(cursor_xy[0]), float(cursor_xy[1])),
+                        ]
+                    except Exception:
+                        line_points = []
+                vertex_points = self._annotation_capture_points[:1]
+        elif kind == "text":
+            if cursor_xy is not None:
+                try:
+                    vertex_points = [(float(cursor_xy[0]), float(cursor_xy[1]))]
+                except Exception:
+                    vertex_points = []
+            else:
+                vertex_points = []
+
+        self._ensure_annotation_capture_items()
+
+        if line_points:
+            xs = [p[0] for p in line_points]
+            ys = [p[1] for p in line_points]
+            self._annotation_capture_line_item.setData(xs, ys)
+        else:
+            self._annotation_capture_line_item.setData([], [])
+
+        if vertex_points:
+            xs = [p[0] for p in vertex_points]
+            ys = [p[1] for p in vertex_points]
+            self._annotation_capture_vertex_item.setData(xs, ys)
+        else:
+            self._annotation_capture_vertex_item.setData([], [])
+
+    def _finish_annotation_capture(self, kind: str, payload) -> None:
+        kind_norm = str(kind or "").strip().lower()
+        if kind_norm == "polygon":
+            out = [(float(x), float(y)) for x, y in list(payload or [])]
+        elif kind_norm == "line":
+            out = [(float(x), float(y)) for x, y in list(payload or [])[:2]]
+        else:
+            x, y = payload
+            out = (float(x), float(y))
+
+        self._interaction_mode = None
+        self._clear_annotation_capture_overlay()
+        self._apply_navigation_state()
+        self.annotationCaptureFinished.emit(kind_norm, out)
+
+    def _cancel_annotation_capture(self, kind: str | None = None) -> None:
+        kind_norm = str(kind or self._annotation_capture_kind() or "").strip().lower()
+        if not kind_norm:
+            return
+        self._interaction_mode = None
+        self._clear_annotation_capture_overlay()
+        self._apply_navigation_state()
+        self.annotationCaptureCancelled.emit(kind_norm)
+
     def clear_overlays(self) -> None:
         if not self.is_available:
             return
         self._clear_lasso_overlay()
         self._clear_drift_overlay()
+        self._clear_annotation_capture_overlay()
 
     def clear(self) -> None:
         if not self.is_available:
@@ -443,6 +579,7 @@ class AcceleratedPlotWidget(QWidget):
         self._interaction_mode = None
         self._clear_lasso_overlay()
         self._clear_drift_overlay()
+        self._clear_annotation_capture_overlay()
         self._clear_annotation_overlay()
 
     def export_plot_item(self):
@@ -521,6 +658,7 @@ class AcceleratedPlotWidget(QWidget):
             return
         self._interaction_mode = "lasso"
         self._clear_lasso_overlay()
+        self._clear_annotation_capture_overlay()
         # Avoid panning while drawing freehand lasso
         self._plot.setMouseEnabled(x=False, y=False)
 
@@ -529,10 +667,23 @@ class AcceleratedPlotWidget(QWidget):
             return
         self._interaction_mode = "drift"
         self._clear_drift_overlay()
+        self._clear_annotation_capture_overlay()
+
+    def begin_annotation_capture(self, kind: str) -> None:
+        if not self.is_available:
+            return
+        kind_norm = str(kind or "").strip().lower()
+        if kind_norm not in {"polygon", "line", "text"}:
+            return
+        self._interaction_mode = f"annotation:{kind_norm}"
+        self._clear_lasso_overlay()
+        self._clear_annotation_capture_overlay()
+        self._plot.setMouseEnabled(x=False, y=False)
 
     def stop_interaction_capture(self) -> None:
         self._interaction_mode = None
         self._clear_lasso_overlay()
+        self._clear_annotation_capture_overlay()
         self._apply_navigation_state()
 
     def show_drift_points(self, points, with_segments: bool = False) -> None:
@@ -631,6 +782,8 @@ class AcceleratedPlotWidget(QWidget):
             self.mousePositionChanged.emit(0.0, 0.0, False)
             return
         self.mousePositionChanged.emit(xy[0], xy[1], True)
+        if self._annotation_capture_kind() is not None:
+            self._update_annotation_capture_overlay(cursor_xy=xy)
 
     def _update_lasso_curve(self):
         if self._lasso_line_item is None:
@@ -717,6 +870,31 @@ class AcceleratedPlotWidget(QWidget):
             is_double = False
 
         x, y = xy
+
+        annotation_kind = self._annotation_capture_kind()
+        if annotation_kind is not None:
+            if button == Qt.MouseButton.RightButton:
+                if annotation_kind == "polygon" and len(self._annotation_capture_points) >= 3:
+                    self._finish_annotation_capture(annotation_kind, list(self._annotation_capture_points))
+                else:
+                    self._cancel_annotation_capture(annotation_kind)
+                return
+
+            if button != Qt.MouseButton.LeftButton:
+                return
+
+            if annotation_kind == "text":
+                self._finish_annotation_capture(annotation_kind, (x, y))
+                return
+
+            self._append_annotation_capture_point((x, y))
+            self._update_annotation_capture_overlay(cursor_xy=(x, y))
+
+            if annotation_kind == "line" and len(self._annotation_capture_points) >= 2:
+                self._finish_annotation_capture(annotation_kind, self._annotation_capture_points[:2])
+            elif annotation_kind == "polygon" and is_double and len(self._annotation_capture_points) >= 3:
+                self._finish_annotation_capture(annotation_kind, list(self._annotation_capture_points))
+            return
 
         if self._interaction_mode == "drift":
             if button == Qt.MouseButton.LeftButton:

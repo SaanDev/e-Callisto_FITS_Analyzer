@@ -1,14 +1,14 @@
 # e-CALLISTO FITS Analyzer
 A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data.
 
-Current stable release: **2.2.1**  
+Current version: **2.3.0-dev**  
 Previous stable release: **2.1**
 
 ---
 
-## ✨ What's New in v2.2.1
+## ✨ What's New in v2.3.0-dev
 
-The items below are included in the finalized **v2.2.1** desktop release.
+The items below are included in the current **v2.3.0-dev** desktop build.
 
 ### Application updates
 - **SunPy Multi-Mission Explorer**: **Solar Events → Archives → SunPy Multi-Mission Explorer** for querying, downloading, plotting, and analyzing SDO, SOHO, STEREO-A, and GOES data inside the desktop app.
@@ -25,7 +25,7 @@ The items below are included in the finalized **v2.2.1** desktop release.
 - **Downloader stability improvements**: safer FITS download/fetch flow plus calendar/date-picker usability fixes.
 - **Analysis dialog UI fix**: fold-selection dropdown sizing is corrected across Qt styles/themes.
 - **RFI reset-state fix**: reset/apply flows restore the correct pre-clean plot state more reliably.
-- **Desktop packaging updates**: SunPy runtime dependencies and packaging hooks are included for local builds, with Python **3.12+** as the `v2.2.1` packaging baseline.
+- **Desktop packaging updates**: SunPy runtime dependencies and packaging hooks are included for local builds, with Python **3.12+** as the `v2.3.0-dev` packaging baseline.
 
 ### v2.1 highlights (previous stable release)
 - **Update Checker**: **About → Check for Updates...** to search online for newer releases.
@@ -450,7 +450,7 @@ Use **About → Check for Updates...** to query the latest release from GitHub.
 
 ---
 
-## 🛠️ Build and Packaging (v2.2.1)
+## 🛠️ Build and Packaging (v2.3.0-dev)
 
 ### Prerequisites
 - Python 3.12+ (SunPy 7.1.x baseline; recommended: same version used for your target build machine)
