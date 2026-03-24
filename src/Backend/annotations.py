@@ -13,6 +13,8 @@ from uuid import uuid4
 
 
 ALLOWED_KINDS = {"polygon", "line", "text"}
+DEFAULT_ANNOTATION_COLOR = "#00d4ff"
+DEFAULT_TEXT_FONT_SIZE = 12
 
 
 def _now_iso() -> str:
@@ -30,13 +32,24 @@ def _norm_points(points: Iterable[Iterable[float]] | None) -> list[list[float]]:
     return out
 
 
+def _norm_int(value: Any, default: int) -> int:
+    try:
+        return max(1, int(value))
+    except Exception:
+        return int(default)
+
+
 def make_annotation(
     *,
     kind: str,
     points: Iterable[Iterable[float]],
     text: str = "",
-    color: str = "#00d4ff",
+    color: str = DEFAULT_ANNOTATION_COLOR,
     line_width: float = 1.5,
+    font_family: str = "",
+    font_size: int = DEFAULT_TEXT_FONT_SIZE,
+    font_bold: bool = False,
+    font_italic: bool = False,
     visible: bool = True,
 ) -> dict[str, Any]:
     kind_norm = str(kind or "").strip().lower()
@@ -48,8 +61,12 @@ def make_annotation(
         "kind": kind_norm,
         "points": _norm_points(points),
         "text": str(text or ""),
-        "color": str(color or "#00d4ff"),
+        "color": str(color or DEFAULT_ANNOTATION_COLOR),
         "line_width": float(line_width),
+        "font_family": str(font_family or ""),
+        "font_size": _norm_int(font_size, DEFAULT_TEXT_FONT_SIZE),
+        "font_bold": bool(font_bold),
+        "font_italic": bool(font_italic),
         "visible": bool(visible),
         "created_at": _now_iso(),
     }
@@ -77,8 +94,12 @@ def normalize_annotations(items: Iterable[dict[str, Any]] | None) -> list[dict[s
                 "kind": kind,
                 "points": points,
                 "text": str(raw.get("text", "")),
-                "color": str(raw.get("color") or "#00d4ff"),
+                "color": str(raw.get("color") or DEFAULT_ANNOTATION_COLOR),
                 "line_width": float(raw.get("line_width", 1.5)),
+                "font_family": str(raw.get("font_family") or ""),
+                "font_size": _norm_int(raw.get("font_size", DEFAULT_TEXT_FONT_SIZE), DEFAULT_TEXT_FONT_SIZE),
+                "font_bold": bool(raw.get("font_bold", False)),
+                "font_italic": bool(raw.get("font_italic", False)),
                 "visible": bool(raw.get("visible", True)),
                 "created_at": str(raw.get("created_at") or _now_iso()),
             }

@@ -759,6 +759,23 @@ class AcceleratedPlotWidget(QWidget):
                     x, y = points[0]
                     txt = str(ann.get("text") or "")
                     item = pg.TextItem(text=txt, color=color, anchor=(0, 1))
+                    font = QFont()
+                    font_family = str(ann.get("font_family") or "").strip()
+                    if font_family:
+                        font.setFamily(font_family)
+                    try:
+                        font.setPixelSize(max(6, int(ann.get("font_size", 12))))
+                    except Exception:
+                        font.setPixelSize(12)
+                    font.setBold(bool(ann.get("font_bold", False)))
+                    font.setItalic(bool(ann.get("font_italic", False)))
+                    try:
+                        item.setFont(font)
+                    except Exception:
+                        try:
+                            item.textItem.setFont(font)
+                        except Exception:
+                            pass
                     item.setPos(float(x), float(y))
                     self._plot.addItem(item)
                     self._annotation_items.append(item)

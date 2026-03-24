@@ -77,7 +77,13 @@ from src.Backend.analysis_session import (
     to_project_payload as analysis_session_to_project_payload,
     validate_session_for_source,
 )
-from src.Backend.annotations import make_annotation, normalize_annotations, toggle_all_visibility
+from src.Backend.annotations import (
+    DEFAULT_ANNOTATION_COLOR,
+    DEFAULT_TEXT_FONT_SIZE,
+    make_annotation,
+    normalize_annotations,
+    toggle_all_visibility,
+)
 from src.Backend.fits_io import build_combined_header, extract_ut_start_sec, load_callisto_fits
 from src.Backend.presets import (
     PRESET_SCHEMA_VERSION,
@@ -100,6 +106,7 @@ from src.Backend.update_checker import GITHUB_REPO
 from src.UI.accelerated_plot_widget import AcceleratedPlotWidget
 from src.UI.callisto_downloader import CallistoDownloaderApp
 from src.UI.dialogs.analyze_dialog import AnalyzeDialog
+from src.UI.dialogs.annotation_text_dialog import TextAnnotationDialog
 from src.UI.dialogs.batch_processing_dialog import BatchProcessingDialog
 from src.UI.dialogs.bug_report_dialog import BugReportDialog
 from src.UI.dialogs.combine_dialogs import CombineFrequencyDialog, CombineTimeDialog
@@ -257,9 +264,11 @@ class MainWindow(QMainWindow):
         self._annotation_mode = None
         self._annotation_click_points = []
         self._annotation_pending_text = ""
+        self._annotation_pending_text_style = {}
+        self._annotation_target_index = None
         self._annotation_mpl_cid = None
         self._annotation_artists = []
-        self._annotation_style_defaults = {"color": "#00d4ff", "line_width": 1.5}
+        self._annotation_style_defaults = self._merge_annotation_style_defaults()
 
         # Autosave / crash-recovery state
         self._autosave_timer = QTimer(self)
@@ -799,12 +808,16 @@ class MainWindow(QMainWindow):
         self.ann_add_polygon_action = QAction("Add Polygon", self)
         self.ann_add_line_action = QAction("Add Line", self)
         self.ann_add_text_action = QAction("Add Text", self)
+        self.ann_edit_text_action = QAction("Edit Text Label...", self)
+        self.ann_move_text_action = QAction("Move Text Label...", self)
         self.ann_toggle_visibility_action = QAction("Toggle Visibility", self)
         self.ann_delete_last_action = QAction("Delete Last", self)
         self.ann_clear_action = QAction("Clear All", self)
         ann_menu.addAction(self.ann_add_polygon_action)
         ann_menu.addAction(self.ann_add_line_action)
         ann_menu.addAction(self.ann_add_text_action)
+        ann_menu.addAction(self.ann_edit_text_action)
+        ann_menu.addAction(self.ann_move_text_action)
         ann_menu.addSeparator()
         ann_menu.addAction(self.ann_toggle_visibility_action)
         ann_menu.addAction(self.ann_delete_last_action)
@@ -909,6 +922,8 @@ class MainWindow(QMainWindow):
         self.ann_add_polygon_action.triggered.connect(self.start_annotation_polygon)
         self.ann_add_line_action.triggered.connect(self.start_annotation_line)
         self.ann_add_text_action.triggered.connect(self.start_annotation_text)
+        self.ann_edit_text_action.triggered.connect(self.edit_text_label)
+        self.ann_move_text_action.triggered.connect(self.move_text_label)
         self.ann_toggle_visibility_action.triggered.connect(self.toggle_annotations_visibility)
         self.ann_delete_last_action.triggered.connect(self.delete_last_annotation)
         self.ann_clear_action.triggered.connect(self.clear_annotations)
@@ -2535,7 +2550,7 @@ class MainWindow(QMainWindow):
 
         self._annotations = []
         self._annotations_visible = True
-        self._annotation_style_defaults = {"color": "#00d4ff", "line_width": 1.5}
+        self._annotation_style_defaults = self._merge_annotation_style_defaults()
         self._active_preset_snapshot = None
         self._render_annotations()
 
@@ -3157,12 +3172,18 @@ class MainWindow(QMainWindow):
         except Exception:
             self._reset_annotation_mode()
             return
+        style = dict(self._annotation_pending_text_style or self._text_annotation_style_defaults())
+        self._remember_text_annotation_style(style)
         ann = make_annotation(
             kind="text",
             points=[[float(x), float(y)]],
             text=self._annotation_pending_text,
-            color=self._annotation_style_defaults["color"],
+            color=style["color"],
             line_width=self._annotation_style_defaults["line_width"],
+            font_family=style["font_family"],
+            font_size=style["font_size"],
+            font_bold=style["font_bold"],
+            font_italic=style["font_italic"],
             visible=self._annotations_visible,
         )
         self._add_annotation(ann)
@@ -3173,6 +3194,12 @@ class MainWindow(QMainWindow):
             return
 
         kind_norm = str(kind or "").strip().lower()
+        if self._annotation_mode == "move_text":
+            if kind_norm == "text":
+                self._move_selected_text_annotation_to(payload)
+            else:
+                self._reset_annotation_mode()
+            return
         if kind_norm != str(self._annotation_mode or "").strip().lower():
             self._reset_annotation_mode()
             return
@@ -3191,7 +3218,12 @@ class MainWindow(QMainWindow):
 
     def _on_accel_annotation_capture_cancelled(self, kind: str):
         kind_norm = str(kind or "").strip().lower()
-        if kind_norm != str(self._annotation_mode or "").strip().lower():
+        active_mode = str(self._annotation_mode or "").strip().lower()
+        if active_mode == "move_text" and kind_norm == "text":
+            self._reset_annotation_mode()
+            self.statusBar().showMessage("Cancelled text label move.", 2500)
+            return
+        if kind_norm != active_mode:
             return
         self._reset_annotation_mode()
         self.statusBar().showMessage(f"Cancelled {kind_norm} annotation.", 2500)
@@ -5844,10 +5876,164 @@ class MainWindow(QMainWindow):
                 pass
             self._annotation_mpl_cid = None
 
+    def _default_annotation_style_defaults(self) -> dict:
+        return {
+            "color": DEFAULT_ANNOTATION_COLOR,
+            "line_width": 1.5,
+            "text_color": DEFAULT_ANNOTATION_COLOR,
+            "text_font_family": "",
+            "text_font_size": DEFAULT_TEXT_FONT_SIZE,
+            "text_bold": False,
+            "text_italic": False,
+        }
+
+    def _merge_annotation_style_defaults(self, payload: dict | None = None) -> dict:
+        defaults = self._default_annotation_style_defaults()
+        raw = dict(payload or {})
+
+        out = dict(defaults)
+        out["color"] = str(raw.get("color") or defaults["color"])
+        try:
+            out["line_width"] = max(0.5, float(raw.get("line_width", defaults["line_width"])))
+        except Exception:
+            out["line_width"] = float(defaults["line_width"])
+        out["text_color"] = str(raw.get("text_color") or out["color"] or defaults["text_color"])
+        out["text_font_family"] = str(raw.get("text_font_family") or defaults["text_font_family"])
+        try:
+            out["text_font_size"] = max(6, int(raw.get("text_font_size", defaults["text_font_size"])))
+        except Exception:
+            out["text_font_size"] = int(defaults["text_font_size"])
+        out["text_bold"] = bool(raw.get("text_bold", defaults["text_bold"]))
+        out["text_italic"] = bool(raw.get("text_italic", defaults["text_italic"]))
+        return out
+
+    def _text_annotation_style_defaults(self) -> dict:
+        merged = self._merge_annotation_style_defaults(self._annotation_style_defaults)
+        return {
+            "color": str(merged.get("text_color") or merged.get("color") or DEFAULT_ANNOTATION_COLOR),
+            "font_family": str(merged.get("text_font_family") or ""),
+            "font_size": int(merged.get("text_font_size", DEFAULT_TEXT_FONT_SIZE)),
+            "font_bold": bool(merged.get("text_bold", False)),
+            "font_italic": bool(merged.get("text_italic", False)),
+        }
+
+    def _annotation_text_style(self, ann: dict | None = None) -> dict:
+        style = self._text_annotation_style_defaults()
+        if not isinstance(ann, dict):
+            return style
+        style["color"] = str(ann.get("color") or style["color"])
+        style["font_family"] = str(ann.get("font_family") or style["font_family"])
+        try:
+            style["font_size"] = max(6, int(ann.get("font_size", style["font_size"])))
+        except Exception:
+            pass
+        style["font_bold"] = bool(ann.get("font_bold", style["font_bold"]))
+        style["font_italic"] = bool(ann.get("font_italic", style["font_italic"]))
+        return style
+
+    def _remember_text_annotation_style(self, style: dict | None) -> None:
+        merged = self._merge_annotation_style_defaults(self._annotation_style_defaults)
+        raw = dict(style or {})
+        merged["text_color"] = str(raw.get("color") or merged["text_color"])
+        merged["text_font_family"] = str(raw.get("font_family") or merged["text_font_family"])
+        try:
+            merged["text_font_size"] = max(6, int(raw.get("font_size", merged["text_font_size"])))
+        except Exception:
+            pass
+        merged["text_bold"] = bool(raw.get("font_bold", merged["text_bold"]))
+        merged["text_italic"] = bool(raw.get("font_italic", merged["text_italic"]))
+        self._annotation_style_defaults = merged
+
+    def _text_annotation_label(self, index: int, ann: dict) -> str:
+        points = ann.get("points") or []
+        x, y = (points[0] if points else [0.0, 0.0])
+        text = str(ann.get("text") or "").replace("\n", " ").strip()
+        if len(text) > 32:
+            text = f"{text[:29]}..."
+        if not text:
+            text = "<blank>"
+        return f"#{index + 1} {text} @ ({float(x):.2f}, {float(y):.2f})"
+
+    def _text_annotations_with_indices(self) -> list[tuple[int, dict, str]]:
+        out: list[tuple[int, dict, str]] = []
+        for index, ann in enumerate(list(self._annotations or [])):
+            if str((ann or {}).get("kind", "")).strip().lower() != "text":
+                continue
+            out.append((index, ann, self._text_annotation_label(index, ann)))
+        return out
+
+    def _choose_text_annotation_index(self, *, title: str, prompt: str) -> int | None:
+        rows = self._text_annotations_with_indices()
+        if not rows:
+            QMessageBox.information(self, title, "There are no text labels available.")
+            return None
+        if len(rows) == 1:
+            return int(rows[0][0])
+
+        labels = [label for _, _, label in rows]
+        choice, ok = QInputDialog.getItem(self, title, prompt, labels, 0, False)
+        if not ok or not choice:
+            return None
+        for index, _ann, label in rows:
+            if label == choice:
+                return int(index)
+        return None
+
+    def _open_text_annotation_dialog(self, *, title: str, text: str = "", style: dict | None = None) -> dict | None:
+        dlg = TextAnnotationDialog(
+            title=title,
+            initial_text=text,
+            initial_style=style or self._text_annotation_style_defaults(),
+            parent=self,
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return dlg.payload()
+
+    def _replace_annotation(self, index: int, updated: dict, *, status_message: str, log_message: str) -> bool:
+        if index < 0 or index >= len(self._annotations):
+            return False
+        normalized = normalize_annotations([updated])
+        if not normalized:
+            return False
+        self._annotations[index] = normalized[0]
+        self._render_annotations()
+        self._mark_project_dirty()
+        self.statusBar().showMessage(status_message, 3000)
+        self._log_operation(log_message)
+        return True
+
+    def _move_selected_text_annotation_to(self, point) -> None:
+        index = self._annotation_target_index
+        if index is None or index < 0 or index >= len(self._annotations):
+            self._reset_annotation_mode()
+            return
+        ann = dict(self._annotations[index] or {})
+        if str(ann.get("kind", "")).strip().lower() != "text":
+            self._reset_annotation_mode()
+            return
+        try:
+            x, y = point
+            ann["points"] = [[float(x), float(y)]]
+        except Exception:
+            self._reset_annotation_mode()
+            return
+
+        label = self._text_annotation_label(index, ann)
+        self._replace_annotation(
+            index,
+            ann,
+            status_message="Moved text label.",
+            log_message=f"Moved text label: {label}",
+        )
+        self._reset_annotation_mode()
+
     def _reset_annotation_mode(self):
         self._annotation_mode = None
         self._annotation_click_points = []
         self._annotation_pending_text = ""
+        self._annotation_pending_text_style = {}
+        self._annotation_target_index = None
         self.lasso_active = False
         self._annotation_disconnect_mpl()
         if self._hardware_mode_enabled():
@@ -5899,14 +6085,21 @@ class MainWindow(QMainWindow):
                     artists.append(line)
                 elif kind == "text" and len(pts) >= 1:
                     x, y = pts[0]
+                    text_style = self._annotation_text_style(ann)
+                    text_kwargs = {}
+                    if text_style["font_family"]:
+                        text_kwargs["fontfamily"] = text_style["font_family"]
                     text_artist = ax.text(
                         float(x),
                         float(y),
                         str(ann.get("text", "")),
-                        color=color,
-                        fontsize=10,
+                        color=text_style["color"],
+                        fontsize=text_style["font_size"],
+                        fontweight="bold" if text_style["font_bold"] else "normal",
+                        fontstyle="italic" if text_style["font_italic"] else "normal",
                         ha="left",
                         va="bottom",
+                        **text_kwargs,
                     )
                     artists.append(text_artist)
             self._annotation_artists = artists
@@ -5977,12 +6170,16 @@ class MainWindow(QMainWindow):
         if self.raw_data is None:
             QMessageBox.information(self, "Annotations", "Load a FITS file first.")
             return
-        txt, ok = QInputDialog.getText(self, "Add Text Annotation", "Annotation text:")
-        if not ok or not str(txt).strip():
+        payload = self._open_text_annotation_dialog(
+            title="Add Text Annotation",
+            style=self._text_annotation_style_defaults(),
+        )
+        if not payload:
             return
         self._reset_annotation_mode()
         self._annotation_mode = "text"
-        self._annotation_pending_text = str(txt).strip()
+        self._annotation_pending_text = str(payload.get("text") or "").strip()
+        self._annotation_pending_text_style = dict(payload)
         if self._hardware_mode_enabled():
             self._show_accel_canvas()
             self.accel_canvas.begin_annotation_capture("text")
@@ -6016,6 +6213,14 @@ class MainWindow(QMainWindow):
             self._commit_text_annotation((x, y))
             return
 
+        if self._annotation_mode == "move_text":
+            if event.button == 3:
+                self._reset_annotation_mode()
+                self.statusBar().showMessage("Cancelled text label move.", 2500)
+                return
+            self._move_selected_text_annotation_to((x, y))
+            return
+
         if self._annotation_mode == "polygon":
             if event.button == 3 and len(self._annotation_click_points) >= 3:
                 self._on_annotation_polygon_finished(self._annotation_click_points)
@@ -6037,6 +6242,61 @@ class MainWindow(QMainWindow):
         )
         self._add_annotation(ann)
         self._reset_annotation_mode()
+
+    def edit_text_label(self):
+        index = self._choose_text_annotation_index(
+            title="Edit Text Label",
+            prompt="Choose label:",
+        )
+        if index is None:
+            return
+        ann = dict(self._annotations[index] or {})
+        payload = self._open_text_annotation_dialog(
+            title="Edit Text Label",
+            text=str(ann.get("text") or ""),
+            style=self._annotation_text_style(ann),
+        )
+        if not payload:
+            return
+
+        ann["text"] = str(payload.get("text") or "").strip()
+        ann["color"] = str(payload.get("color") or ann.get("color") or DEFAULT_ANNOTATION_COLOR)
+        ann["font_family"] = str(payload.get("font_family") or "")
+        ann["font_size"] = int(payload.get("font_size", DEFAULT_TEXT_FONT_SIZE) or DEFAULT_TEXT_FONT_SIZE)
+        ann["font_bold"] = bool(payload.get("font_bold", False))
+        ann["font_italic"] = bool(payload.get("font_italic", False))
+        self._remember_text_annotation_style(payload)
+        self._replace_annotation(
+            index,
+            ann,
+            status_message="Updated text label style.",
+            log_message=f"Edited text label: {self._text_annotation_label(index, ann)}",
+        )
+
+    def move_text_label(self):
+        index = self._choose_text_annotation_index(
+            title="Move Text Label",
+            prompt="Choose label:",
+        )
+        if index is None:
+            return
+
+        self._reset_annotation_mode()
+        self._annotation_mode = "move_text"
+        self._annotation_target_index = int(index)
+        if self._hardware_mode_enabled():
+            self._show_accel_canvas()
+            self.accel_canvas.begin_annotation_capture("text")
+        else:
+            self._show_plot_canvas()
+            try:
+                self.canvas.mpl_disconnect(self._cid_press)
+                self.canvas.mpl_disconnect(self._cid_motion)
+                self.canvas.mpl_disconnect(self._cid_release)
+            except Exception:
+                pass
+            self._annotation_mpl_cid = self.canvas.mpl_connect("button_press_event", self._on_annotation_mpl_click)
+        self.statusBar().showMessage("Click the new location for the selected text label.", 5000)
 
     def toggle_annotations_visibility(self):
         self._annotations_visible = not bool(self._annotations_visible)
@@ -6142,7 +6402,9 @@ class MainWindow(QMainWindow):
         self.cmap_combo.setCurrentText(cmap)
 
         self._rfi_config = dict(settings.get("rfi") or self._rfi_config)
-        self._annotation_style_defaults = dict(settings.get("annotation_style_defaults") or self._annotation_style_defaults)
+        self._annotation_style_defaults = self._merge_annotation_style_defaults(
+            settings.get("annotation_style_defaults") or self._annotation_style_defaults
+        )
 
         graph = dict(settings.get("graph") or {})
         self.remove_titles_chk.setChecked(bool(graph.get("remove_titles", self.remove_titles_chk.isChecked())))
@@ -6586,6 +6848,7 @@ class MainWindow(QMainWindow):
             "graph": graph,
             "rfi": dict(getattr(self, "_rfi_config", {}) or {}),
             "annotations": normalize_annotations(getattr(self, "_annotations", [])),
+            "annotation_style_defaults": dict(self._annotation_style_defaults or {}),
             "active_preset": dict(getattr(self, "_active_preset_snapshot", {}) or {}),
             "processing_log": list(getattr(self, "_processing_log", []) or []),
             "time_sync": dict(getattr(self, "_last_time_sync_context", {}) or {}),
@@ -6675,6 +6938,9 @@ class MainWindow(QMainWindow):
             self._combined_sources = list(meta.get("combined_sources", []) or [])
             self._rfi_config = dict(meta.get("rfi") or self._rfi_config)
             self._annotations = normalize_annotations(meta.get("annotations", []))
+            self._annotation_style_defaults = self._merge_annotation_style_defaults(
+                meta.get("annotation_style_defaults") or self._annotation_style_defaults
+            )
             self._active_preset_snapshot = dict(meta.get("active_preset") or {})
             self._processing_log = list(meta.get("processing_log") or [])
             self._last_time_sync_context = dict(meta.get("time_sync") or {})

@@ -18,6 +18,26 @@ def test_make_annotation_polygon_schema():
     assert ann["visible"] is True
 
 
+def test_make_annotation_text_style_schema():
+    ann = make_annotation(
+        kind="text",
+        points=[(1, 2)],
+        text="Burst A",
+        color="#ff6600",
+        font_family="Helvetica",
+        font_size=16,
+        font_bold=True,
+        font_italic=True,
+    )
+    assert ann["kind"] == "text"
+    assert ann["text"] == "Burst A"
+    assert ann["color"] == "#ff6600"
+    assert ann["font_family"] == "Helvetica"
+    assert ann["font_size"] == 16
+    assert ann["font_bold"] is True
+    assert ann["font_italic"] is True
+
+
 def test_normalize_filters_invalid_rows():
     rows = [
         {"kind": "polygon", "points": [[1, 2], [3, 4], [5, 6]]},
@@ -38,3 +58,11 @@ def test_toggle_visibility_applies_to_all():
     ]
     hidden = toggle_all_visibility(rows, False)
     assert all(not x["visible"] for x in hidden)
+
+
+def test_normalize_text_style_defaults_when_missing():
+    out = normalize_annotations([{"kind": "text", "points": [[7, 8]], "text": "note"}])
+    assert out[0]["font_family"] == ""
+    assert out[0]["font_size"] >= 6
+    assert out[0]["font_bold"] is False
+    assert out[0]["font_italic"] is False
