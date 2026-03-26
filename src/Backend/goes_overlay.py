@@ -213,24 +213,32 @@ def fetch_goes_overlay(
 
         if progress_cb is not None:
             progress_cb(search_start, f"Searching GOES-{sat} XRS archive...")
-        search_result = search(spec)
+        try:
+            search_result = search(spec)
+        except Exception as exc:
+            fetch_errors.append(f"GOES-{sat}: search failed: {exc}")
+            continue
         if not search_result.rows:
             continue
         search_hits += len(search_result.rows)
 
-        fetch_result = fetch(
-            search_result,
-            cache_dir,
-            selected_rows=list(range(len(search_result.rows))),
-            progress_cb=(
-                None
-                if progress_cb is None
-                else lambda value, text, sat=sat, start=search_start, end=search_end: progress_cb(
-                    start + int(max(0, min(100, int(value or 0))) * max(1, end - start) / 100.0),
-                    f"GOES-{sat}: {text}",
-                )
-            ),
-        )
+        try:
+            fetch_result = fetch(
+                search_result,
+                cache_dir,
+                selected_rows=list(range(len(search_result.rows))),
+                progress_cb=(
+                    None
+                    if progress_cb is None
+                    else lambda value, text, sat=sat, start=search_start, end=search_end: progress_cb(
+                        start + int(max(0, min(100, int(value or 0))) * max(1, end - start) / 100.0),
+                        f"GOES-{sat}: {text}",
+                    )
+                ),
+            )
+        except Exception as exc:
+            fetch_errors.append(f"GOES-{sat}: fetch failed: {exc}")
+            continue
         if fetch_result.errors:
             fetch_errors.extend([f"GOES-{sat}: {msg}" for msg in fetch_result.errors])
         if not fetch_result.paths:
@@ -239,12 +247,17 @@ def fetch_goes_overlay(
         if progress_cb is not None:
             progress_cb(search_end, f"Loading GOES-{sat} XRS time series...")
 
-        load_result = load_downloaded(fetch_result.paths, data_kind=DATA_KIND_TIMESERIES)
-        ts = load_result.maps_or_timeseries
-        to_dataframe = getattr(ts, "to_dataframe", None)
-        if not callable(to_dataframe):
+        try:
+            load_result = load_downloaded(fetch_result.paths, data_kind=DATA_KIND_TIMESERIES)
+            ts = load_result.maps_or_timeseries
+            to_dataframe = getattr(ts, "to_dataframe", None)
+            if not callable(to_dataframe):
+                fetch_errors.append(f"GOES-{sat}: loaded data does not provide a dataframe.")
+                continue
+            frame = to_dataframe()
+        except Exception as exc:
+            fetch_errors.append(f"GOES-{sat}: load failed: {exc}")
             continue
-        frame = to_dataframe()
         try:
             payload = build_goes_overlay_payload(
                 frame,

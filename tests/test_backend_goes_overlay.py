@@ -160,3 +160,50 @@ def test_fetch_goes_overlay_searches_all_satellites_and_selects_best(monkeypatch
     assert calls["search"] == [16, 17, 18, 19]
     assert payload.satellite_number == 17
     assert np.allclose(payload.x_seconds, np.array([0.0, 60.0, 120.0, 180.0], dtype=float))
+
+
+def test_fetch_goes_overlay_skips_satellite_search_failures(monkeypatch, tmp_path):
+    class _FakeTimeSeries:
+        def to_dataframe(self):
+            idx = pd.to_datetime(
+                [
+                    "2026-02-10T01:00:00Z",
+                    "2026-02-10T01:01:00Z",
+                    "2026-02-10T01:02:00Z",
+                ],
+                utc=True,
+            )
+            return pd.DataFrame({"xrsb_long": [1e-8, 2e-8, 3e-8]}, index=idx)
+
+    seen = {"search": []}
+
+    def fake_search(spec):
+        sat = int(spec.satellite_number)
+        seen["search"].append(sat)
+        if sat == 16:
+            raise RuntimeError("This query was not understood by any clients. Did you miss an OR?")
+        if sat == 17:
+            return type("Result", (), {"rows": [object()], "satellite_number": sat})()
+        return type("Result", (), {"rows": [], "satellite_number": sat})()
+
+    def fake_fetch(search_result, cache_dir, selected_rows=None, progress_cb=None):
+        sat = int(search_result.satellite_number)
+        return type("FetchResult", (), {"paths": [str(tmp_path / f"goes{sat}.nc")], "errors": [], "failed_count": 0})()
+
+    def fake_load(paths, data_kind):
+        return type("LoadResult", (), {"maps_or_timeseries": _FakeTimeSeries()})()
+
+    monkeypatch.setattr("src.Backend.goes_overlay.search", fake_search)
+    monkeypatch.setattr("src.Backend.goes_overlay.fetch", fake_fetch)
+    monkeypatch.setattr("src.Backend.goes_overlay.load_downloaded", fake_load)
+
+    payload = fetch_goes_overlay(
+        start_utc=datetime(2026, 2, 10, 1, 0, 0, tzinfo=timezone.utc),
+        end_utc=datetime(2026, 2, 10, 1, 2, 0, tzinfo=timezone.utc),
+        base_utc=datetime(2026, 2, 10, 1, 0, 0, tzinfo=timezone.utc),
+        cache_dir=tmp_path,
+        satellite_numbers=(16, 17, 18, 19),
+    )
+
+    assert seen["search"][:2] == [16, 17]
+    assert payload.satellite_number == 17
