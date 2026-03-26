@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import os
 import tempfile
+from pathlib import Path
 
 import numpy as np
 import requests
-from PySide6.QtCore import QObject, Signal, Slot
+from PySide6.QtCore import QObject, QStandardPaths, Signal, Slot
 
 from src.Backend.batch_processing import (
     build_unique_output_png_path,
@@ -21,7 +22,18 @@ from src.Backend.batch_processing import (
     save_background_subtracted_png,
 )
 from src.Backend.fits_io import extract_ut_start_sec, load_callisto_fits
+from src.Backend.goes_overlay import fetch_goes_overlay
 from src.Backend.update_checker import check_for_updates
+
+
+def _default_sunpy_cache_dir() -> Path:
+    app_data = str(QStandardPaths.writableLocation(QStandardPaths.AppDataLocation) or "").strip()
+    if not app_data:
+        app_data = str(Path.home() / ".local" / "share" / "e-callisto-fits-analyzer")
+    out = Path(app_data) / "sunpy_cache"
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
 
 class DownloaderImportWorker(QObject):
     progress_text = Signal(str)
@@ -201,6 +213,67 @@ class UpdateDownloadWorker(QObject):
             except Exception:
                 pass
             self.failed.emit(str(e))
+
+
+class GoesOverlayLoadWorker(QObject):
+    progress = Signal(object, object)
+    finished = Signal(str, object)
+    failed = Signal(str, str)
+    cancelled = Signal(str)
+
+    def __init__(
+        self,
+        request_key: str,
+        *,
+        start_utc,
+        end_utc,
+        base_utc,
+        satellite_numbers=None,
+        cache_dir: str | Path | None = None,
+    ):
+        super().__init__()
+        self.request_key = str(request_key or "").strip()
+        self.start_utc = start_utc
+        self.end_utc = end_utc
+        self.base_utc = base_utc
+        self.satellite_numbers = tuple(satellite_numbers or (16, 17, 18, 19))
+        self.cache_dir = Path(cache_dir).expanduser().resolve() if cache_dir else _default_sunpy_cache_dir()
+        self._cancel_requested = False
+
+    @Slot()
+    def request_cancel(self):
+        self._cancel_requested = True
+
+    def _emit_progress(self, value, text) -> None:
+        if self._cancel_requested:
+            return
+        self.progress.emit(value, text)
+
+    @Slot()
+    def run(self):
+        if self._cancel_requested:
+            self.cancelled.emit(self.request_key)
+            return
+        try:
+            payload = fetch_goes_overlay(
+                start_utc=self.start_utc,
+                end_utc=self.end_utc,
+                base_utc=self.base_utc,
+                cache_dir=self.cache_dir,
+                satellite_numbers=self.satellite_numbers,
+                progress_cb=self._emit_progress,
+            )
+        except Exception as exc:
+            if self._cancel_requested:
+                self.cancelled.emit(self.request_key)
+                return
+            self.failed.emit(self.request_key, str(exc))
+            return
+
+        if self._cancel_requested:
+            self.cancelled.emit(self.request_key)
+            return
+        self.finished.emit(self.request_key, payload)
 
 
 class BatchProcessWorker(QObject):

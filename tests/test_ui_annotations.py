@@ -5,6 +5,8 @@ Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
 
+from datetime import datetime, timezone
+
 import numpy as np
 import pytest
 
@@ -17,6 +19,7 @@ pytest.importorskip("requests")
 
 from PySide6.QtWidgets import QApplication
 
+from src.Backend.goes_overlay import GoesOverlayPayload
 from src.UI.gui_main import MainWindow
 
 
@@ -150,4 +153,137 @@ def test_move_text_label_repositions_selected_label():
 
     assert window._annotations[0]["points"] == [[8.0, 9.0]]
     assert window._annotation_mode is None
+    window.close()
+
+
+def test_goes_overlay_action_is_present_in_solar_events_menu():
+    _app()
+    window = MainWindow(theme=None)
+
+    solar_menu = None
+    for action in window.menuBar().actions():
+        if action.text() == "Solar Events":
+            solar_menu = action.menu()
+            break
+
+    assert solar_menu is not None
+    actions = [action for action in solar_menu.actions() if not action.isSeparator()]
+    assert actions[-2].text() == "Sync Current Time Window"
+    assert actions[-1].text() == "GOES Overlay"
+    assert actions[-1].isCheckable() is True
+    window.close()
+
+
+def test_goes_overlay_toggle_reverts_without_utc_context():
+    _app()
+    window = MainWindow(theme=None)
+    window.raw_data = np.zeros((2, 2), dtype=np.float32)
+    window.goes_overlay_action.setChecked(True)
+
+    assert window.goes_overlay_action.isChecked() is False
+    assert window._goes_overlay_enabled is False
+    window.close()
+
+
+def test_goes_overlay_toggle_with_mocked_success_keeps_spectrogram_data(monkeypatch):
+    _app()
+    window = MainWindow(theme=None)
+    window.raw_data = np.arange(4, dtype=np.float32).reshape(2, 2)
+    window.freqs = np.array([40.0, 41.0], dtype=float)
+    window.time = np.array([0.0, 60.0], dtype=float)
+    window.ut_start_sec = 0.0
+    window._fits_header0 = {"DATE-OBS": "2026-02-10T00:00:00Z"}
+    window.filename = "test.fit"
+
+    before = window.raw_data.copy()
+    monkeypatch.setattr(window, "_render_goes_overlay", lambda: None)
+
+    def fake_start(ctx):
+        payload = GoesOverlayPayload(
+            start_utc=ctx["start_utc"],
+            end_utc=ctx["end_utc"],
+            base_utc=ctx["base_utc"],
+            satellite_number=16,
+            x_seconds=np.array([0.0, 30.0, 60.0], dtype=float),
+            flux_wm2=np.array([1e-8, 2e-8, 4e-8], dtype=float),
+            channel_label="xrsb",
+        )
+        window._on_goes_overlay_finished(ctx["request_key"], payload)
+
+    monkeypatch.setattr(window, "_start_goes_overlay_request", fake_start)
+    window.goes_overlay_action.setChecked(True)
+
+    assert window.goes_overlay_action.isChecked() is True
+    assert window._goes_overlay_enabled is True
+    assert window._goes_overlay_payload is not None
+    assert np.array_equal(window.raw_data, before)
+    assert window.noise_reduced_data is None
+    window.close()
+
+
+def test_apply_loaded_dataset_invalidates_goes_overlay_and_requests_refresh(monkeypatch):
+    _app()
+    window = MainWindow(theme=None)
+    window._set_goes_overlay_checked(True)
+    window._goes_overlay_enabled = True
+    window._goes_overlay_payload = GoesOverlayPayload(
+        start_utc=datetime(2026, 2, 10, 0, 0, tzinfo=timezone.utc),
+        end_utc=datetime(2026, 2, 10, 0, 1, tzinfo=timezone.utc),
+        base_utc=datetime(2026, 2, 10, 0, 0, tzinfo=timezone.utc),
+        satellite_number=16,
+        x_seconds=np.array([0.0, 60.0], dtype=float),
+        flux_wm2=np.array([1e-8, 2e-8], dtype=float),
+        channel_label="xrsb",
+    )
+    window._goes_overlay_payload_key = "old"
+
+    calls = []
+    monkeypatch.setattr(window, "plot_data", lambda *args, **kwargs: None)
+    monkeypatch.setattr(window, "_render_goes_overlay", lambda: None)
+    monkeypatch.setattr(
+        window,
+        "_ensure_goes_overlay_for_current_data",
+        lambda force=False: calls.append(bool(force)) or True,
+    )
+
+    window._apply_loaded_dataset(
+        data=np.zeros((2, 2), dtype=np.float32),
+        freqs=np.array([40.0, 41.0], dtype=float),
+        time=np.array([0.0, 120.0], dtype=float),
+        filename="next.fit",
+        header0={"DATE-OBS": "2026-02-11T00:00:00Z"},
+        ut_start_sec=0.0,
+    )
+    QApplication.processEvents()
+
+    assert window._goes_overlay_payload is None
+    assert window._goes_overlay_payload_key is None
+    assert calls == [True]
+    window.close()
+
+
+def test_goes_overlay_toggle_off_clears_renderers(monkeypatch):
+    _app()
+    window = MainWindow(theme=None)
+    window._goes_overlay_enabled = True
+    window._goes_overlay_payload = GoesOverlayPayload(
+        start_utc=datetime(2026, 2, 10, 0, 0, tzinfo=timezone.utc),
+        end_utc=datetime(2026, 2, 10, 0, 1, tzinfo=timezone.utc),
+        base_utc=datetime(2026, 2, 10, 0, 0, tzinfo=timezone.utc),
+        satellite_number=16,
+        x_seconds=np.array([0.0, 60.0], dtype=float),
+        flux_wm2=np.array([1e-8, 2e-8], dtype=float),
+        channel_label="xrsb",
+    )
+    window._set_goes_overlay_checked(True)
+
+    cleared = {"mpl": 0, "hw": 0}
+    monkeypatch.setattr(window, "_remove_goes_overlay_mpl_axis", lambda: cleared.__setitem__("mpl", cleared["mpl"] + 1))
+    monkeypatch.setattr(window.accel_canvas, "clear_goes_overlay", lambda: cleared.__setitem__("hw", cleared["hw"] + 1))
+
+    window.goes_overlay_action.setChecked(False)
+
+    assert window._goes_overlay_enabled is False
+    assert cleared["mpl"] >= 1
+    assert cleared["hw"] >= 1
     window.close()

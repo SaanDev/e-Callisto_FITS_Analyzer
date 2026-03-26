@@ -127,3 +127,49 @@ def test_accelerated_widget_annotation_capture_api_no_crash():
     widget.begin_annotation_capture("line")
     widget.begin_annotation_capture("text")
     widget.stop_interaction_capture()
+
+
+def test_accelerated_widget_goes_overlay_lifecycle():
+    _app()
+    widget = AcceleratedPlotWidget()
+    if not widget.is_available:
+        pytest.skip("pyqtgraph not available in test environment")
+
+    class _DummyCmap:
+        def __call__(self, x):
+            arr = np.asarray(x, dtype=float)
+            rgba = np.zeros((arr.size, 4), dtype=float)
+            rgba[:, 0] = arr
+            rgba[:, 1] = 1.0 - arr
+            rgba[:, 2] = 0.5
+            rgba[:, 3] = 1.0
+            return rgba
+
+    widget.update_image(
+        np.random.rand(8, 16).astype(np.float32),
+        extent=[0.0, 10.0, 20.0, 80.0],
+        cmap=_DummyCmap(),
+        title="Preview",
+        x_label="Time [s]",
+        y_label="Frequency [MHz]",
+    )
+
+    payload = {
+        "x_seconds": np.array([0.0, 2.0, 4.0, 6.0], dtype=float),
+        "flux_wm2": np.array([1e-8, 2e-8, 4e-8, 6e-8], dtype=float),
+        "channel_label": "xrsb",
+    }
+    widget.set_goes_overlay(payload)
+
+    assert widget._goes_overlay_payload is payload
+    assert widget._goes_curve_item is not None
+
+    x_data, y_data = widget._goes_curve_item.getData()
+    assert np.allclose(x_data, payload["x_seconds"])
+    assert np.allclose(y_data, np.log10(payload["flux_wm2"]))
+
+    widget.clear_goes_overlay()
+    x_data, y_data = widget._goes_curve_item.getData()
+    assert widget._goes_overlay_payload is None
+    assert len(x_data) == 0
+    assert len(y_data) == 0

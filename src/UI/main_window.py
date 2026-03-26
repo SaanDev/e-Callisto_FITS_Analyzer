@@ -85,6 +85,8 @@ from src.Backend.annotations import (
     toggle_all_visibility,
 )
 from src.Backend.fits_io import build_combined_header, extract_ut_start_sec, load_callisto_fits
+from src.Backend.goes_overlay import GoesOverlayPayload
+from src.Backend.goes_overlay import goes_class_ticks_for_limits, goes_flux_axis_limits
 from src.Backend.presets import (
     PRESET_SCHEMA_VERSION,
     build_preset,
@@ -121,7 +123,12 @@ from src.UI.gui_shared import (
     pick_export_path,
     resource_path,
 )
-from src.UI.gui_workers import DownloaderImportWorker, UpdateCheckWorker, UpdateDownloadWorker
+from src.UI.gui_workers import (
+    DownloaderImportWorker,
+    GoesOverlayLoadWorker,
+    UpdateCheckWorker,
+    UpdateDownloadWorker,
+)
 from src.UI.mpl_style import style_axes
 from src.UI.utils.cme_helper_client import CMEHelperClient
 from src.version import APP_NAME, APP_ORG, APP_VERSION
@@ -153,6 +160,15 @@ class MainWindow(QMainWindow):
         self._cme_helper_client = CMEHelperClient(theme_manager=self.theme, parent=self)
         self._cme_viewer = None
         self._sunpy_window = None
+        self._goes_window = None
+        self._goes_overlay_enabled = False
+        self._goes_overlay_payload: GoesOverlayPayload | None = None
+        self._goes_overlay_payload_key: str | None = None
+        self._goes_overlay_active_request: dict | None = None
+        self._goes_overlay_inflight_key: str | None = None
+        self._goes_overlay_thread = None
+        self._goes_overlay_worker = None
+        self._goes_overlay_mpl_ax = None
 
         #Linux Messagebox Fix
         _install_linux_msgbox_fixer()
@@ -235,7 +251,6 @@ class MainWindow(QMainWindow):
         self._update_download_worker = None
         self._update_download_progress_dialog = None
         self._import_progress_dialog = None
-        self._goes_window = None
         self._batch_processing_dialog = None
         self._bug_report_dialog = None
 
@@ -758,6 +773,8 @@ class MainWindow(QMainWindow):
         self.sync_time_window_action = QAction("Sync Current Time Window", self)
         self.sync_time_window_action.triggered.connect(self.sync_current_time_window_to_solar_events)
         solar_events_menu.addAction(self.sync_time_window_action)
+        self.goes_overlay_action = QAction("GOES Overlay", self, checkable=True)
+        solar_events_menu.addAction(self.goes_overlay_action)
 
         # FITS View Menu
         fits_view_menu = menubar.addMenu("FITS View")
@@ -918,6 +935,7 @@ class MainWindow(QMainWindow):
         self.rfi_open_action.triggered.connect(self.open_rfi_panel)
         self.rfi_apply_action.triggered.connect(self.apply_rfi_now)
         self.rfi_reset_action.triggered.connect(self.reset_rfi)
+        self.goes_overlay_action.toggled.connect(self._on_goes_overlay_toggled)
 
         self.ann_add_polygon_action.triggered.connect(self.start_annotation_polygon)
         self.ann_add_line_action.triggered.connect(self.start_annotation_line)
@@ -1749,6 +1767,10 @@ class MainWindow(QMainWindow):
             view=view,
         )
         self.accel_canvas.set_time_mode(self.use_utc, self.ut_start_sec)
+        try:
+            self.accel_canvas.set_goes_overlay(self._goes_overlay_payload if self._goes_overlay_enabled else None)
+        except Exception:
+            pass
         return True
 
     def _apply_mpl_theme(self):
@@ -1842,6 +1864,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_apply_mpl_theme"):
             self._apply_mpl_theme()
         self._apply_accel_theme()
+        self._render_goes_overlay()
 
     def toggle_left_sidebar(self):
         self._set_sidebar_collapsed(not bool(getattr(self, "_sidebar_collapsed", False)))
@@ -2085,6 +2108,7 @@ class MainWindow(QMainWindow):
 
         self.canvas.draw_idle()
         self._refresh_accel_plot(preserve_view=True)
+        self._render_goes_overlay()
 
     def _on_tick_font_spin_changed(self, _value):
         self._hw_default_font_sizes_active = False
@@ -2531,6 +2555,9 @@ class MainWindow(QMainWindow):
     def _reset_feature_state_for_new_data(self):
         self._clear_analysis_session_state(close_windows=True)
         self._reset_annotation_mode()
+        self._clear_goes_overlay_payload()
+        self._goes_overlay_active_request = None
+        self._render_goes_overlay()
         self._rfi_preview_data = None
         self._rfi_preview_masked = []
         self._rfi_config = rfi_config_dict(
@@ -2601,6 +2628,8 @@ class MainWindow(QMainWindow):
 
         self._reset_runtime_state_for_loaded_data()
         self.plot_data(self.raw_data, title=plot_title)
+        if getattr(self, "goes_overlay_action", None) is not None and self.goes_overlay_action.isChecked():
+            QTimer.singleShot(0, lambda: self._ensure_goes_overlay_for_current_data(force=True))
 
         self._project_path = None
         self._mark_project_dirty()
@@ -3048,6 +3077,7 @@ class MainWindow(QMainWindow):
             self._refresh_accel_plot(data=data, title=plot_type, view=view, preserve_view=(view is not None))
         except Exception:
             pass
+        self._render_goes_overlay()
         self._render_annotations()
 
         self.current_plot_type = plot_type
@@ -4282,6 +4312,12 @@ class MainWindow(QMainWindow):
         # Clear canvas
         self.canvas.ax.clear()
         self.canvas.draw()
+        self._cancel_goes_overlay_request()
+        self._clear_goes_overlay_payload()
+        self._goes_overlay_active_request = None
+        self._goes_overlay_enabled = False
+        self._set_goes_overlay_checked(False)
+        self._render_goes_overlay()
 
         # Clear data
         self.raw_data = None
@@ -6509,6 +6545,306 @@ class MainWindow(QMainWindow):
         end_dt = base + timedelta(seconds=float(self.ut_start_sec) + x1)
         return start_dt, end_dt
 
+    def _set_goes_overlay_checked(self, checked: bool) -> None:
+        act = getattr(self, "goes_overlay_action", None)
+        if act is None:
+            return
+        blocked = act.blockSignals(True)
+        act.setChecked(bool(checked))
+        act.blockSignals(blocked)
+
+    def _remove_goes_overlay_mpl_axis(self) -> None:
+        ax = getattr(self, "_goes_overlay_mpl_ax", None)
+        if ax is None:
+            return
+        try:
+            ax.remove()
+        except Exception:
+            pass
+        self._goes_overlay_mpl_ax = None
+
+    def _clear_goes_overlay_render(self) -> None:
+        self._remove_goes_overlay_mpl_axis()
+        try:
+            self.accel_canvas.clear_goes_overlay()
+        except Exception:
+            pass
+
+    def _clear_goes_overlay_payload(self) -> None:
+        self._goes_overlay_payload = None
+        self._goes_overlay_payload_key = None
+
+    def _goes_overlay_request_context(self) -> dict | None:
+        if self.time is None or self.ut_start_sec is None:
+            return None
+        obs_date = self._extract_observation_date()
+        if obs_date is None:
+            return None
+
+        arr = np.asarray(self.time, dtype=float)
+        finite = arr[np.isfinite(arr)]
+        if finite.size == 0:
+            return None
+
+        time_min = float(np.nanmin(finite))
+        time_max = float(np.nanmax(finite))
+        if time_max <= time_min:
+            return None
+
+        base_utc = datetime(
+            obs_date.year,
+            obs_date.month,
+            obs_date.day,
+            tzinfo=timezone.utc,
+        ) + timedelta(seconds=float(self.ut_start_sec))
+        start_utc = base_utc + timedelta(seconds=time_min)
+        end_utc = base_utc + timedelta(seconds=time_max)
+        satellite_numbers = (16, 17, 18, 19)
+        request_key = "|".join(
+            (
+                "sats=" + ",".join(str(x) for x in satellite_numbers),
+                base_utc.isoformat(timespec="seconds"),
+                start_utc.isoformat(timespec="seconds"),
+                end_utc.isoformat(timespec="seconds"),
+            )
+        )
+        return {
+            "request_key": request_key,
+            "satellite_numbers": satellite_numbers,
+            "base_utc": base_utc,
+            "start_utc": start_utc,
+            "end_utc": end_utc,
+        }
+
+    def _goes_overlay_fg_color(self) -> str:
+        try:
+            app = QApplication.instance()
+            if app is not None:
+                return app.palette().color(QPalette.WindowText).name()
+        except Exception:
+            pass
+        return "#101010"
+
+    def _apply_goes_overlay_axis_style(self, ax) -> None:
+        if ax is None:
+            return
+        fg = self._goes_overlay_fg_color()
+        fontfam = self.graph_font_family if self.graph_font_family else None
+        weight = "bold" if self.axis_bold else "normal"
+        style = "italic" if self.axis_italic else "normal"
+        tick_weight = "bold" if self.ticks_bold else "normal"
+        tick_style = "italic" if self.ticks_italic else "normal"
+        label = "GOES X-Ray Class"
+
+        ax.patch.set_visible(False)
+        ax.grid(False)
+        ax.spines["right"].set_color(fg)
+        for spine_name in ("top", "left", "bottom"):
+            try:
+                ax.spines[spine_name].set_visible(False)
+            except Exception:
+                pass
+        ax.tick_params(axis="y", colors=fg, labelsize=self.tick_font_px)
+        for lbl in ax.get_yticklabels():
+            lbl.set_fontsize(self.tick_font_px)
+            lbl.set_fontweight(tick_weight)
+            lbl.set_fontstyle(tick_style)
+            if fontfam:
+                lbl.set_fontfamily(fontfam)
+        ax.set_ylabel(
+            label,
+            color=fg,
+            fontsize=self.axis_label_font_px,
+            fontweight=weight,
+            fontstyle=style,
+            fontfamily=fontfam,
+        )
+
+    def _render_goes_overlay(self) -> None:
+        self._clear_goes_overlay_render()
+
+        payload = self._goes_overlay_payload if self._goes_overlay_enabled else None
+        if payload is None:
+            try:
+                self.canvas.draw_idle()
+            except Exception:
+                pass
+            return
+
+        try:
+            xs = np.asarray(payload.x_seconds, dtype=float)
+            flux = np.asarray(payload.flux_wm2, dtype=float)
+        except Exception:
+            return
+        mask = np.isfinite(xs) & np.isfinite(flux) & (flux > 0.0)
+        if not np.any(mask):
+            return
+        xs = xs[mask]
+        flux = flux[mask]
+        limits = goes_flux_axis_limits(flux)
+        if limits is None:
+            return
+        class_ticks = goes_class_ticks_for_limits(limits[0], limits[1])
+
+        try:
+            overlay_ax = self.canvas.ax.twinx()
+            overlay_ax.set_zorder(self.canvas.ax.get_zorder() + 0.2)
+            overlay_ax.set_yscale("log")
+            overlay_ax.set_ylim(limits)
+            overlay_ax.set_xlim(self.canvas.ax.get_xlim())
+            overlay_ax.plot(xs, flux, color="#ffffff", linewidth=2.0, alpha=0.95, zorder=6)
+            overlay_ax.set_yticks([value for value, _label in class_ticks])
+            overlay_ax.set_yticklabels([label for _value, label in class_ticks])
+            self._apply_goes_overlay_axis_style(overlay_ax)
+            self._goes_overlay_mpl_ax = overlay_ax
+        except Exception:
+            self._goes_overlay_mpl_ax = None
+
+        try:
+            self.accel_canvas.set_goes_overlay(payload)
+        except Exception:
+            pass
+
+        try:
+            self.canvas.draw_idle()
+        except Exception:
+            pass
+
+    def _start_goes_overlay_request(self, ctx: dict) -> None:
+        if self._goes_overlay_thread is not None or not ctx:
+            return
+
+        request_key = str(ctx["request_key"])
+        self._goes_overlay_inflight_key = request_key
+        self.statusBar().showMessage("Loading GOES overlay...", 0)
+
+        self._goes_overlay_thread = QThread(self)
+        self._goes_overlay_worker = GoesOverlayLoadWorker(
+            request_key,
+            start_utc=ctx["start_utc"],
+            end_utc=ctx["end_utc"],
+            base_utc=ctx["base_utc"],
+            satellite_numbers=tuple(ctx["satellite_numbers"]),
+        )
+        self._goes_overlay_worker.moveToThread(self._goes_overlay_thread)
+
+        self._goes_overlay_thread.started.connect(self._goes_overlay_worker.run)
+        self._goes_overlay_worker.progress.connect(self._on_goes_overlay_progress)
+        self._goes_overlay_worker.finished.connect(self._on_goes_overlay_finished)
+        self._goes_overlay_worker.failed.connect(self._on_goes_overlay_failed)
+        self._goes_overlay_worker.cancelled.connect(self._on_goes_overlay_cancelled)
+
+        self._goes_overlay_worker.finished.connect(self._goes_overlay_thread.quit)
+        self._goes_overlay_worker.failed.connect(self._goes_overlay_thread.quit)
+        self._goes_overlay_worker.cancelled.connect(self._goes_overlay_thread.quit)
+        self._goes_overlay_thread.finished.connect(self._on_goes_overlay_thread_finished)
+        self._goes_overlay_thread.finished.connect(self._goes_overlay_worker.deleteLater)
+        self._goes_overlay_thread.finished.connect(self._goes_overlay_thread.deleteLater)
+        self._goes_overlay_thread.start()
+
+    def _ensure_goes_overlay_for_current_data(self, *, force: bool = False) -> bool:
+        if not bool(getattr(self, "goes_overlay_action", None) and self.goes_overlay_action.isChecked()):
+            self._goes_overlay_enabled = False
+            self._goes_overlay_active_request = None
+            self._render_goes_overlay()
+            return False
+
+        ctx = self._goes_overlay_request_context()
+        if ctx is None:
+            self._goes_overlay_enabled = False
+            self._goes_overlay_active_request = None
+            self._set_goes_overlay_checked(False)
+            self.statusBar().showMessage("GOES overlay is unavailable until a FITS file with UTC context is loaded.", 4500)
+            self._render_goes_overlay()
+            return False
+
+        self._goes_overlay_enabled = True
+        self._goes_overlay_active_request = dict(ctx)
+
+        if (
+            not force
+            and self._goes_overlay_payload is not None
+            and self._goes_overlay_payload_key == str(ctx["request_key"])
+        ):
+            self._render_goes_overlay()
+            self.statusBar().showMessage("GOES overlay ready.", 2500)
+            return True
+
+        if self._goes_overlay_thread is not None:
+            self.statusBar().showMessage("Loading GOES overlay...", 0)
+            return True
+
+        self._start_goes_overlay_request(ctx)
+        return True
+
+    def _on_goes_overlay_toggled(self, checked: bool) -> None:
+        self._goes_overlay_enabled = bool(checked)
+        if not checked:
+            self._goes_overlay_active_request = None
+            self._render_goes_overlay()
+            self.statusBar().showMessage("GOES overlay hidden.", 2500)
+            return
+        self._ensure_goes_overlay_for_current_data(force=False)
+
+    def _on_goes_overlay_progress(self, value, text) -> None:
+        message = str(text or "").strip() or "Loading GOES overlay..."
+        self.statusBar().showMessage(message, 0)
+
+    def _on_goes_overlay_finished(self, request_key: str, payload: GoesOverlayPayload) -> None:
+        request_key = str(request_key or "").strip()
+        current = dict(self._goes_overlay_active_request or {})
+        if not self._goes_overlay_enabled or not current:
+            return
+        current_key = str(current.get("request_key") or "")
+        if current_key != request_key:
+            return
+        self._goes_overlay_payload = payload
+        self._goes_overlay_payload_key = request_key
+        self._render_goes_overlay()
+        self.statusBar().showMessage(f"GOES overlay loaded from GOES-{int(payload.satellite_number)}.", 3500)
+
+    def _on_goes_overlay_failed(self, request_key: str, message: str) -> None:
+        request_key = str(request_key or "").strip()
+        current = dict(self._goes_overlay_active_request or {})
+        current_key = str(current.get("request_key") or "")
+        if current_key and current_key != request_key:
+            return
+        self._goes_overlay_enabled = False
+        self._goes_overlay_active_request = None
+        self._clear_goes_overlay_payload()
+        self._set_goes_overlay_checked(False)
+        self._render_goes_overlay()
+        detail = str(message or "Could not load GOES XRS data.").splitlines()[0].strip()
+        self.statusBar().showMessage(f"GOES overlay failed: {detail}", 6000)
+
+    def _on_goes_overlay_cancelled(self, _request_key: str) -> None:
+        if self._goes_overlay_enabled:
+            self.statusBar().showMessage("GOES overlay request cancelled.", 2500)
+
+    def _on_goes_overlay_thread_finished(self) -> None:
+        self._goes_overlay_worker = None
+        self._goes_overlay_thread = None
+        finished_key = str(self._goes_overlay_inflight_key or "")
+        self._goes_overlay_inflight_key = None
+
+        current = dict(self._goes_overlay_active_request or {})
+        current_key = str(current.get("request_key") or "")
+        if self._goes_overlay_enabled and current_key and current_key != finished_key:
+            self._start_goes_overlay_request(current)
+
+    def _cancel_goes_overlay_request(self) -> None:
+        try:
+            if self._goes_overlay_worker is not None:
+                self._goes_overlay_worker.request_cancel()
+        except Exception:
+            pass
+        try:
+            if self._goes_overlay_thread is not None:
+                self._goes_overlay_thread.quit()
+                self._goes_overlay_thread.wait(800)
+        except Exception:
+            pass
+
     def _sync_window_to_goes(self, start_dt: datetime, end_dt: datetime, *, auto_plot: bool = True) -> bool:
         if self._goes_window is None:
             return False
@@ -7255,6 +7591,10 @@ class MainWindow(QMainWindow):
                     self._update_download_worker.request_cancel()
                 self._update_download_thread.quit()
                 self._update_download_thread.wait(800)
+        except Exception:
+            pass
+        try:
+            self._cancel_goes_overlay_request()
         except Exception:
             pass
         try:

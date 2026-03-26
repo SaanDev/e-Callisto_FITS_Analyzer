@@ -12,6 +12,8 @@ from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
+from src.Backend.goes_overlay import goes_class_ticks_for_limits, goes_flux_axis_limits
+
 try:
     import pyqtgraph as pg
 except Exception:
@@ -72,8 +74,17 @@ if pg is not None:
                 else:
                     out.append(f"{hours:02d}:{minutes:02d}")
             return out
+
+
+    class _LogFluxAxisItem(pg.AxisItem):
+        def tickStrings(self, values, scale, spacing):
+            return ["" for _ in values]
 else:
     class _TimeAxisItem:
+        pass
+
+
+    class _LogFluxAxisItem:
         pass
 
 
@@ -113,6 +124,11 @@ class AcceleratedPlotWidget(QWidget):
         self._image = None
         self._color_bar = None
         self._bottom_axis = None
+        self._goes_axis = None
+        self._goes_view = None
+        self._goes_curve_item = None
+        self._goes_overlay_payload = None
+        self._goes_axis_label = "GOES X-Ray Class"
         self._title = ""
         self._x_label = "Time [s]"
         self._y_label = "Frequency [MHz]"
@@ -183,9 +199,35 @@ class AcceleratedPlotWidget(QWidget):
 
         self._viewbox = self._plot.getViewBox()
         self._viewbox.sigRangeChanged.connect(self._on_range_changed)
+        try:
+            self._viewbox.sigResized.connect(self._sync_goes_overlay_geometry)
+        except Exception:
+            pass
 
         self._image = pg.ImageItem(axisOrder="row-major")
         self._plot.addItem(self._image)
+
+        try:
+            self._goes_axis = _LogFluxAxisItem("right")
+            self._plot.layout.addItem(self._goes_axis, 2, 3)
+            self._goes_view = pg.ViewBox(enableMenu=False)
+            self._goes_view.setMouseEnabled(x=False, y=False)
+            self._goes_view.setZValue(10)
+            self._plot.scene().addItem(self._goes_view)
+            self._goes_axis.linkToView(self._goes_view)
+            self._goes_view.setXLink(self._viewbox)
+            self._goes_curve_item = pg.PlotCurveItem(
+                pen=pg.mkPen(color="#ffffff", width=2.0),
+                antialias=True,
+            )
+            self._goes_curve_item.setZValue(11)
+            self._goes_view.addItem(self._goes_curve_item)
+            self._goes_axis.hide()
+            self._sync_goes_overlay_geometry()
+        except Exception:
+            self._goes_axis = None
+            self._goes_view = None
+            self._goes_curve_item = None
 
         self._plot.setMouseEnabled(x=True, y=True)
         try:
@@ -386,6 +428,15 @@ class AcceleratedPlotWidget(QWidget):
             except Exception:
                 pass
 
+        if self._goes_axis is not None:
+            try:
+                self._goes_axis.setTextPen(self._fg)
+                self._goes_axis.setPen(self._fg)
+                self._goes_axis.setStyle(tickFont=tick_font)
+                self._goes_axis.setLabel(self._goes_axis_label, **label_style)
+            except Exception:
+                pass
+
         self._plot.setTitle(self._title, **self._title_style())
         try:
             title_font = self._build_font(self._title_font_px, self._title_bold, self._title_italic)
@@ -401,6 +452,89 @@ class AcceleratedPlotWidget(QWidget):
         self._fg = "#f2f2f2" if is_dark else "#101010"
         self._graphics.setBackground(bg)
         self._apply_text_style()
+
+    def _sync_goes_overlay_geometry(self):
+        if not self.is_available or self._goes_view is None or self._goes_axis is None:
+            return
+        try:
+            self._goes_view.setGeometry(self._viewbox.sceneBoundingRect())
+            self._goes_view.linkedViewChanged(self._viewbox, self._goes_view.XAxis)
+        except Exception:
+            pass
+
+    def _payload_field(self, payload, name: str, default=None):
+        if payload is None:
+            return default
+        if isinstance(payload, dict):
+            return payload.get(name, default)
+        return getattr(payload, name, default)
+
+    def _goes_payload_arrays(self, payload):
+        xs = np.asarray(self._payload_field(payload, "x_seconds", []), dtype=float)
+        ys = np.asarray(self._payload_field(payload, "flux_wm2", []), dtype=float)
+        if xs.size == 0 or ys.size == 0 or xs.size != ys.size:
+            return None, None
+        mask = np.isfinite(xs) & np.isfinite(ys) & (ys > 0.0)
+        if not np.any(mask):
+            return None, None
+        return np.asarray(xs[mask], dtype=float), np.asarray(ys[mask], dtype=float)
+
+    def _goes_log_limits(self, flux):
+        flux_limits = goes_flux_axis_limits(flux)
+        if flux_limits is None:
+            return None
+        return float(np.log10(flux_limits[0])), float(np.log10(flux_limits[1]))
+
+    def clear_goes_overlay(self) -> None:
+        self._goes_overlay_payload = None
+        if self._goes_curve_item is not None:
+            try:
+                self._goes_curve_item.setData([], [])
+            except Exception:
+                pass
+        if self._goes_axis is not None:
+            try:
+                self._goes_axis.setTicks([])
+                self._goes_axis.hide()
+            except Exception:
+                pass
+
+    def set_goes_overlay(self, payload) -> None:
+        self._goes_overlay_payload = payload
+        if not self.is_available or self._goes_view is None or self._goes_axis is None or self._goes_curve_item is None:
+            return
+        xs, flux = self._goes_payload_arrays(payload)
+        if xs is None or flux is None:
+            self.clear_goes_overlay()
+            return
+
+        log_flux = np.log10(flux)
+        limits = self._goes_log_limits(flux)
+        if limits is None:
+            self.clear_goes_overlay()
+            return
+
+        self._goes_axis_label = "GOES X-Ray Class"
+        self._apply_text_style()
+        self._goes_curve_item.setData(xs, log_flux)
+        try:
+            self._goes_view.enableAutoRange(x=False, y=False)
+        except Exception:
+            pass
+        try:
+            self._goes_view.setRange(yRange=(float(limits[0]), float(limits[1])), padding=0.0)
+        except Exception:
+            pass
+        tick_pairs = goes_class_ticks_for_limits(float(10.0 ** limits[0]), float(10.0 ** limits[1]))
+        try:
+            self._goes_axis.setTicks([[(float(np.log10(value)), label) for value, label in tick_pairs]])
+        except Exception:
+            pass
+        self._sync_goes_overlay_geometry()
+        try:
+            self._goes_axis.show()
+        except Exception:
+            pass
 
     def _clear_lasso_overlay(self):
         self._lasso_points = []
@@ -590,6 +724,7 @@ class AcceleratedPlotWidget(QWidget):
         self._clear_drift_overlay()
         self._clear_annotation_capture_overlay()
         self._clear_annotation_overlay()
+        self.clear_goes_overlay()
 
     def export_plot_item(self):
         if not self.is_available:
@@ -661,6 +796,7 @@ class AcceleratedPlotWidget(QWidget):
             self.set_view(view)
         elif self._full_view is not None:
             self.set_view(self._full_view)
+        self._sync_goes_overlay_geometry()
 
     def begin_lasso_capture(self) -> None:
         if not self.is_available:
@@ -760,6 +896,7 @@ class AcceleratedPlotWidget(QWidget):
                         xs.append(xs[0])
                         ys.append(ys[0])
                     item = pg.PlotDataItem(xs, ys, pen=pen)
+                    item.setZValue(20)
                     self._plot.addItem(item)
                     self._annotation_items.append(item)
                     continue
@@ -788,6 +925,7 @@ class AcceleratedPlotWidget(QWidget):
                         except Exception:
                             pass
                     item.setPos(float(x), float(y))
+                    item.setZValue(20)
                     self._plot.addItem(item)
                     self._annotation_items.append(item)
             except Exception:
