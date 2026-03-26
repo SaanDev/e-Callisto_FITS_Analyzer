@@ -8,7 +8,6 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """Dialog components for e-CALLISTO FITS Analyzer."""
 
 from src.UI.dialogs.analyze_dialog import AnalyzeDialog
-from src.UI.dialogs.annotation_arrow_dialog import ArrowAnnotationDialog
 from src.UI.dialogs.annotation_text_dialog import TextAnnotationDialog
 from src.UI.dialogs.batch_processing_dialog import BatchProcessingDialog
 from src.UI.dialogs.bug_report_dialog import BugReportDialog
@@ -18,7 +17,6 @@ from src.UI.dialogs.rfi_control_dialog import RFIControlDialog
 
 __all__ = [
     "AnalyzeDialog",
-    "ArrowAnnotationDialog",
     "TextAnnotationDialog",
     "BatchProcessingDialog",
     "BugReportDialog",

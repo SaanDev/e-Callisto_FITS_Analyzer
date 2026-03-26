@@ -125,48 +125,5 @@ def test_accelerated_widget_annotation_capture_api_no_crash():
         pytest.skip("pyqtgraph not available in test environment")
     widget.begin_annotation_capture("polygon")
     widget.begin_annotation_capture("line")
-    widget.begin_annotation_capture("arrow")
     widget.begin_annotation_capture("text")
     widget.stop_interaction_capture()
-
-
-def test_accelerated_widget_arrow_annotation_render_no_crash():
-    _app()
-    widget = AcceleratedPlotWidget()
-    if not widget.is_available:
-        pytest.skip("pyqtgraph not available in test environment")
-
-    class _DummyCmap:
-        def __call__(self, x):
-            arr = np.asarray(x, dtype=float)
-            rgba = np.zeros((arr.size, 4), dtype=float)
-            rgba[:, 0] = arr
-            rgba[:, 1] = 1.0 - arr
-            rgba[:, 2] = 0.5
-            rgba[:, 3] = 1.0
-            return rgba
-
-    widget.update_image(
-        np.random.rand(8, 16).astype(np.float32),
-        extent=[0.0, 10.0, 20.0, 80.0],
-        cmap=_DummyCmap(),
-        title="Arrow Preview",
-        x_label="Time [s]",
-        y_label="Frequency [MHz]",
-    )
-    widget.set_annotations(
-        [
-            {
-                "kind": "arrow",
-                "points": [[1.0, 30.0], [8.0, 60.0]],
-                "color": "#ffffff",
-                "line_width": 2.0,
-                "arrow_start": False,
-                "arrow_end": True,
-                "arrow_head_size": 20.0,
-                "visible": True,
-            }
-        ]
-    )
-
-    assert len(widget._annotation_items) >= 2
