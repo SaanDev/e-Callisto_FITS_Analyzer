@@ -24,6 +24,20 @@ def _app():
     return QApplication.instance() or QApplication([])
 
 
+def _mpl_event(window, *, xdata, ydata, x, y, button=1):
+    class _Event:
+        pass
+
+    event = _Event()
+    event.inaxes = window.canvas.ax
+    event.xdata = float(xdata)
+    event.ydata = float(ydata)
+    event.x = float(x)
+    event.y = float(y)
+    event.button = button
+    return event
+
+
 def test_main_window_hw_annotation_actions_keep_accel_canvas(monkeypatch):
     _app()
     window = MainWindow(theme=None)
@@ -270,4 +284,67 @@ def test_render_annotations_arrow_creates_visible_artists():
     window._render_annotations()
 
     assert len(window._annotation_artists) >= 2
+    window.close()
+
+
+def test_arrow_mpl_click_then_click_adds_annotation():
+    _app()
+    window = MainWindow(theme=None)
+    window.use_hw_live_preview = False
+    window._annotation_mode = "arrow"
+    window._annotation_pending_arrow_style = {
+        "color": "#ffaa00",
+        "line_width": 2.0,
+        "arrow_head_size": 18.0,
+        "arrow_start": False,
+        "arrow_end": True,
+    }
+
+    start_event = _mpl_event(window, xdata=1.0, ydata=2.0, x=20, y=20)
+    end_event = _mpl_event(window, xdata=5.0, ydata=7.0, x=80, y=90)
+
+    window._on_annotation_mpl_press(start_event)
+    window._on_annotation_mpl_release(start_event)
+    assert window._annotation_click_points == [[1.0, 2.0]]
+
+    window._on_annotation_mpl_motion(end_event)
+    assert len(window._annotation_preview_artists) >= 1
+
+    window._on_annotation_mpl_press(end_event)
+    window._on_annotation_mpl_release(end_event)
+
+    assert len(window._annotations) == 1
+    assert window._annotations[0]["kind"] == "arrow"
+    assert window._annotations[0]["points"] == [[1.0, 2.0], [5.0, 7.0]]
+    window.close()
+
+
+def test_arrow_mpl_drag_adds_annotation():
+    _app()
+    window = MainWindow(theme=None)
+    window.use_hw_live_preview = False
+    window._annotation_mode = "arrow"
+    window._annotation_pending_arrow_style = {
+        "color": "#00ffaa",
+        "line_width": 3.0,
+        "arrow_head_size": 20.0,
+        "arrow_start": True,
+        "arrow_end": True,
+    }
+
+    press_event = _mpl_event(window, xdata=2.0, ydata=3.0, x=10, y=10)
+    motion_event = _mpl_event(window, xdata=6.0, ydata=9.0, x=45, y=55)
+    release_event = _mpl_event(window, xdata=6.0, ydata=9.0, x=45, y=55)
+
+    window._on_annotation_mpl_press(press_event)
+    window._on_annotation_mpl_motion(motion_event)
+    assert window._annotation_drag_active is True
+    assert len(window._annotation_preview_artists) >= 1
+
+    window._on_annotation_mpl_release(release_event)
+
+    assert len(window._annotations) == 1
+    assert window._annotations[0]["kind"] == "arrow"
+    assert window._annotations[0]["points"] == [[2.0, 3.0], [6.0, 9.0]]
+    assert window._annotation_mode is None
     window.close()

@@ -271,6 +271,13 @@ class MainWindow(QMainWindow):
         self._annotation_pending_arrow_style = {}
         self._annotation_target_index = None
         self._annotation_mpl_cid = None
+        self._annotation_mpl_motion_cid = None
+        self._annotation_mpl_release_cid = None
+        self._annotation_preview_artists = []
+        self._annotation_drag_origin = None
+        self._annotation_drag_origin_pixels = None
+        self._annotation_drag_last_point = None
+        self._annotation_drag_active = False
         self._annotation_artists = []
         self._annotation_style_defaults = self._merge_annotation_style_defaults()
 
@@ -5908,6 +5915,97 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             self._annotation_mpl_cid = None
+        if self._annotation_mpl_motion_cid is not None:
+            try:
+                self.canvas.mpl_disconnect(self._annotation_mpl_motion_cid)
+            except Exception:
+                pass
+            self._annotation_mpl_motion_cid = None
+        if self._annotation_mpl_release_cid is not None:
+            try:
+                self.canvas.mpl_disconnect(self._annotation_mpl_release_cid)
+            except Exception:
+                pass
+            self._annotation_mpl_release_cid = None
+
+    def _clear_annotation_preview(self, *, redraw: bool = True) -> None:
+        stale = getattr(self, "_annotation_preview_artists", None) or []
+        for artist in stale:
+            try:
+                artist.remove()
+            except Exception:
+                pass
+        self._annotation_preview_artists = []
+        if redraw:
+            try:
+                self.canvas.draw_idle()
+            except Exception:
+                pass
+
+    def _annotation_mpl_event_point(self, event):
+        if event is None or event.inaxes != self.canvas.ax:
+            return None
+        if event.xdata is None or event.ydata is None:
+            return None
+        return (float(event.xdata), float(event.ydata))
+
+    def _annotation_points_close(self, a, b, tol: float = 1e-9) -> bool:
+        try:
+            dx = float(a[0]) - float(b[0])
+            dy = float(a[1]) - float(b[1])
+            return (dx * dx + dy * dy) <= float(tol)
+        except Exception:
+            return False
+
+    def _render_arrow_preview(self, start_xy, end_xy) -> None:
+        self._clear_annotation_preview(redraw=False)
+        if start_xy is None or end_xy is None:
+            self.canvas.draw_idle()
+            return
+
+        style = dict(self._annotation_pending_arrow_style or self._arrow_annotation_style_defaults())
+        color = str(style.get("color") or DEFAULT_ANNOTATION_COLOR)
+        lw = max(0.5, float(style.get("line_width", 1.5)))
+        geometry = self._mpl_arrow_overlay_geometry(
+            self.canvas.ax,
+            start_xy,
+            end_xy,
+            head_size=max(4.0, float(style.get("arrow_head_size", DEFAULT_ARROW_HEAD_SIZE))),
+            line_width=lw,
+            start_head=bool(style.get("arrow_start", False)),
+            end_head=bool(style.get("arrow_end", True)),
+        )
+        if geometry is None:
+            self.canvas.draw_idle()
+            return
+
+        preview = []
+        shaft = geometry.get("shaft")
+        if shaft is not None:
+            preview.append(
+                self.canvas.ax.plot(
+                    shaft[:, 0],
+                    shaft[:, 1],
+                    color=color,
+                    linewidth=lw,
+                    alpha=0.72,
+                    solid_capstyle="round",
+                )[0]
+            )
+        for head_points in geometry.get("heads", []):
+            patch = Polygon(
+                head_points,
+                closed=True,
+                facecolor=color,
+                edgecolor=color,
+                linewidth=max(0.5, lw * 0.5),
+                alpha=0.72,
+                joinstyle="miter",
+            )
+            self.canvas.ax.add_patch(patch)
+            preview.append(patch)
+        self._annotation_preview_artists = preview
+        self.canvas.draw_idle()
 
     def _default_annotation_style_defaults(self) -> dict:
         return {
@@ -6277,7 +6375,12 @@ class MainWindow(QMainWindow):
         self._annotation_pending_text_style = {}
         self._annotation_pending_arrow_style = {}
         self._annotation_target_index = None
+        self._annotation_drag_origin = None
+        self._annotation_drag_origin_pixels = None
+        self._annotation_drag_last_point = None
+        self._annotation_drag_active = False
         self.lasso_active = False
+        self._clear_annotation_preview(redraw=False)
         self._annotation_disconnect_mpl()
         if self._hardware_mode_enabled():
             try:
@@ -6464,7 +6567,7 @@ class MainWindow(QMainWindow):
         if self._hardware_mode_enabled():
             self._show_accel_canvas()
             self.accel_canvas.begin_annotation_capture("arrow")
-            self.statusBar().showMessage("Click the start point, then the end point for the arrow.", 5000)
+            self.statusBar().showMessage("Drag to place the arrow, or click the start point and then the end point.", 5000)
             return
         try:
             self.canvas.mpl_disconnect(self._cid_press)
@@ -6472,8 +6575,10 @@ class MainWindow(QMainWindow):
             self.canvas.mpl_disconnect(self._cid_release)
         except Exception:
             pass
-        self._annotation_mpl_cid = self.canvas.mpl_connect("button_press_event", self._on_annotation_mpl_click)
-        self.statusBar().showMessage("Click the start point, then the end point for the arrow.", 5000)
+        self._annotation_mpl_cid = self.canvas.mpl_connect("button_press_event", self._on_annotation_mpl_press)
+        self._annotation_mpl_motion_cid = self.canvas.mpl_connect("motion_notify_event", self._on_annotation_mpl_motion)
+        self._annotation_mpl_release_cid = self.canvas.mpl_connect("button_release_event", self._on_annotation_mpl_release)
+        self.statusBar().showMessage("Drag to place the arrow, or click the start point and then the end point.", 5000)
 
     def start_annotation_text(self):
         if self.raw_data is None:
@@ -6541,6 +6646,92 @@ class MainWindow(QMainWindow):
                 self._on_annotation_polygon_finished(self._annotation_click_points)
                 return
             self._annotation_click_points.append([x, y])
+
+    def _on_annotation_mpl_press(self, event):
+        if self._annotation_mode != "arrow":
+            return
+        if event.button == 3:
+            self._reset_annotation_mode()
+            self.statusBar().showMessage("Cancelled arrow annotation.", 2500)
+            return
+        if event.button != 1:
+            return
+        point = self._annotation_mpl_event_point(event)
+        if point is None:
+            return
+        self._annotation_drag_origin = point
+        self._annotation_drag_origin_pixels = (
+            float(getattr(event, "x", 0.0)),
+            float(getattr(event, "y", 0.0)),
+        )
+        self._annotation_drag_last_point = point
+        self._annotation_drag_active = False
+
+    def _on_annotation_mpl_motion(self, event):
+        if self._annotation_mode != "arrow":
+            return
+
+        point = self._annotation_mpl_event_point(event)
+        if self._annotation_drag_origin is not None and self._annotation_drag_origin_pixels is not None:
+            px = float(getattr(event, "x", self._annotation_drag_origin_pixels[0]))
+            py = float(getattr(event, "y", self._annotation_drag_origin_pixels[1]))
+            dx = px - self._annotation_drag_origin_pixels[0]
+            dy = py - self._annotation_drag_origin_pixels[1]
+            if point is not None:
+                self._annotation_drag_last_point = point
+            if not self._annotation_drag_active and (dx * dx + dy * dy) >= 16.0:
+                self._annotation_drag_active = True
+            if self._annotation_drag_active and self._annotation_drag_last_point is not None:
+                self._render_arrow_preview(self._annotation_drag_origin, self._annotation_drag_last_point)
+                return
+
+        if len(self._annotation_click_points) == 1 and point is not None:
+            self._render_arrow_preview(tuple(self._annotation_click_points[0]), point)
+            return
+
+        self._clear_annotation_preview()
+
+    def _on_annotation_mpl_release(self, event):
+        if self._annotation_mode != "arrow" or event.button != 1:
+            return
+        if self._annotation_drag_origin is None:
+            return
+
+        origin = self._annotation_drag_origin
+        point = self._annotation_mpl_event_point(event)
+        drag_point = point or self._annotation_drag_last_point
+        was_drag = bool(self._annotation_drag_active)
+
+        self._annotation_drag_origin = None
+        self._annotation_drag_origin_pixels = None
+        self._annotation_drag_last_point = None
+        self._annotation_drag_active = False
+
+        if was_drag:
+            self._clear_annotation_preview(redraw=False)
+            if drag_point is None or self._annotation_points_close(origin, drag_point):
+                self.statusBar().showMessage("Drag to place the arrow.", 2500)
+                self.canvas.draw_idle()
+                return
+            self._commit_arrow_annotation([origin, drag_point])
+            return
+
+        if point is None:
+            return
+        if not self._annotation_click_points:
+            self._annotation_click_points = [[float(point[0]), float(point[1])]]
+            self.statusBar().showMessage(
+                "Arrow start set. Move the cursor and click the end point, or drag from the start point.",
+                5000,
+            )
+            return
+
+        start = tuple(self._annotation_click_points[0])
+        if self._annotation_points_close(start, point):
+            self.statusBar().showMessage("Choose a different end point for the arrow.", 2500)
+            return
+        self._clear_annotation_preview(redraw=False)
+        self._commit_arrow_annotation([start, point])
 
     def _on_annotation_polygon_finished(self, verts):
         if self._annotation_mode != "polygon":

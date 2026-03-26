@@ -146,6 +146,11 @@ class AcceleratedPlotWidget(QWidget):
         self._annotation_capture_points = []
         self._annotation_capture_line_item = None
         self._annotation_capture_vertex_item = None
+        self._annotation_capture_drag_active = False
+        self._annotation_capture_press_scene_pos = None
+        self._annotation_capture_press_xy = None
+        self._annotation_capture_drag_last_xy = None
+        self._annotation_capture_suppress_next_click = False
         self._scene_filter = None
 
         self._interaction_timer = QTimer(self)
@@ -442,6 +447,10 @@ class AcceleratedPlotWidget(QWidget):
 
     def _clear_annotation_capture_overlay(self) -> None:
         self._annotation_capture_points = []
+        self._annotation_capture_drag_active = False
+        self._annotation_capture_press_scene_pos = None
+        self._annotation_capture_press_xy = None
+        self._annotation_capture_drag_last_xy = None
         if self._annotation_capture_line_item is not None:
             try:
                 self._plot.removeItem(self._annotation_capture_line_item)
@@ -676,12 +685,14 @@ class AcceleratedPlotWidget(QWidget):
         if kind_norm not in {"polygon", "line", "text", "arrow"}:
             return
         self._interaction_mode = f"annotation:{kind_norm}"
+        self._annotation_capture_suppress_next_click = False
         self._clear_lasso_overlay()
         self._clear_annotation_capture_overlay()
         self._plot.setMouseEnabled(x=False, y=False)
 
     def stop_interaction_capture(self) -> None:
         self._interaction_mode = None
+        self._annotation_capture_suppress_next_click = False
         self._clear_lasso_overlay()
         self._clear_annotation_capture_overlay()
         self._apply_navigation_state()
@@ -974,8 +985,78 @@ class AcceleratedPlotWidget(QWidget):
         ys = [p[1] for p in self._lasso_points]
         self._lasso_line_item.setData(xs, ys)
 
+    def _handle_annotation_drag_scene_event(self, event, annotation_kind: str) -> bool:
+        if not self.is_available or annotation_kind not in {"line", "arrow"}:
+            return False
+
+        etype = event.type()
+        if etype == QEvent.Type.GraphicsSceneMousePress:
+            if event.button() == Qt.MouseButton.RightButton:
+                self._annotation_capture_suppress_next_click = True
+                self._cancel_annotation_capture(annotation_kind)
+                return True
+            if event.button() != Qt.MouseButton.LeftButton:
+                return False
+            xy = self._scene_to_plot_xy(event.scenePos())
+            if xy is None:
+                return False
+            self._annotation_capture_press_scene_pos = QPointF(event.scenePos())
+            self._annotation_capture_press_xy = (float(xy[0]), float(xy[1]))
+            self._annotation_capture_drag_last_xy = self._annotation_capture_press_xy
+            self._annotation_capture_drag_active = False
+            return False
+
+        if etype == QEvent.Type.GraphicsSceneMouseMove:
+            if self._annotation_capture_press_scene_pos is None or self._annotation_capture_press_xy is None:
+                return False
+            dx = float(event.scenePos().x() - self._annotation_capture_press_scene_pos.x())
+            dy = float(event.scenePos().y() - self._annotation_capture_press_scene_pos.y())
+            if not self._annotation_capture_drag_active and (dx * dx + dy * dy) < 16.0:
+                return False
+            self._annotation_capture_drag_active = True
+            xy = self._scene_to_plot_xy(event.scenePos())
+            if xy is None:
+                return True
+            self._annotation_capture_drag_last_xy = (float(xy[0]), float(xy[1]))
+            self._annotation_capture_points = [self._annotation_capture_press_xy]
+            self._update_annotation_capture_overlay(cursor_xy=self._annotation_capture_drag_last_xy)
+            return True
+
+        if etype == QEvent.Type.GraphicsSceneMouseRelease:
+            if event.button() != Qt.MouseButton.LeftButton:
+                return False
+            if self._annotation_capture_press_scene_pos is None or self._annotation_capture_press_xy is None:
+                return False
+
+            origin = self._annotation_capture_press_xy
+            drag_point = self._scene_to_plot_xy(event.scenePos()) or self._annotation_capture_drag_last_xy
+            was_drag = bool(self._annotation_capture_drag_active)
+
+            self._annotation_capture_press_scene_pos = None
+            self._annotation_capture_press_xy = None
+            self._annotation_capture_drag_active = False
+            self._annotation_capture_drag_last_xy = None
+
+            if not was_drag:
+                return False
+
+            self._annotation_capture_suppress_next_click = True
+            if drag_point is None or self._points_close(origin, drag_point):
+                self._clear_annotation_capture_overlay()
+                return True
+            self._finish_annotation_capture(annotation_kind, [origin, drag_point])
+            return True
+
+        return False
+
     def _handle_scene_event(self, event) -> bool:
-        if not self.is_available or self._interaction_mode != "lasso":
+        if not self.is_available:
+            return False
+
+        annotation_kind = self._annotation_capture_kind()
+        if annotation_kind in {"line", "arrow"}:
+            return self._handle_annotation_drag_scene_event(event, annotation_kind)
+        if self._interaction_mode != "lasso":
             return False
 
         etype = event.type()
@@ -1037,6 +1118,10 @@ class AcceleratedPlotWidget(QWidget):
         self._interaction_mode = None
 
     def _on_scene_mouse_clicked(self, ev):
+        if self._annotation_capture_suppress_next_click:
+            self._annotation_capture_suppress_next_click = False
+            return
+
         xy = self._scene_to_plot_xy(ev.scenePos())
         if xy is None:
             return
