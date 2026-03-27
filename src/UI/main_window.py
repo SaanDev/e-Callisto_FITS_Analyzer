@@ -2886,6 +2886,9 @@ class MainWindow(QMainWindow):
     def _noise_clip_thresholds_active(self) -> bool:
         return abs(float(self.noise_clip_low)) > 1e-9 or abs(float(self.noise_clip_high)) > 1e-9
 
+    def _reset_noise_controls_to_defaults(self) -> None:
+        self._set_noise_clip_state(0.0, 0.0, scale=self.NOISE_CLIP_SCALE_LINEAR, sync_widgets=True)
+
     def _set_noise_scale_checkbox(self, scale: str | None = None) -> None:
         act = getattr(self, "noise_log_scale_chk", None)
         if act is None:
@@ -3025,6 +3028,78 @@ class MainWindow(QMainWindow):
         if cold > hot:
             cold, hot = hot, cold
         return cold, hot
+
+    def _reset_sidebar_controls_to_defaults(self) -> None:
+        self._reset_noise_controls_to_defaults()
+        self.set_units_mode(False)
+        self.set_axis_to_seconds()
+
+        self.current_cmap_name = "Custom"
+        try:
+            self.cmap_combo.blockSignals(True)
+            self.cmap_combo.setCurrentText("Custom")
+        finally:
+            self.cmap_combo.blockSignals(False)
+
+        self.graph_title_override = ""
+        self.graph_font_family = ""
+        self.tick_font_px = 11
+        self.axis_label_font_px = 12
+        self.title_font_px = 14
+        self.title_bold = False
+        self.title_italic = False
+        self.axis_bold = False
+        self.axis_italic = False
+        self.ticks_bold = False
+        self.ticks_italic = False
+        self.remove_titles = False
+        self._hw_default_font_sizes_active = True
+
+        try:
+            self.remove_titles_chk.blockSignals(True)
+            self.title_bold_chk.blockSignals(True)
+            self.title_italic_chk.blockSignals(True)
+            self.axis_bold_chk.blockSignals(True)
+            self.axis_italic_chk.blockSignals(True)
+            self.ticks_bold_chk.blockSignals(True)
+            self.ticks_italic_chk.blockSignals(True)
+            self.title_edit.blockSignals(True)
+            self.font_combo.blockSignals(True)
+            self.tick_font_spin.blockSignals(True)
+            self.axis_font_spin.blockSignals(True)
+            self.title_font_spin.blockSignals(True)
+
+            self.remove_titles_chk.setChecked(False)
+            self.title_bold_chk.setChecked(False)
+            self.title_italic_chk.setChecked(False)
+            self.axis_bold_chk.setChecked(False)
+            self.axis_italic_chk.setChecked(False)
+            self.ticks_bold_chk.setChecked(False)
+            self.ticks_italic_chk.setChecked(False)
+            self.title_edit.setText("")
+            self.font_combo.setCurrentText("Default")
+            self.tick_font_spin.setValue(11)
+            self.axis_font_spin.setValue(12)
+            self.title_font_spin.setValue(14)
+        finally:
+            self.remove_titles_chk.blockSignals(False)
+            self.title_bold_chk.blockSignals(False)
+            self.title_italic_chk.blockSignals(False)
+            self.axis_bold_chk.blockSignals(False)
+            self.axis_italic_chk.blockSignals(False)
+            self.ticks_bold_chk.blockSignals(False)
+            self.ticks_italic_chk.blockSignals(False)
+            self.title_edit.blockSignals(False)
+            self.font_combo.blockSignals(False)
+            self.tick_font_spin.blockSignals(False)
+            self.axis_font_spin.blockSignals(False)
+            self.title_font_spin.blockSignals(False)
+
+        self.title_edit.setEnabled(True)
+        self.title_bold_chk.setEnabled(True)
+        self.title_italic_chk.setEnabled(True)
+        self.axis_bold_chk.setEnabled(True)
+        self.axis_italic_chk.setEnabled(True)
 
     def _intensity_for_display(self, data):
         if data is None:
@@ -4643,6 +4718,17 @@ class MainWindow(QMainWindow):
         self._rfi_preview_masked = []
         self._annotations = []
         self._annotation_artists = []
+        self._rfi_config = rfi_config_dict(
+            enabled=True,
+            kernel_time=3,
+            kernel_freq=3,
+            channel_z_threshold=6.0,
+            percentile_clip=99.5,
+            masked_channel_indices=[],
+            applied=False,
+        )
+        self._annotations_visible = True
+        self._annotation_style_defaults = self._merge_annotation_style_defaults()
 
         # FITS metadata / provenance
         self._fits_header0 = None
@@ -4653,6 +4739,9 @@ class MainWindow(QMainWindow):
         self.ut_start_sec = None
         self._home_view = None
         self._pan_start_view = None
+        self._processing_log = []
+        self._last_time_sync_context = {}
+        self._reset_sidebar_controls_to_defaults()
 
         # Reset GUI
         self.statusBar().showMessage("All reset", 4000)

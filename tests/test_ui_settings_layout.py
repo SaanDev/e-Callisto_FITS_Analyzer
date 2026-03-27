@@ -169,3 +169,62 @@ def test_apply_preset_updates_restored_sidebar_controls():
     assert win.upper_value_sub_label.text() == win._format_noise_clip_value(high_disp, unit)
 
     win.close()
+
+
+def test_reset_all_restores_sidebar_controls_to_defaults():
+    _app()
+    win = MainWindow(theme=None)
+    _load_demo_plot(win)
+
+    win._set_noise_clip_state(-7.5, 14.5, scale=MainWindow.NOISE_CLIP_SCALE_SIGNED_LOG, sync_widgets=True)
+    win.set_units_mode(True)
+    win.set_axis_to_utc()
+    win.cmap_combo.setCurrentText("inferno")
+    win.remove_titles_chk.setChecked(True)
+    win.title_bold_chk.setChecked(True)
+    win.title_italic_chk.setChecked(True)
+    win.axis_bold_chk.setChecked(True)
+    win.axis_italic_chk.setChecked(True)
+    win.ticks_bold_chk.setChecked(True)
+    win.ticks_italic_chk.setChecked(True)
+    win.title_edit.setText("Custom")
+    if win.font_combo.count() > 1:
+        win.font_combo.setCurrentIndex(1)
+    win.tick_font_spin.setValue(17)
+    win.axis_font_spin.setValue(18)
+    win.title_font_spin.setValue(19)
+    QApplication.processEvents()
+
+    win.reset_all()
+    QApplication.processEvents()
+
+    assert win.raw_data is None
+    assert win.noise_clip_low == pytest.approx(0.0)
+    assert win.noise_clip_high == pytest.approx(0.0)
+    assert win.noise_clip_scale == MainWindow.NOISE_CLIP_SCALE_LINEAR
+    assert win.noise_log_scale_chk.isChecked() is False
+    assert win.lower_value_label.text() == "0.00 Digits"
+    assert win.upper_value_label.text() == "0.00 Digits"
+    assert win.lower_value_sub_label.isHidden() is True
+    assert win.upper_value_sub_label.isHidden() is True
+    assert win.units_digits_radio.isChecked() is True
+    assert win.units_db_radio.isChecked() is False
+    assert win.time_sec_radio.isChecked() is True
+    assert win.time_ut_radio.isChecked() is False
+    assert win.cmap_combo.currentText() == "Custom"
+    assert win.title_edit.text() == ""
+    assert win.title_edit.isEnabled() is True
+    assert win.font_combo.currentText() == "Default"
+    assert win.remove_titles_chk.isChecked() is False
+    assert win.title_bold_chk.isChecked() is False
+    assert win.title_italic_chk.isChecked() is False
+    assert win.axis_bold_chk.isChecked() is False
+    assert win.axis_italic_chk.isChecked() is False
+    assert win.ticks_bold_chk.isChecked() is False
+    assert win.ticks_italic_chk.isChecked() is False
+    assert win.tick_font_spin.value() == 11
+    assert win.axis_font_spin.value() == 12
+    assert win.title_font_spin.value() == 14
+    assert win.graph_group.isEnabled() is False
+
+    win.close()
