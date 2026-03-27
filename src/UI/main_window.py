@@ -12,6 +12,7 @@ import platform
 import re
 import sys
 import tempfile
+import math
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import unquote, urlparse
 
@@ -148,6 +149,13 @@ GOES_OVERLAY_LINE_WIDTH = 3.0
 class MainWindow(QMainWindow):
     # Convert digit differences (e.g., Ihot - Icold) to dB.
     DB_SCALE = 2500.0 / 256.0 / 25.4
+    NOISE_CLIP_MIN = -100.0
+    NOISE_CLIP_MAX = 100.0
+    NOISE_SLIDER_MAX = 4000
+    NOISE_SLIDER_MIN = 0
+    NOISE_SLIDER_MID = NOISE_SLIDER_MAX // 2
+    NOISE_CLIP_SCALE_LINEAR = "linear"
+    NOISE_CLIP_SCALE_SIGNED_LOG = "signed_log"
     HW_DEFAULT_TICK_FONT_PX = 14
     HW_DEFAULT_AXIS_FONT_PX = 16
     HW_DEFAULT_TITLE_FONT_PX = 22
@@ -218,6 +226,9 @@ class MainWindow(QMainWindow):
         self.current_cmap_name = "Custom"
         self.lasso_active = False
 
+        self.noise_clip_low = 0.0
+        self.noise_clip_high = 0.0
+        self.noise_clip_scale = self.NOISE_CLIP_SCALE_LINEAR
         self.noise_vmin = None
         self.noise_vmax = None
 
@@ -254,6 +265,7 @@ class MainWindow(QMainWindow):
         self._noise_preview_active = False
         self._noise_base_data = None
         self._noise_base_source_id = None
+        self._noise_slider_sync_guard = False
 
         self._import_thread = None
         self._import_worker = None
@@ -363,12 +375,16 @@ class MainWindow(QMainWindow):
         # Noise clipping sliders
         # -------------------------
         self.lower_slider = QSlider(Qt.Horizontal)
-        self.lower_slider.setRange(-100, 100)
-        self.lower_slider.setValue(0)
+        self.lower_slider.setRange(self.NOISE_SLIDER_MIN, self.NOISE_SLIDER_MAX)
+        self.lower_slider.setSingleStep(1)
+        self.lower_slider.setPageStep(50)
+        self.lower_slider.setValue(self._noise_threshold_to_slider(self.noise_clip_low))
 
         self.upper_slider = QSlider(Qt.Horizontal)
-        self.upper_slider.setRange(-100, 100)
-        self.upper_slider.setValue(0)
+        self.upper_slider.setRange(self.NOISE_SLIDER_MIN, self.NOISE_SLIDER_MAX)
+        self.upper_slider.setSingleStep(1)
+        self.upper_slider.setPageStep(50)
+        self.upper_slider.setValue(self._noise_threshold_to_slider(self.noise_clip_high))
 
         slider_group = QGroupBox("Noise Clipping Thresholds")
         self.slider_group = slider_group
@@ -378,15 +394,36 @@ class MainWindow(QMainWindow):
         slider_layout.setContentsMargins(12, 12, 12, 12)
         slider_layout.setSpacing(8)
 
+        low_row = QHBoxLayout()
+        low_row.setSpacing(8)
         lbl_low = QLabel("Lower Threshold")
         lbl_low.setAlignment(Qt.AlignLeft)
-        slider_layout.addWidget(lbl_low)
+        self.lower_value_label = QLabel("")
+        self.lower_value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.lower_value_label.setMinimumWidth(88)
+        low_row.addWidget(lbl_low)
+        low_row.addStretch(1)
+        low_row.addWidget(self.lower_value_label)
+        slider_layout.addLayout(low_row)
         slider_layout.addWidget(self.lower_slider)
 
+        high_row = QHBoxLayout()
+        high_row.setSpacing(8)
         lbl_high = QLabel("Upper Threshold")
         lbl_high.setAlignment(Qt.AlignLeft)
-        slider_layout.addWidget(lbl_high)
+        self.upper_value_label = QLabel("")
+        self.upper_value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.upper_value_label.setMinimumWidth(88)
+        high_row.addWidget(lbl_high)
+        high_row.addStretch(1)
+        high_row.addWidget(self.upper_value_label)
+        slider_layout.addLayout(high_row)
         slider_layout.addWidget(self.upper_slider)
+
+        self.noise_log_scale_chk = QCheckBox("Logarithmic Threshold Scale")
+        self.noise_log_scale_chk.setChecked(False)
+        slider_layout.addWidget(self.noise_log_scale_chk)
+        self._update_noise_clip_value_labels()
 
         # -------------------------
         # Units Group (Intensity + Time in one row)
@@ -918,12 +955,13 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(container)
 
         # Signals
-        self.lower_slider.valueChanged.connect(self.schedule_noise_update)
-        self.upper_slider.valueChanged.connect(self.schedule_noise_update)
+        self.lower_slider.valueChanged.connect(self._on_noise_slider_value_changed)
+        self.upper_slider.valueChanged.connect(self._on_noise_slider_value_changed)
         self.lower_slider.sliderPressed.connect(self._on_noise_slider_pressed)
         self.upper_slider.sliderPressed.connect(self._on_noise_slider_pressed)
         self.lower_slider.sliderReleased.connect(self._on_noise_slider_released)
         self.upper_slider.sliderReleased.connect(self._on_noise_slider_released)
+        self.noise_log_scale_chk.toggled.connect(self._on_noise_scale_mode_toggled)
         self.cmap_combo.currentTextChanged.connect(self.change_cmap)
         self.open_action.triggered.connect(self.load_file)
         self.open_project_action.triggered.connect(self.open_project)
@@ -2731,10 +2769,168 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Combine Error", f"An error occurred while combining files:\n{e}")
             return
 
+    def _clamp_noise_threshold(self, value) -> float:
+        try:
+            out = float(value)
+        except Exception:
+            out = 0.0
+        return float(max(self.NOISE_CLIP_MIN, min(self.NOISE_CLIP_MAX, out)))
+
+    def _normalize_noise_clip_scale(self, scale) -> str:
+        return (
+            self.NOISE_CLIP_SCALE_SIGNED_LOG
+            if str(scale or "").strip().lower() == self.NOISE_CLIP_SCALE_SIGNED_LOG
+            else self.NOISE_CLIP_SCALE_LINEAR
+        )
+
+    def _noise_clip_scale_is_log(self, scale: str | None = None) -> bool:
+        return self._normalize_noise_clip_scale(scale if scale is not None else self.noise_clip_scale) == self.NOISE_CLIP_SCALE_SIGNED_LOG
+
+    def _noise_threshold_to_slider(self, value, scale: str | None = None) -> int:
+        val = self._clamp_noise_threshold(value)
+        if self._noise_clip_scale_is_log(scale):
+            max_abs = max(abs(self.NOISE_CLIP_MIN), abs(self.NOISE_CLIP_MAX))
+            if abs(val) <= 1e-12:
+                u = 0.0
+            else:
+                denom = math.log10(1.0 + float(max_abs))
+                u = math.copysign(math.log10(1.0 + abs(val)) / denom, val) if denom > 0.0 else 0.0
+            pos = self.NOISE_SLIDER_MID + int(round(u * self.NOISE_SLIDER_MID))
+            return int(max(self.NOISE_SLIDER_MIN, min(self.NOISE_SLIDER_MAX, pos)))
+
+        fraction = (val - self.NOISE_CLIP_MIN) / (self.NOISE_CLIP_MAX - self.NOISE_CLIP_MIN)
+        pos = self.NOISE_SLIDER_MIN + int(round(fraction * (self.NOISE_SLIDER_MAX - self.NOISE_SLIDER_MIN)))
+        return int(max(self.NOISE_SLIDER_MIN, min(self.NOISE_SLIDER_MAX, pos)))
+
+    def _noise_slider_to_threshold(self, slider_value, scale: str | None = None) -> float:
+        try:
+            raw = int(slider_value)
+        except Exception:
+            raw = self.NOISE_SLIDER_MID
+        raw = int(max(self.NOISE_SLIDER_MIN, min(self.NOISE_SLIDER_MAX, raw)))
+
+        if self._noise_clip_scale_is_log(scale):
+            u = (raw - self.NOISE_SLIDER_MID) / float(self.NOISE_SLIDER_MID)
+            u = max(-1.0, min(1.0, float(u)))
+            max_abs = max(abs(self.NOISE_CLIP_MIN), abs(self.NOISE_CLIP_MAX))
+            magnitude = (10.0 ** (abs(u) * math.log10(1.0 + float(max_abs)))) - 1.0
+            return self._clamp_noise_threshold(math.copysign(magnitude, u))
+
+        fraction = (raw - self.NOISE_SLIDER_MIN) / float(self.NOISE_SLIDER_MAX - self.NOISE_SLIDER_MIN)
+        value = self.NOISE_CLIP_MIN + (fraction * (self.NOISE_CLIP_MAX - self.NOISE_CLIP_MIN))
+        return self._clamp_noise_threshold(value)
+
+    def _legacy_noise_threshold_value(self, value) -> int:
+        return int(round(self._clamp_noise_threshold(value)))
+
+    def _noise_clip_thresholds_active(self) -> bool:
+        return abs(float(self.noise_clip_low)) > 1e-9 or abs(float(self.noise_clip_high)) > 1e-9
+
+    def _set_noise_scale_checkbox(self, scale: str | None = None) -> None:
+        act = getattr(self, "noise_log_scale_chk", None)
+        if act is None:
+            return
+        blocked = act.blockSignals(True)
+        act.setChecked(self._noise_clip_scale_is_log(scale))
+        act.blockSignals(blocked)
+
+    def _sync_noise_sliders_from_thresholds(self) -> None:
+        if getattr(self, "lower_slider", None) is None or getattr(self, "upper_slider", None) is None:
+            return
+        self._noise_slider_sync_guard = True
+        try:
+            self.lower_slider.blockSignals(True)
+            self.upper_slider.blockSignals(True)
+            self.lower_slider.setValue(self._noise_threshold_to_slider(self.noise_clip_low))
+            self.upper_slider.setValue(self._noise_threshold_to_slider(self.noise_clip_high))
+        finally:
+            self.lower_slider.blockSignals(False)
+            self.upper_slider.blockSignals(False)
+            self._noise_slider_sync_guard = False
+
+    def _set_noise_clip_state(
+        self,
+        low=None,
+        high=None,
+        *,
+        scale: str | None = None,
+        sync_widgets: bool = True,
+    ) -> None:
+        low_val = self.noise_clip_low if low is None else self._clamp_noise_threshold(low)
+        high_val = self.noise_clip_high if high is None else self._clamp_noise_threshold(high)
+        if low_val > high_val:
+            low_val, high_val = high_val, low_val
+        self.noise_clip_low = float(low_val)
+        self.noise_clip_high = float(high_val)
+        if scale is not None:
+            self.noise_clip_scale = self._normalize_noise_clip_scale(scale)
+        else:
+            self.noise_clip_scale = self._normalize_noise_clip_scale(self.noise_clip_scale)
+        if sync_widgets:
+            self._set_noise_scale_checkbox(self.noise_clip_scale)
+            self._sync_noise_sliders_from_thresholds()
+        self._update_noise_clip_value_labels()
+
+    def _noise_thresholds_from_mapping(self, mapping, *, default_low=0.0, default_high=0.0, default_scale=None) -> tuple[float, float, str]:
+        source = dict(mapping or {})
+        low = source.get("noise_clip_low", source.get("lower_slider", default_low))
+        high = source.get("noise_clip_high", source.get("upper_slider", default_high))
+        scale = source.get("noise_clip_scale", default_scale if default_scale is not None else self.noise_clip_scale)
+        low_val = self._clamp_noise_threshold(low)
+        high_val = self._clamp_noise_threshold(high)
+        if low_val > high_val:
+            low_val, high_val = high_val, low_val
+        return float(low_val), float(high_val), self._normalize_noise_clip_scale(scale)
+
+    def _noise_clip_display_values(self) -> tuple[float, float, str]:
+        low = float(self.noise_clip_low)
+        high = float(self.noise_clip_high)
+        if not self.use_db:
+            return low, high, "Digits"
+        cold_digits, _ = self._db_hot_cold_digits()
+        return (low - cold_digits) * self.DB_SCALE, (high - cold_digits) * self.DB_SCALE, "dB"
+
+    def _format_noise_clip_value(self, value: float, unit_label: str) -> str:
+        return f"{float(value):.2f} {unit_label}"
+
+    def _update_noise_clip_value_labels(self) -> None:
+        low_label = getattr(self, "lower_value_label", None)
+        high_label = getattr(self, "upper_value_label", None)
+        if low_label is None or high_label is None:
+            return
+        low_disp, high_disp, unit_label = self._noise_clip_display_values()
+        low_label.setText(self._format_noise_clip_value(low_disp, unit_label))
+        high_label.setText(self._format_noise_clip_value(high_disp, unit_label))
+
+    def _on_noise_slider_value_changed(self, _value: int) -> None:
+        if self._noise_slider_sync_guard:
+            return
+
+        low = self._noise_slider_to_threshold(self.lower_slider.value())
+        high = self._noise_slider_to_threshold(self.upper_slider.value())
+        sender = self.sender()
+        if low > high:
+            if sender is self.lower_slider:
+                low = high
+            else:
+                high = low
+        self._set_noise_clip_state(low, high, scale=self.noise_clip_scale, sync_widgets=True)
+        if self.raw_data is not None:
+            self.schedule_noise_update()
+
+    def _on_noise_scale_mode_toggled(self, checked: bool) -> None:
+        scale = self.NOISE_CLIP_SCALE_SIGNED_LOG if checked else self.NOISE_CLIP_SCALE_LINEAR
+        if self._normalize_noise_clip_scale(scale) == self.noise_clip_scale:
+            self._update_noise_clip_value_labels()
+            return
+        self._set_noise_clip_state(self.noise_clip_low, self.noise_clip_high, scale=scale, sync_widgets=True)
+        if self.raw_data is not None:
+            self._mark_project_dirty()
+
     def _db_hot_cold_digits(self) -> tuple[float, float]:
-        # For Y-factor style conversion use Icold=vmin and Ihot=vmax from scrollbars.
-        cold = float(self.lower_slider.value())
-        hot = float(self.upper_slider.value())
+        # For Y-factor style conversion use Icold=vmin and Ihot=vmax from clipping thresholds.
+        cold = float(self.noise_clip_low)
+        hot = float(self.noise_clip_high)
         if cold > hot:
             cold, hot = hot, cold
         return cold, hot
@@ -2762,6 +2958,7 @@ class MainWindow(QMainWindow):
         self.use_db = bool(use_db)
         self._set_checked_if_exists("units_db_radio", self.use_db)
         self._set_checked_if_exists("units_digits_radio", not self.use_db)
+        self._update_noise_clip_value_labels()
 
         if self.raw_data is None:
             return
@@ -2940,10 +3137,8 @@ class MainWindow(QMainWindow):
             self._push_undo_state()
             self._noise_undo_pending = True
 
-        low = self.lower_slider.value()
-        high = self.upper_slider.value()
-        if low > high:
-            low, high = high, low
+        low = float(self.noise_clip_low)
+        high = float(self.noise_clip_high)
 
         data = self._compute_noise_reduced(low, high)
         if data is None:
@@ -4396,8 +4591,7 @@ class MainWindow(QMainWindow):
             or self.lasso_mask is not None
             or self.lasso_active
             or bool(getattr(self, "lasso", None))
-            or self.lower_slider.value() != 0
-            or self.upper_slider.value() != 0
+            or self._noise_clip_thresholds_active()
         )
         if had_processed:
             self._push_undo_state()
@@ -4452,14 +4646,7 @@ class MainWindow(QMainWindow):
         if isinstance(self._rfi_config, dict):
             self._rfi_config["applied"] = False
 
-        self.lower_slider.blockSignals(True)
-        self.upper_slider.blockSignals(True)
-        try:
-            self.lower_slider.setValue(0)
-            self.upper_slider.setValue(0)
-        finally:
-            self.lower_slider.blockSignals(False)
-            self.upper_slider.blockSignals(False)
+        self._set_noise_clip_state(0.0, 0.0, scale=self.noise_clip_scale, sync_widgets=True)
 
         self.plot_data(self.raw_data, title="Raw")
         if had_processed:
@@ -5523,8 +5710,11 @@ class MainWindow(QMainWindow):
             "time": None if self.time is None else self.time.copy(),
             "filename": self.filename,
             "current_plot_type": self.current_plot_type,
-            "lower_slider": self.lower_slider.value(),
-            "upper_slider": self.upper_slider.value(),
+            "lower_slider": self._legacy_noise_threshold_value(self.noise_clip_low),
+            "upper_slider": self._legacy_noise_threshold_value(self.noise_clip_high),
+            "noise_clip_low": float(self.noise_clip_low),
+            "noise_clip_high": float(self.noise_clip_high),
+            "noise_clip_scale": str(self.noise_clip_scale),
             "use_db": self.use_db,
             "use_utc": self.use_utc,
             "cmap": self.current_cmap_name,
@@ -5638,13 +5828,14 @@ class MainWindow(QMainWindow):
         self.use_db = state["use_db"]
         self.use_utc = state["use_utc"]
         self.current_cmap_name = state["cmap"]
-
-        self.lower_slider.blockSignals(True)
-        self.upper_slider.blockSignals(True)
-        self.lower_slider.setValue(state["lower_slider"])
-        self.upper_slider.setValue(state["upper_slider"])
-        self.lower_slider.blockSignals(False)
-        self.upper_slider.blockSignals(False)
+        low, high, scale = self._noise_thresholds_from_mapping(
+            state,
+            default_low=self.noise_clip_low,
+            default_high=self.noise_clip_high,
+            default_scale=self.noise_clip_scale,
+        )
+        self._set_noise_clip_state(low, high, scale=scale, sync_widgets=True)
+        self._update_noise_clip_value_labels()
 
         if self.raw_data is not None:
             data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
@@ -6378,8 +6569,11 @@ class MainWindow(QMainWindow):
 
     def _preset_settings_payload(self) -> dict:
         return {
-            "lower_slider": int(self.lower_slider.value()),
-            "upper_slider": int(self.upper_slider.value()),
+            "lower_slider": self._legacy_noise_threshold_value(self.noise_clip_low),
+            "upper_slider": self._legacy_noise_threshold_value(self.noise_clip_high),
+            "noise_clip_low": float(self.noise_clip_low),
+            "noise_clip_high": float(self.noise_clip_high),
+            "noise_clip_scale": str(self.noise_clip_scale),
             "use_db": bool(self.use_db),
             "use_utc": bool(self.use_utc),
             "cmap": str(self.current_cmap_name or "Custom"),
@@ -6436,15 +6630,13 @@ class MainWindow(QMainWindow):
 
         settings = dict((preset or {}).get("settings") or {})
         self._active_preset_snapshot = dict(preset)
-
-        try:
-            self.lower_slider.blockSignals(True)
-            self.upper_slider.blockSignals(True)
-            self.lower_slider.setValue(int(settings.get("lower_slider", self.lower_slider.value())))
-            self.upper_slider.setValue(int(settings.get("upper_slider", self.upper_slider.value())))
-        finally:
-            self.lower_slider.blockSignals(False)
-            self.upper_slider.blockSignals(False)
+        low, high, scale = self._noise_thresholds_from_mapping(
+            settings,
+            default_low=self.noise_clip_low,
+            default_high=self.noise_clip_high,
+            default_scale=self.noise_clip_scale,
+        )
+        self._set_noise_clip_state(low, high, scale=scale, sync_widgets=True)
 
         self.set_units_mode(bool(settings.get("use_db", False)))
         if bool(settings.get("use_utc", False)):
@@ -7076,8 +7268,11 @@ class MainWindow(QMainWindow):
                 "plot_type": self.current_plot_type,
                 "use_db": bool(self.use_db),
                 "use_utc": bool(self.use_utc),
-                "slider_low": int(self.lower_slider.value()),
-                "slider_high": int(self.upper_slider.value()),
+                "slider_low": self._legacy_noise_threshold_value(self.noise_clip_low),
+                "slider_high": self._legacy_noise_threshold_value(self.noise_clip_high),
+                "noise_clip_low": float(self.noise_clip_low),
+                "noise_clip_high": float(self.noise_clip_high),
+                "noise_clip_scale": str(self.noise_clip_scale),
                 "cmap": self.current_cmap_name,
                 "graph": self._preset_settings_payload().get("graph", {}),
                 "active_preset": dict(self._active_preset_snapshot or {}),
@@ -7305,6 +7500,9 @@ class MainWindow(QMainWindow):
             "current_plot_type": state["current_plot_type"],
             "lower_slider": int(state["lower_slider"]),
             "upper_slider": int(state["upper_slider"]),
+            "noise_clip_low": float(state.get("noise_clip_low", self.noise_clip_low)),
+            "noise_clip_high": float(state.get("noise_clip_high", self.noise_clip_high)),
+            "noise_clip_scale": str(state.get("noise_clip_scale", self.noise_clip_scale)),
             "use_db": bool(state["use_db"]),
             "use_utc": bool(state["use_utc"]),
             "ut_start_sec": self.ut_start_sec,
@@ -7404,6 +7602,13 @@ class MainWindow(QMainWindow):
 
             self.noise_vmin = meta.get("noise_vmin", None)
             self.noise_vmax = meta.get("noise_vmax", None)
+            low, high, scale = self._noise_thresholds_from_mapping(
+                meta,
+                default_low=self.noise_clip_low,
+                default_high=self.noise_clip_high,
+                default_scale=self.noise_clip_scale,
+            )
+            self._set_noise_clip_state(low, high, scale=scale, sync_widgets=True)
 
             self._fits_source_path = meta.get("fits_source_path", None)
             self._is_combined = bool(meta.get("is_combined", False))
@@ -7426,16 +7631,6 @@ class MainWindow(QMainWindow):
                 except Exception:
                     self._fits_header0 = None
 
-            # Restore widgets without triggering live updates
-            try:
-                self.lower_slider.blockSignals(True)
-                self.upper_slider.blockSignals(True)
-                self.lower_slider.setValue(int(meta.get("lower_slider", self.lower_slider.value())))
-                self.upper_slider.setValue(int(meta.get("upper_slider", self.upper_slider.value())))
-            finally:
-                self.lower_slider.blockSignals(False)
-                self.upper_slider.blockSignals(False)
-
             # Units radios
             try:
                 self.units_digits_radio.blockSignals(True)
@@ -7445,6 +7640,7 @@ class MainWindow(QMainWindow):
             finally:
                 self.units_digits_radio.blockSignals(False)
                 self.units_db_radio.blockSignals(False)
+            self._update_noise_clip_value_labels()
 
             # Time-axis radios
             try:

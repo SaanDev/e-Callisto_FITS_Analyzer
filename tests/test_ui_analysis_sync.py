@@ -335,11 +335,13 @@ def test_noise_threshold_live_update_preserves_zoomed_view():
     win.canvas.ax.set_xlim(*expected_xlim)
     win.canvas.ax.set_ylim(*expected_ylim)
 
-    win.lower_slider.setValue(-1)
-    win.upper_slider.setValue(2)
+    win.lower_slider.setValue(win._noise_threshold_to_slider(-1.0))
+    win.upper_slider.setValue(win._noise_threshold_to_slider(2.0))
     win.update_noise_live()
     QApplication.processEvents()
 
+    assert win.noise_clip_low == pytest.approx(-1.0)
+    assert win.noise_clip_high == pytest.approx(2.0)
     assert win.canvas.ax.get_xlim() == pytest.approx(expected_xlim)
     assert win.canvas.ax.get_ylim() == pytest.approx(expected_ylim)
     win.close()
@@ -383,4 +385,105 @@ def test_noise_threshold_commit_preserves_zoomed_view():
 
     assert win.canvas.ax.get_xlim() == pytest.approx(expected_xlim)
     assert win.canvas.ax.get_ylim() == pytest.approx(expected_ylim)
+    win.close()
+
+
+def test_noise_scale_mapping_round_trip_and_zero_midpoint():
+    _app()
+    win = MainWindow(theme=None)
+
+    values = [-100.0, -10.0, -1.0, 0.0, 1.0, 10.0, 100.0]
+    positions = [
+        win._noise_threshold_to_slider(value, scale=win.NOISE_CLIP_SCALE_SIGNED_LOG)
+        for value in values
+    ]
+
+    assert positions == sorted(positions)
+    assert win._noise_threshold_to_slider(0.0, scale=win.NOISE_CLIP_SCALE_SIGNED_LOG) == win.NOISE_SLIDER_MID
+    assert win._noise_slider_to_threshold(win.NOISE_SLIDER_MID, scale=win.NOISE_CLIP_SCALE_SIGNED_LOG) == pytest.approx(0.0)
+    for value in values:
+        slider_value = win._noise_threshold_to_slider(value, scale=win.NOISE_CLIP_SCALE_SIGNED_LOG)
+        assert win._noise_slider_to_threshold(slider_value, scale=win.NOISE_CLIP_SCALE_SIGNED_LOG) == pytest.approx(value, abs=0.06)
+
+    win.close()
+
+
+def test_noise_scale_toggle_preserves_logical_thresholds():
+    _app()
+    win = MainWindow(theme=None)
+    win._set_noise_clip_state(-12.5, 34.25, scale=win.NOISE_CLIP_SCALE_LINEAR, sync_widgets=True)
+
+    win.noise_log_scale_chk.setChecked(True)
+    QApplication.processEvents()
+    assert win.noise_clip_scale == win.NOISE_CLIP_SCALE_SIGNED_LOG
+    assert win.noise_clip_low == pytest.approx(-12.5)
+    assert win.noise_clip_high == pytest.approx(34.25)
+
+    win.noise_log_scale_chk.setChecked(False)
+    QApplication.processEvents()
+    assert win.noise_clip_scale == win.NOISE_CLIP_SCALE_LINEAR
+    assert win.noise_clip_low == pytest.approx(-12.5)
+    assert win.noise_clip_high == pytest.approx(34.25)
+
+    win.close()
+
+
+def test_noise_slider_crossing_clamps_threshold_order():
+    _app()
+    win = MainWindow(theme=None)
+    win._set_noise_clip_state(-10.0, 5.0, scale=win.NOISE_CLIP_SCALE_LINEAR, sync_widgets=True)
+
+    win.lower_slider.setValue(win._noise_threshold_to_slider(20.0))
+    QApplication.processEvents()
+    assert win.noise_clip_low == pytest.approx(5.0)
+    assert win.noise_clip_high == pytest.approx(5.0)
+    assert win.lower_slider.value() == win.upper_slider.value()
+
+    win._set_noise_clip_state(-10.0, 5.0, scale=win.NOISE_CLIP_SCALE_LINEAR, sync_widgets=True)
+    win.upper_slider.setValue(win._noise_threshold_to_slider(-20.0))
+    QApplication.processEvents()
+    assert win.noise_clip_low == pytest.approx(-10.0)
+    assert win.noise_clip_high == pytest.approx(-10.0)
+    assert win.lower_slider.value() == win.upper_slider.value()
+
+    win.close()
+
+
+def test_noise_value_labels_follow_units_and_reset_to_zero():
+    _app()
+    win = MainWindow(theme=None)
+    win.filename = "demo.fit"
+    win.freqs = np.array([100.0, 95.0, 90.0], dtype=float)
+    win.time = np.array([0.0, 1.0, 2.0, 3.0], dtype=float)
+    win.raw_data = np.array(
+        [
+            [1.0, 4.0, 2.0, 5.0],
+            [2.0, 6.0, 3.0, 7.0],
+            [3.0, 8.0, 4.0, 9.0],
+        ],
+        dtype=np.float32,
+    )
+
+    win._set_noise_clip_state(-5.0, 12.0, scale=win.NOISE_CLIP_SCALE_LINEAR, sync_widgets=True)
+    QApplication.processEvents()
+
+    low_disp, high_disp, unit = win._noise_clip_display_values()
+    assert win.lower_value_label.text() == win._format_noise_clip_value(low_disp, unit)
+    assert win.upper_value_label.text() == win._format_noise_clip_value(high_disp, unit)
+
+    win.set_units_mode(True)
+    QApplication.processEvents()
+    low_disp, high_disp, unit = win._noise_clip_display_values()
+    assert unit == "dB"
+    assert win.lower_value_label.text() == win._format_noise_clip_value(low_disp, unit)
+    assert win.upper_value_label.text() == win._format_noise_clip_value(high_disp, unit)
+
+    win.reset_to_raw()
+    QApplication.processEvents()
+    assert win.noise_clip_low == pytest.approx(0.0)
+    assert win.noise_clip_high == pytest.approx(0.0)
+    low_disp, high_disp, unit = win._noise_clip_display_values()
+    assert win.lower_value_label.text() == win._format_noise_clip_value(low_disp, unit)
+    assert win.upper_value_label.text() == win._format_noise_clip_value(high_disp, unit)
+
     win.close()

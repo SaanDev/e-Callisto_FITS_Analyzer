@@ -122,8 +122,9 @@ def test_apply_preset_updates_restored_sidebar_controls():
     preset = build_preset(
         "Sidebar UI",
         {
-            "lower_slider": -5,
-            "upper_slider": 12,
+            "noise_clip_low": -5.0,
+            "noise_clip_high": 12.0,
+            "noise_clip_scale": "signed_log",
             "use_db": True,
             "use_utc": True,
             "cmap": "inferno",
@@ -147,13 +148,20 @@ def test_apply_preset_updates_restored_sidebar_controls():
     assert win._apply_preset_payload(preset) is True
     QApplication.processEvents()
 
-    assert win.lower_slider.value() == -5
-    assert win.upper_slider.value() == 12
+    assert win.noise_clip_low == pytest.approx(-5.0)
+    assert win.noise_clip_high == pytest.approx(12.0)
+    assert win.noise_clip_scale == MainWindow.NOISE_CLIP_SCALE_SIGNED_LOG
+    assert win.noise_log_scale_chk.isChecked() is True
+    assert win.lower_slider.value() == win._noise_threshold_to_slider(-5.0, scale=MainWindow.NOISE_CLIP_SCALE_SIGNED_LOG)
+    assert win.upper_slider.value() == win._noise_threshold_to_slider(12.0, scale=MainWindow.NOISE_CLIP_SCALE_SIGNED_LOG)
     assert win.units_db_radio.isChecked() is True
     assert win.time_ut_radio.isChecked() is True
     assert win.cmap_combo.currentText() == "inferno"
     assert win.title_edit.text() == "Preset Title"
     assert win.tick_font_spin.value() == 15
     assert win.canvas.ax.get_title() == "Preset Title"
+    low_disp, high_disp, unit = win._noise_clip_display_values()
+    assert win.lower_value_label.text() == win._format_noise_clip_value(low_disp, unit)
+    assert win.upper_value_label.text() == win._format_noise_clip_value(high_disp, unit)
 
     win.close()

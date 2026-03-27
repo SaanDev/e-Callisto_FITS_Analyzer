@@ -37,20 +37,38 @@ def _safe_int(value: Any, default: int) -> int:
         return int(default)
 
 
+def _normalize_noise_clip_scale(value: Any) -> str:
+    return "signed_log" if str(value or "").strip().lower() == "signed_log" else "linear"
+
+
+def _clamp_noise_threshold(value: Any, default: float = 0.0) -> float:
+    out = _safe_float(value, default)
+    return float(max(-100.0, min(100.0, out)))
+
+
 def normalize_preset(raw: dict[str, Any]) -> dict[str, Any]:
     name = normalize_name(raw.get("name", ""))
     if not name:
         raise ValueError("Preset name is required")
 
     settings = dict(raw.get("settings") or {})
+    legacy_low = _clamp_noise_threshold(settings.get("lower_slider"), 0.0)
+    legacy_high = _clamp_noise_threshold(settings.get("upper_slider"), 0.0)
+    noise_clip_low = _clamp_noise_threshold(settings.get("noise_clip_low"), legacy_low)
+    noise_clip_high = _clamp_noise_threshold(settings.get("noise_clip_high"), legacy_high)
+    if noise_clip_low > noise_clip_high:
+        noise_clip_low, noise_clip_high = noise_clip_high, noise_clip_low
 
     return {
         "name": name,
         "version": _safe_int(raw.get("version"), PRESET_SCHEMA_VERSION),
         "created_at": str(raw.get("created_at") or _now_iso()),
         "settings": {
-            "lower_slider": _safe_int(settings.get("lower_slider"), 0),
-            "upper_slider": _safe_int(settings.get("upper_slider"), 255),
+            "lower_slider": int(round(noise_clip_low)),
+            "upper_slider": int(round(noise_clip_high)),
+            "noise_clip_low": float(noise_clip_low),
+            "noise_clip_high": float(noise_clip_high),
+            "noise_clip_scale": _normalize_noise_clip_scale(settings.get("noise_clip_scale")),
             "use_db": bool(settings.get("use_db", False)),
             "use_utc": bool(settings.get("use_utc", False)),
             "cmap": str(settings.get("cmap") or "Custom"),
