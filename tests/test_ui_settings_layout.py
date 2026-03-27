@@ -161,7 +161,11 @@ def test_apply_preset_updates_restored_sidebar_controls():
     assert win.tick_font_spin.value() == 15
     assert win.canvas.ax.get_title() == "Preset Title"
     low_disp, high_disp, unit = win._noise_clip_display_values()
-    assert win.lower_value_label.text() == win._format_noise_clip_value(low_disp, unit)
-    assert win.upper_value_label.text() == win._format_noise_clip_value(high_disp, unit)
+    assert win.lower_value_label.text() == win._format_noise_clip_threshold_digits(win.noise_clip_low)
+    assert win.upper_value_label.text() == win._format_noise_clip_threshold_digits(win.noise_clip_high)
+    assert win.lower_value_sub_label.isHidden() is False
+    assert win.upper_value_sub_label.isHidden() is False
+    assert win.lower_value_sub_label.text() == win._format_noise_clip_value(low_disp, unit)
+    assert win.upper_value_sub_label.text() == win._format_noise_clip_value(high_disp, unit)
 
     win.close()

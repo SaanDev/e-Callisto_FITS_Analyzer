@@ -470,20 +470,38 @@ def test_noise_value_labels_follow_units_and_reset_to_zero():
     low_disp, high_disp, unit = win._noise_clip_display_values()
     assert win.lower_value_label.text() == win._format_noise_clip_value(low_disp, unit)
     assert win.upper_value_label.text() == win._format_noise_clip_value(high_disp, unit)
+    assert win.lower_value_sub_label.isHidden() is True
+    assert win.upper_value_sub_label.isHidden() is True
 
     win.set_units_mode(True)
     QApplication.processEvents()
+    prior_lower_text = win.lower_value_label.text()
+    prior_lower_sub_text = win.lower_value_sub_label.text()
     low_disp, high_disp, unit = win._noise_clip_display_values()
     assert unit == "dB"
-    assert win.lower_value_label.text() == win._format_noise_clip_value(low_disp, unit)
-    assert win.upper_value_label.text() == win._format_noise_clip_value(high_disp, unit)
+    assert win.lower_value_label.text() == win._format_noise_clip_threshold_digits(win.noise_clip_low)
+    assert win.upper_value_label.text() == win._format_noise_clip_threshold_digits(win.noise_clip_high)
+    assert win.lower_value_sub_label.isHidden() is False
+    assert win.upper_value_sub_label.isHidden() is False
+    assert win.lower_value_sub_label.text() == win._format_noise_clip_value(low_disp, unit)
+    assert win.upper_value_sub_label.text() == win._format_noise_clip_value(high_disp, unit)
+
+    win.lower_slider.setValue(win._noise_threshold_to_slider(-8.0))
+    QApplication.processEvents()
+    assert win.lower_value_label.text() != prior_lower_text
+    assert win.lower_value_sub_label.text() != prior_lower_sub_text
+    assert win.lower_value_label.text() == win._format_noise_clip_threshold_digits(-8.0)
 
     win.reset_to_raw()
     QApplication.processEvents()
     assert win.noise_clip_low == pytest.approx(0.0)
     assert win.noise_clip_high == pytest.approx(0.0)
     low_disp, high_disp, unit = win._noise_clip_display_values()
-    assert win.lower_value_label.text() == win._format_noise_clip_value(low_disp, unit)
-    assert win.upper_value_label.text() == win._format_noise_clip_value(high_disp, unit)
+    assert win.lower_value_label.text() == win._format_noise_clip_threshold_digits(win.noise_clip_low)
+    assert win.upper_value_label.text() == win._format_noise_clip_threshold_digits(win.noise_clip_high)
+    assert win.lower_value_sub_label.isHidden() is False
+    assert win.upper_value_sub_label.isHidden() is False
+    assert win.lower_value_sub_label.text() == win._format_noise_clip_value(low_disp, unit)
+    assert win.upper_value_sub_label.text() == win._format_noise_clip_value(high_disp, unit)
 
     win.close()

@@ -398,12 +398,22 @@ class MainWindow(QMainWindow):
         low_row.setSpacing(8)
         lbl_low = QLabel("Lower Threshold")
         lbl_low.setAlignment(Qt.AlignLeft)
+        low_value_card = QFrame()
+        low_value_card.setObjectName("NoiseThresholdValueCard")
+        low_value_layout = QVBoxLayout(low_value_card)
+        low_value_layout.setContentsMargins(8, 5, 8, 5)
+        low_value_layout.setSpacing(0)
         self.lower_value_label = QLabel("")
-        self.lower_value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.lower_value_label.setMinimumWidth(88)
-        low_row.addWidget(lbl_low)
-        low_row.addStretch(1)
-        low_row.addWidget(self.lower_value_label)
+        self.lower_value_label.setObjectName("NoiseThresholdPrimary")
+        self.lower_value_label.setAlignment(Qt.AlignRight | Qt.AlignBottom)
+        self.lower_value_sub_label = QLabel("")
+        self.lower_value_sub_label.setObjectName("NoiseThresholdSecondary")
+        self.lower_value_sub_label.setAlignment(Qt.AlignRight | Qt.AlignTop)
+        low_value_layout.addWidget(self.lower_value_label)
+        low_value_layout.addWidget(self.lower_value_sub_label)
+        low_value_card.setMinimumWidth(120)
+        low_row.addWidget(lbl_low, 1)
+        low_row.addWidget(low_value_card, 0)
         slider_layout.addLayout(low_row)
         slider_layout.addWidget(self.lower_slider)
 
@@ -411,12 +421,22 @@ class MainWindow(QMainWindow):
         high_row.setSpacing(8)
         lbl_high = QLabel("Upper Threshold")
         lbl_high.setAlignment(Qt.AlignLeft)
+        high_value_card = QFrame()
+        high_value_card.setObjectName("NoiseThresholdValueCard")
+        high_value_layout = QVBoxLayout(high_value_card)
+        high_value_layout.setContentsMargins(8, 5, 8, 5)
+        high_value_layout.setSpacing(0)
         self.upper_value_label = QLabel("")
-        self.upper_value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.upper_value_label.setMinimumWidth(88)
-        high_row.addWidget(lbl_high)
-        high_row.addStretch(1)
-        high_row.addWidget(self.upper_value_label)
+        self.upper_value_label.setObjectName("NoiseThresholdPrimary")
+        self.upper_value_label.setAlignment(Qt.AlignRight | Qt.AlignBottom)
+        self.upper_value_sub_label = QLabel("")
+        self.upper_value_sub_label.setObjectName("NoiseThresholdSecondary")
+        self.upper_value_sub_label.setAlignment(Qt.AlignRight | Qt.AlignTop)
+        high_value_layout.addWidget(self.upper_value_label)
+        high_value_layout.addWidget(self.upper_value_sub_label)
+        high_value_card.setMinimumWidth(120)
+        high_row.addWidget(lbl_high, 1)
+        high_row.addWidget(high_value_card, 0)
         slider_layout.addLayout(high_row)
         slider_layout.addWidget(self.upper_slider)
 
@@ -1148,8 +1168,22 @@ class MainWindow(QMainWindow):
         QGroupBox {
             font-weight: bold;
         }
+        QFrame#NoiseThresholdValueCard {
+            border: 1px solid #c8d0db;
+            border-radius: 8px;
+            background: #f5f8fc;
+        }
         QLabel {
             font-size: 12px;
+        }
+        QLabel#NoiseThresholdPrimary {
+            font-size: 12px;
+            font-weight: bold;
+            color: #223047;
+        }
+        QLabel#NoiseThresholdSecondary {
+            font-size: 10px;
+            color: #607089;
         }
         QLabel[section="true"] {
             font-weight: bold;
@@ -1383,6 +1417,20 @@ class MainWindow(QMainWindow):
         QLabel {{
             font-size: 12px;
             color: {text};
+        }}
+        QFrame#NoiseThresholdValueCard {{
+            border: 1px solid {border};
+            border-radius: 8px;
+            background-color: {field_bg};
+        }}
+        QLabel#NoiseThresholdPrimary {{
+            font-size: 12px;
+            font-weight: 700;
+            color: {text};
+        }}
+        QLabel#NoiseThresholdSecondary {{
+            font-size: 10px;
+            color: {muted};
         }}
         QLabel[section="true"] {{
             font-weight: 600;
@@ -2893,14 +2941,45 @@ class MainWindow(QMainWindow):
     def _format_noise_clip_value(self, value: float, unit_label: str) -> str:
         return f"{float(value):.2f} {unit_label}"
 
+    def _format_noise_clip_threshold_digits(self, value: float) -> str:
+        return f"{float(value):.2f} Digits"
+
     def _update_noise_clip_value_labels(self) -> None:
         low_label = getattr(self, "lower_value_label", None)
         high_label = getattr(self, "upper_value_label", None)
+        low_sub_label = getattr(self, "lower_value_sub_label", None)
+        high_sub_label = getattr(self, "upper_value_sub_label", None)
         if low_label is None or high_label is None:
             return
         low_disp, high_disp, unit_label = self._noise_clip_display_values()
+        if unit_label == "dB":
+            low_label.setText(self._format_noise_clip_threshold_digits(self.noise_clip_low))
+            high_label.setText(self._format_noise_clip_threshold_digits(self.noise_clip_high))
+            if low_sub_label is not None:
+                low_sub_label.setText(self._format_noise_clip_value(low_disp, unit_label))
+                low_sub_label.setVisible(True)
+            if high_sub_label is not None:
+                high_sub_label.setText(self._format_noise_clip_value(high_disp, unit_label))
+                high_sub_label.setVisible(True)
+            tooltip = "Primary readout shows the clipping threshold in Digits; secondary line shows the display value in dB"
+            low_label.setToolTip(tooltip)
+            high_label.setToolTip(tooltip)
+            if low_sub_label is not None:
+                low_sub_label.setToolTip(tooltip)
+            if high_sub_label is not None:
+                high_sub_label.setToolTip(tooltip)
+            return
         low_label.setText(self._format_noise_clip_value(low_disp, unit_label))
         high_label.setText(self._format_noise_clip_value(high_disp, unit_label))
+        if low_sub_label is not None:
+            low_sub_label.clear()
+            low_sub_label.setVisible(False)
+        if high_sub_label is not None:
+            high_sub_label.clear()
+            high_sub_label.setVisible(False)
+        tooltip = "Clipping threshold in Digits"
+        low_label.setToolTip(tooltip)
+        high_label.setToolTip(tooltip)
 
     def _on_noise_slider_value_changed(self, _value: int) -> None:
         if self._noise_slider_sync_guard:
