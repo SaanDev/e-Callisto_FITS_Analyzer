@@ -27,6 +27,37 @@ def _app():
     return QApplication.instance() or QApplication([])
 
 
+def _make_goes_payload():
+    return GoesOverlayPayload(
+        start_utc=datetime(2026, 2, 10, 0, 0, tzinfo=timezone.utc),
+        end_utc=datetime(2026, 2, 10, 0, 1, tzinfo=timezone.utc),
+        base_utc=datetime(2026, 2, 10, 0, 0, tzinfo=timezone.utc),
+        satellite_number=17,
+        satellite_numbers=(17,),
+        series={
+            "xrsa": {
+                "channel_key": "xrsa",
+                "display_label": "Long(XRS-A)",
+                "channel_label": "xrsa_short",
+                "satellite_number": 17,
+                "x_seconds": np.array([0.0, 60.0], dtype=float),
+                "flux_wm2": np.array([8e-9, 1e-8], dtype=float),
+            },
+            "xrsb": {
+                "channel_key": "xrsb",
+                "display_label": "Short(XRS-B)",
+                "channel_label": "xrsb_long",
+                "satellite_number": 17,
+                "x_seconds": np.array([0.0, 60.0], dtype=float),
+                "flux_wm2": np.array([1e-8, 2e-8], dtype=float),
+            },
+        },
+        x_seconds=np.array([0.0, 60.0], dtype=float),
+        flux_wm2=np.array([1e-8, 2e-8], dtype=float),
+        channel_label="xrsb_long",
+    )
+
+
 def test_main_window_hw_annotation_actions_keep_accel_canvas(monkeypatch):
     _app()
     window = MainWindow(theme=None)
@@ -156,7 +187,7 @@ def test_move_text_label_repositions_selected_label():
     window.close()
 
 
-def test_goes_overlay_action_is_present_in_solar_events_menu():
+def test_goes_overlay_submenu_is_present_in_solar_events_menu():
     _app()
     window = MainWindow(theme=None)
 
@@ -170,7 +201,11 @@ def test_goes_overlay_action_is_present_in_solar_events_menu():
     actions = [action for action in solar_menu.actions() if not action.isSeparator()]
     assert actions[-2].text() == "Sync Current Time Window"
     assert actions[-1].text() == "GOES Overlay"
-    assert actions[-1].isCheckable() is True
+    goes_menu = actions[-1].menu()
+    assert goes_menu is not None
+    goes_actions = [action for action in goes_menu.actions() if not action.isSeparator()]
+    assert [action.text() for action in goes_actions] == ["Long(XRS-A)", "Short(XRS-B)"]
+    assert all(action.isCheckable() for action in goes_actions)
     window.close()
 
 
@@ -178,9 +213,10 @@ def test_goes_overlay_toggle_reverts_without_utc_context():
     _app()
     window = MainWindow(theme=None)
     window.raw_data = np.zeros((2, 2), dtype=np.float32)
-    window.goes_overlay_action.setChecked(True)
+    window.goes_overlay_long_action.setChecked(True)
 
-    assert window.goes_overlay_action.isChecked() is False
+    assert window.goes_overlay_long_action.isChecked() is False
+    assert window.goes_overlay_short_action.isChecked() is False
     assert window._goes_overlay_enabled is False
     window.close()
 
@@ -204,16 +240,35 @@ def test_goes_overlay_toggle_with_mocked_success_keeps_spectrogram_data(monkeypa
             end_utc=ctx["end_utc"],
             base_utc=ctx["base_utc"],
             satellite_number=16,
+            satellite_numbers=(16,),
+            series={
+                "xrsa": {
+                    "channel_key": "xrsa",
+                    "display_label": "Long(XRS-A)",
+                    "channel_label": "xrsa_short",
+                    "satellite_number": 16,
+                    "x_seconds": np.array([0.0, 30.0, 60.0], dtype=float),
+                    "flux_wm2": np.array([7e-9, 1e-8, 2e-8], dtype=float),
+                },
+                "xrsb": {
+                    "channel_key": "xrsb",
+                    "display_label": "Short(XRS-B)",
+                    "channel_label": "xrsb_long",
+                    "satellite_number": 16,
+                    "x_seconds": np.array([0.0, 30.0, 60.0], dtype=float),
+                    "flux_wm2": np.array([1e-8, 2e-8, 4e-8], dtype=float),
+                },
+            },
             x_seconds=np.array([0.0, 30.0, 60.0], dtype=float),
             flux_wm2=np.array([1e-8, 2e-8, 4e-8], dtype=float),
-            channel_label="xrsb",
+            channel_label="xrsb_long",
         )
         window._on_goes_overlay_finished(ctx["request_key"], payload)
 
     monkeypatch.setattr(window, "_start_goes_overlay_request", fake_start)
-    window.goes_overlay_action.setChecked(True)
+    window.goes_overlay_long_action.setChecked(True)
 
-    assert window.goes_overlay_action.isChecked() is True
+    assert window.goes_overlay_long_action.isChecked() is True
     assert window._goes_overlay_enabled is True
     assert window._goes_overlay_payload is not None
     assert np.array_equal(window.raw_data, before)
@@ -224,17 +279,9 @@ def test_goes_overlay_toggle_with_mocked_success_keeps_spectrogram_data(monkeypa
 def test_apply_loaded_dataset_invalidates_goes_overlay_and_requests_refresh(monkeypatch):
     _app()
     window = MainWindow(theme=None)
-    window._set_goes_overlay_checked(True)
+    window._set_goes_overlay_checked(("xrsa",))
     window._goes_overlay_enabled = True
-    window._goes_overlay_payload = GoesOverlayPayload(
-        start_utc=datetime(2026, 2, 10, 0, 0, tzinfo=timezone.utc),
-        end_utc=datetime(2026, 2, 10, 0, 1, tzinfo=timezone.utc),
-        base_utc=datetime(2026, 2, 10, 0, 0, tzinfo=timezone.utc),
-        satellite_number=16,
-        x_seconds=np.array([0.0, 60.0], dtype=float),
-        flux_wm2=np.array([1e-8, 2e-8], dtype=float),
-        channel_label="xrsb",
-    )
+    window._goes_overlay_payload = _make_goes_payload()
     window._goes_overlay_payload_key = "old"
 
     calls = []
@@ -266,22 +313,15 @@ def test_goes_overlay_toggle_off_clears_renderers(monkeypatch):
     _app()
     window = MainWindow(theme=None)
     window._goes_overlay_enabled = True
-    window._goes_overlay_payload = GoesOverlayPayload(
-        start_utc=datetime(2026, 2, 10, 0, 0, tzinfo=timezone.utc),
-        end_utc=datetime(2026, 2, 10, 0, 1, tzinfo=timezone.utc),
-        base_utc=datetime(2026, 2, 10, 0, 0, tzinfo=timezone.utc),
-        satellite_number=16,
-        x_seconds=np.array([0.0, 60.0], dtype=float),
-        flux_wm2=np.array([1e-8, 2e-8], dtype=float),
-        channel_label="xrsb",
-    )
-    window._set_goes_overlay_checked(True)
+    window._goes_overlay_payload = _make_goes_payload()
+    window._set_goes_overlay_checked(("xrsa", "xrsb"))
 
     cleared = {"mpl": 0, "hw": 0}
     monkeypatch.setattr(window, "_remove_goes_overlay_mpl_axis", lambda: cleared.__setitem__("mpl", cleared["mpl"] + 1))
     monkeypatch.setattr(window.accel_canvas, "clear_goes_overlay", lambda: cleared.__setitem__("hw", cleared["hw"] + 1))
 
-    window.goes_overlay_action.setChecked(False)
+    window.goes_overlay_long_action.setChecked(False)
+    window.goes_overlay_short_action.setChecked(False)
 
     assert window._goes_overlay_enabled is False
     assert cleared["mpl"] >= 1

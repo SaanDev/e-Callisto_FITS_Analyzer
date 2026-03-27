@@ -155,21 +155,38 @@ def test_accelerated_widget_goes_overlay_lifecycle():
     )
 
     payload = {
+        "satellite_number": 18,
+        "satellite_numbers": (17, 18),
+        "series": {
+            "xrsa": {
+                "x_seconds": np.array([0.0, 2.0, 4.0, 6.0], dtype=float),
+                "flux_wm2": np.array([6e-9, 8e-9, 1e-8, 2e-8], dtype=float),
+                "channel_label": "xrsa",
+            },
+            "xrsb": {
+                "x_seconds": np.array([0.0, 2.0, 4.0, 6.0], dtype=float),
+                "flux_wm2": np.array([1e-8, 2e-8, 4e-8, 6e-8], dtype=float),
+                "channel_label": "xrsb",
+            },
+        },
         "x_seconds": np.array([0.0, 2.0, 4.0, 6.0], dtype=float),
         "flux_wm2": np.array([1e-8, 2e-8, 4e-8, 6e-8], dtype=float),
         "channel_label": "xrsb",
     }
-    widget.set_goes_overlay(payload)
+    widget.set_goes_overlay(payload, visible_channels=("xrsa", "xrsb"))
 
     assert widget._goes_overlay_payload is payload
-    assert widget._goes_curve_item is not None
+    assert widget._goes_curve_items
 
-    x_data, y_data = widget._goes_curve_item.getData()
-    assert np.allclose(x_data, payload["x_seconds"])
-    assert np.allclose(y_data, np.log10(payload["flux_wm2"]))
+    x_b, y_b = widget._goes_curve_items["xrsb"].getData()
+    x_a, y_a = widget._goes_curve_items["xrsa"].getData()
+    assert np.allclose(x_b, payload["series"]["xrsb"]["x_seconds"])
+    assert np.allclose(y_b, np.log10(payload["series"]["xrsb"]["flux_wm2"]))
+    assert np.allclose(x_a, payload["series"]["xrsa"]["x_seconds"])
+    assert np.allclose(y_a, np.log10(payload["series"]["xrsa"]["flux_wm2"]))
 
     widget.clear_goes_overlay()
-    x_data, y_data = widget._goes_curve_item.getData()
+    x_data, y_data = widget._goes_curve_items["xrsb"].getData()
     assert widget._goes_overlay_payload is None
     assert len(x_data) == 0
     assert len(y_data) == 0

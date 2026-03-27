@@ -12,7 +12,7 @@ from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
-from src.Backend.goes_overlay import goes_class_ticks_for_limits, goes_flux_axis_limits
+from src.Backend.goes_overlay import GOES_OVERLAY_CHANNEL_ORDER, goes_class_ticks_for_limits, goes_flux_axis_limits
 
 try:
     import pyqtgraph as pg
@@ -88,6 +88,13 @@ else:
         pass
 
 
+GOES_OVERLAY_CHANNEL_COLORS = {
+    "xrsa": "#67f2ff",
+    "xrsb": "#ffffff",
+}
+GOES_OVERLAY_LINE_WIDTH = 3.0
+
+
 class _SceneEventFilter(QObject):
     def __init__(self, owner):
         super().__init__(owner)
@@ -126,8 +133,10 @@ class AcceleratedPlotWidget(QWidget):
         self._bottom_axis = None
         self._goes_axis = None
         self._goes_view = None
+        self._goes_curve_items = {}
         self._goes_curve_item = None
         self._goes_overlay_payload = None
+        self._goes_visible_channels = ()
         self._goes_axis_label = "GOES X-Ray Class"
         self._title = ""
         self._x_label = "Time [s]"
@@ -216,17 +225,21 @@ class AcceleratedPlotWidget(QWidget):
             self._plot.scene().addItem(self._goes_view)
             self._goes_axis.linkToView(self._goes_view)
             self._goes_view.setXLink(self._viewbox)
-            self._goes_curve_item = pg.PlotCurveItem(
-                pen=pg.mkPen(color="#ffffff", width=2.0),
-                antialias=True,
-            )
-            self._goes_curve_item.setZValue(11)
-            self._goes_view.addItem(self._goes_curve_item)
+            for idx, key in enumerate(GOES_OVERLAY_CHANNEL_ORDER, start=1):
+                curve_item = pg.PlotCurveItem(
+                    pen=pg.mkPen(color=GOES_OVERLAY_CHANNEL_COLORS.get(key, "#ffffff"), width=GOES_OVERLAY_LINE_WIDTH + (0.2 if key == "xrsb" else 0.0)),
+                    antialias=True,
+                )
+                curve_item.setZValue(11 + idx)
+                self._goes_view.addItem(curve_item)
+                self._goes_curve_items[key] = curve_item
+            self._goes_curve_item = self._goes_curve_items.get("xrsb") or next(iter(self._goes_curve_items.values()), None)
             self._goes_axis.hide()
             self._sync_goes_overlay_geometry()
         except Exception:
             self._goes_axis = None
             self._goes_view = None
+            self._goes_curve_items = {}
             self._goes_curve_item = None
 
         self._plot.setMouseEnabled(x=True, y=True)
@@ -431,8 +444,8 @@ class AcceleratedPlotWidget(QWidget):
         if self._goes_axis is not None:
             try:
                 self._goes_axis.setTextPen(self._fg)
-                self._goes_axis.setPen(self._fg)
-                self._goes_axis.setStyle(tickFont=tick_font)
+                self._goes_axis.setPen(pg.mkPen(color=self._fg, width=1.25) if pg is not None else self._fg)
+                self._goes_axis.setStyle(tickFont=tick_font, tickLength=10)
                 self._goes_axis.setLabel(self._goes_axis_label, **label_style)
             except Exception:
                 pass
@@ -469,9 +482,9 @@ class AcceleratedPlotWidget(QWidget):
             return payload.get(name, default)
         return getattr(payload, name, default)
 
-    def _goes_payload_arrays(self, payload):
-        xs = np.asarray(self._payload_field(payload, "x_seconds", []), dtype=float)
-        ys = np.asarray(self._payload_field(payload, "flux_wm2", []), dtype=float)
+    def _goes_series_arrays(self, series):
+        xs = np.asarray(self._payload_field(series, "x_seconds", []), dtype=float)
+        ys = np.asarray(self._payload_field(series, "flux_wm2", []), dtype=float)
         if xs.size == 0 or ys.size == 0 or xs.size != ys.size:
             return None, None
         mask = np.isfinite(xs) & np.isfinite(ys) & (ys > 0.0)
@@ -479,17 +492,50 @@ class AcceleratedPlotWidget(QWidget):
             return None, None
         return np.asarray(xs[mask], dtype=float), np.asarray(ys[mask], dtype=float)
 
+    def _goes_payload_series(self, payload, visible_channels=None):
+        series_map = self._payload_field(payload, "series", {}) or {}
+        if not series_map:
+            return []
+        selected = tuple(visible_channels or GOES_OVERLAY_CHANNEL_ORDER)
+        out = []
+        for key in GOES_OVERLAY_CHANNEL_ORDER:
+            if key in selected and key in series_map:
+                out.append((key, series_map[key]))
+        for key, series in series_map.items():
+            if key in selected and key not in {item[0] for item in out}:
+                out.append((key, series))
+        return out
+
     def _goes_log_limits(self, flux):
         flux_limits = goes_flux_axis_limits(flux)
         if flux_limits is None:
             return None
         return float(np.log10(flux_limits[0])), float(np.log10(flux_limits[1]))
 
+    def _goes_axis_ticks(self, limits):
+        try:
+            flux_min = float(10.0 ** float(limits[0]))
+            flux_max = float(10.0 ** float(limits[1]))
+        except Exception:
+            return []
+        major = [(float(np.log10(value)), label) for value, label in goes_class_ticks_for_limits(flux_min, flux_max)]
+        minor = []
+        lo_exp = int(np.floor(float(limits[0])))
+        hi_exp = int(np.ceil(float(limits[1])))
+        for exponent in range(lo_exp, hi_exp + 1):
+            base = 10.0 ** exponent
+            for factor in range(2, 10):
+                value = float(factor) * base
+                if flux_min <= value <= flux_max:
+                    minor.append((float(np.log10(value)), ""))
+        return [major, minor]
+
     def clear_goes_overlay(self) -> None:
         self._goes_overlay_payload = None
-        if self._goes_curve_item is not None:
+        self._goes_visible_channels = ()
+        for curve_item in self._goes_curve_items.values():
             try:
-                self._goes_curve_item.setData([], [])
+                curve_item.setData([], [])
             except Exception:
                 pass
         if self._goes_axis is not None:
@@ -499,24 +545,37 @@ class AcceleratedPlotWidget(QWidget):
             except Exception:
                 pass
 
-    def set_goes_overlay(self, payload) -> None:
+    def set_goes_overlay(self, payload, visible_channels=None) -> None:
         self._goes_overlay_payload = payload
-        if not self.is_available or self._goes_view is None or self._goes_axis is None or self._goes_curve_item is None:
+        self._goes_visible_channels = tuple(visible_channels or ())
+        if not self.is_available or self._goes_view is None or self._goes_axis is None or not self._goes_curve_items:
             return
-        xs, flux = self._goes_payload_arrays(payload)
-        if xs is None or flux is None:
+        plot_series = []
+        flux_arrays = []
+        for key, series in self._goes_payload_series(payload, visible_channels=self._goes_visible_channels):
+            xs, flux = self._goes_series_arrays(series)
+            if xs is None or flux is None:
+                continue
+            plot_series.append((key, xs, flux))
+            flux_arrays.append(flux)
+        if not plot_series or not flux_arrays:
             self.clear_goes_overlay()
             return
 
-        log_flux = np.log10(flux)
-        limits = self._goes_log_limits(flux)
+        limits = self._goes_log_limits(np.concatenate(flux_arrays))
         if limits is None:
             self.clear_goes_overlay()
             return
 
         self._goes_axis_label = "GOES X-Ray Class"
         self._apply_text_style()
-        self._goes_curve_item.setData(xs, log_flux)
+        for key, curve_item in self._goes_curve_items.items():
+            curve_item.setData([], [])
+        for key, xs, flux in plot_series:
+            curve_item = self._goes_curve_items.get(key)
+            if curve_item is None:
+                continue
+            curve_item.setData(xs, np.log10(flux))
         try:
             self._goes_view.enableAutoRange(x=False, y=False)
         except Exception:
@@ -525,9 +584,8 @@ class AcceleratedPlotWidget(QWidget):
             self._goes_view.setRange(yRange=(float(limits[0]), float(limits[1])), padding=0.0)
         except Exception:
             pass
-        tick_pairs = goes_class_ticks_for_limits(float(10.0 ** limits[0]), float(10.0 ** limits[1]))
         try:
-            self._goes_axis.setTicks([[(float(np.log10(value)), label) for value, label in tick_pairs]])
+            self._goes_axis.setTicks(self._goes_axis_ticks(limits))
         except Exception:
             pass
         self._sync_goes_overlay_geometry()

@@ -23,12 +23,31 @@ from src.Backend.sunpy_archive import (
 )
 
 
+GOES_OVERLAY_CHANNEL_ORDER: tuple[str, ...] = ("xrsa", "xrsb")
+GOES_OVERLAY_CHANNEL_LABELS: dict[str, str] = {
+    "xrsa": "Long(XRS-A)",
+    "xrsb": "Short(XRS-B)",
+}
+
+
+@dataclass(slots=True)
+class GoesOverlaySeries:
+    channel_key: str
+    display_label: str
+    channel_label: str
+    satellite_number: int
+    x_seconds: np.ndarray
+    flux_wm2: np.ndarray
+
+
 @dataclass(slots=True)
 class GoesOverlayPayload:
     start_utc: datetime
     end_utc: datetime
     base_utc: datetime
     satellite_number: int
+    satellite_numbers: tuple[int, ...]
+    series: dict[str, GoesOverlaySeries]
     x_seconds: np.ndarray
     flux_wm2: np.ndarray
     channel_label: str
@@ -53,6 +72,14 @@ def pick_goes_long_channel(columns: list[str]) -> str | None:
     for col in columns:
         lowered = str(col or "").strip().lower()
         if any(token in lowered for token in ("xrsb", "long", "1.0", "8.0")):
+            return str(col)
+    return None
+
+
+def pick_goes_short_channel(columns: list[str]) -> str | None:
+    for col in columns:
+        lowered = str(col or "").strip().lower()
+        if any(token in lowered for token in ("xrsa", "short", "0.5", "4.0")):
             return str(col)
     return None
 
@@ -115,6 +142,77 @@ def goes_class_ticks_for_limits(ymin: float, ymax: float) -> list[tuple[float, s
     return [GOES_CLASS_LEVELS[-1]]
 
 
+def _extract_goes_overlay_series(
+    frame,
+    *,
+    column: str,
+    channel_key: str,
+    base_utc: datetime,
+    start_utc: datetime,
+    end_utc: datetime,
+    satellite_number: int,
+) -> GoesOverlaySeries:
+    index = getattr(frame, "index", None)
+    to_pydatetime = getattr(index, "to_pydatetime", None)
+    if not callable(to_pydatetime):
+        raise RuntimeError("GOES/XRS frame index does not provide timestamps.")
+
+    base_utc = _ensure_utc(base_utc)
+    start_utc = _ensure_utc(start_utc)
+    end_utc = _ensure_utc(end_utc)
+    times_utc = [_ensure_utc(item) for item in list(to_pydatetime())]
+    flux = np.asarray(frame[column], dtype=float)
+
+    if flux.size != len(times_utc):
+        raise RuntimeError("GOES/XRS frame shape is inconsistent.")
+
+    mask = np.array(
+        [
+            (start_utc <= item <= end_utc)
+            and np.isfinite(val)
+            and float(val) > 0.0
+            for item, val in zip(times_utc, flux)
+        ],
+        dtype=bool,
+    )
+    if not np.any(mask):
+        raise RuntimeError(f"GOES/XRS overlay contains no valid {channel_key.upper()} samples in range.")
+
+    selected_times = [times_utc[i] for i in np.nonzero(mask)[0]]
+    selected_flux = np.asarray(flux[mask], dtype=float)
+    x_seconds = np.asarray([(item - base_utc).total_seconds() for item in selected_times], dtype=float)
+
+    if x_seconds.size == 0:
+        raise RuntimeError("GOES/XRS overlay did not produce any plottable timestamps.")
+
+    order = np.argsort(x_seconds, kind="mergesort")
+    return GoesOverlaySeries(
+        channel_key=str(channel_key),
+        display_label=str(GOES_OVERLAY_CHANNEL_LABELS.get(channel_key, channel_key.upper())),
+        channel_label=str(column),
+        satellite_number=int(satellite_number),
+        x_seconds=np.asarray(x_seconds[order], dtype=float),
+        flux_wm2=np.asarray(selected_flux[order], dtype=float),
+    )
+
+
+def _best_channel_key(series_map: dict[str, GoesOverlaySeries]) -> str:
+    for key in ("xrsb", "xrsa"):
+        if key in series_map:
+            return key
+    return next(iter(series_map))
+
+
+def _payload_sample_count(payload: GoesOverlayPayload) -> int:
+    total = 0
+    for series in (payload.series or {}).values():
+        try:
+            total += int(np.asarray(series.x_seconds, dtype=float).size)
+        except Exception:
+            continue
+    return total
+
+
 def build_goes_overlay_payload(
     frame,
     *,
@@ -130,52 +228,53 @@ def build_goes_overlay_payload(
     if not numeric_cols:
         raise RuntimeError("GOES/XRS TimeSeries has no numeric columns.")
 
+    series_map: dict[str, GoesOverlaySeries] = {}
+    short_col = pick_goes_short_channel(numeric_cols)
     long_col = pick_goes_long_channel(numeric_cols)
-    if not long_col:
-        raise RuntimeError("GOES/XRS long channel (XRS-B) is unavailable.")
 
-    index = getattr(frame, "index", None)
-    to_pydatetime = getattr(index, "to_pydatetime", None)
-    if not callable(to_pydatetime):
-        raise RuntimeError("GOES/XRS frame index does not provide timestamps.")
+    if short_col:
+        try:
+            series_map["xrsa"] = _extract_goes_overlay_series(
+                frame,
+                column=short_col,
+                channel_key="xrsa",
+                base_utc=base_utc,
+                start_utc=start_utc,
+                end_utc=end_utc,
+                satellite_number=satellite_number,
+            )
+        except Exception:
+            pass
 
-    base_utc = _ensure_utc(base_utc)
-    start_utc = _ensure_utc(start_utc)
-    end_utc = _ensure_utc(end_utc)
-    times_utc = [_ensure_utc(item) for item in list(to_pydatetime())]
-    flux = np.asarray(frame[long_col], dtype=float)
+    if long_col:
+        try:
+            series_map["xrsb"] = _extract_goes_overlay_series(
+                frame,
+                column=long_col,
+                channel_key="xrsb",
+                base_utc=base_utc,
+                start_utc=start_utc,
+                end_utc=end_utc,
+                satellite_number=satellite_number,
+            )
+        except Exception:
+            pass
 
-    if flux.size != len(times_utc):
-        raise RuntimeError("GOES/XRS frame shape is inconsistent.")
+    if not series_map:
+        raise RuntimeError("GOES/XRS overlay does not provide usable XRS-A or XRS-B samples in range.")
 
-    mask = np.array(
-        [
-            (start_utc <= item <= end_utc)
-            and np.isfinite(val)
-            and float(val) > 0.0
-            for item, val in zip(times_utc, flux)
-        ],
-        dtype=bool,
-    )
-    if not np.any(mask):
-        raise RuntimeError("GOES/XRS overlay contains no valid long-channel samples in range.")
-
-    selected_times = [times_utc[i] for i in np.nonzero(mask)[0]]
-    selected_flux = np.asarray(flux[mask], dtype=float)
-    x_seconds = np.asarray([(item - base_utc).total_seconds() for item in selected_times], dtype=float)
-
-    if x_seconds.size == 0:
-        raise RuntimeError("GOES/XRS overlay did not produce any plottable timestamps.")
-
-    order = np.argsort(x_seconds, kind="mergesort")
+    primary_key = _best_channel_key(series_map)
+    primary_series = series_map[primary_key]
     return GoesOverlayPayload(
-        start_utc=start_utc,
-        end_utc=end_utc,
-        base_utc=base_utc,
-        satellite_number=int(satellite_number),
-        x_seconds=np.asarray(x_seconds[order], dtype=float),
-        flux_wm2=np.asarray(selected_flux[order], dtype=float),
-        channel_label=str(long_col),
+        start_utc=_ensure_utc(start_utc),
+        end_utc=_ensure_utc(end_utc),
+        base_utc=_ensure_utc(base_utc),
+        satellite_number=int(primary_series.satellite_number),
+        satellite_numbers=(int(primary_series.satellite_number),),
+        series=dict(series_map),
+        x_seconds=np.asarray(primary_series.x_seconds, dtype=float),
+        flux_wm2=np.asarray(primary_series.flux_wm2, dtype=float),
+        channel_label=str(primary_series.channel_label),
     )
 
 
@@ -277,14 +376,54 @@ def fetch_goes_overlay(
         if search_hits == 0:
             raise RuntimeError("No GOES/XRS files were found across GOES-16 to GOES-19 for the selected FITS observation window.")
         raise RuntimeError(
-            "No usable GOES/XRS long-channel data could be loaded across GOES-16 to GOES-19."
+            "No usable GOES/XRS overlay channels could be loaded across GOES-16 to GOES-19."
             + (f"\n\nDetails:\n{details}{more}" if details else "")
         )
 
-    payload = max(
-        payload_candidates,
-        key=lambda item: (int(item.x_seconds.size), -int(item.satellite_number)),
+    best_series: dict[str, GoesOverlaySeries] = {}
+    for payload in payload_candidates:
+        for key, series in (payload.series or {}).items():
+            current = best_series.get(key)
+            score = (int(np.asarray(series.x_seconds, dtype=float).size), -int(series.satellite_number))
+            current_score = (
+                (-1, 0)
+                if current is None
+                else (int(np.asarray(current.x_seconds, dtype=float).size), -int(current.satellite_number))
+            )
+            if current is None or score > current_score:
+                best_series[key] = series
+
+    if not best_series:
+        details = "\n".join(fetch_errors[:6])
+        more = "" if len(fetch_errors) <= 6 else f"\n...and {len(fetch_errors) - 6} more."
+        raise RuntimeError(
+            "No usable GOES/XRS overlay channels could be loaded across GOES-16 to GOES-19."
+            + (f"\n\nDetails:\n{details}{more}" if details else "")
+        )
+
+    ordered_series: dict[str, GoesOverlaySeries] = {}
+    for key in GOES_OVERLAY_CHANNEL_ORDER:
+        if key in best_series:
+            ordered_series[key] = best_series[key]
+    for key in best_series:
+        if key not in ordered_series:
+            ordered_series[key] = best_series[key]
+
+    primary_key = _best_channel_key(ordered_series)
+    primary_series = ordered_series[primary_key]
+    used_satellites = tuple(sorted({int(series.satellite_number) for series in ordered_series.values()}))
+    payload = GoesOverlayPayload(
+        start_utc=_ensure_utc(start_utc),
+        end_utc=_ensure_utc(end_utc),
+        base_utc=_ensure_utc(base_utc),
+        satellite_number=int(primary_series.satellite_number),
+        satellite_numbers=used_satellites,
+        series=ordered_series,
+        x_seconds=np.asarray(primary_series.x_seconds, dtype=float),
+        flux_wm2=np.asarray(primary_series.flux_wm2, dtype=float),
+        channel_label=str(primary_series.channel_label),
     )
     if progress_cb is not None:
-        progress_cb(100, f"Loaded {int(payload.x_seconds.size)} GOES/XRS samples from GOES-{int(payload.satellite_number)}.")
+        sat_text = ", ".join(f"GOES-{sat}" for sat in payload.satellite_numbers) or f"GOES-{int(payload.satellite_number)}"
+        progress_cb(100, f"Loaded {_payload_sample_count(payload)} GOES/XRS samples from {sat_text}.")
     return payload

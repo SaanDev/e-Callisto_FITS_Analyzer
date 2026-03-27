@@ -14,12 +14,14 @@ import pandas as pd
 import pytest
 
 from src.Backend.goes_overlay import (
+    GOES_OVERLAY_CHANNEL_LABELS,
     build_goes_overlay_payload,
     fetch_goes_overlay,
     goes_class_ticks_for_limits,
     goes_flux_axis_limits,
     normalize_goes_satellite_numbers,
     pick_goes_long_channel,
+    pick_goes_short_channel,
 )
 
 
@@ -28,11 +30,16 @@ def test_pick_goes_long_channel_prefers_long_tokens():
     assert pick_goes_long_channel(cols) == "XRSB_Flux_Long"
 
 
-def test_build_goes_overlay_payload_rejects_missing_long_channel():
-    idx = pd.to_datetime(["2026-02-10T01:00:00Z", "2026-02-10T01:01:00Z"], utc=True)
-    frame = pd.DataFrame({"xrsa": [1e-8, 2e-8]}, index=idx)
+def test_pick_goes_short_channel_prefers_short_tokens():
+    cols = ["quality_flag", "XRSA_Flux_Short", "xrsb_flux"]
+    assert pick_goes_short_channel(cols) == "XRSA_Flux_Short"
 
-    with pytest.raises(RuntimeError, match="long channel"):
+
+def test_build_goes_overlay_payload_rejects_missing_overlay_channels():
+    idx = pd.to_datetime(["2026-02-10T01:00:00Z", "2026-02-10T01:01:00Z"], utc=True)
+    frame = pd.DataFrame({"quality_flag": [0, 0]}, index=idx)
+
+    with pytest.raises(RuntimeError, match="XRS-A or XRS-B"):
         build_goes_overlay_payload(
             frame,
             base_utc=datetime(2026, 2, 10, 1, 0, 0, tzinfo=timezone.utc),
@@ -51,7 +58,13 @@ def test_build_goes_overlay_payload_converts_times_to_plot_seconds():
         ],
         utc=True,
     )
-    frame = pd.DataFrame({"xrsb_flux_long": [1e-8, 2e-8, 5e-8, 3e-8]}, index=idx)
+    frame = pd.DataFrame(
+        {
+            "xrsa_flux_short": [5e-9, 1e-8, 2e-8, 3e-8],
+            "xrsb_flux_long": [1e-8, 2e-8, 5e-8, 3e-8],
+        },
+        index=idx,
+    )
 
     payload = build_goes_overlay_payload(
         frame,
@@ -61,8 +74,13 @@ def test_build_goes_overlay_payload_converts_times_to_plot_seconds():
     )
 
     assert payload.channel_label == "xrsb_flux_long"
+    assert payload.satellite_numbers == (16,)
     assert np.allclose(payload.x_seconds, np.array([0.0, 60.0, 120.0], dtype=float))
     assert np.allclose(payload.flux_wm2, np.array([2e-8, 5e-8, 3e-8], dtype=float))
+    assert tuple(payload.series.keys()) == ("xrsa", "xrsb")
+    assert payload.series["xrsa"].display_label == GOES_OVERLAY_CHANNEL_LABELS["xrsa"]
+    assert np.allclose(payload.series["xrsa"].x_seconds, np.array([0.0, 60.0, 120.0], dtype=float))
+    assert np.allclose(payload.series["xrsa"].flux_wm2, np.array([1e-8, 2e-8, 3e-8], dtype=float))
 
 
 def test_build_goes_overlay_payload_handles_cross_day_range():
@@ -76,7 +94,13 @@ def test_build_goes_overlay_payload_handles_cross_day_range():
         ],
         utc=True,
     )
-    frame = pd.DataFrame({"long_channel_xrsb": [1e-8, 2e-8, 3e-8, 4e-8, 5e-8]}, index=idx)
+    frame = pd.DataFrame(
+        {
+            "short_channel_xrsa": [7e-9, 8e-9, 9e-9, 1e-8, 2e-8],
+            "long_channel_xrsb": [1e-8, 2e-8, 3e-8, 4e-8, 5e-8],
+        },
+        index=idx,
+    )
 
     payload = build_goes_overlay_payload(
         frame,
@@ -87,6 +111,7 @@ def test_build_goes_overlay_payload_handles_cross_day_range():
 
     assert np.allclose(payload.x_seconds, np.array([0.0, 60.0, 120.0, 180.0], dtype=float))
     assert np.allclose(payload.flux_wm2, np.array([2e-8, 3e-8, 4e-8, 5e-8], dtype=float))
+    assert np.allclose(payload.series["xrsa"].x_seconds, np.array([0.0, 60.0, 120.0, 180.0], dtype=float))
 
 
 def test_normalize_goes_satellite_numbers_defaults_and_deduplicates():
@@ -123,7 +148,13 @@ def test_fetch_goes_overlay_searches_all_satellites_and_selects_best(monkeypatch
             else:
                 vals = [1e-8, 2e-8]
                 idx = idx[:2]
-            return pd.DataFrame({"xrsb_long": vals}, index=idx)
+            return pd.DataFrame(
+                {
+                    "xrsa_short": np.asarray(vals, dtype=float) / 2.0,
+                    "xrsb_long": vals,
+                },
+                index=idx,
+            )
 
     def fake_search(spec):
         sat = int(spec.satellite_number)
@@ -159,7 +190,59 @@ def test_fetch_goes_overlay_searches_all_satellites_and_selects_best(monkeypatch
 
     assert calls["search"] == [16, 17, 18, 19]
     assert payload.satellite_number == 17
+    assert payload.satellite_numbers == (17,)
     assert np.allclose(payload.x_seconds, np.array([0.0, 60.0, 120.0, 180.0], dtype=float))
+    assert tuple(payload.series.keys()) == ("xrsa", "xrsb")
+
+
+def test_fetch_goes_overlay_combines_best_channels_across_satellites(monkeypatch, tmp_path):
+    class _FakeTimeSeries:
+        def __init__(self, sat: int):
+            self.sat = sat
+
+        def to_dataframe(self):
+            idx = pd.to_datetime(
+                [
+                    "2026-02-10T01:00:00Z",
+                    "2026-02-10T01:01:00Z",
+                    "2026-02-10T01:02:00Z",
+                ],
+                utc=True,
+            )
+            if self.sat == 17:
+                return pd.DataFrame({"xrsb_long": [1e-8, 2e-8, 4e-8]}, index=idx)
+            if self.sat == 18:
+                return pd.DataFrame({"xrsa_short": [8e-9, 9e-9, 1e-8]}, index=idx)
+            return pd.DataFrame({"quality_flag": [0, 0, 0]}, index=idx)
+
+    def fake_search(spec):
+        sat = int(spec.satellite_number)
+        rows = [object()] if sat in {17, 18} else []
+        return type("Result", (), {"rows": rows, "satellite_number": sat})()
+
+    def fake_fetch(search_result, cache_dir, selected_rows=None, progress_cb=None):
+        sat = int(search_result.satellite_number)
+        return type("FetchResult", (), {"paths": [str(tmp_path / f"goes{sat}.nc")], "errors": [], "failed_count": 0})()
+
+    def fake_load(paths, data_kind):
+        sat = 17 if "goes17" in str(paths[0]) else 18
+        return type("LoadResult", (), {"maps_or_timeseries": _FakeTimeSeries(sat)})()
+
+    monkeypatch.setattr("src.Backend.goes_overlay.search", fake_search)
+    monkeypatch.setattr("src.Backend.goes_overlay.fetch", fake_fetch)
+    monkeypatch.setattr("src.Backend.goes_overlay.load_downloaded", fake_load)
+
+    payload = fetch_goes_overlay(
+        start_utc=datetime(2026, 2, 10, 1, 0, 0, tzinfo=timezone.utc),
+        end_utc=datetime(2026, 2, 10, 1, 2, 0, tzinfo=timezone.utc),
+        base_utc=datetime(2026, 2, 10, 1, 0, 0, tzinfo=timezone.utc),
+        cache_dir=tmp_path,
+        satellite_numbers=(16, 17, 18, 19),
+    )
+
+    assert payload.satellite_numbers == (17, 18)
+    assert payload.series["xrsb"].satellite_number == 17
+    assert payload.series["xrsa"].satellite_number == 18
 
 
 def test_fetch_goes_overlay_skips_satellite_search_failures(monkeypatch, tmp_path):
@@ -173,7 +256,13 @@ def test_fetch_goes_overlay_skips_satellite_search_failures(monkeypatch, tmp_pat
                 ],
                 utc=True,
             )
-            return pd.DataFrame({"xrsb_long": [1e-8, 2e-8, 3e-8]}, index=idx)
+            return pd.DataFrame(
+                {
+                    "xrsa_short": [6e-9, 8e-9, 1e-8],
+                    "xrsb_long": [1e-8, 2e-8, 3e-8],
+                },
+                index=idx,
+            )
 
     seen = {"search": []}
 
@@ -207,3 +296,4 @@ def test_fetch_goes_overlay_skips_satellite_search_failures(monkeypatch, tmp_pat
 
     assert seen["search"][:2] == [16, 17]
     assert payload.satellite_number == 17
+    assert payload.satellite_numbers == (17,)

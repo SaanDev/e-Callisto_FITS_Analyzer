@@ -21,7 +21,7 @@ import numpy as np
 from astropy.io import fits
 from matplotlib.figure import Figure
 from matplotlib.path import Path
-from matplotlib.ticker import FuncFormatter, ScalarFormatter
+from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter, ScalarFormatter
 from matplotlib.widgets import LassoSelector, RectangleSelector
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from PySide6.QtCore import QSettings, QSize, QStandardPaths, Qt, QThread, QTimer, QUrl, Slot
@@ -85,8 +85,13 @@ from src.Backend.annotations import (
     toggle_all_visibility,
 )
 from src.Backend.fits_io import build_combined_header, extract_ut_start_sec, load_callisto_fits
-from src.Backend.goes_overlay import GoesOverlayPayload
-from src.Backend.goes_overlay import goes_class_ticks_for_limits, goes_flux_axis_limits
+from src.Backend.goes_overlay import (
+    GOES_OVERLAY_CHANNEL_LABELS,
+    GOES_OVERLAY_CHANNEL_ORDER,
+    GoesOverlayPayload,
+    goes_class_ticks_for_limits,
+    goes_flux_axis_limits,
+)
 from src.Backend.presets import (
     PRESET_SCHEMA_VERSION,
     build_preset,
@@ -132,6 +137,13 @@ from src.UI.gui_workers import (
 from src.UI.mpl_style import style_axes
 from src.UI.utils.cme_helper_client import CMEHelperClient
 from src.version import APP_NAME, APP_ORG, APP_VERSION
+
+
+GOES_OVERLAY_CHANNEL_COLORS = {
+    "xrsa": "#67f2ff",
+    "xrsb": "#ffffff",
+}
+GOES_OVERLAY_LINE_WIDTH = 3.0
 
 class MainWindow(QMainWindow):
     # Convert digit differences (e.g., Ihot - Icold) to dB.
@@ -773,8 +785,11 @@ class MainWindow(QMainWindow):
         self.sync_time_window_action = QAction("Sync Current Time Window", self)
         self.sync_time_window_action.triggered.connect(self.sync_current_time_window_to_solar_events)
         solar_events_menu.addAction(self.sync_time_window_action)
-        self.goes_overlay_action = QAction("GOES Overlay", self, checkable=True)
-        solar_events_menu.addAction(self.goes_overlay_action)
+        self.goes_overlay_menu = solar_events_menu.addMenu("GOES Overlay")
+        self.goes_overlay_long_action = QAction(GOES_OVERLAY_CHANNEL_LABELS["xrsa"], self, checkable=True)
+        self.goes_overlay_short_action = QAction(GOES_OVERLAY_CHANNEL_LABELS["xrsb"], self, checkable=True)
+        self.goes_overlay_menu.addAction(self.goes_overlay_long_action)
+        self.goes_overlay_menu.addAction(self.goes_overlay_short_action)
 
         # FITS View Menu
         fits_view_menu = menubar.addMenu("FITS View")
@@ -935,7 +950,8 @@ class MainWindow(QMainWindow):
         self.rfi_open_action.triggered.connect(self.open_rfi_panel)
         self.rfi_apply_action.triggered.connect(self.apply_rfi_now)
         self.rfi_reset_action.triggered.connect(self.reset_rfi)
-        self.goes_overlay_action.toggled.connect(self._on_goes_overlay_toggled)
+        self.goes_overlay_long_action.toggled.connect(self._on_goes_overlay_toggled)
+        self.goes_overlay_short_action.toggled.connect(self._on_goes_overlay_toggled)
 
         self.ann_add_polygon_action.triggered.connect(self.start_annotation_polygon)
         self.ann_add_line_action.triggered.connect(self.start_annotation_line)
@@ -1768,7 +1784,10 @@ class MainWindow(QMainWindow):
         )
         self.accel_canvas.set_time_mode(self.use_utc, self.ut_start_sec)
         try:
-            self.accel_canvas.set_goes_overlay(self._goes_overlay_payload if self._goes_overlay_enabled else None)
+            self.accel_canvas.set_goes_overlay(
+                self._goes_overlay_payload if self._goes_overlay_enabled else None,
+                visible_channels=self._selected_goes_overlay_channels(),
+            )
         except Exception:
             pass
         return True
@@ -2628,7 +2647,7 @@ class MainWindow(QMainWindow):
 
         self._reset_runtime_state_for_loaded_data()
         self.plot_data(self.raw_data, title=plot_title)
-        if getattr(self, "goes_overlay_action", None) is not None and self.goes_overlay_action.isChecked():
+        if self._selected_goes_overlay_channels():
             QTimer.singleShot(0, lambda: self._ensure_goes_overlay_for_current_data(force=True))
 
         self._project_path = None
@@ -6545,13 +6564,82 @@ class MainWindow(QMainWindow):
         end_dt = base + timedelta(seconds=float(self.ut_start_sec) + x1)
         return start_dt, end_dt
 
-    def _set_goes_overlay_checked(self, checked: bool) -> None:
-        act = getattr(self, "goes_overlay_action", None)
-        if act is None:
-            return
-        blocked = act.blockSignals(True)
-        act.setChecked(bool(checked))
-        act.blockSignals(blocked)
+    def _goes_overlay_channel_actions(self) -> dict[str, QAction]:
+        return {
+            "xrsa": getattr(self, "goes_overlay_long_action", None),
+            "xrsb": getattr(self, "goes_overlay_short_action", None),
+        }
+
+    def _selected_goes_overlay_channels(self) -> tuple[str, ...]:
+        selected: list[str] = []
+        for key in GOES_OVERLAY_CHANNEL_ORDER:
+            action = self._goes_overlay_channel_actions().get(key)
+            if action is not None and action.isChecked():
+                selected.append(key)
+        return tuple(selected)
+
+    def _set_goes_overlay_checked(self, checked) -> None:
+        if isinstance(checked, bool):
+            selected = set(GOES_OVERLAY_CHANNEL_ORDER if checked else ())
+        else:
+            selected = {str(key).strip().lower() for key in list(checked or [])}
+        for key, action in self._goes_overlay_channel_actions().items():
+            if action is None:
+                continue
+            blocked = action.blockSignals(True)
+            action.setChecked(key in selected)
+            action.blockSignals(blocked)
+
+    def _goes_payload_field(self, payload, name: str, default=None):
+        if payload is None:
+            return default
+        if isinstance(payload, dict):
+            return payload.get(name, default)
+        return getattr(payload, name, default)
+
+    def _goes_overlay_visible_series(self, payload, selected_channels=None) -> list[tuple[str, object]]:
+        if payload is None:
+            return []
+        try:
+            series_map = self._goes_payload_field(payload, "series", {}) or {}
+        except Exception:
+            series_map = {}
+        if not series_map:
+            return []
+        selected = tuple(selected_channels or self._selected_goes_overlay_channels())
+        if not selected:
+            return []
+        out: list[tuple[str, object]] = []
+        for key in GOES_OVERLAY_CHANNEL_ORDER:
+            if key in selected and key in series_map:
+                out.append((key, series_map[key]))
+        for key, series in series_map.items():
+            if key in selected and key not in {item[0] for item in out}:
+                out.append((key, series))
+        return out
+
+    def _goes_overlay_used_satellites(self, payload) -> tuple[int, ...]:
+        values = self._goes_payload_field(payload, "satellite_numbers", ()) or ()
+        out: list[int] = []
+        for item in values:
+            try:
+                sat = int(item)
+            except Exception:
+                continue
+            if sat not in out:
+                out.append(sat)
+        if out:
+            return tuple(out)
+        try:
+            sat = int(self._goes_payload_field(payload, "satellite_number", 0) or 0)
+        except Exception:
+            sat = 0
+        return (sat,) if sat > 0 else ()
+
+    def _goes_overlay_missing_selected_channels(self, payload, selected_channels=None) -> list[str]:
+        selected = tuple(selected_channels or self._selected_goes_overlay_channels())
+        series_map = self._goes_payload_field(payload, "series", {}) or {}
+        return [GOES_OVERLAY_CHANNEL_LABELS.get(key, key.upper()) for key in selected if key not in series_map]
 
     def _remove_goes_overlay_mpl_axis(self) -> None:
         ax = getattr(self, "_goes_overlay_mpl_ax", None)
@@ -6639,12 +6727,14 @@ class MainWindow(QMainWindow):
         ax.patch.set_visible(False)
         ax.grid(False)
         ax.spines["right"].set_color(fg)
+        ax.spines["right"].set_linewidth(1.15)
         for spine_name in ("top", "left", "bottom"):
             try:
                 ax.spines[spine_name].set_visible(False)
             except Exception:
                 pass
-        ax.tick_params(axis="y", colors=fg, labelsize=self.tick_font_px)
+        ax.tick_params(axis="y", which="major", colors=fg, labelsize=self.tick_font_px, length=8, width=1.25, direction="out")
+        ax.tick_params(axis="y", which="minor", colors=fg, length=5, width=1.0, direction="out")
         for lbl in ax.get_yticklabels():
             lbl.set_fontsize(self.tick_font_px)
             lbl.set_fontweight(tick_weight)
@@ -6663,7 +6753,8 @@ class MainWindow(QMainWindow):
     def _render_goes_overlay(self) -> None:
         self._clear_goes_overlay_render()
 
-        payload = self._goes_overlay_payload if self._goes_overlay_enabled else None
+        selected_channels = self._selected_goes_overlay_channels()
+        payload = self._goes_overlay_payload if (self._goes_overlay_enabled and selected_channels) else None
         if payload is None:
             try:
                 self.canvas.draw_idle()
@@ -6671,17 +6762,39 @@ class MainWindow(QMainWindow):
                 pass
             return
 
-        try:
-            xs = np.asarray(payload.x_seconds, dtype=float)
-            flux = np.asarray(payload.flux_wm2, dtype=float)
-        except Exception:
+        visible_series = self._goes_overlay_visible_series(payload, selected_channels=selected_channels)
+        if not visible_series:
+            try:
+                self.accel_canvas.clear_goes_overlay()
+            except Exception:
+                pass
+            try:
+                self.canvas.draw_idle()
+            except Exception:
+                pass
             return
-        mask = np.isfinite(xs) & np.isfinite(flux) & (flux > 0.0)
-        if not np.any(mask):
+
+        flux_arrays: list[np.ndarray] = []
+        plot_series: list[tuple[str, np.ndarray, np.ndarray]] = []
+        for key, series in visible_series:
+            try:
+                xs = np.asarray(self._goes_payload_field(series, "x_seconds", []), dtype=float)
+                flux = np.asarray(self._goes_payload_field(series, "flux_wm2", []), dtype=float)
+            except Exception:
+                continue
+            mask = np.isfinite(xs) & np.isfinite(flux) & (flux > 0.0)
+            if not np.any(mask):
+                continue
+            xs = np.asarray(xs[mask], dtype=float)
+            flux = np.asarray(flux[mask], dtype=float)
+            if xs.size == 0 or flux.size == 0:
+                continue
+            flux_arrays.append(flux)
+            plot_series.append((key, xs, flux))
+        if not plot_series or not flux_arrays:
             return
-        xs = xs[mask]
-        flux = flux[mask]
-        limits = goes_flux_axis_limits(flux)
+
+        limits = goes_flux_axis_limits(np.concatenate(flux_arrays))
         if limits is None:
             return
         class_ticks = goes_class_ticks_for_limits(limits[0], limits[1])
@@ -6692,7 +6805,19 @@ class MainWindow(QMainWindow):
             overlay_ax.set_yscale("log")
             overlay_ax.set_ylim(limits)
             overlay_ax.set_xlim(self.canvas.ax.get_xlim())
-            overlay_ax.plot(xs, flux, color="#ffffff", linewidth=2.0, alpha=0.95, zorder=6)
+            overlay_ax.yaxis.set_major_locator(LogLocator(base=10.0, subs=(1.0,), numticks=12))
+            overlay_ax.yaxis.set_minor_locator(LogLocator(base=10.0, subs=np.arange(2.0, 10.0), numticks=120))
+            overlay_ax.yaxis.set_minor_formatter(NullFormatter())
+            for idx, (key, xs, flux) in enumerate(plot_series, start=1):
+                overlay_ax.plot(
+                    xs,
+                    flux,
+                    color=GOES_OVERLAY_CHANNEL_COLORS.get(key, "#ffffff"),
+                    linewidth=GOES_OVERLAY_LINE_WIDTH + (0.2 if key == "xrsb" else 0.0),
+                    alpha=0.98,
+                    solid_capstyle="round",
+                    zorder=6 + idx,
+                )
             overlay_ax.set_yticks([value for value, _label in class_ticks])
             overlay_ax.set_yticklabels([label for _value, label in class_ticks])
             self._apply_goes_overlay_axis_style(overlay_ax)
@@ -6701,7 +6826,7 @@ class MainWindow(QMainWindow):
             self._goes_overlay_mpl_ax = None
 
         try:
-            self.accel_canvas.set_goes_overlay(payload)
+            self.accel_canvas.set_goes_overlay(payload, visible_channels=selected_channels)
         except Exception:
             pass
 
@@ -6743,7 +6868,8 @@ class MainWindow(QMainWindow):
         self._goes_overlay_thread.start()
 
     def _ensure_goes_overlay_for_current_data(self, *, force: bool = False) -> bool:
-        if not bool(getattr(self, "goes_overlay_action", None) and self.goes_overlay_action.isChecked()):
+        selected_channels = self._selected_goes_overlay_channels()
+        if not selected_channels:
             self._goes_overlay_enabled = False
             self._goes_overlay_active_request = None
             self._render_goes_overlay()
@@ -6767,7 +6893,11 @@ class MainWindow(QMainWindow):
             and self._goes_overlay_payload_key == str(ctx["request_key"])
         ):
             self._render_goes_overlay()
-            self.statusBar().showMessage("GOES overlay ready.", 2500)
+            missing = self._goes_overlay_missing_selected_channels(self._goes_overlay_payload, selected_channels)
+            message = "GOES overlay ready."
+            if missing:
+                message = f"GOES overlay ready; missing {', '.join(missing)}."
+            self.statusBar().showMessage(message, 3000)
             return True
 
         if self._goes_overlay_thread is not None:
@@ -6778,8 +6908,9 @@ class MainWindow(QMainWindow):
         return True
 
     def _on_goes_overlay_toggled(self, checked: bool) -> None:
-        self._goes_overlay_enabled = bool(checked)
-        if not checked:
+        selected_channels = self._selected_goes_overlay_channels()
+        self._goes_overlay_enabled = bool(selected_channels)
+        if not selected_channels:
             self._goes_overlay_active_request = None
             self._render_goes_overlay()
             self.statusBar().showMessage("GOES overlay hidden.", 2500)
@@ -6801,7 +6932,13 @@ class MainWindow(QMainWindow):
         self._goes_overlay_payload = payload
         self._goes_overlay_payload_key = request_key
         self._render_goes_overlay()
-        self.statusBar().showMessage(f"GOES overlay loaded from GOES-{int(payload.satellite_number)}.", 3500)
+        used_satellites = self._goes_overlay_used_satellites(payload)
+        source_text = ", ".join(f"GOES-{sat}" for sat in used_satellites) or f"GOES-{int(payload.satellite_number)}"
+        missing = self._goes_overlay_missing_selected_channels(payload)
+        detail = f"GOES overlay loaded from {source_text}."
+        if missing:
+            detail = detail[:-1] + f"; missing {', '.join(missing)}."
+        self.statusBar().showMessage(detail, 4000)
 
     def _on_goes_overlay_failed(self, request_key: str, message: str) -> None:
         request_key = str(request_key or "").strip()
