@@ -25,8 +25,8 @@ from src.Backend.sunpy_archive import (
 
 GOES_OVERLAY_CHANNEL_ORDER: tuple[str, ...] = ("xrsa", "xrsb")
 GOES_OVERLAY_CHANNEL_LABELS: dict[str, str] = {
-    "xrsa": "Long(XRS-A)",
-    "xrsb": "Short(XRS-B)",
+    "xrsa": "Short(XRS-A)",
+    "xrsb": "Long(XRS-B)",
 }
 
 
@@ -142,6 +142,96 @@ def goes_class_ticks_for_limits(ymin: float, ymax: float) -> list[tuple[float, s
     return [GOES_CLASS_LEVELS[-1]]
 
 
+def _collapse_duplicate_samples(x_seconds: np.ndarray, flux_wm2: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    xs = np.asarray(x_seconds, dtype=float)
+    ys = np.asarray(flux_wm2, dtype=float)
+    if xs.size <= 1 or ys.size <= 1:
+        return xs, ys
+
+    unique_xs, inverse = np.unique(xs, return_inverse=True)
+    if unique_xs.size == xs.size:
+        return xs, ys
+
+    merged_flux = np.empty(unique_xs.size, dtype=float)
+    for idx in range(unique_xs.size):
+        merged_flux[idx] = float(np.nanmedian(ys[inverse == idx]))
+    return np.asarray(unique_xs, dtype=float), np.asarray(merged_flux, dtype=float)
+
+
+def _resample_minute_buckets(x_seconds: np.ndarray, flux_wm2: np.ndarray, cadence_seconds: float = 60.0) -> tuple[np.ndarray, np.ndarray]:
+    xs = np.asarray(x_seconds, dtype=float)
+    ys = np.asarray(flux_wm2, dtype=float)
+    if xs.size <= 2 or ys.size <= 2:
+        return xs, ys
+
+    diffs = np.diff(xs)
+    diffs = diffs[np.isfinite(diffs) & (diffs > 0.0)]
+    if diffs.size == 0:
+        return xs, ys
+    if float(np.nanmedian(diffs)) >= float(cadence_seconds * 0.75):
+        return xs, ys
+
+    bucket_ids = np.rint(xs / float(cadence_seconds)).astype(np.int64)
+    unique_ids = np.unique(bucket_ids)
+    if unique_ids.size == xs.size:
+        return xs, ys
+
+    bucket_xs = np.empty(unique_ids.size, dtype=float)
+    bucket_flux = np.empty(unique_ids.size, dtype=float)
+    for idx, bucket_id in enumerate(unique_ids):
+        mask = bucket_ids == bucket_id
+        bucket_xs[idx] = float(np.nanmedian(xs[mask]))
+        bucket_flux[idx] = float(np.nanmedian(ys[mask]))
+    return np.asarray(bucket_xs, dtype=float), np.asarray(bucket_flux, dtype=float)
+
+
+def _despike_isolated_samples(flux_wm2: np.ndarray, *, threshold_dex: float = 0.65) -> np.ndarray:
+    vals = np.asarray(flux_wm2, dtype=float)
+    if vals.size < 3:
+        return vals
+
+    log_vals = np.log10(vals)
+    out = np.array(log_vals, dtype=float, copy=True)
+    neighbor_limit = float(threshold_dex) * 0.6
+
+    for idx in range(1, log_vals.size - 1):
+        prev_val = float(log_vals[idx - 1])
+        cur_val = float(log_vals[idx])
+        next_val = float(log_vals[idx + 1])
+        if not np.isfinite(prev_val) or not np.isfinite(cur_val) or not np.isfinite(next_val):
+            continue
+        if abs(prev_val - next_val) > neighbor_limit:
+            continue
+        upper = max(prev_val, next_val) + float(threshold_dex)
+        lower = min(prev_val, next_val) - float(threshold_dex)
+        if cur_val > upper or cur_val < lower:
+            out[idx] = 0.5 * (prev_val + next_val)
+
+    return np.asarray(np.power(10.0, out), dtype=float)
+
+
+def normalize_goes_overlay_curve(x_seconds: np.ndarray, flux_wm2: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    xs = np.asarray(x_seconds, dtype=float)
+    ys = np.asarray(flux_wm2, dtype=float)
+    if xs.size == 0 or ys.size == 0:
+        return xs, ys
+
+    mask = np.isfinite(xs) & np.isfinite(ys) & (ys > 0.0)
+    if not np.any(mask):
+        return np.empty(0, dtype=float), np.empty(0, dtype=float)
+    xs = np.asarray(xs[mask], dtype=float)
+    ys = np.asarray(ys[mask], dtype=float)
+
+    order = np.argsort(xs, kind="mergesort")
+    xs = np.asarray(xs[order], dtype=float)
+    ys = np.asarray(ys[order], dtype=float)
+
+    xs, ys = _collapse_duplicate_samples(xs, ys)
+    xs, ys = _resample_minute_buckets(xs, ys)
+    ys = _despike_isolated_samples(ys)
+    return np.asarray(xs, dtype=float), np.asarray(ys, dtype=float)
+
+
 def _extract_goes_overlay_series(
     frame,
     *,
@@ -186,13 +276,18 @@ def _extract_goes_overlay_series(
         raise RuntimeError("GOES/XRS overlay did not produce any plottable timestamps.")
 
     order = np.argsort(x_seconds, kind="mergesort")
+    sorted_x = np.asarray(x_seconds[order], dtype=float)
+    sorted_flux = np.asarray(selected_flux[order], dtype=float)
+    norm_x, norm_flux = normalize_goes_overlay_curve(sorted_x, sorted_flux)
+    if norm_x.size == 0 or norm_flux.size == 0:
+        raise RuntimeError("GOES/XRS overlay normalization produced no plottable samples.")
     return GoesOverlaySeries(
         channel_key=str(channel_key),
         display_label=str(GOES_OVERLAY_CHANNEL_LABELS.get(channel_key, channel_key.upper())),
         channel_label=str(column),
         satellite_number=int(satellite_number),
-        x_seconds=np.asarray(x_seconds[order], dtype=float),
-        flux_wm2=np.asarray(selected_flux[order], dtype=float),
+        x_seconds=np.asarray(norm_x, dtype=float),
+        flux_wm2=np.asarray(norm_flux, dtype=float),
     )
 
 

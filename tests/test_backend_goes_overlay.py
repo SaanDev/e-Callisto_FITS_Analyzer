@@ -19,6 +19,7 @@ from src.Backend.goes_overlay import (
     fetch_goes_overlay,
     goes_class_ticks_for_limits,
     goes_flux_axis_limits,
+    normalize_goes_overlay_curve,
     normalize_goes_satellite_numbers,
     pick_goes_long_channel,
     pick_goes_short_channel,
@@ -124,6 +125,17 @@ def test_goes_class_ticks_and_limits_use_class_boundaries():
     assert limits is not None
     ticks = goes_class_ticks_for_limits(*limits)
     assert ticks == [(1e-08, "A"), (1e-07, "B"), (1e-06, "C"), (1e-05, "M")]
+
+
+def test_normalize_goes_overlay_curve_collapses_duplicates_and_isolated_spikes():
+    xs = np.array([0.0, 60.0, 60.0, 120.0, 180.0], dtype=float)
+    flux = np.array([1.0e-8, 1.1e-8, 1.2e-8, 8.0e-8, 1.15e-8], dtype=float)
+
+    norm_x, norm_flux = normalize_goes_overlay_curve(xs, flux)
+
+    assert np.allclose(norm_x, np.array([0.0, 60.0, 120.0, 180.0], dtype=float))
+    assert np.isclose(norm_flux[1], 1.15e-8)
+    assert np.isclose(norm_flux[2], 1.15e-8)
 
 
 def test_fetch_goes_overlay_searches_all_satellites_and_selects_best(monkeypatch, tmp_path):

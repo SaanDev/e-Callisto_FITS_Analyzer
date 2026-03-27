@@ -37,7 +37,7 @@ def _make_goes_payload():
         series={
             "xrsa": {
                 "channel_key": "xrsa",
-                "display_label": "Long(XRS-A)",
+                "display_label": "Short(XRS-A)",
                 "channel_label": "xrsa_short",
                 "satellite_number": 17,
                 "x_seconds": np.array([0.0, 60.0], dtype=float),
@@ -45,7 +45,7 @@ def _make_goes_payload():
             },
             "xrsb": {
                 "channel_key": "xrsb",
-                "display_label": "Short(XRS-B)",
+                "display_label": "Long(XRS-B)",
                 "channel_label": "xrsb_long",
                 "satellite_number": 17,
                 "x_seconds": np.array([0.0, 60.0], dtype=float),
@@ -204,7 +204,7 @@ def test_goes_overlay_submenu_is_present_in_solar_events_menu():
     goes_menu = actions[-1].menu()
     assert goes_menu is not None
     goes_actions = [action for action in goes_menu.actions() if not action.isSeparator()]
-    assert [action.text() for action in goes_actions] == ["Long(XRS-A)", "Short(XRS-B)"]
+    assert [action.text() for action in goes_actions] == ["Short(XRS-A)", "Long(XRS-B)"]
     assert all(action.isCheckable() for action in goes_actions)
     window.close()
 
@@ -244,7 +244,7 @@ def test_goes_overlay_toggle_with_mocked_success_keeps_spectrogram_data(monkeypa
             series={
                 "xrsa": {
                     "channel_key": "xrsa",
-                    "display_label": "Long(XRS-A)",
+                    "display_label": "Short(XRS-A)",
                     "channel_label": "xrsa_short",
                     "satellite_number": 16,
                     "x_seconds": np.array([0.0, 30.0, 60.0], dtype=float),
@@ -252,7 +252,7 @@ def test_goes_overlay_toggle_with_mocked_success_keeps_spectrogram_data(monkeypa
                 },
                 "xrsb": {
                     "channel_key": "xrsb",
-                    "display_label": "Short(XRS-B)",
+                    "display_label": "Long(XRS-B)",
                     "channel_label": "xrsb_long",
                     "satellite_number": 16,
                     "x_seconds": np.array([0.0, 30.0, 60.0], dtype=float),
