@@ -11,6 +11,7 @@ import faulthandler
 import os
 import platform
 import sys
+import threading
 
 
 def _force_software_opengl() -> bool:
@@ -19,6 +20,63 @@ def _force_software_opengl() -> bool:
 
 
 FORCE_SOFTWARE_OPENGL = _force_software_opengl()
+
+
+def _suppress_macos_tsm_warnings_enabled() -> bool:
+    raw = os.environ.get("CALLISTO_SUPPRESS_MACOS_TSM_WARNINGS", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _install_macos_stderr_filter() -> None:
+    if sys.platform != "darwin" or not _suppress_macos_tsm_warnings_enabled():
+        return
+
+    patterns = (
+        b"TSMSendMessageToUIServer",
+        b"com.apple.tsm.uiserver",
+    )
+    try:
+        original_stderr_fd = os.dup(2)
+        read_fd, write_fd = os.pipe()
+        os.dup2(write_fd, 2)
+        os.close(write_fd)
+    except Exception:
+        return
+
+    def _pump() -> None:
+        pending = b""
+        try:
+            while True:
+                chunk = os.read(read_fd, 4096)
+                if not chunk:
+                    break
+                pending += chunk
+                while b"\n" in pending:
+                    line, pending = pending.split(b"\n", 1)
+                    line_out = line + b"\n"
+                    if any(pattern in line_out for pattern in patterns):
+                        continue
+                    os.write(original_stderr_fd, line_out)
+            if pending and not any(pattern in pending for pattern in patterns):
+                os.write(original_stderr_fd, pending)
+        except Exception:
+            try:
+                if pending:
+                    os.write(original_stderr_fd, pending)
+            except Exception:
+                pass
+        finally:
+            try:
+                os.close(read_fd)
+            except Exception:
+                pass
+            try:
+                os.close(original_stderr_fd)
+            except Exception:
+                pass
+
+    thread = threading.Thread(target=_pump, name="macos-stderr-filter", daemon=True)
+    thread.start()
 
 
 def _is_cme_helper_mode_argv(argv: list[str]) -> bool:
@@ -73,6 +131,7 @@ if BASE_PATH not in sys.path:
     sys.path.insert(0, BASE_PATH)
 
 _configure_platform_env()
+_install_macos_stderr_filter()
 
 # Now import from src (after sys.path is configured)
 from PySide6.QtCore import Qt
