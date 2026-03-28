@@ -6,6 +6,7 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -326,4 +327,93 @@ def test_goes_overlay_toggle_off_clears_renderers(monkeypatch):
     assert window._goes_overlay_enabled is False
     assert cleared["mpl"] >= 1
     assert cleared["hw"] >= 1
+    window.close()
+
+
+def test_rectangular_zoom_accepts_goes_overlay_axis_events():
+    _app()
+    window = MainWindow(theme=None)
+    window.use_hw_live_preview = False
+    window.filename = "demo.fit"
+    window.freqs = np.array([100.0, 95.0, 90.0], dtype=float)
+    window.time = np.array([0.0, 1.0, 2.0, 3.0], dtype=float)
+    window.raw_data = np.array(
+        [
+            [1.0, 2.0, 3.0, 4.0],
+            [2.0, 3.0, 4.0, 5.0],
+            [3.0, 4.0, 5.0, 6.0],
+        ],
+        dtype=np.float32,
+    )
+
+    window.plot_data(window.raw_data, title="Raw")
+    QApplication.processEvents()
+
+    window._goes_overlay_payload = _make_goes_payload()
+    window._goes_overlay_enabled = True
+    window._set_goes_overlay_checked(("xrsa", "xrsb"))
+    window._render_goes_overlay()
+    window.canvas.draw()
+
+    overlay_ax = window._goes_overlay_mpl_ax
+    assert overlay_ax is not None
+
+    start_px = window.canvas.ax.transData.transform((0.5, 99.0))
+    end_px = window.canvas.ax.transData.transform((2.5, 91.0))
+    eclick = SimpleNamespace(inaxes=overlay_ax, x=float(start_px[0]), y=float(start_px[1]), xdata=None, ydata=None)
+    erelease = SimpleNamespace(inaxes=overlay_ax, x=float(end_px[0]), y=float(end_px[1]), xdata=None, ydata=None)
+
+    window.rect_zoom_active = True
+    window._on_rect_zoom_select(eclick, erelease)
+
+    assert window.canvas.ax.get_xlim() == pytest.approx((0.5, 2.5))
+    assert window.canvas.ax.get_ylim() == pytest.approx((91.0, 99.0))
+    assert window.rect_zoom_active is False
+    window.close()
+
+
+def test_rectangular_zoom_temporarily_suspends_mpl_goes_overlay():
+    _app()
+    window = MainWindow(theme=None)
+    window.use_hw_live_preview = False
+    window.filename = "demo.fit"
+    window.freqs = np.array([100.0, 95.0, 90.0], dtype=float)
+    window.time = np.array([0.0, 1.0, 2.0, 3.0], dtype=float)
+    window.raw_data = np.array(
+        [
+            [1.0, 2.0, 3.0, 4.0],
+            [2.0, 3.0, 4.0, 5.0],
+            [3.0, 4.0, 5.0, 6.0],
+        ],
+        dtype=np.float32,
+    )
+
+    window.plot_data(window.raw_data, title="Raw")
+    QApplication.processEvents()
+
+    window._goes_overlay_payload = _make_goes_payload()
+    window._goes_overlay_enabled = True
+    window._set_goes_overlay_checked(("xrsa", "xrsb"))
+    window._render_goes_overlay()
+    window.canvas.draw()
+
+    assert window._goes_overlay_mpl_ax is not None
+
+    window.nav_locked = True
+    window.rectangular_zoom()
+
+    assert window._rect_selector is not None
+    assert window._goes_overlay_mpl_ax is None
+    assert window._rect_zoom_restore_goes_overlay is True
+
+    start_px = window.canvas.ax.transData.transform((0.5, 99.0))
+    end_px = window.canvas.ax.transData.transform((2.5, 91.0))
+    eclick = SimpleNamespace(inaxes=window.canvas.ax, x=float(start_px[0]), y=float(start_px[1]), xdata=None, ydata=None)
+    erelease = SimpleNamespace(inaxes=window.canvas.ax, x=float(end_px[0]), y=float(end_px[1]), xdata=None, ydata=None)
+    window._on_rect_zoom_select(eclick, erelease)
+
+    assert window._goes_overlay_mpl_ax is not None
+    assert window._rect_zoom_restore_goes_overlay is False
+    assert window.canvas.ax.get_xlim() == pytest.approx((0.5, 2.5))
+    assert window.canvas.ax.get_ylim() == pytest.approx((91.0, 99.0))
     window.close()

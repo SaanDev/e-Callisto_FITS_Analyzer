@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
 import numpy as np
 
@@ -100,6 +100,143 @@ def normalize_goes_satellite_numbers(values: Sequence[int] | int | None) -> tupl
             continue
         out.append(sat)
     return tuple(out) if out else (16, 17, 18, 19)
+
+
+def _import_goes_netcdf_dependencies():
+    try:
+        import netCDF4 as nc
+        import pandas as pd
+    except Exception as exc:
+        raise RuntimeError(
+            "GOES overlay requires the 'netCDF4' and 'pandas' packages to read downloaded XRS files safely."
+        ) from exc
+    return nc, pd
+
+
+def _coerce_goes_time_utc(value) -> datetime:
+    if isinstance(value, datetime):
+        return _ensure_utc(value)
+
+    try:
+        year = int(getattr(value, "year"))
+        month = int(getattr(value, "month"))
+        day = int(getattr(value, "day"))
+        hour = int(getattr(value, "hour", 0))
+        minute = int(getattr(value, "minute", 0))
+        sec_raw = float(getattr(value, "second", 0))
+        whole_sec = int(sec_raw)
+        micro = int(round((sec_raw - whole_sec) * 1_000_000.0))
+        extra_micro = int(getattr(value, "microsecond", 0) or 0)
+        micro += extra_micro
+        whole_sec += micro // 1_000_000
+        micro = micro % 1_000_000
+        return datetime(year, month, day, hour, minute, whole_sec, micro, tzinfo=timezone.utc)
+    except Exception:
+        pass
+
+    text = str(value or "").strip()
+    if text:
+        try:
+            return _ensure_utc(datetime.fromisoformat(text.replace("Z", "+00:00")))
+        except Exception:
+            pass
+
+    raise RuntimeError(f"Could not convert GOES/XRS timestamp '{value}' to UTC datetime.")
+
+
+def _looks_like_goes_overlay_var(name: str) -> bool:
+    lowered = str(name or "").strip().lower()
+    return any(token in lowered for token in ("xrsa", "xrsb", "short", "long"))
+
+
+def _coerce_goes_numeric_series(values, *, expected_size: int) -> np.ndarray | None:
+    arr = np.asanyarray(values)
+    if np.ma.isMaskedArray(arr):
+        arr = arr.filled(np.nan)
+    arr = np.squeeze(np.asarray(arr))
+    if arr.ndim != 1 or int(arr.shape[0]) != int(expected_size):
+        return None
+    try:
+        return np.asarray(arr, dtype=float)
+    except Exception:
+        return None
+
+
+def _load_goes_overlay_frame_from_netcdf_paths(paths: Sequence[str | Path]):
+    nc, pd = _import_goes_netcdf_dependencies()
+    frames = []
+
+    for raw_path in paths:
+        path = Path(raw_path).expanduser().resolve()
+        with nc.Dataset(str(path)) as ds:
+            time_var = ds.variables.get("time")
+            if time_var is None:
+                raise RuntimeError(f"GOES/XRS file '{path.name}' is missing the time variable.")
+
+            units = str(getattr(time_var, "units", "") or "").strip()
+            if not units:
+                raise RuntimeError(f"GOES/XRS file '{path.name}' is missing time units.")
+
+            calendar = str(getattr(time_var, "calendar", "standard") or "standard")
+            raw_times = nc.num2date(
+                time_var[:],
+                units,
+                calendar=calendar,
+                only_use_cftime_datetimes=False,
+                only_use_python_datetimes=False,
+            )
+            time_values = [_coerce_goes_time_utc(item) for item in list(np.ravel(raw_times))]
+            if not time_values:
+                raise RuntimeError(f"GOES/XRS file '{path.name}' does not contain any timestamps.")
+
+            time_index = pd.DatetimeIndex(time_values)
+            if time_index.tz is None:
+                time_index = time_index.tz_localize("UTC")
+            else:
+                time_index = time_index.tz_convert("UTC")
+
+            columns: dict[str, np.ndarray] = {}
+            expected_size = int(time_index.size)
+            for name, var in ds.variables.items():
+                if str(name) == "time" or not _looks_like_goes_overlay_var(str(name)):
+                    continue
+                series = _coerce_goes_numeric_series(var[:], expected_size=expected_size)
+                if series is None:
+                    continue
+                columns[str(name)] = series
+
+            if not columns:
+                raise RuntimeError(f"GOES/XRS file '{path.name}' does not contain usable XRS-A/XRS-B variables.")
+
+            frames.append(pd.DataFrame(columns, index=time_index))
+
+    if not frames:
+        raise RuntimeError("Downloaded GOES/XRS files could not be parsed.")
+
+    combined = pd.concat(frames, axis=0, sort=False)
+    try:
+        combined = combined.sort_index()
+    except Exception:
+        pass
+    return combined
+
+
+def _load_goes_overlay_frame(paths: Sequence[str | Path]):
+    normalized = [Path(p).expanduser().resolve() for p in paths if str(p).strip()]
+    netcdf_paths = [
+        path
+        for path in normalized
+        if path.exists() and path.suffix.lower() in {".nc", ".nc4", ".cdf"}
+    ]
+    if netcdf_paths:
+        return _load_goes_overlay_frame_from_netcdf_paths(netcdf_paths)
+
+    load_result = load_downloaded(normalized, data_kind=DATA_KIND_TIMESERIES)
+    ts = load_result.maps_or_timeseries
+    to_dataframe = getattr(ts, "to_dataframe", None)
+    if not callable(to_dataframe):
+        raise RuntimeError("Loaded GOES/XRS data does not provide a dataframe.")
+    return to_dataframe()
 
 
 def goes_flux_axis_limits(flux) -> tuple[float, float] | None:
@@ -442,13 +579,7 @@ def fetch_goes_overlay(
             progress_cb(search_end, f"Loading GOES-{sat} XRS time series...")
 
         try:
-            load_result = load_downloaded(fetch_result.paths, data_kind=DATA_KIND_TIMESERIES)
-            ts = load_result.maps_or_timeseries
-            to_dataframe = getattr(ts, "to_dataframe", None)
-            if not callable(to_dataframe):
-                fetch_errors.append(f"GOES-{sat}: loaded data does not provide a dataframe.")
-                continue
-            frame = to_dataframe()
+            frame = _load_goes_overlay_frame(fetch_result.paths)
         except Exception as exc:
             fetch_errors.append(f"GOES-{sat}: load failed: {exc}")
             continue

@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.Backend import goes_overlay as goes_overlay_module
 from src.Backend.goes_overlay import (
     GOES_OVERLAY_CHANNEL_LABELS,
     build_goes_overlay_payload,
@@ -138,35 +139,32 @@ def test_normalize_goes_overlay_curve_collapses_duplicates_and_isolated_spikes()
     assert np.isclose(norm_flux[2], 1.15e-8)
 
 
+def test_load_goes_overlay_frame_prefers_direct_netcdf_loader(monkeypatch, tmp_path):
+    nc_path = tmp_path / "goes18.nc"
+    nc_path.write_bytes(b"placeholder")
+    seen = {"direct": None, "fallback": False}
+
+    def fake_direct(paths):
+        seen["direct"] = [str(item) for item in paths]
+        idx = pd.to_datetime(["2026-02-10T01:00:00Z"], utc=True)
+        return pd.DataFrame({"xrsb_long": [1e-8]}, index=idx)
+
+    def fake_fallback(paths, data_kind):
+        seen["fallback"] = True
+        raise AssertionError("load_downloaded should not be used for local GOES netCDF overlay files")
+
+    monkeypatch.setattr(goes_overlay_module, "_load_goes_overlay_frame_from_netcdf_paths", fake_direct)
+    monkeypatch.setattr(goes_overlay_module, "load_downloaded", fake_fallback)
+
+    frame = goes_overlay_module._load_goes_overlay_frame([nc_path])
+
+    assert seen["direct"] == [str(nc_path.resolve())]
+    assert seen["fallback"] is False
+    assert list(frame.columns) == ["xrsb_long"]
+
+
 def test_fetch_goes_overlay_searches_all_satellites_and_selects_best(monkeypatch, tmp_path):
     calls = {"search": [], "fetch": [], "load": []}
-
-    class _FakeTimeSeries:
-        def __init__(self, sat: int):
-            self.sat = sat
-
-        def to_dataframe(self):
-            idx = pd.to_datetime(
-                [
-                    "2026-02-10T01:00:00Z",
-                    "2026-02-10T01:01:00Z",
-                    "2026-02-10T01:02:00Z",
-                    "2026-02-10T01:03:00Z",
-                ],
-                utc=True,
-            )
-            if self.sat == 17:
-                vals = [1e-8, 2e-8, 3e-8, 4e-8]
-            else:
-                vals = [1e-8, 2e-8]
-                idx = idx[:2]
-            return pd.DataFrame(
-                {
-                    "xrsa_short": np.asarray(vals, dtype=float) / 2.0,
-                    "xrsb_long": vals,
-                },
-                index=idx,
-            )
 
     def fake_search(spec):
         sat = int(spec.satellite_number)
@@ -183,14 +181,34 @@ def test_fetch_goes_overlay_searches_all_satellites_and_selects_best(monkeypatch
         sat = int(search_result.satellite_number)
         return type("FetchResult", (), {"paths": [str(tmp_path / f"goes{sat}.nc")], "errors": [], "failed_count": 0})()
 
-    def fake_load(paths, data_kind):
+    def fake_load_frame(paths):
         calls["load"].append(list(paths))
         sat = 17 if "goes17" in str(paths[0]) else 18
-        return type("LoadResult", (), {"maps_or_timeseries": _FakeTimeSeries(sat)})()
+        idx = pd.to_datetime(
+            [
+                "2026-02-10T01:00:00Z",
+                "2026-02-10T01:01:00Z",
+                "2026-02-10T01:02:00Z",
+                "2026-02-10T01:03:00Z",
+            ],
+            utc=True,
+        )
+        if sat == 17:
+            vals = [1e-8, 2e-8, 3e-8, 4e-8]
+        else:
+            vals = [1e-8, 2e-8]
+            idx = idx[:2]
+        return pd.DataFrame(
+            {
+                "xrsa_short": np.asarray(vals, dtype=float) / 2.0,
+                "xrsb_long": vals,
+            },
+            index=idx,
+        )
 
     monkeypatch.setattr("src.Backend.goes_overlay.search", fake_search)
     monkeypatch.setattr("src.Backend.goes_overlay.fetch", fake_fetch)
-    monkeypatch.setattr("src.Backend.goes_overlay.load_downloaded", fake_load)
+    monkeypatch.setattr("src.Backend.goes_overlay._load_goes_overlay_frame", fake_load_frame)
 
     payload = fetch_goes_overlay(
         start_utc=datetime(2026, 2, 10, 1, 0, 0, tzinfo=timezone.utc),
@@ -208,25 +226,6 @@ def test_fetch_goes_overlay_searches_all_satellites_and_selects_best(monkeypatch
 
 
 def test_fetch_goes_overlay_combines_best_channels_across_satellites(monkeypatch, tmp_path):
-    class _FakeTimeSeries:
-        def __init__(self, sat: int):
-            self.sat = sat
-
-        def to_dataframe(self):
-            idx = pd.to_datetime(
-                [
-                    "2026-02-10T01:00:00Z",
-                    "2026-02-10T01:01:00Z",
-                    "2026-02-10T01:02:00Z",
-                ],
-                utc=True,
-            )
-            if self.sat == 17:
-                return pd.DataFrame({"xrsb_long": [1e-8, 2e-8, 4e-8]}, index=idx)
-            if self.sat == 18:
-                return pd.DataFrame({"xrsa_short": [8e-9, 9e-9, 1e-8]}, index=idx)
-            return pd.DataFrame({"quality_flag": [0, 0, 0]}, index=idx)
-
     def fake_search(spec):
         sat = int(spec.satellite_number)
         rows = [object()] if sat in {17, 18} else []
@@ -236,13 +235,25 @@ def test_fetch_goes_overlay_combines_best_channels_across_satellites(monkeypatch
         sat = int(search_result.satellite_number)
         return type("FetchResult", (), {"paths": [str(tmp_path / f"goes{sat}.nc")], "errors": [], "failed_count": 0})()
 
-    def fake_load(paths, data_kind):
+    def fake_load_frame(paths):
         sat = 17 if "goes17" in str(paths[0]) else 18
-        return type("LoadResult", (), {"maps_or_timeseries": _FakeTimeSeries(sat)})()
+        idx = pd.to_datetime(
+            [
+                "2026-02-10T01:00:00Z",
+                "2026-02-10T01:01:00Z",
+                "2026-02-10T01:02:00Z",
+            ],
+            utc=True,
+        )
+        if sat == 17:
+            return pd.DataFrame({"xrsb_long": [1e-8, 2e-8, 4e-8]}, index=idx)
+        if sat == 18:
+            return pd.DataFrame({"xrsa_short": [8e-9, 9e-9, 1e-8]}, index=idx)
+        return pd.DataFrame({"quality_flag": [0, 0, 0]}, index=idx)
 
     monkeypatch.setattr("src.Backend.goes_overlay.search", fake_search)
     monkeypatch.setattr("src.Backend.goes_overlay.fetch", fake_fetch)
-    monkeypatch.setattr("src.Backend.goes_overlay.load_downloaded", fake_load)
+    monkeypatch.setattr("src.Backend.goes_overlay._load_goes_overlay_frame", fake_load_frame)
 
     payload = fetch_goes_overlay(
         start_utc=datetime(2026, 2, 10, 1, 0, 0, tzinfo=timezone.utc),
@@ -258,24 +269,6 @@ def test_fetch_goes_overlay_combines_best_channels_across_satellites(monkeypatch
 
 
 def test_fetch_goes_overlay_skips_satellite_search_failures(monkeypatch, tmp_path):
-    class _FakeTimeSeries:
-        def to_dataframe(self):
-            idx = pd.to_datetime(
-                [
-                    "2026-02-10T01:00:00Z",
-                    "2026-02-10T01:01:00Z",
-                    "2026-02-10T01:02:00Z",
-                ],
-                utc=True,
-            )
-            return pd.DataFrame(
-                {
-                    "xrsa_short": [6e-9, 8e-9, 1e-8],
-                    "xrsb_long": [1e-8, 2e-8, 3e-8],
-                },
-                index=idx,
-            )
-
     seen = {"search": []}
 
     def fake_search(spec):
@@ -291,12 +284,26 @@ def test_fetch_goes_overlay_skips_satellite_search_failures(monkeypatch, tmp_pat
         sat = int(search_result.satellite_number)
         return type("FetchResult", (), {"paths": [str(tmp_path / f"goes{sat}.nc")], "errors": [], "failed_count": 0})()
 
-    def fake_load(paths, data_kind):
-        return type("LoadResult", (), {"maps_or_timeseries": _FakeTimeSeries()})()
+    def fake_load_frame(paths):
+        idx = pd.to_datetime(
+            [
+                "2026-02-10T01:00:00Z",
+                "2026-02-10T01:01:00Z",
+                "2026-02-10T01:02:00Z",
+            ],
+            utc=True,
+        )
+        return pd.DataFrame(
+            {
+                "xrsa_short": [6e-9, 8e-9, 1e-8],
+                "xrsb_long": [1e-8, 2e-8, 3e-8],
+            },
+            index=idx,
+        )
 
     monkeypatch.setattr("src.Backend.goes_overlay.search", fake_search)
     monkeypatch.setattr("src.Backend.goes_overlay.fetch", fake_fetch)
-    monkeypatch.setattr("src.Backend.goes_overlay.load_downloaded", fake_load)
+    monkeypatch.setattr("src.Backend.goes_overlay._load_goes_overlay_frame", fake_load_frame)
 
     payload = fetch_goes_overlay(
         start_utc=datetime(2026, 2, 10, 1, 0, 0, tzinfo=timezone.utc),

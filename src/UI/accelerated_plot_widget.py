@@ -137,6 +137,7 @@ class AcceleratedPlotWidget(QWidget):
         self._goes_curve_item = None
         self._goes_overlay_payload = None
         self._goes_visible_channels = ()
+        self._goes_overlay_rect_zoom_hidden = False
         self._goes_axis_label = "GOES X-Ray Class"
         self._title = ""
         self._x_label = "Time [s]"
@@ -222,6 +223,14 @@ class AcceleratedPlotWidget(QWidget):
             self._goes_view = pg.ViewBox(enableMenu=False)
             self._goes_view.setMouseEnabled(x=False, y=False)
             self._goes_view.setZValue(10)
+            try:
+                self._goes_view.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            except Exception:
+                pass
+            try:
+                self._goes_view.setAcceptHoverEvents(False)
+            except Exception:
+                pass
             self._plot.scene().addItem(self._goes_view)
             self._goes_axis.linkToView(self._goes_view)
             self._goes_view.setXLink(self._viewbox)
@@ -231,6 +240,14 @@ class AcceleratedPlotWidget(QWidget):
                     antialias=True,
                 )
                 curve_item.setZValue(11 + idx)
+                try:
+                    curve_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                except Exception:
+                    pass
+                try:
+                    curve_item.setAcceptHoverEvents(False)
+                except Exception:
+                    pass
                 self._goes_view.addItem(curve_item)
                 self._goes_curve_items[key] = curve_item
             self._goes_curve_item = self._goes_curve_items.get("xrsb") or next(iter(self._goes_curve_items.values()), None)
@@ -326,11 +343,47 @@ class AcceleratedPlotWidget(QWidget):
             except Exception:
                 pass
 
+    def _set_goes_overlay_rect_zoom_hidden(self, hidden: bool) -> None:
+        hidden = bool(hidden)
+        self._goes_overlay_rect_zoom_hidden = hidden
+        if not self.is_available:
+            return
+        if hidden:
+            if self._goes_axis is not None:
+                try:
+                    self._goes_axis.hide()
+                except Exception:
+                    pass
+            if self._goes_view is not None:
+                try:
+                    self._goes_view.hide()
+                except Exception:
+                    pass
+            for curve_item in self._goes_curve_items.values():
+                try:
+                    curve_item.hide()
+                except Exception:
+                    pass
+            return
+
+        payload = self._goes_overlay_payload
+        channels = self._goes_visible_channels
+        if payload is not None and channels:
+            self.set_goes_overlay(payload, visible_channels=channels)
+            return
+
+        if self._goes_view is not None:
+            try:
+                self._goes_view.show()
+            except Exception:
+                pass
+
     def start_rect_zoom_once(self) -> None:
         if not self.is_available:
             return
         self._rect_zoom_once = True
         self._interaction_start_view = self.get_view()
+        self._set_goes_overlay_rect_zoom_hidden(True)
         self._plot.setMouseEnabled(x=True, y=True)
         try:
             self._viewbox.setMouseMode(pg.ViewBox.RectMode)
@@ -347,6 +400,7 @@ class AcceleratedPlotWidget(QWidget):
             self._viewbox.setMouseMode(pg.ViewBox.PanMode)
         except Exception:
             pass
+        self._set_goes_overlay_rect_zoom_hidden(False)
         if self._navigation_locked:
             self._plot.setMouseEnabled(x=False, y=False)
 
@@ -589,6 +643,33 @@ class AcceleratedPlotWidget(QWidget):
         except Exception:
             pass
         self._sync_goes_overlay_geometry()
+        if self._goes_overlay_rect_zoom_hidden:
+            for curve_item in self._goes_curve_items.values():
+                try:
+                    curve_item.hide()
+                except Exception:
+                    pass
+            try:
+                self._goes_view.hide()
+            except Exception:
+                pass
+            try:
+                self._goes_axis.hide()
+            except Exception:
+                pass
+            return
+        try:
+            self._goes_view.show()
+        except Exception:
+            pass
+        for curve_item in self._goes_curve_items.values():
+            try:
+                x_data, y_data = curve_item.getData()
+                x_count = 0 if x_data is None else int(len(x_data))
+                y_count = 0 if y_data is None else int(len(y_data))
+                curve_item.setVisible(bool(x_count and y_count))
+            except Exception:
+                pass
         try:
             self._goes_axis.show()
         except Exception:
@@ -1226,6 +1307,7 @@ class AcceleratedPlotWidget(QWidget):
                 pass
             if self._navigation_locked:
                 self._plot.setMouseEnabled(x=False, y=False)
+            self._set_goes_overlay_rect_zoom_hidden(False)
             self.rectZoomFinished.emit(start, end)
             return
 

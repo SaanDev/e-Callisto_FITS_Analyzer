@@ -189,6 +189,7 @@ class MainWindow(QMainWindow):
         self._goes_overlay_thread = None
         self._goes_overlay_worker = None
         self._goes_overlay_mpl_ax = None
+        self._rect_zoom_restore_goes_overlay = False
 
         #Linux Messagebox Fix
         _install_linux_msgbox_fixer()
@@ -5705,18 +5706,38 @@ class MainWindow(QMainWindow):
                 self.accel_canvas.set_navigation_locked(self.nav_locked)
             except Exception:
                 pass
+            return
+
+        if getattr(self, "_rect_zoom_restore_goes_overlay", False):
+            self._rect_zoom_restore_goes_overlay = False
+            try:
+                self._render_goes_overlay()
+            except Exception:
+                pass
+
+    def _suspend_goes_overlay_for_rect_zoom(self) -> None:
+        if self._hardware_mode_enabled():
+            return
+        if getattr(self, "_goes_overlay_mpl_ax", None) is None:
+            self._rect_zoom_restore_goes_overlay = False
+            return
+        self._rect_zoom_restore_goes_overlay = True
+        self._remove_goes_overlay_mpl_axis()
+        try:
+            self.canvas.draw_idle()
+        except Exception:
+            pass
 
     def _on_rect_zoom_select(self, eclick, erelease):
         """Callback when the user finishes drawing the rectangle."""
-        if eclick.inaxes != self.canvas.ax or erelease.inaxes != self.canvas.ax:
+        start = self._event_data_in_main_axes(eclick)
+        end = self._event_data_in_main_axes(erelease)
+        if start is None or end is None:
             self._stop_rect_zoom()
             return
 
-        x0, y0 = eclick.xdata, eclick.ydata
-        x1, y1 = erelease.xdata, erelease.ydata
-        if x0 is None or x1 is None or y0 is None or y1 is None:
-            self._stop_rect_zoom()
-            return
+        x0, y0 = start
+        x1, y1 = end
 
         xmin, xmax = sorted([x0, x1])
         ymin, ymax = sorted([y0, y1])
@@ -5811,6 +5832,7 @@ class MainWindow(QMainWindow):
 
         ax = self.canvas.ax
         self.rect_zoom_active = True
+        self._suspend_goes_overlay_for_rect_zoom()
 
         # Create rectangle selector
         self._rect_selector = RectangleSelector(
@@ -7023,6 +7045,51 @@ class MainWindow(QMainWindow):
             pass
         self._goes_overlay_mpl_ax = None
 
+    def _make_goes_overlay_axis_passive(self, ax) -> None:
+        if ax is None:
+            return
+        try:
+            ax.set_navigate(False)
+        except Exception:
+            pass
+        patch = getattr(ax, "patch", None)
+        if patch is None:
+            return
+        try:
+            patch.set_visible(False)
+        except Exception:
+            pass
+        try:
+            patch.contains = lambda *args, **kwargs: (False, {})
+        except Exception:
+            pass
+        try:
+            patch.contains_point = lambda *args, **kwargs: False
+        except Exception:
+            pass
+
+    def _event_data_in_main_axes(self, event) -> tuple[float, float] | None:
+        ax = getattr(getattr(self, "canvas", None), "ax", None)
+        if ax is None or event is None:
+            return None
+        try:
+            x = float(getattr(event, "x"))
+            y = float(getattr(event, "y"))
+        except Exception:
+            return None
+        try:
+            if not ax.bbox.contains(x, y):
+                return None
+        except Exception:
+            pass
+        try:
+            xdata, ydata = ax.transData.inverted().transform((x, y))
+        except Exception:
+            return None
+        if not np.isfinite([xdata, ydata]).all():
+            return None
+        return float(xdata), float(ydata)
+
     def _clear_goes_overlay_render(self) -> None:
         self._remove_goes_overlay_mpl_axis()
         try:
@@ -7174,6 +7241,7 @@ class MainWindow(QMainWindow):
         try:
             overlay_ax = self.canvas.ax.twinx()
             overlay_ax.set_zorder(self.canvas.ax.get_zorder() + 0.2)
+            self._make_goes_overlay_axis_passive(overlay_ax)
             overlay_ax.set_yscale("log")
             overlay_ax.set_ylim(limits)
             overlay_ax.set_xlim(self.canvas.ax.get_xlim())

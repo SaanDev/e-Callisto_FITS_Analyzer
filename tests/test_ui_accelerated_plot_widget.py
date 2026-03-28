@@ -190,3 +190,57 @@ def test_accelerated_widget_goes_overlay_lifecycle():
     assert widget._goes_overlay_payload is None
     assert len(x_data) == 0
     assert len(y_data) == 0
+
+
+def test_accelerated_widget_rect_zoom_hides_and_restores_goes_overlay():
+    _app()
+    widget = AcceleratedPlotWidget()
+    if not widget.is_available:
+        pytest.skip("pyqtgraph not available in test environment")
+
+    class _DummyCmap:
+        def __call__(self, x):
+            arr = np.asarray(x, dtype=float)
+            rgba = np.zeros((arr.size, 4), dtype=float)
+            rgba[:, 0] = arr
+            rgba[:, 1] = 1.0 - arr
+            rgba[:, 2] = 0.5
+            rgba[:, 3] = 1.0
+            return rgba
+
+    widget.update_image(
+        np.random.rand(8, 16).astype(np.float32),
+        extent=[0.0, 10.0, 20.0, 80.0],
+        cmap=_DummyCmap(),
+        title="Preview",
+        x_label="Time [s]",
+        y_label="Frequency [MHz]",
+    )
+
+    payload = {
+        "satellite_number": 18,
+        "satellite_numbers": (18,),
+        "series": {
+            "xrsb": {
+                "x_seconds": np.array([0.0, 2.0, 4.0, 6.0], dtype=float),
+                "flux_wm2": np.array([1e-8, 2e-8, 4e-8, 6e-8], dtype=float),
+                "channel_label": "xrsb",
+            },
+        },
+    }
+    widget.set_goes_overlay(payload, visible_channels=("xrsb",))
+    assert widget._goes_overlay_rect_zoom_hidden is False
+
+    widget.start_rect_zoom_once()
+    assert widget._rect_zoom_once is True
+    assert widget._goes_overlay_rect_zoom_hidden is True
+    assert widget._goes_axis is None or widget._goes_axis.isVisible() is False
+
+    widget.cancel_rect_zoom()
+    assert widget._rect_zoom_once is False
+    assert widget._goes_overlay_rect_zoom_hidden is False
+    assert widget._goes_axis is None or widget._goes_axis.isVisible() is True
+
+    x_data, y_data = widget._goes_curve_items["xrsb"].getData()
+    assert np.allclose(x_data, payload["series"]["xrsb"]["x_seconds"])
+    assert np.allclose(y_data, np.log10(payload["series"]["xrsb"]["flux_wm2"]))
