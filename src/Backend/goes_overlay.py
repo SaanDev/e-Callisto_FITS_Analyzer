@@ -69,19 +69,11 @@ def _ensure_utc(dt: datetime) -> datetime:
 
 
 def pick_goes_long_channel(columns: list[str]) -> str | None:
-    for col in columns:
-        lowered = str(col or "").strip().lower()
-        if any(token in lowered for token in ("xrsb", "long", "1.0", "8.0")):
-            return str(col)
-    return None
+    return _pick_goes_channel(columns, channel_key="xrsb")
 
 
 def pick_goes_short_channel(columns: list[str]) -> str | None:
-    for col in columns:
-        lowered = str(col or "").strip().lower()
-        if any(token in lowered for token in ("xrsa", "short", "0.5", "4.0")):
-            return str(col)
-    return None
+    return _pick_goes_channel(columns, channel_key="xrsa")
 
 
 def normalize_goes_satellite_numbers(values: Sequence[int] | int | None) -> tuple[int, ...]:
@@ -146,16 +138,77 @@ def _coerce_goes_time_utc(value) -> datetime:
 
 def _looks_like_goes_overlay_var(name: str) -> bool:
     lowered = str(name or "").strip().lower()
-    return any(token in lowered for token in ("xrsa", "xrsb", "short", "long"))
+    return ("flux" in lowered) or any(token in lowered for token in ("xrsa", "xrsb", "short", "long"))
+
+
+def _goes_channel_score(name: str, *, channel_key: str) -> int:
+    lowered = str(name or "").strip().lower()
+    if not lowered:
+        return -10_000
+
+    score = 0
+    if channel_key == "xrsa":
+        if lowered == "xrsa_flux":
+            score += 160
+        if lowered == "a_flux":
+            score += 150
+        if any(token in lowered for token in ("xrsa", "short", "0.5", "4.0")):
+            score += 60
+        if lowered.startswith("a_"):
+            score += 15
+    else:
+        if lowered == "xrsb_flux":
+            score += 160
+        if lowered == "b_flux":
+            score += 150
+        if any(token in lowered for token in ("xrsb", "long", "1.0", "8.0")):
+            score += 60
+        if lowered.startswith("b_"):
+            score += 15
+
+    if "flux" in lowered:
+        score += 80
+    if lowered.endswith("_flux"):
+        score += 20
+
+    if any(token in lowered for token in ("flag", "flags", "quality", "count", "counts", "num", "primary", "excluded")):
+        score -= 220
+    if any(token in lowered for token in ("electron", "electrons", "current")):
+        score -= 160
+
+    return score
+
+
+def _pick_goes_channel(columns: Sequence[str], *, channel_key: str) -> str | None:
+    best_name = None
+    best_score = -10_000
+    for col in columns:
+        score = _goes_channel_score(str(col), channel_key=channel_key)
+        if score > best_score:
+            best_name = str(col)
+            best_score = score
+    if best_name is None or best_score <= 0:
+        return None
+    return best_name
 
 
 def _coerce_goes_numeric_series(values, *, expected_size: int) -> np.ndarray | None:
-    arr = np.asanyarray(values)
-    if np.ma.isMaskedArray(arr):
-        arr = arr.filled(np.nan)
-    arr = np.squeeze(np.asarray(arr))
-    if arr.ndim != 1 or int(arr.shape[0]) != int(expected_size):
+    arr = np.ma.asarray(values)
+    arr = np.ma.squeeze(arr)
+    if int(getattr(arr, "ndim", -1)) != 1 or int(arr.shape[0]) != int(expected_size):
         return None
+    if np.ma.isMaskedArray(arr):
+        try:
+            data = np.asarray(np.ma.getdata(arr), dtype=float)
+            mask = np.asarray(np.ma.getmaskarray(arr), dtype=bool)
+        except Exception:
+            return None
+        if mask.shape != data.shape:
+            return None
+        if np.any(mask):
+            data = np.array(data, dtype=float, copy=True)
+            data[mask] = np.nan
+        return np.asarray(data, dtype=float)
     try:
         return np.asarray(arr, dtype=float)
     except Exception:
@@ -198,9 +251,16 @@ def _load_goes_overlay_frame_from_netcdf_paths(paths: Sequence[str | Path]):
             columns: dict[str, np.ndarray] = {}
             expected_size = int(time_index.size)
             for name, var in ds.variables.items():
-                if str(name) == "time" or not _looks_like_goes_overlay_var(str(name)):
+                if str(name) == "time":
                     continue
-                series = _coerce_goes_numeric_series(var[:], expected_size=expected_size)
+                lowered = str(name or "").strip().lower()
+                units = str(getattr(var, "units", "") or "").strip().lower().replace(" ", "")
+                if not (_looks_like_goes_overlay_var(str(name)) or units in {"w/m2", "w/m^2", "wm-2", "wm^-2"}):
+                    continue
+                try:
+                    series = _coerce_goes_numeric_series(var[:], expected_size=expected_size)
+                except Exception:
+                    continue
                 if series is None:
                     continue
                 columns[str(name)] = series

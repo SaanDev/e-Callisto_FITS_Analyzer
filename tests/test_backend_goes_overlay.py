@@ -37,6 +37,18 @@ def test_pick_goes_short_channel_prefers_short_tokens():
     assert pick_goes_short_channel(cols) == "XRSA_Flux_Short"
 
 
+def test_pick_goes_channels_prefer_flux_over_flags_counts_and_quality():
+    cols = ["xrsb_flags", "xrsb_primary_chan", "xrsb_flux", "xrsa_flags", "xrsa_flux", "quality_flag"]
+    assert pick_goes_long_channel(cols) == "xrsb_flux"
+    assert pick_goes_short_channel(cols) == "xrsa_flux"
+
+
+def test_pick_goes_channels_support_legacy_a_flux_b_flux_aliases():
+    cols = ["a_flags", "b_flags", "a_flux", "b_flux"]
+    assert pick_goes_short_channel(cols) == "a_flux"
+    assert pick_goes_long_channel(cols) == "b_flux"
+
+
 def test_build_goes_overlay_payload_rejects_missing_overlay_channels():
     idx = pd.to_datetime(["2026-02-10T01:00:00Z", "2026-02-10T01:01:00Z"], utc=True)
     frame = pd.DataFrame({"quality_flag": [0, 0]}, index=idx)
@@ -116,6 +128,37 @@ def test_build_goes_overlay_payload_handles_cross_day_range():
     assert np.allclose(payload.series["xrsa"].x_seconds, np.array([0.0, 60.0, 120.0, 180.0], dtype=float))
 
 
+def test_build_goes_overlay_payload_accepts_legacy_a_flux_b_flux_columns():
+    idx = pd.to_datetime(
+        [
+            "2026-02-10T01:00:00Z",
+            "2026-02-10T01:01:00Z",
+            "2026-02-10T01:02:00Z",
+        ],
+        utc=True,
+    )
+    frame = pd.DataFrame(
+        {
+            "a_flags": [0, 0, 0],
+            "b_flags": [0, 0, 0],
+            "a_flux": [6e-9, 8e-9, 1e-8],
+            "b_flux": [1e-8, 2e-8, 4e-8],
+        },
+        index=idx,
+    )
+
+    payload = build_goes_overlay_payload(
+        frame,
+        base_utc=datetime(2026, 2, 10, 1, 0, 0, tzinfo=timezone.utc),
+        start_utc=datetime(2026, 2, 10, 1, 0, 0, tzinfo=timezone.utc),
+        end_utc=datetime(2026, 2, 10, 1, 2, 0, tzinfo=timezone.utc),
+    )
+
+    assert payload.channel_label == "b_flux"
+    assert np.allclose(payload.series["xrsa"].flux_wm2, np.array([6e-9, 8e-9, 1e-8], dtype=float))
+    assert np.allclose(payload.series["xrsb"].flux_wm2, np.array([1e-8, 2e-8, 4e-8], dtype=float))
+
+
 def test_normalize_goes_satellite_numbers_defaults_and_deduplicates():
     assert normalize_goes_satellite_numbers(None) == (16, 17, 18, 19)
     assert normalize_goes_satellite_numbers([17, 17, 18, -1, 0, 19]) == (17, 18, 19)
@@ -161,6 +204,18 @@ def test_load_goes_overlay_frame_prefers_direct_netcdf_loader(monkeypatch, tmp_p
     assert seen["direct"] == [str(nc_path.resolve())]
     assert seen["fallback"] is False
     assert list(frame.columns) == ["xrsb_long"]
+
+
+def test_coerce_goes_numeric_series_handles_masked_uint8_without_crashing():
+    arr = np.ma.array([1, 2, 3], mask=[False, True, False], dtype=np.uint8)
+
+    series = goes_overlay_module._coerce_goes_numeric_series(arr, expected_size=3)
+
+    assert series is not None
+    assert series.dtype.kind == "f"
+    assert np.isclose(series[0], 1.0)
+    assert np.isnan(series[1])
+    assert np.isclose(series[2], 3.0)
 
 
 def test_fetch_goes_overlay_searches_all_satellites_and_selects_best(monkeypatch, tmp_path):

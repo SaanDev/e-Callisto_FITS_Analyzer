@@ -7391,7 +7391,14 @@ class MainWindow(QMainWindow):
         self._clear_goes_overlay_payload()
         self._set_goes_overlay_checked(False)
         self._render_goes_overlay()
-        detail = str(message or "Could not load GOES XRS data.").splitlines()[0].strip()
+        lines = [line.strip() for line in str(message or "Could not load GOES XRS data.").splitlines() if str(line).strip()]
+        detail = lines[0] if lines else "Could not load GOES XRS data."
+        if detail.startswith("No usable GOES/XRS overlay channels could be loaded") and "Details:" in lines:
+            idx = lines.index("Details:")
+            for candidate in lines[idx + 1:]:
+                if candidate and not candidate.startswith("...and"):
+                    detail = candidate
+                    break
         self.statusBar().showMessage(f"GOES overlay failed: {detail}", 6000)
 
     def _on_goes_overlay_cancelled(self, _request_key: str) -> None:
