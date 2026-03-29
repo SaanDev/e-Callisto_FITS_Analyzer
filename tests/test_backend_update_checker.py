@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.3.0-dev
+Version 2.3.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -26,14 +26,14 @@ class FakeResponse:
 def test_normalize_version():
     assert update_checker.normalize_version("v2.2.1") == (2, 2, 1)
     assert update_checker.normalize_version("release-2.2.3") == (2, 2, 3)
-    assert update_checker.normalize_version("2.3.0-dev") == (2, 3, 0)
+    assert update_checker.normalize_version("2.3.0") == (2, 3, 0)
     assert update_checker.normalize_version("invalid") == ()
 
 
 def test_is_newer_version():
     assert update_checker.is_newer_version("2.0", "2.2.1")
     assert update_checker.is_newer_version("2.2.1", "2.3.0")
-    assert not update_checker.is_newer_version("2.3.0-dev", "2.2.1")
+    assert not update_checker.is_newer_version("2.3.0", "2.2.1")
     assert not update_checker.is_newer_version("2.2.1", "2.2.1")
     assert not update_checker.is_newer_version("2.3", "2.2.1")
 
