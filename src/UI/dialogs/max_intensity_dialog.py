@@ -139,13 +139,8 @@ class MaxIntensityPlotDialog(QDialog):
 
     def set_auto_outlier_mode(self, enabled: bool):
         self._auto_outlier_mode = bool(enabled)
-        manual_enabled = not self._auto_outlier_mode
-        self.select_button.setVisible(manual_enabled)
-        self.remove_button.setVisible(manual_enabled)
-        self.select_button.setEnabled(manual_enabled)
-        self.remove_button.setEnabled(manual_enabled)
         if self._auto_outlier_mode:
-            self.status.showMessage("Auto outlier cleaning enabled for isolated burst.", 3500)
+            self.status.showMessage("Auto outlier cleaning enabled for isolated burst; manual outlier tools remain available.", 3500)
 
     def _redraw_points(self, title: str):
         self.canvas.ax.clear()
@@ -207,9 +202,6 @@ class MaxIntensityPlotDialog(QDialog):
             self._emit_session_changed()
 
     def activate_lasso(self):
-        if self._auto_outlier_mode:
-            self.status.showMessage("Manual outlier tools are disabled in isolated auto-clean mode.", 3000)
-            return
         self.canvas.ax.set_title("Draw around outliers to remove")
         self.canvas.draw()
 
@@ -228,9 +220,6 @@ class MaxIntensityPlotDialog(QDialog):
         self.status.showMessage(f"{np.sum(self.selected_mask)} points selected", 3000)
 
     def remove_selected_outliers(self):
-        if self._auto_outlier_mode:
-            self.status.showMessage("Manual outlier tools are disabled in isolated auto-clean mode.", 3000)
-            return
         if not np.any(self.selected_mask):
             self.status.showMessage("No points selected for removal", 3000)
             return

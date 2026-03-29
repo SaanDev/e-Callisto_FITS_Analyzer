@@ -212,7 +212,7 @@ def test_isolated_seed_auto_filters_zero_columns():
     win.close()
 
 
-def test_max_dialog_hides_manual_outlier_buttons_in_auto_mode():
+def test_max_dialog_keeps_manual_outlier_buttons_in_auto_mode():
     _app()
     dlg = MaxIntensityPlotDialog(
         np.arange(8, dtype=float),
@@ -220,8 +220,29 @@ def test_max_dialog_hides_manual_outlier_buttons_in_auto_mode():
         "demo.fit",
         auto_outlier_mode=True,
     )
-    assert dlg.select_button.isHidden() is True
-    assert dlg.remove_button.isHidden() is True
+    assert dlg.select_button.isHidden() is False
+    assert dlg.remove_button.isHidden() is False
+    assert dlg.select_button.isEnabled() is True
+    assert dlg.remove_button.isEnabled() is True
+    dlg.close()
+
+
+def test_max_dialog_manual_outlier_removal_still_works_in_auto_mode():
+    _app()
+    dlg = MaxIntensityPlotDialog(
+        np.arange(6, dtype=float),
+        np.linspace(80.0, 70.0, 6),
+        "demo.fit",
+        auto_outlier_mode=True,
+    )
+
+    dlg.selected_mask = np.array([False, True, False, True, False, False], dtype=bool)
+    dlg.remove_selected_outliers()
+
+    assert dlg.time_channels.shape[0] == 4
+    assert dlg.freqs.shape[0] == 4
+    assert dlg.selected_mask.shape[0] == 4
+
     dlg.close()
 
 
