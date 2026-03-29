@@ -77,49 +77,6 @@ def test_analyze_dialog_fold_combo_reserves_space_for_visible_value():
     dlg.close()
 
 
-def test_analyze_dialog_restores_remove_outliers_button():
-    _app()
-    dlg = AnalyzeDialog(
-        np.arange(1, 6, dtype=float),
-        np.array([60.0, 55.0, 50.0, 45.0, 40.0], dtype=float),
-        "demo.fit",
-        fundamental=True,
-        harmonic=False,
-    )
-
-    assert dlg.remove_button.text() == "Remove Outliers"
-    assert dlg.remove_button.isHidden() is False
-
-    dlg.close()
-
-
-def test_analyze_dialog_remove_selected_outliers_updates_series_and_clears_fit():
-    _app()
-    time_channels = np.arange(1, 8, dtype=float)
-    time_s = time_channels * 0.25
-    freqs = 90.0 * np.power(time_s, -0.45)
-
-    dlg = AnalyzeDialog(time_channels, freqs, "demo.fit", fundamental=True, harmonic=False)
-    dlg.plot_fit()
-
-    dlg.selected_mask = np.array([False, True, False, False, True, False, False], dtype=bool)
-    dlg.remove_selected_outliers()
-
-    assert dlg.time_channels.shape[0] == 5
-    assert dlg.freq.shape[0] == 5
-    assert dlg._fit_params is None
-    assert dlg.fold_calc_button.isEnabled() is False
-    assert dlg.equation_display.text() == ""
-    assert "Filtered_Maximum_Intensity" in dlg.current_plot_title
-
-    state = dlg.session_state()
-    max_block = dict(state.get("max_intensity") or {})
-    assert np.asarray(max_block.get("time_channels"), dtype=float).shape[0] == 5
-    assert np.asarray(max_block.get("freqs"), dtype=float).shape[0] == 5
-
-    dlg.close()
-
-
 def test_max_dialog_emits_session_changed_on_mode_toggle():
     _app()
     dlg = MaxIntensityPlotDialog(
@@ -137,6 +94,21 @@ def test_max_dialog_emits_session_changed_on_mode_toggle():
     dlg.harmonic_radio.setChecked(True)
 
     assert seen["n"] >= 1
+    dlg.close()
+
+
+def test_max_dialog_shows_manual_outlier_buttons_in_normal_mode():
+    _app()
+    dlg = MaxIntensityPlotDialog(
+        np.arange(8, dtype=float),
+        np.linspace(80.0, 70.0, 8),
+        "demo.fit",
+        auto_outlier_mode=False,
+    )
+
+    assert dlg.select_button.isHidden() is False
+    assert dlg.remove_button.isHidden() is False
+
     dlg.close()
 
 
