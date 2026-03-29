@@ -1,33 +1,41 @@
 # e-CALLISTO FITS Analyzer
 A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data.
 
-Current stable release: **2.2.1**  
-Previous stable release: **2.2.0**
+Current stable release: **2.3.0**  
+Previous stable release: **2.2.1**
 
 ---
 
-## ✨ What's New in v2.2.1
+## ✨ What's New in v2.3.0
 
-The items below are included in the finalized **v2.2.1** desktop release.
+The items below are included in the finalized **v2.3.0** desktop release.
 
-### Application updates
+### Plotting and event overlays
+- **GOES Overlay on the main spectrum**: enable **Solar Events → GOES Overlay → Long(XRS-B)** and/or **Short(XRS-A)** to draw GOES X-ray flux directly on top of the loaded FITS plot.
+- **Multi-spacecraft GOES archive fallback**: the overlay loader now searches **GOES-16** through **GOES-19** and uses the first usable XRS archive response automatically.
+- **Overlay-safe processing**: GOES overlay curves remain independent from noise reduction, RFI cleaning, colormap changes, and other dynamic-spectrum processing steps.
+- **Improved overlay readability**: thicker GOES curves plus a right-side flare-class guide (**A / B / C / M / X**) improve visibility on the shared plot.
+
+### Annotation and analysis updates
+- **Native accelerated annotations**: polygon, line, and text annotations now stay on the PyQtGraph / hardware-accelerated window instead of falling back to Matplotlib.
+- **Text label editing**: text annotations can be moved and styled with custom font family, font size, bold/italic emphasis, and color.
+- **Maximum-intensity cleanup workflow**: manual **Select Outliers** and **Remove Outliers** remain available even when automatic outlier cleaning is enabled.
+
+### Noise reduction and interaction updates
+- **Smooth clipping thresholds**: higher-resolution lower/upper threshold sliders now provide much finer control for background tuning.
+- **Live threshold readouts**: the current clipping values are shown next to the controls for faster adjustment on smaller screens.
+- **Logarithmic threshold scale**: an optional signed-log slider mapping makes small threshold changes easier near zero.
+- **Interaction stability fixes**: rectangular zoom, cursor hover readouts, and reset behavior remain functional alongside overlays and accelerated plotting.
+
+### v2.2.1 highlights (previous stable release)
 - **SunPy Multi-Mission Explorer**: **Solar Events → Archives → SunPy Multi-Mission Explorer** for querying, downloading, plotting, and analyzing SDO, SOHO, STEREO-A, and GOES data inside the desktop app.
-- **Batch FIT Processing window**: **Processing → Batch Processing → Open Batch Processor** for folder-based batch export.
-- **Batch output controls**: choose **Raw** or **Background Subtracted** PNG output.
-- **Background subtraction options**: select **Mean** or **Median** subtraction for batch processing.
-- **Batch visualization controls**: select colormap per batch run; output PNGs use **UT** on the x-axis and **dB** on the colorbar.
-- **Batch progress + resilience**: progress bar, cancel support, per-file continue-on-error behavior, and end-of-run summary.
-- **Report a Bug workflow**: **About → Report a Bug...** with diagnostics ZIP generation and prefilled GitHub issue draft.
+- **Batch FIT Processing window**: **Processing → Batch Processing → Open Batch Processor** for folder-based batch export with raw/background-subtracted output and per-run colormap controls.
+- **Report a Bug workflow**: **About → Report a Bug...** with diagnostics ZIP generation and a prefilled GitHub issue draft.
 - **Expanded time-window sync**: sync the active analyzer time window to GOES, CME, and SunPy windows.
-- **Toolbar workflow polish**: faster access to **Save Project** and **Reset to Raw** from the main toolbar.
-
-### Stability and packaging updates
 - **Downloader stability improvements**: safer FITS download/fetch flow plus calendar/date-picker usability fixes.
-- **Analysis dialog UI fix**: fold-selection dropdown sizing is corrected across Qt styles/themes.
-- **RFI reset-state fix**: reset/apply flows restore the correct pre-clean plot state more reliably.
 - **Desktop packaging updates**: SunPy runtime dependencies and packaging hooks are included for local builds, with Python **3.12+** as the `v2.2.1` packaging baseline.
 
-### v2.1 highlights (previous stable release)
+### v2.1 highlights
 - **Update Checker**: **About → Check for Updates...** to search online for newer releases.
 - **Background update checks**: checks run without blocking the UI.
 - **In-app update download flow**: download installer/package inside the app with progress and cancel support, plus release page link.
@@ -43,7 +51,7 @@ The items below are included in the finalized **v2.2.1** desktop release.
 - Improved interactive CME playback for running-difference movies with GOES X-ray context.
 - Better failure handling and fallback behavior to avoid main-window crashes.
 
-### v2.0 highlights (previous release)
+### v2.0 highlights
 
 ### Core workflow
 - Added **session/project save and load** support (`.efaproj`) to restore analysis state.
@@ -81,7 +89,7 @@ The items below are included in the finalized **v2.2.1** desktop release.
 
 ## 📘 User Guide
 
-This guide explains how to use the main features of the **e-CALLISTO FITS Analyzer**, including dynamic spectrum visualization, live noise reduction, burst isolation, drift estimation, maximum intensity extraction, best-fit analysis, FITS export, the FITS downloader, and the built-in CME, GOES, and SunPy modules.
+This guide explains how to use the main features of the **e-CALLISTO FITS Analyzer**, including dynamic spectrum visualization, live noise reduction, annotations, burst isolation, drift estimation, maximum intensity extraction, best-fit analysis, FITS export, the FITS downloader, and the built-in CME, GOES, and SunPy modules.
 
 ---
 
@@ -116,8 +124,9 @@ Noise reduction updates **live** without pressing Apply.
 
 Features:
 
-- Two wide horizontal scrollbars for lower and upper clipping thresholds (Vmin / Vmax)
-- Labels repositioned for clearer visual feedback
+- High-resolution lower and upper clipping sliders for smoother Vmin / Vmax adjustment
+- Live threshold readouts next to each slider for quick feedback while dragging
+- Optional **Logarithmic Threshold Scale** checkbox for finer control near zero
 - Dynamic spectrum refreshes automatically
 - No data are lost when switching x-axis units (seconds ↔ UT)
 
@@ -255,6 +264,7 @@ Inside the Maximum Intensities window:
 
 - Draw a lasso to select outliers
 - Remove them instantly
+- Keep manual cleanup controls available even when automatic outlier removal is enabled
 - Prepare the cleaned curve for fitting
 
 ---
@@ -395,15 +405,15 @@ Features:
 
 ---
 
-# 19. GOES X-Ray Flux Viewer
+# 19. GOES X-Ray Flux Viewer and Overlay
 
 Features:
 
-- View GOES-16 / GOES-18 X-ray light curves
-- Select short or long channels
-- Adjust time windows
-- Extract flare parameters
-- Export plots and data
+- Open a standalone GOES X-ray viewer for time-window inspection and flare analysis
+- Enable **Solar Events → GOES Overlay → Long(XRS-B)** and/or **Short(XRS-A)** to draw GOES curves on the current FITS spectrum
+- Automatically fall back across **GOES-16** to **GOES-19** when loading overlay archives
+- Display GOES overlay curves with a dedicated right-side flare-class guide (**A / B / C / M / X**) without modifying the spectrogram data
+- Adjust time windows, extract flare parameters, and export plots/data from the standalone GOES viewer
 
 ### Example: GOES X-Ray Viewer
 ![GOES X-Ray](assets/screenshots/goes_xray.png)
