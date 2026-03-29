@@ -460,7 +460,7 @@ Use **About → Check for Updates...** to query the latest release from GitHub.
 
 ---
 
-## 🛠️ Build and Packaging (v2.2.1)
+## 🛠️ Build and Packaging (v2.3.0)
 
 ### Prerequisites
 - Python 3.12+ (SunPy 7.1.x baseline; recommended: same version used for your target build machine)
