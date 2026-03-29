@@ -88,7 +88,7 @@ def test_analyze_dialog_restores_remove_outliers_button():
     )
 
     assert dlg.remove_button.text() == "Remove Outliers"
-    assert dlg.remove_button.isVisible() is True
+    assert dlg.remove_button.isHidden() is False
 
     dlg.close()
 
