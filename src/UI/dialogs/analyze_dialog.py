@@ -11,6 +11,8 @@ import os
 import re
 import sys
 
+from matplotlib.path import Path
+from matplotlib.widgets import LassoSelector
 import numpy as np
 from openpyxl import Workbook, load_workbook
 from PySide6.QtCore import Qt, Signal
@@ -54,6 +56,8 @@ class AnalyzeDialog(QDialog):
         self._fit_params = None
         self._shock_summary = {}
         self._suppress_emit = False
+        self.selected_mask = np.zeros_like(self.time_channels, dtype=bool)
+        self.lasso = None
 
         # Canvas
         self.canvas = MplCanvas(self, width=8, height=5)
@@ -64,6 +68,7 @@ class AnalyzeDialog(QDialog):
         # Buttons
         self.max_button = QPushButton("Maximum Intensities")
         self.fit_button = QPushButton("Best Fit")
+        self.remove_button = QPushButton("Remove Outliers")
         self.save_plot_button = QPushButton("Save Graph")
         self.save_data_button = QPushButton("Save Data")
         self.existing_excel_checkbox = QCheckBox("Existing Excel File")
@@ -79,14 +84,17 @@ class AnalyzeDialog(QDialog):
 
         self.max_button.clicked.connect(self.plot_max)
         self.fit_button.clicked.connect(self.plot_fit)
+        self.remove_button.clicked.connect(self.activate_remove_outliers)
         self.save_plot_button.clicked.connect(self.save_graph)
         self.save_data_button.clicked.connect(self.save_data)
         self.extra_plot_button.clicked.connect(self.plot_extra)
+        self.remove_button.setToolTip("Draw around outliers on the analyzer plot and remove them")
 
         # Plot control layout
         plot_button_layout = QHBoxLayout()
         plot_button_layout.addWidget(self.max_button)
         plot_button_layout.addWidget(self.fit_button)
+        plot_button_layout.addWidget(self.remove_button)
 
         left_layout = QVBoxLayout()
         left_layout.addLayout(plot_button_layout)
@@ -187,6 +195,51 @@ class AnalyzeDialog(QDialog):
         except Exception:
             pass
 
+    def _disconnect_lasso(self):
+        if self.lasso is None:
+            return
+        try:
+            self.lasso.disconnect_events()
+        except Exception:
+            pass
+        self.lasso = None
+
+    def _clear_fit_results(self):
+        self._fit_params = None
+        self._shock_summary = {}
+        for attr in ("_drift_vals", "_drift_errs", "freq_err", "shock_speed", "R_p", "start_freq", "start_height"):
+            if hasattr(self, attr):
+                try:
+                    delattr(self, attr)
+                except Exception:
+                    setattr(self, attr, None)
+
+        self.equation_display.setText("")
+        self.r2_display.setText("R² = ")
+        self.rmse_display.setText("RMSE = ")
+        self.shock_header.setText("<b>Shock Parameters:</b>")
+        self.avg_freq_display.setText("")
+        self.drift_display.setText("")
+        self.start_freq_display.setText("")
+        self.initial_shock_speed_display.setText("")
+        self.initial_shock_height_display.setText("")
+        self.avg_shock_speed_display.setText("")
+        self.avg_shock_height_display.setText("")
+        self.fold_calc_button.setEnabled(False)
+
+    def _draw_max_points(self, title: str, *, plot_name: str):
+        self.canvas.ax.clear()
+        self.canvas.figure.clf()
+        self.canvas.ax = self.canvas.figure.add_subplot(111)
+        style_axes(self.canvas.ax)
+        self.canvas.ax.scatter(self.time, self.freq, s=10, color="blue")
+        self.canvas.ax.set_title(title)
+        self.canvas.ax.set_xlabel("Time (s)")
+        self.canvas.ax.set_ylabel("Frequency (MHz)")
+        self.canvas.ax.grid(True)
+        self.canvas.draw()
+        self.current_plot_title = plot_name
+
     def _set_summary_labels_from_dict(self, summary: dict):
         if not isinstance(summary, dict):
             return
@@ -224,16 +277,72 @@ class AnalyzeDialog(QDialog):
         )
 
     def plot_max(self):
-        self.canvas.ax.clear()
-        self.canvas.ax.scatter(self.time, self.freq, s=10, color='blue')
-        self.canvas.ax.set_title(f"{self.filename}_Maximum_Intensity")
-        self.canvas.ax.set_xlabel("Time (s)")
-        self.canvas.ax.set_ylabel("Frequency (MHz)")
-        self.canvas.ax.grid(True)
-        self.canvas.draw()
-        self.equation_display.setText("")
-        self.fold_calc_button.setEnabled(False)
+        self._disconnect_lasso()
+        self.selected_mask = np.zeros_like(self.time_channels, dtype=bool)
+        self._draw_max_points(
+            f"{self.filename}_Maximum_Intensity",
+            plot_name=f"{self.filename}_Maximum_Intensity",
+        )
+        self._clear_fit_results()
         self.status.showMessage("Max intensities plotted successfully!", 3000)
+
+    def activate_remove_outliers(self):
+        if self.time.size == 0 or self.freq.size == 0:
+            self.status.showMessage("No analyzer points are available to clean.", 3000)
+            return
+
+        self._disconnect_lasso()
+        self.selected_mask = np.zeros_like(self.time_channels, dtype=bool)
+        self._draw_max_points(
+            "Draw around outliers to remove",
+            plot_name=f"{self.filename}_Maximum_Intensity",
+        )
+        self.lasso = LassoSelector(self.canvas.ax, onselect=self.on_lasso_select)
+        self.status.showMessage("Draw around outliers to remove.", 4000)
+
+    def on_lasso_select(self, verts):
+        points = np.column_stack((self.time, self.freq))
+        path = Path(verts)
+        self.selected_mask = np.asarray(path.contains_points(points), dtype=bool)
+        self._disconnect_lasso()
+
+        if not np.any(self.selected_mask):
+            self.status.showMessage("No points selected for removal.", 3000)
+            self._draw_max_points(
+                f"{self.filename}_Maximum_Intensity",
+                plot_name=f"{self.filename}_Maximum_Intensity",
+            )
+            return
+
+        self.remove_selected_outliers()
+
+    def remove_selected_outliers(self):
+        if not np.any(self.selected_mask):
+            self.status.showMessage("No points selected for removal.", 3000)
+            return
+
+        keep_mask = ~np.asarray(self.selected_mask, dtype=bool)
+        remaining = int(np.sum(keep_mask))
+        if remaining < 2:
+            self.status.showMessage("Keep at least two points for analyzer fitting.", 3500)
+            self.selected_mask = np.zeros_like(self.time_channels, dtype=bool)
+            self._draw_max_points(
+                f"{self.filename}_Maximum_Intensity",
+                plot_name=f"{self.filename}_Maximum_Intensity",
+            )
+            return
+
+        self.time_channels = np.asarray(self.time_channels[keep_mask], dtype=float)
+        self.time = np.asarray(self.time_channels * 0.25, dtype=float)
+        self.freq = np.asarray(self.freq[keep_mask], dtype=float)
+        self.selected_mask = np.zeros_like(self.time_channels, dtype=bool)
+        self._clear_fit_results()
+        self._draw_max_points(
+            f"{self.filename}_Filtered_Maximum_Intensity",
+            plot_name=f"{self.filename}_Filtered_Maximum_Intensity",
+        )
+        self.status.showMessage("Selected outliers removed.", 3000)
+        self._emit_session_changed()
 
     def plot_fit(self, _checked=False, params=None, std_errs=None):
         def model_func(t, a, b): return a * t ** (b)
@@ -684,5 +793,6 @@ class AnalyzeDialog(QDialog):
         self.canvas.draw()
 
     def closeEvent(self, event):
+        self._disconnect_lasso()
         self._emit_session_changed()
         super().closeEvent(event)

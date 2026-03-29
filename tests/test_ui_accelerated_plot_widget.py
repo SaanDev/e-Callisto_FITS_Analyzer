@@ -28,6 +28,17 @@ def test_accelerated_widget_constructs():
     assert hasattr(widget, "is_available")
 
 
+def test_accelerated_widget_enables_hover_mouse_tracking():
+    _app()
+    widget = AcceleratedPlotWidget()
+    if not widget.is_available:
+        pytest.skip("pyqtgraph not available in test environment")
+
+    assert widget.hasMouseTracking() is True
+    assert widget._graphics.hasMouseTracking() is True
+    assert widget._graphics.viewport().hasMouseTracking() is True
+
+
 def test_accelerated_widget_update_image_no_crash():
     _app()
     widget = AcceleratedPlotWidget()

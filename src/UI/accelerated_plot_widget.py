@@ -196,6 +196,17 @@ class AcceleratedPlotWidget(QWidget):
             pass
 
         self._graphics = pg.GraphicsLayoutWidget()
+        self.setMouseTracking(True)
+        try:
+            self._graphics.setMouseTracking(True)
+        except Exception:
+            pass
+        try:
+            viewport = self._graphics.viewport()
+            if viewport is not None:
+                viewport.setMouseTracking(True)
+        except Exception:
+            pass
         layout.addWidget(self._graphics)
 
         self._bottom_axis = _TimeAxisItem(orientation="bottom")
