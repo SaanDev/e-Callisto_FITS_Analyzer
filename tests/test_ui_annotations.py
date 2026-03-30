@@ -286,8 +286,10 @@ def test_apply_loaded_dataset_invalidates_goes_overlay_and_requests_refresh(monk
     window._goes_overlay_payload_key = "old"
 
     calls = []
+    cancelled = []
     monkeypatch.setattr(window, "plot_data", lambda *args, **kwargs: None)
     monkeypatch.setattr(window, "_render_goes_overlay", lambda: None)
+    monkeypatch.setattr(window, "_cancel_goes_overlay_request", lambda: cancelled.append(True))
     monkeypatch.setattr(
         window,
         "_ensure_goes_overlay_for_current_data",
@@ -306,6 +308,7 @@ def test_apply_loaded_dataset_invalidates_goes_overlay_and_requests_refresh(monk
 
     assert window._goes_overlay_payload is None
     assert window._goes_overlay_payload_key is None
+    assert cancelled == [True]
     assert calls == [True]
     window.close()
 

@@ -178,11 +178,13 @@ def _load_app_icon() -> QIcon:
 
 def _parse_cli_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--mode", choices=["main", "cme-helper"], default="main")
+    parser.add_argument("--mode", choices=["main", "cme-helper", "goes-overlay-helper"], default="main")
     parser.add_argument("--movie-url", default="")
     parser.add_argument("--movie-title", default="")
     parser.add_argument("--movie-direct-url", default="")
     parser.add_argument("--ipc-name", default="")
+    parser.add_argument("--request-file", default="")
+    parser.add_argument("--response-file", default="")
     return parser.parse_known_args(argv[1:])
 
 
@@ -241,12 +243,24 @@ def _run_cme_helper_mode(
     )
 
 
+def _run_goes_overlay_helper_mode(request_file: str, response_file: str) -> int:
+    from src.Backend.goes_overlay import run_goes_overlay_helper_cli
+
+    return run_goes_overlay_helper_cli(request_file, response_file)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(argv or sys.argv)
     args, qt_args = _parse_cli_args(argv)
 
     if platform.system() != "Windows":
         faulthandler.enable()
+
+    if args.mode == "goes-overlay-helper":
+        return _run_goes_overlay_helper_mode(
+            request_file=str(args.request_file or ""),
+            response_file=str(args.response_file or ""),
+        )
 
     qt_argv = [argv[0], *qt_args]
     app = QApplication(qt_argv)

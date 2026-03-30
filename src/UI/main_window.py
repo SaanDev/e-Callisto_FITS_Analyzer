@@ -2673,6 +2673,7 @@ class MainWindow(QMainWindow):
     def _reset_feature_state_for_new_data(self):
         self._clear_analysis_session_state(close_windows=True)
         self._reset_annotation_mode()
+        self._cancel_goes_overlay_request()
         self._clear_goes_overlay_payload()
         self._goes_overlay_active_request = None
         self._render_goes_overlay()

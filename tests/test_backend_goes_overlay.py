@@ -8,6 +8,7 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 
 import numpy as np
 import pandas as pd
@@ -16,8 +17,11 @@ import pytest
 from src.Backend import goes_overlay as goes_overlay_module
 from src.Backend.goes_overlay import (
     GOES_OVERLAY_CHANNEL_LABELS,
+    GoesOverlayPayload,
     build_goes_overlay_payload,
     fetch_goes_overlay,
+    goes_overlay_payload_from_dict,
+    goes_overlay_payload_to_dict,
     goes_class_ticks_for_limits,
     goes_flux_axis_limits,
     normalize_goes_overlay_curve,
@@ -436,3 +440,109 @@ def test_fetch_goes_overlay_skips_satellite_search_failures(monkeypatch, tmp_pat
     assert seen["search"][:2] == [16, 17]
     assert payload.satellite_number == 17
     assert payload.satellite_numbers == (17,)
+
+
+def test_goes_overlay_payload_dict_round_trip_preserves_arrays_and_timestamps():
+    payload = GoesOverlayPayload(
+        start_utc=datetime(2026, 2, 10, 1, 0, 0, tzinfo=timezone.utc),
+        end_utc=datetime(2026, 2, 10, 1, 2, 0, tzinfo=timezone.utc),
+        base_utc=datetime(2026, 2, 10, 1, 0, 0, tzinfo=timezone.utc),
+        satellite_number=19,
+        satellite_numbers=(18, 19),
+        series={
+            "xrsa": goes_overlay_module.GoesOverlaySeries(
+                channel_key="xrsa",
+                display_label="Short(XRS-A)",
+                channel_label="xrsa_short",
+                satellite_number=18,
+                x_seconds=np.array([0.0, 60.0], dtype=float),
+                flux_wm2=np.array([8e-9, 1e-8], dtype=float),
+            ),
+            "xrsb": goes_overlay_module.GoesOverlaySeries(
+                channel_key="xrsb",
+                display_label="Long(XRS-B)",
+                channel_label="xrsb_long",
+                satellite_number=19,
+                x_seconds=np.array([0.0, 60.0], dtype=float),
+                flux_wm2=np.array([1e-8, 2e-8], dtype=float),
+            ),
+        },
+        x_seconds=np.array([0.0, 60.0], dtype=float),
+        flux_wm2=np.array([1e-8, 2e-8], dtype=float),
+        channel_label="xrsb_long",
+    )
+
+    restored = goes_overlay_payload_from_dict(goes_overlay_payload_to_dict(payload))
+
+    assert restored.start_utc == payload.start_utc
+    assert restored.end_utc == payload.end_utc
+    assert restored.base_utc == payload.base_utc
+    assert restored.satellite_number == 19
+    assert restored.satellite_numbers == (18, 19)
+    assert tuple(restored.series.keys()) == ("xrsa", "xrsb")
+    assert np.allclose(restored.series["xrsa"].flux_wm2, np.array([8e-9, 1e-8], dtype=float))
+    assert np.allclose(restored.flux_wm2, np.array([1e-8, 2e-8], dtype=float))
+
+
+def test_run_goes_overlay_helper_cli_writes_success_response(monkeypatch, tmp_path):
+    request_path = tmp_path / "request.json"
+    response_path = tmp_path / "response.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "start_utc": "2026-02-10T01:00:00+00:00",
+                "end_utc": "2026-02-10T01:02:00+00:00",
+                "base_utc": "2026-02-10T01:00:00+00:00",
+                "cache_dir": str(tmp_path),
+                "satellite_numbers": [19],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = GoesOverlayPayload(
+        start_utc=datetime(2026, 2, 10, 1, 0, 0, tzinfo=timezone.utc),
+        end_utc=datetime(2026, 2, 10, 1, 2, 0, tzinfo=timezone.utc),
+        base_utc=datetime(2026, 2, 10, 1, 0, 0, tzinfo=timezone.utc),
+        satellite_number=19,
+        satellite_numbers=(19,),
+        series={},
+        x_seconds=np.array([0.0, 60.0], dtype=float),
+        flux_wm2=np.array([1e-8, 2e-8], dtype=float),
+        channel_label="xrsb_long",
+    )
+
+    monkeypatch.setattr(goes_overlay_module, "fetch_goes_overlay", lambda **_kwargs: payload)
+
+    exit_code = goes_overlay_module.run_goes_overlay_helper_cli(str(request_path), str(response_path))
+    raw = json.loads(response_path.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert raw["ok"] is True
+    assert raw["payload"]["satellite_number"] == 19
+    assert raw["payload"]["x_seconds"] == [0.0, 60.0]
+
+
+def test_run_goes_overlay_helper_cli_writes_error_response(monkeypatch, tmp_path):
+    request_path = tmp_path / "request.json"
+    response_path = tmp_path / "response.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "start_utc": "2026-02-10T01:00:00+00:00",
+                "end_utc": "2026-02-10T01:02:00+00:00",
+                "base_utc": "2026-02-10T01:00:00+00:00",
+                "cache_dir": str(tmp_path),
+                "satellite_numbers": [19],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(goes_overlay_module, "fetch_goes_overlay", lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    exit_code = goes_overlay_module.run_goes_overlay_helper_cli(str(request_path), str(response_path))
+    raw = json.loads(response_path.read_text(encoding="utf-8"))
+
+    assert exit_code == 1
+    assert raw == {"ok": False, "error": "boom"}

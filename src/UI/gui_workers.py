@@ -7,13 +7,17 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
+import sys
 import tempfile
+import time
 from pathlib import Path
 
 import numpy as np
 import requests
-from PySide6.QtCore import QObject, QStandardPaths, Signal, Slot
+from PySide6.QtCore import QCoreApplication, QObject, QStandardPaths, Signal, Slot
 
 from src.Backend.batch_processing import (
     build_unique_output_png_path,
@@ -22,7 +26,7 @@ from src.Backend.batch_processing import (
     save_background_subtracted_png,
 )
 from src.Backend.fits_io import extract_ut_start_sec, load_callisto_fits
-from src.Backend.goes_overlay import fetch_goes_overlay
+from src.Backend.goes_overlay import goes_overlay_payload_from_dict
 from src.Backend.update_checker import check_for_updates
 
 
@@ -249,27 +253,136 @@ class GoesOverlayLoadWorker(QObject):
             return
         self.progress.emit(value, text)
 
+    def _helper_command(self, request_path: str, response_path: str) -> list[str]:
+        if getattr(sys, "frozen", False):
+            binary = str(QCoreApplication.applicationFilePath() or sys.executable)
+            return [binary, "--mode=goes-overlay-helper", "--request-file", request_path, "--response-file", response_path]
+
+        main_py = Path(__file__).resolve().parent / "main.py"
+        return [sys.executable, str(main_py), "--mode=goes-overlay-helper", "--request-file", request_path, "--response-file", response_path]
+
+    def _terminate_process(self, proc: subprocess.Popen | None) -> None:
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            proc.terminate()
+            proc.wait(timeout=1.5)
+            return
+        except Exception:
+            pass
+        try:
+            proc.kill()
+            proc.wait(timeout=1.5)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _read_text_if_exists(path: Path) -> str:
+        try:
+            return path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _format_subprocess_failure(returncode: int | None, stderr_text: str) -> str:
+        code = int(returncode) if returncode is not None else -1
+        if code in {-11, 139}:
+            return (
+                "GOES overlay helper crashed while loading SunPy archive data. "
+                "The request was aborted to keep the main application running."
+            )
+        detail = (stderr_text or "").strip().splitlines()
+        if detail:
+            return detail[-1].strip()
+        return f"GOES overlay helper exited with code {code}."
+
     @Slot()
     def run(self):
         if self._cancel_requested:
             self.cancelled.emit(self.request_key)
             return
+        self._emit_progress(5, "Loading GOES overlay...")
+
+        temp_dir = Path(tempfile.mkdtemp(prefix="callisto_goes_overlay_"))
+        request_path = temp_dir / "request.json"
+        response_path = temp_dir / "response.json"
+        stderr_path = temp_dir / "stderr.log"
+        proc = None
+
+        request_payload = {
+            "start_utc": self.start_utc.isoformat(),
+            "end_utc": self.end_utc.isoformat(),
+            "base_utc": self.base_utc.isoformat(),
+            "cache_dir": str(self.cache_dir),
+            "satellite_numbers": [int(item) for item in self.satellite_numbers],
+        }
+
         try:
-            payload = fetch_goes_overlay(
-                start_utc=self.start_utc,
-                end_utc=self.end_utc,
-                base_utc=self.base_utc,
-                cache_dir=self.cache_dir,
-                satellite_numbers=self.satellite_numbers,
-                progress_cb=self._emit_progress,
-                cancel_cb=lambda: self._cancel_requested,
-            )
+            request_path.write_text(json.dumps(request_payload), encoding="utf-8")
+
+            with stderr_path.open("w", encoding="utf-8") as stderr_handle:
+                proc = subprocess.Popen(
+                    self._helper_command(str(request_path), str(response_path)),
+                    stdout=subprocess.DEVNULL,
+                    stderr=stderr_handle,
+                    stdin=subprocess.DEVNULL,
+                    cwd=str(Path(__file__).resolve().parents[2]),
+                )
+
+            while proc.poll() is None:
+                if self._cancel_requested:
+                    self._terminate_process(proc)
+                    self.cancelled.emit(self.request_key)
+                    return
+                time.sleep(0.15)
+
+            if self._cancel_requested:
+                self.cancelled.emit(self.request_key)
+                return
+
+            stderr_text = self._read_text_if_exists(stderr_path)
+            raw_response = {}
+            if response_path.exists():
+                try:
+                    raw_response = json.loads(response_path.read_text(encoding="utf-8"))
+                except Exception:
+                    raw_response = {}
+            if proc.returncode != 0:
+                if isinstance(raw_response, dict) and raw_response:
+                    self.failed.emit(
+                        self.request_key,
+                        str(raw_response.get("error") or self._format_subprocess_failure(proc.returncode, stderr_text)),
+                    )
+                else:
+                    self.failed.emit(self.request_key, self._format_subprocess_failure(proc.returncode, stderr_text))
+                return
+
+            if not response_path.exists():
+                self.failed.emit(self.request_key, "GOES overlay helper exited without producing a response.")
+                return
+
+            if not bool(raw_response.get("ok")):
+                self.failed.emit(self.request_key, str(raw_response.get("error") or "Could not load GOES XRS data."))
+                return
+
+            payload = goes_overlay_payload_from_dict(dict(raw_response.get("payload") or {}))
         except Exception as exc:
             if self._cancel_requested:
                 self.cancelled.emit(self.request_key)
                 return
             self.failed.emit(self.request_key, str(exc))
             return
+        finally:
+            self._terminate_process(proc)
+            for path in (request_path, response_path, stderr_path):
+                try:
+                    path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            try:
+                temp_dir.rmdir()
+            except Exception:
+                pass
 
         if self._cancel_requested:
             self.cancelled.emit(self.request_key)

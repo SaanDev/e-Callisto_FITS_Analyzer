@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 import re
 from typing import Any, Callable, Sequence
@@ -96,6 +97,63 @@ _GOES_TIME_UNITS_RE = re.compile(r"^\s*([A-Za-z_]+)\s+since\s+(.+?)\s*$", re.IGN
 
 class GoesOverlayCancelled(RuntimeError):
     pass
+
+
+def _series_to_dict(series: GoesOverlaySeries) -> dict[str, Any]:
+    return {
+        "channel_key": str(series.channel_key),
+        "display_label": str(series.display_label),
+        "channel_label": str(series.channel_label),
+        "satellite_number": int(series.satellite_number),
+        "x_seconds": np.asarray(series.x_seconds, dtype=float).tolist(),
+        "flux_wm2": np.asarray(series.flux_wm2, dtype=float).tolist(),
+    }
+
+
+def _series_from_dict(data: dict[str, Any]) -> GoesOverlaySeries:
+    return GoesOverlaySeries(
+        channel_key=str(data.get("channel_key") or ""),
+        display_label=str(data.get("display_label") or ""),
+        channel_label=str(data.get("channel_label") or ""),
+        satellite_number=int(data.get("satellite_number") or 0),
+        x_seconds=np.asarray(data.get("x_seconds") or [], dtype=float),
+        flux_wm2=np.asarray(data.get("flux_wm2") or [], dtype=float),
+    )
+
+
+def goes_overlay_payload_to_dict(payload: GoesOverlayPayload) -> dict[str, Any]:
+    return {
+        "start_utc": _ensure_utc(payload.start_utc).isoformat(),
+        "end_utc": _ensure_utc(payload.end_utc).isoformat(),
+        "base_utc": _ensure_utc(payload.base_utc).isoformat(),
+        "satellite_number": int(payload.satellite_number),
+        "satellite_numbers": [int(item) for item in tuple(payload.satellite_numbers or ())],
+        "series": {
+            str(key): _series_to_dict(series)
+            for key, series in dict(payload.series or {}).items()
+        },
+        "x_seconds": np.asarray(payload.x_seconds, dtype=float).tolist(),
+        "flux_wm2": np.asarray(payload.flux_wm2, dtype=float).tolist(),
+        "channel_label": str(payload.channel_label),
+    }
+
+
+def goes_overlay_payload_from_dict(data: dict[str, Any]) -> GoesOverlayPayload:
+    series_map = {
+        str(key): _series_from_dict(value if isinstance(value, dict) else {})
+        for key, value in dict(data.get("series") or {}).items()
+    }
+    return GoesOverlayPayload(
+        start_utc=_ensure_utc(datetime.fromisoformat(str(data.get("start_utc") or "").replace("Z", "+00:00"))),
+        end_utc=_ensure_utc(datetime.fromisoformat(str(data.get("end_utc") or "").replace("Z", "+00:00"))),
+        base_utc=_ensure_utc(datetime.fromisoformat(str(data.get("base_utc") or "").replace("Z", "+00:00"))),
+        satellite_number=int(data.get("satellite_number") or 0),
+        satellite_numbers=tuple(int(item) for item in list(data.get("satellite_numbers") or [])),
+        series=series_map,
+        x_seconds=np.asarray(data.get("x_seconds") or [], dtype=float),
+        flux_wm2=np.asarray(data.get("flux_wm2") or [], dtype=float),
+        channel_label=str(data.get("channel_label") or ""),
+    )
 
 
 def _ensure_utc(dt: datetime) -> datetime:
@@ -858,3 +916,40 @@ def fetch_goes_overlay(
         sat_text = ", ".join(f"GOES-{sat}" for sat in payload.satellite_numbers) or f"GOES-{int(payload.satellite_number)}"
         progress_cb(100, f"Loaded {_payload_sample_count(payload)} GOES/XRS samples from {sat_text}.")
     return payload
+
+
+def run_goes_overlay_helper_cli(request_file: str, response_file: str) -> int:
+    request_path = Path(request_file).expanduser().resolve()
+    response_path = Path(response_file).expanduser().resolve()
+    payload: dict[str, Any] = {}
+
+    with request_path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+
+    start_utc = _ensure_utc(datetime.fromisoformat(str(payload.get("start_utc") or "").replace("Z", "+00:00")))
+    end_utc = _ensure_utc(datetime.fromisoformat(str(payload.get("end_utc") or "").replace("Z", "+00:00")))
+    base_utc = _ensure_utc(datetime.fromisoformat(str(payload.get("base_utc") or "").replace("Z", "+00:00")))
+    cache_dir = str(payload.get("cache_dir") or "").strip()
+    satellite_numbers = tuple(int(item) for item in list(payload.get("satellite_numbers") or []))
+
+    response: dict[str, Any]
+    exit_code = 0
+    try:
+        overlay_payload = fetch_goes_overlay(
+            start_utc=start_utc,
+            end_utc=end_utc,
+            base_utc=base_utc,
+            cache_dir=cache_dir,
+            satellite_numbers=satellite_numbers,
+        )
+        response = {"ok": True, "payload": goes_overlay_payload_to_dict(overlay_payload)}
+    except Exception as exc:
+        response = {"ok": False, "error": str(exc)}
+        exit_code = 1
+
+    response_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = response_path.with_suffix(response_path.suffix + ".tmp")
+    with temp_path.open("w", encoding="utf-8") as handle:
+        json.dump(response, handle)
+    temp_path.replace(response_path)
+    return exit_code
