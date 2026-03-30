@@ -262,6 +262,7 @@ class GoesOverlayLoadWorker(QObject):
                 cache_dir=self.cache_dir,
                 satellite_numbers=self.satellite_numbers,
                 progress_cb=self._emit_progress,
+                cancel_cb=lambda: self._cancel_requested,
             )
         except Exception as exc:
             if self._cancel_requested:

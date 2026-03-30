@@ -8,8 +8,9 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import re
 from typing import Any, Callable, Sequence
 
 import numpy as np
@@ -60,6 +61,41 @@ GOES_CLASS_LEVELS: tuple[tuple[float, str], ...] = (
     (1.0e-5, "M"),
     (1.0e-4, "X"),
 )
+_GOES_STANDARD_TIME_CALENDARS = frozenset({"standard", "gregorian", "proleptic_gregorian"})
+_GOES_TIME_UNIT_SECONDS: dict[str, float] = {
+    "us": 1.0e-6,
+    "usec": 1.0e-6,
+    "usecs": 1.0e-6,
+    "microsecond": 1.0e-6,
+    "microseconds": 1.0e-6,
+    "ms": 1.0e-3,
+    "msec": 1.0e-3,
+    "msecs": 1.0e-3,
+    "millisecond": 1.0e-3,
+    "milliseconds": 1.0e-3,
+    "s": 1.0,
+    "sec": 1.0,
+    "secs": 1.0,
+    "second": 1.0,
+    "seconds": 1.0,
+    "min": 60.0,
+    "mins": 60.0,
+    "minute": 60.0,
+    "minutes": 60.0,
+    "h": 3600.0,
+    "hr": 3600.0,
+    "hrs": 3600.0,
+    "hour": 3600.0,
+    "hours": 3600.0,
+    "d": 86400.0,
+    "day": 86400.0,
+    "days": 86400.0,
+}
+_GOES_TIME_UNITS_RE = re.compile(r"^\s*([A-Za-z_]+)\s+since\s+(.+?)\s*$", re.IGNORECASE)
+
+
+class GoesOverlayCancelled(RuntimeError):
+    pass
 
 
 def _ensure_utc(dt: datetime) -> datetime:
@@ -103,6 +139,99 @@ def _import_goes_netcdf_dependencies():
             "GOES overlay requires the 'netCDF4' and 'pandas' packages to read downloaded XRS files safely."
         ) from exc
     return nc, pd
+
+
+def _raise_if_goes_overlay_cancelled(cancel_cb: Callable[[], bool] | None) -> None:
+    if cancel_cb is None:
+        return
+    try:
+        cancelled = bool(cancel_cb())
+    except Exception:
+        cancelled = False
+    if cancelled:
+        raise GoesOverlayCancelled("GOES overlay request cancelled.")
+
+
+def _parse_goes_time_reference(units: str) -> tuple[datetime, float] | None:
+    match = _GOES_TIME_UNITS_RE.match(str(units or "").strip())
+    if match is None:
+        return None
+
+    unit_token = str(match.group(1) or "").strip().lower()
+    seconds_per_unit = _GOES_TIME_UNIT_SECONDS.get(unit_token)
+    if seconds_per_unit is None:
+        return None
+
+    anchor_text = str(match.group(2) or "").strip()
+    if not anchor_text:
+        return None
+    anchor_text = anchor_text.replace("Z", "+00:00")
+    anchor_text = re.sub(r"\s+(UTC|GMT)$", " +00:00", anchor_text, flags=re.IGNORECASE)
+    anchor_text = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", anchor_text)
+    try:
+        anchor_dt = datetime.fromisoformat(anchor_text)
+    except Exception:
+        return None
+    return _ensure_utc(anchor_dt), float(seconds_per_unit)
+
+
+def _manual_goes_time_utc_values(raw_values, *, units: str, calendar: str) -> list[datetime] | None:
+    if str(calendar or "standard").strip().lower() not in _GOES_STANDARD_TIME_CALENDARS:
+        return None
+
+    parsed_reference = _parse_goes_time_reference(units)
+    if parsed_reference is None:
+        return None
+    anchor_dt, seconds_per_unit = parsed_reference
+
+    try:
+        arr = np.ma.asarray(raw_values)
+        arr = np.ma.squeeze(arr)
+        if int(getattr(arr, "ndim", 0)) == 0:
+            arr = np.ma.asarray([arr.item()])
+        if np.ma.isMaskedArray(arr) and np.any(np.ma.getmaskarray(arr)):
+            return None
+        offsets = np.asarray(np.ma.getdata(arr), dtype=float).ravel()
+    except Exception:
+        return None
+
+    if offsets.size == 0 or not np.all(np.isfinite(offsets)):
+        return None
+
+    out: list[datetime] = []
+    for offset in offsets:
+        total_microseconds = int(round(float(offset) * seconds_per_unit * 1_000_000.0))
+        out.append(anchor_dt + timedelta(microseconds=total_microseconds))
+    return out
+
+
+def _load_goes_overlay_time_values(time_var, *, nc_module) -> list[datetime]:
+    units = str(getattr(time_var, "units", "") or "").strip()
+    if not units:
+        raise RuntimeError("GOES/XRS file is missing time units.")
+
+    calendar = str(getattr(time_var, "calendar", "standard") or "standard").strip()
+
+    raw_values = time_var[:]
+    manual_values = _manual_goes_time_utc_values(raw_values, units=units, calendar=calendar)
+    if manual_values is not None:
+        return manual_values
+
+    try:
+        raw_times = nc_module.num2date(
+            raw_values,
+            units,
+            calendar=calendar,
+            only_use_cftime_datetimes=False,
+            only_use_python_datetimes=True,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Could not convert GOES/XRS timestamps using units '{units}'.") from exc
+
+    time_values = [_coerce_goes_time_utc(item) for item in np.asarray(raw_times, dtype=object).ravel().tolist()]
+    if not time_values:
+        raise RuntimeError("GOES/XRS file does not contain any timestamps.")
+    return time_values
 
 
 def _coerce_goes_time_utc(value) -> datetime:
@@ -215,30 +344,26 @@ def _coerce_goes_numeric_series(values, *, expected_size: int) -> np.ndarray | N
         return None
 
 
-def _load_goes_overlay_frame_from_netcdf_paths(paths: Sequence[str | Path]):
+def _load_goes_overlay_frame_from_netcdf_paths(
+    paths: Sequence[str | Path],
+    *,
+    cancel_cb: Callable[[], bool] | None = None,
+):
     nc, pd = _import_goes_netcdf_dependencies()
     frames = []
 
     for raw_path in paths:
+        _raise_if_goes_overlay_cancelled(cancel_cb)
         path = Path(raw_path).expanduser().resolve()
         with nc.Dataset(str(path)) as ds:
             time_var = ds.variables.get("time")
             if time_var is None:
                 raise RuntimeError(f"GOES/XRS file '{path.name}' is missing the time variable.")
 
-            units = str(getattr(time_var, "units", "") or "").strip()
-            if not units:
-                raise RuntimeError(f"GOES/XRS file '{path.name}' is missing time units.")
-
-            calendar = str(getattr(time_var, "calendar", "standard") or "standard")
-            raw_times = nc.num2date(
-                time_var[:],
-                units,
-                calendar=calendar,
-                only_use_cftime_datetimes=False,
-                only_use_python_datetimes=False,
-            )
-            time_values = [_coerce_goes_time_utc(item) for item in list(np.ravel(raw_times))]
+            try:
+                time_values = _load_goes_overlay_time_values(time_var, nc_module=nc)
+            except Exception as exc:
+                raise RuntimeError(f"Could not parse GOES/XRS timestamps in '{path.name}'.") from exc
             if not time_values:
                 raise RuntimeError(f"GOES/XRS file '{path.name}' does not contain any timestamps.")
 
@@ -281,7 +406,11 @@ def _load_goes_overlay_frame_from_netcdf_paths(paths: Sequence[str | Path]):
     return combined
 
 
-def _load_goes_overlay_frame(paths: Sequence[str | Path]):
+def _load_goes_overlay_frame(
+    paths: Sequence[str | Path],
+    *,
+    cancel_cb: Callable[[], bool] | None = None,
+):
     normalized = [Path(p).expanduser().resolve() for p in paths if str(p).strip()]
     netcdf_paths = [
         path
@@ -289,7 +418,7 @@ def _load_goes_overlay_frame(paths: Sequence[str | Path]):
         if path.exists() and path.suffix.lower() in {".nc", ".nc4", ".cdf"}
     ]
     if netcdf_paths:
-        return _load_goes_overlay_frame_from_netcdf_paths(netcdf_paths)
+        return _load_goes_overlay_frame_from_netcdf_paths(netcdf_paths, cancel_cb=cancel_cb)
 
     load_result = load_downloaded(normalized, data_kind=DATA_KIND_TIMESERIES)
     ts = load_result.maps_or_timeseries
@@ -579,7 +708,9 @@ def fetch_goes_overlay(
     satellite_numbers: Sequence[int] | int | None = None,
     max_records: int = 128,
     progress_cb: Callable[[int | None, str | None], None] | None = None,
+    cancel_cb: Callable[[], bool] | None = None,
 ) -> GoesOverlayPayload:
+    _raise_if_goes_overlay_cancelled(cancel_cb)
     satellites = normalize_goes_satellite_numbers(satellite_numbers)
     if progress_cb is not None:
         sat_text = ", ".join(f"GOES-{sat}" for sat in satellites)
@@ -591,6 +722,7 @@ def fetch_goes_overlay(
     n_sats = max(1, len(satellites))
 
     for idx, sat in enumerate(satellites, start=1):
+        _raise_if_goes_overlay_cancelled(cancel_cb)
         search_start = 5 + int(((idx - 1) / n_sats) * 70)
         search_end = 5 + int((idx / n_sats) * 70)
         spec = SunPyQuerySpec(
@@ -606,27 +738,34 @@ def fetch_goes_overlay(
             progress_cb(search_start, f"Searching GOES-{sat} XRS archive...")
         try:
             search_result = search(spec)
+        except GoesOverlayCancelled:
+            raise
         except Exception as exc:
             fetch_errors.append(f"GOES-{sat}: search failed: {exc}")
             continue
         if not search_result.rows:
             continue
+        _raise_if_goes_overlay_cancelled(cancel_cb)
         search_hits += len(search_result.rows)
+
+        fetch_progress_cb = None
+        if progress_cb is not None:
+            def fetch_progress_cb(value, text, sat=sat, start=search_start, end=search_end):
+                _raise_if_goes_overlay_cancelled(cancel_cb)
+                progress_cb(
+                    start + int(max(0, min(100, int(value or 0))) * max(1, end - start) / 100.0),
+                    f"GOES-{sat}: {text}",
+                )
 
         try:
             fetch_result = fetch(
                 search_result,
                 cache_dir,
                 selected_rows=list(range(len(search_result.rows))),
-                progress_cb=(
-                    None
-                    if progress_cb is None
-                    else lambda value, text, sat=sat, start=search_start, end=search_end: progress_cb(
-                        start + int(max(0, min(100, int(value or 0))) * max(1, end - start) / 100.0),
-                        f"GOES-{sat}: {text}",
-                    )
-                ),
+                progress_cb=fetch_progress_cb,
             )
+        except GoesOverlayCancelled:
+            raise
         except Exception as exc:
             fetch_errors.append(f"GOES-{sat}: fetch failed: {exc}")
             continue
@@ -634,15 +773,19 @@ def fetch_goes_overlay(
             fetch_errors.extend([f"GOES-{sat}: {msg}" for msg in fetch_result.errors])
         if not fetch_result.paths:
             continue
+        _raise_if_goes_overlay_cancelled(cancel_cb)
 
         if progress_cb is not None:
             progress_cb(search_end, f"Loading GOES-{sat} XRS time series...")
 
         try:
-            frame = _load_goes_overlay_frame(fetch_result.paths)
+            frame = _load_goes_overlay_frame(fetch_result.paths, cancel_cb=cancel_cb)
+        except GoesOverlayCancelled:
+            raise
         except Exception as exc:
             fetch_errors.append(f"GOES-{sat}: load failed: {exc}")
             continue
+        _raise_if_goes_overlay_cancelled(cancel_cb)
         try:
             payload = build_goes_overlay_payload(
                 frame,
@@ -651,6 +794,8 @@ def fetch_goes_overlay(
                 end_utc=end_utc,
                 satellite_number=sat,
             )
+        except GoesOverlayCancelled:
+            raise
         except Exception as exc:
             fetch_errors.append(f"GOES-{sat}: {exc}")
             continue

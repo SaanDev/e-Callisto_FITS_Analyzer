@@ -187,7 +187,7 @@ def test_load_goes_overlay_frame_prefers_direct_netcdf_loader(monkeypatch, tmp_p
     nc_path.write_bytes(b"placeholder")
     seen = {"direct": None, "fallback": False}
 
-    def fake_direct(paths):
+    def fake_direct(paths, *, cancel_cb=None):
         seen["direct"] = [str(item) for item in paths]
         idx = pd.to_datetime(["2026-02-10T01:00:00Z"], utc=True)
         return pd.DataFrame({"xrsb_long": [1e-8]}, index=idx)
@@ -204,6 +204,59 @@ def test_load_goes_overlay_frame_prefers_direct_netcdf_loader(monkeypatch, tmp_p
     assert seen["direct"] == [str(nc_path.resolve())]
     assert seen["fallback"] is False
     assert list(frame.columns) == ["xrsb_long"]
+
+
+def test_load_goes_overlay_time_values_prefers_manual_standard_unit_parser():
+    class FakeNC:
+        @staticmethod
+        def num2date(*_args, **_kwargs):
+            raise AssertionError("num2date should not be used for standard GOES time units")
+
+    class FakeTimeVar:
+        units = "seconds since 2026-02-10 01:00:00"
+        calendar = "standard"
+
+        def __getitem__(self, _item):
+            return np.array([0, 60, 120], dtype=np.int64)
+
+    values = goes_overlay_module._load_goes_overlay_time_values(FakeTimeVar(), nc_module=FakeNC)
+
+    assert values == [
+        datetime(2026, 2, 10, 1, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 2, 10, 1, 1, 0, tzinfo=timezone.utc),
+        datetime(2026, 2, 10, 1, 2, 0, tzinfo=timezone.utc),
+    ]
+
+
+def test_load_goes_overlay_time_values_falls_back_to_python_num2date():
+    class FakeNC:
+        @staticmethod
+        def num2date(values, units, calendar=None, only_use_cftime_datetimes=None, only_use_python_datetimes=None):
+            assert units == "fortnights since 2026-02-10T01:00:00"
+            assert calendar == "standard"
+            assert only_use_cftime_datetimes is False
+            assert only_use_python_datetimes is True
+            return np.array(
+                [
+                    datetime(2026, 2, 10, 1, 0, 0, tzinfo=timezone.utc),
+                    datetime(2026, 2, 10, 1, 14, 0, tzinfo=timezone.utc),
+                ],
+                dtype=object,
+            )
+
+    class FakeTimeVar:
+        units = "fortnights since 2026-02-10T01:00:00"
+        calendar = "standard"
+
+        def __getitem__(self, _item):
+            return np.array([0, 1], dtype=np.int64)
+
+    values = goes_overlay_module._load_goes_overlay_time_values(FakeTimeVar(), nc_module=FakeNC)
+
+    assert values == [
+        datetime(2026, 2, 10, 1, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 2, 10, 1, 14, 0, tzinfo=timezone.utc),
+    ]
 
 
 def test_coerce_goes_numeric_series_handles_masked_uint8_without_crashing():
@@ -236,7 +289,7 @@ def test_fetch_goes_overlay_searches_all_satellites_and_selects_best(monkeypatch
         sat = int(search_result.satellite_number)
         return type("FetchResult", (), {"paths": [str(tmp_path / f"goes{sat}.nc")], "errors": [], "failed_count": 0})()
 
-    def fake_load_frame(paths):
+    def fake_load_frame(paths, *, cancel_cb=None):
         calls["load"].append(list(paths))
         sat = 17 if "goes17" in str(paths[0]) else 18
         idx = pd.to_datetime(
@@ -280,6 +333,18 @@ def test_fetch_goes_overlay_searches_all_satellites_and_selects_best(monkeypatch
     assert tuple(payload.series.keys()) == ("xrsa", "xrsb")
 
 
+def test_fetch_goes_overlay_honors_cancel_cb_before_archive_search(tmp_path):
+    with pytest.raises(goes_overlay_module.GoesOverlayCancelled):
+        fetch_goes_overlay(
+            start_utc=datetime(2026, 2, 10, 1, 0, 0, tzinfo=timezone.utc),
+            end_utc=datetime(2026, 2, 10, 1, 3, 0, tzinfo=timezone.utc),
+            base_utc=datetime(2026, 2, 10, 1, 0, 0, tzinfo=timezone.utc),
+            cache_dir=tmp_path,
+            satellite_numbers=(16, 17),
+            cancel_cb=lambda: True,
+        )
+
+
 def test_fetch_goes_overlay_combines_best_channels_across_satellites(monkeypatch, tmp_path):
     def fake_search(spec):
         sat = int(spec.satellite_number)
@@ -290,7 +355,7 @@ def test_fetch_goes_overlay_combines_best_channels_across_satellites(monkeypatch
         sat = int(search_result.satellite_number)
         return type("FetchResult", (), {"paths": [str(tmp_path / f"goes{sat}.nc")], "errors": [], "failed_count": 0})()
 
-    def fake_load_frame(paths):
+    def fake_load_frame(paths, *, cancel_cb=None):
         sat = 17 if "goes17" in str(paths[0]) else 18
         idx = pd.to_datetime(
             [
@@ -339,7 +404,7 @@ def test_fetch_goes_overlay_skips_satellite_search_failures(monkeypatch, tmp_pat
         sat = int(search_result.satellite_number)
         return type("FetchResult", (), {"paths": [str(tmp_path / f"goes{sat}.nc")], "errors": [], "failed_count": 0})()
 
-    def fake_load_frame(paths):
+    def fake_load_frame(paths, *, cancel_cb=None):
         idx = pd.to_datetime(
             [
                 "2026-02-10T01:00:00Z",

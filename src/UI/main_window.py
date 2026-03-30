@@ -3372,6 +3372,27 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _clear_current_colorbar_artists(self) -> None:
+        cbar = getattr(self, "current_colorbar", None)
+        cax = getattr(self, "current_cax", None)
+        self.current_colorbar = None
+        self.current_cax = None
+
+        figure_axes = list(getattr(self.canvas.figure, "axes", []))
+        for artist in (cbar, cax):
+            if artist is None:
+                continue
+            try:
+                axis = getattr(artist, "ax", None)
+                if axis is not None:
+                    if axis in figure_axes:
+                        artist.remove()
+                    continue
+                if artist in figure_axes:
+                    artist.remove()
+            except Exception:
+                pass
+
     def _plot_data_internal(self, data, title="Raw", view=None):
 
         self._stop_rect_zoom()
@@ -3384,20 +3405,10 @@ class MainWindow(QMainWindow):
             print("Canvas not ready yet")
             return
 
+        self._clear_current_colorbar_artists()
         self.canvas.ax.clear()
         self.canvas.figure.clf()
         self.canvas.ax = self.canvas.figure.add_subplot(111)
-
-        # Remove old colorbar axis safely
-        try:
-            if self.current_cax:
-                self.current_cax.remove()
-                self.current_cax = None
-            if self.current_colorbar:
-                self.current_colorbar.remove()
-                self.current_colorbar = None
-        except Exception as e:
-            print("Error removing previous colorbar:", e)
 
         # Define colormap
         # Choose cmap
@@ -3943,26 +3954,13 @@ class MainWindow(QMainWindow):
         burst_isolated = np.zeros_like(self.noise_reduced_data)
         burst_isolated[mask] = self.noise_reduced_data[mask]
 
+        self._clear_current_colorbar_artists()
+
         # Clear figure
         self.canvas.ax.clear()
         self.canvas.figure.clf()
         self.canvas.ax = self.canvas.figure.add_subplot(111)
         style_axes(self.canvas.ax)
-
-        # Remove old colorbar safely
-        try:
-            if self.current_colorbar:
-                self.current_colorbar.remove()
-        except Exception:
-            pass
-        self.current_colorbar = None
-
-        try:
-            if self.current_cax:
-                self.current_cax.remove()
-        except Exception:
-            pass
-        self.current_cax = None
 
         # Restore extent
         extent = [0, self.time[-1], self.freqs[-1], self.freqs[0]]
@@ -4675,20 +4673,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # Safely remove colorbar
-        try:
-            if self.current_colorbar and self.current_colorbar.ax:
-                self.current_colorbar.remove()
-        except Exception:
-            pass
-        self.current_colorbar = None
-
-        try:
-            if self.current_cax:
-                self.current_cax.remove()
-        except Exception:
-            pass
-        self.current_cax = None
+        self._clear_current_colorbar_artists()
 
         # Clear canvas
         self.canvas.ax.clear()
