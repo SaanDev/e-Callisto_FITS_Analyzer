@@ -43,6 +43,7 @@ class BatchProcessingDialog(QDialog):
         "RdYlBu",
         "jet",
         "cubehelix",
+        "bone_r",
     )
 
     def __init__(

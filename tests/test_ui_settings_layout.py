@@ -114,6 +114,16 @@ def test_sidebar_toggle_and_controls_still_work():
     win.close()
 
 
+def test_sidebar_colormap_dropdown_includes_bone_r():
+    _app()
+    win = MainWindow(theme=None)
+
+    options = [win.cmap_combo.itemText(i) for i in range(win.cmap_combo.count())]
+    assert "bone_r" in options
+
+    win.close()
+
+
 def test_apply_preset_updates_restored_sidebar_controls():
     _app()
     win = MainWindow(theme=None)

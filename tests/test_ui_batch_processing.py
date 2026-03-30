@@ -255,6 +255,7 @@ def test_batch_dialog_colormap_dropdown_and_defaults():
     assert "Custom" in options
     assert "inferno" in options
     assert "cubehelix" in options
+    assert "bone_r" in options
     assert dlg.colormap_combo.currentText() == "inferno"
 
     dlg.close()

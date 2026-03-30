@@ -196,6 +196,7 @@ The **Colormap** panel allows choosing from several scientifically useful palett
 - RdYlBu
 - Jet
 - Cubehelix
+- bone_r
 
 The plot updates as soon as a colormap is selected.
 

@@ -574,7 +574,7 @@ class MainWindow(QMainWindow):
         self.cmap_combo = QComboBox()
         self.cmap_combo.addItems([
             "Custom", "viridis", "plasma", "inferno", "magma",
-            "cividis", "turbo", "RdYlBu", "jet", "cubehelix",
+            "cividis", "turbo", "RdYlBu", "jet", "cubehelix", "bone_r",
         ])
         graph_layout.addWidget(QLabel("Colormap"))
         graph_layout.addWidget(self.cmap_combo)
