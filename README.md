@@ -1,95 +1,39 @@
-# e-CALLISTO FITS Analyzer
+# e-CALLISTO FITS Analyzer (v2.3.0) 
 A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data.
-
-Current stable release: **2.3.0**  
-Previous stable release: **2.2.1**
 
 ---
 
-## ✨ What's New in v2.3.0
+## ✨ Current Feature Highlights
 
-The items below are included in the finalized **v2.3.0** desktop release.
+### Dynamic spectrum workflow
+- Load `.fit`, `.fits`, `.fit.gz`, and `.fits.gz` files, including combined time/frequency datasets.
+- Use hardware-accelerated plotting with live cursor readouts, rectangular zoom, lock/unlock navigation, and **Edit → Reset to Raw** controls.
+- Adjust intensity thresholds live with high-resolution sliders, value readouts, optional signed-log scaling, dB or Digits/ADU display modes, and graph-property controls.
+- Inspect FITS headers, customize titles and labels, and export publication-ready figures from the current analysis view.
 
-### Plotting and event overlays
-- **GOES Overlay on the main spectrum**: enable **Solar Events → GOES Overlay → Long(XRS-B)** and/or **Short(XRS-A)** to draw GOES X-ray flux directly on top of the loaded FITS plot.
-- **Multi-spacecraft GOES archive fallback**: the overlay loader now searches **GOES-16** through **GOES-19** and uses the first usable XRS archive response automatically.
-- **Overlay-safe processing**: GOES overlay curves remain independent from noise reduction, RFI cleaning, colormap changes, and other dynamic-spectrum processing steps.
-- **Improved overlay readability**: thicker GOES curves plus a right-side flare-class guide (**A / B / C / M / X**) improve visibility on the shared plot.
+### Processing and analysis
+- Apply deterministic RFI cleaning with preview/apply/reset controls for median smoothing, hot-channel masking, masked-channel repair, and percentile clipping.
+- Isolate radio bursts, extract maximum intensities, remove outliers manually or automatically, and run best-fit / shock-parameter analysis.
+- Keep polygon, line, and text annotations inside the accelerated view, with editable text styling and project persistence.
+- Save and reuse processing presets, reopen restored analysis sessions, and run batch processing for folder-based FIT/FITS exports.
 
-### Annotation and analysis updates
-- **Native accelerated annotations**: polygon, line, and text annotations now stay on the PyQtGraph / hardware-accelerated window instead of falling back to Matplotlib.
-- **Text label editing**: text annotations can be moved and styled with custom font family, font size, bold/italic emphasis, and color.
-- **Maximum-intensity cleanup workflow**: manual **Select Outliers** and **Remove Outliers** remain available even when automatic outlier cleaning is enabled.
+### Solar-event context tools
+- Open standalone viewers for GOES X-ray flux, GOES SEP proton flux, SOHO/LASCO CME catalog data, Kyoto Dst, and GFZ Kp.
+- Overlay GOES XRS curves directly on the main spectrum with automatic GOES-16 through GOES-19 fallback and flare-class guides.
+- Explore external archives with the SunPy Multi-Mission Explorer for SDO, SOHO, STEREO-A, and GOES products.
+- Sync the current analyzer time window across supported solar-event windows for faster cross-comparison.
 
-### Noise reduction and interaction updates
-- **Smooth clipping thresholds**: higher-resolution lower/upper threshold sliders now provide much finer control for background tuning.
-- **Live threshold readouts**: the current clipping values are shown next to the controls for faster adjustment on smaller screens.
-- **Logarithmic threshold scale**: an optional signed-log slider mapping makes small threshold changes easier near zero.
-- **Interaction stability fixes**: rectangular zoom, cursor hover readouts, and reset behavior remain functional alongside overlays and accelerated plotting.
-
-### v2.2.1 highlights (previous stable release)
-- **SunPy Multi-Mission Explorer**: **Solar Events → Archives → SunPy Multi-Mission Explorer** for querying, downloading, plotting, and analyzing SDO, SOHO, STEREO-A, and GOES data inside the desktop app.
-- **Batch FIT Processing window**: **Processing → Batch Processing → Open Batch Processor** for folder-based batch export with raw/background-subtracted output and per-run colormap controls.
-- **Report a Bug workflow**: **About → Report a Bug...** with diagnostics ZIP generation and a prefilled GitHub issue draft.
-- **Expanded time-window sync**: sync the active analyzer time window to GOES, CME, and SunPy windows.
-- **Downloader stability improvements**: safer FITS download/fetch flow plus calendar/date-picker usability fixes.
-- **Desktop packaging updates**: SunPy runtime dependencies and packaging hooks are included for local builds, with Python **3.12+** as the `v2.2.1` packaging baseline.
-
-### v2.1 highlights
-- **Update Checker**: **About → Check for Updates...** to search online for newer releases.
-- **Background update checks**: checks run without blocking the UI.
-- **In-app update download flow**: download installer/package inside the app with progress and cancel support, plus release page link.
-- **Autosave + crash recovery**: rolling recovery snapshots with **File → Recover Last Session...**.
-- **RFI cleaning toolkit**: median filtering, robust channel masking, percentile clip with preview/apply/reset workflow.
-- **Annotation layer**: polygon/line/text annotations persisted in project files.
-- **Cross-panel time sync**: sync active analyzer time window to GOES/CME windows.
-- **Processing presets**: save/apply/delete named presets (global + project snapshot support).
-- **Provenance report export**: one-click Markdown + JSON metadata reports for reproducibility.
-
-### v2.1 CME viewer enhancements
-- **Enhanced CME Viewer** with a more stable, isolated playback flow.
-- Improved interactive CME playback for running-difference movies with GOES X-ray context.
-- Better failure handling and fallback behavior to avoid main-window crashes.
-
-### v2.0 highlights
-
-### Core workflow
-- Added **session/project save and load** support (`.efaproj`) to restore analysis state.
-- Introduced a unified, more robust FITS I/O layer across loading/downloading/combining workflows.
-- Improved FITS parsing for `.fit`, `.fits`, `.fit.gz`, `.fits.gz`, swapped axes, and missing/alternate axis tables.
-- Added **FITS View → View FITS Header** with header inspection and save-to-`.txt`.
-- Combined datasets now carry updated header metadata for time/frequency merge context.
-
-### Analysis and plotting
-- Fixed Best-Fit/Analyzer crash (`TypeError: cannot unpack non-iterable bool object`) in shock parameter workflows.
-- Dynamic spectrum titles are now context-aware (`filename-Raw`, `filename-Background Subtracted`) and no longer use `Dynamic Spectrum`.
-- Short-duration time windows now show `hh:mm:ss` for better readability.
-- Fixed undo/reset-view behavior after zooming so actions stay enabled and functional.
-- Added **Edit → Reset to Raw** to restore raw data view and reset clipping sliders to `0`.
-
-### Export and compatibility
-- Improved exported FITS compatibility with external tools (including JavaViewer) for combined files.
-- Added export `BITPIX` control (`Auto`, `8`, `16`, `32`) and removed problematic float64 export behavior.
-- FITS export now reuses source FITS structure for combined output to preserve axis-table compatibility.
-- Default export filenames (image + FITS) now follow the active graph title and avoid duplicated combine suffixes.
-
-### UI/UX
-- Added a **collapsible left sidebar**.
-- When collapsed, the graph area expands to use the full available width.
-- Added **View → Mode** with **Classic** and **Modern** UI modes.
-- Modern mode is now applied consistently across main and auxiliary windows.
-- Improved modern sidebar layout spacing for cleaner section grouping.
-- Fixed modern-mode **combo box** and **spin box** arrow visibility/styling.
-
-### Build and packaging reliability
-- Updated platform build configs for v2.0 UI assets and modern theme resources.
-- Aligned PyInstaller and py2app manifests so all icon packs are bundled consistently.
+### Reproducibility and support
+- Save full analyzer state as `.efaproj` project files and recover recent autosave snapshots.
+- Export processed FITS files, provenance reports (Markdown + JSON), and analysis logs (CSV + TXT).
+- Generate diagnostics ZIP bundles for bug reports and open a prefilled GitHub issue draft from inside the app.
+- Use the built-in citation dialog to copy the recommended citation or BibTeX entry, and check for newer GitHub releases from the app.
 
 ---
 
 ## 📘 User Guide
 
-This guide explains how to use the main features of the **e-CALLISTO FITS Analyzer**, including dynamic spectrum visualization, live noise reduction, annotations, burst isolation, drift estimation, maximum intensity extraction, best-fit analysis, FITS export, the FITS downloader, and the built-in CME, GOES, and SunPy modules.
+This guide explains how to use the main features of the **e-CALLISTO FITS Analyzer**, including dynamic spectrum visualization, live noise reduction, annotations, burst isolation, drift estimation, maximum intensity extraction, best-fit analysis, FITS export, the FITS downloader, and the built-in CME, GOES, SEP, Dst, Kp, and SunPy modules.
 
 ---
 
@@ -390,6 +334,15 @@ Export handling improvements:
 
 This supports publication workflows across operating systems.
 
+### Provenance and Analysis Logs
+
+For reproducibility and audit trails, the app can export two structured report types from **File → Export As**:
+
+- **Export Provenance Report...** writes both Markdown and JSON summaries of the loaded data source, processing settings, RFI configuration, annotations, time-sync state, and operation log.
+- **Export Analysis Log...** writes CSV and plain-text summaries of analyzer fit parameters and derived shock metrics.
+
+These reports are useful for lab notebooks, collaboration handoffs, and paper preparation.
+
 ---
 
 # 18. CME Catalog Viewer (SOHO/LASCO)
@@ -421,11 +374,11 @@ Features:
 
 ---
 
-## 20. GOES SEP Proton Flux Viewer
+# 20. GOES SEP Proton Flux Viewer
 
 Path:
 
-- **Solar Events -> Energetic Particles -> GOES SEP Proton Flux**
+- **Solar Events → Energetic Particles → GOES SEP Proton Flux**
 
 Features:
 
@@ -434,9 +387,22 @@ Features:
 - Show proton channels closest to about **10 MeV** and **100 MeV**, along with hover readouts and selection-based event metrics
 - Export both the plotted figure and the stitched flux table as PNG/CSV
 
+### Geomagnetic Indices (Dst and Kp)
+
+Path:
+
+- **Solar Events → Geomagnetic → Kyoto Dst Index**
+- **Solar Events → Geomagnetic → GFZ Kp Index**
+
+Features:
+
+- Fetch geomagnetic activity data across custom UTC ranges directly inside the desktop app.
+- Visualize Kyoto Dst and GFZ Kp with dedicated storm-level guides for quick contextual interpretation.
+- Export both plots and tabular data as PNG/CSV for reporting and comparison with solar-radio observations.
+
 ---
 
-## 21. SunPy Multi-Mission Explorer
+# 21. SunPy Multi-Mission Explorer
 
 Path:
 
@@ -465,7 +431,24 @@ Known limitations:
 
 ---
 
-## 22. Check for Updates
+# 22. Support and Research Tools
+
+### Report a Bug
+
+Use **About → Report a Bug...** to open the in-app diagnostics workflow.
+
+- Capture session details, environment information, and user notes in a single report dialog.
+- Generate a diagnostics ZIP bundle that can include structured provenance summaries for easier troubleshooting.
+- Open a prefilled GitHub issue draft or copy the issue text before submitting.
+
+### Cite this Software
+
+Use the **Cite this Software** button in the main window to open the citation dialog.
+
+- Copy the recommended citation text for the e-CALLISTO FITS Analyzer paper.
+- Copy the BibTeX entry directly into your manuscript or reference manager workflow.
+
+### Check for Updates
 
 Use **About → Check for Updates...** to query the latest release from GitHub.
 
@@ -476,10 +459,11 @@ Use **About → Check for Updates...** to query the latest release from GitHub.
 
 ---
 
-## 🛠️ Build and Packaging (v2.3.0)
+## 🛠️ Build and Packaging
 
 ### Prerequisites
-- Python 3.12+ (SunPy 7.1.x baseline; recommended: same version used for your target build machine)
+- Python 3.12+ is recommended for local development and Windows/macOS packaging.
+- Linux packaging scripts can also work with Python 3.11+ when required by the target system.
 
 ### Run from Source
 - Create and activate a virtual environment.
@@ -540,6 +524,7 @@ Use **About → Check for Updates...** to query the latest release from GitHub.
 - Project save/load format: `.efaproj`
 - Live noise reduction with preserved zoom, pan, and axis format
 - Cursor-based data readout for time, frequency, and intensity
+- Provenance/report export and diagnostics bundles are available from the desktop UI
 - Improved plotting area for clearer scientific visualization
 - Robust export system with OS-aware save handling
 - Major plots are publication ready
