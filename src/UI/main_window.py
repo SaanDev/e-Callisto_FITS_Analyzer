@@ -117,6 +117,7 @@ from src.UI.dialogs.analyze_dialog import AnalyzeDialog
 from src.UI.dialogs.annotation_text_dialog import TextAnnotationDialog
 from src.UI.dialogs.batch_processing_dialog import BatchProcessingDialog
 from src.UI.dialogs.bug_report_dialog import BugReportDialog
+from src.UI.dialogs.citation_dialog import CitationDialog
 from src.UI.dialogs.combine_dialogs import CombineFrequencyDialog, CombineTimeDialog
 from src.UI.dialogs.max_intensity_dialog import MaxIntensityPlotDialog
 from src.UI.dialogs.rfi_control_dialog import RFIControlDialog
@@ -284,6 +285,7 @@ class MainWindow(QMainWindow):
         self._import_progress_dialog = None
         self._batch_processing_dialog = None
         self._bug_report_dialog = None
+        self._citation_dialog = None
 
         # Processing audit + derived state
         self._processing_log = []
@@ -1636,6 +1638,7 @@ class MainWindow(QMainWindow):
         tb.setMovable(False)
         tb.setIconSize(QSize(36, 36))
         self.addToolBar(tb)
+        self.main_toolbar = tb
 
         # --- Actions (toolbar) ---
         self.tb_open = QAction(self._icon("open.svg"), "Open / Load", self)
@@ -1710,6 +1713,17 @@ class MainWindow(QMainWindow):
         self.tb_reset_all = QAction(self._icon("reset_all.svg"), "Reset All", self)
         self.tb_reset_all.triggered.connect(self.reset_all)
         tb.addAction(self.tb_reset_all)
+
+        toolbar_spacer = QWidget(tb)
+        toolbar_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        tb.addWidget(toolbar_spacer)
+        self.toolbar_spacer = toolbar_spacer
+
+        self.cite_software_button = QPushButton("Cite this Software", tb)
+        self.cite_software_button.setObjectName("ToolbarCiteButton")
+        self.cite_software_button.setToolTip("Open the citation window for this software")
+        self.cite_software_button.clicked.connect(self.open_citation_dialog)
+        tb.addWidget(self.cite_software_button)
 
         # Initial enable/disable states
         self._sync_toolbar_enabled_states()
@@ -5319,6 +5333,9 @@ class MainWindow(QMainWindow):
     def _on_bug_report_dialog_destroyed(self, *_):
         self._bug_report_dialog = None
 
+    def _on_citation_dialog_destroyed(self, *_):
+        self._citation_dialog = None
+
     def open_bug_report_dialog(self):
         try:
             alive = self._bug_report_dialog is not None
@@ -5341,6 +5358,23 @@ class MainWindow(QMainWindow):
         self._bug_report_dialog.show()
         self._bug_report_dialog.raise_()
         self._bug_report_dialog.activateWindow()
+
+    def open_citation_dialog(self):
+        try:
+            alive = self._citation_dialog is not None
+            if alive:
+                _ = self._citation_dialog.windowTitle()
+        except Exception:
+            alive = False
+
+        if not alive:
+            self._citation_dialog = CitationDialog(parent=self)
+            self._citation_dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+            self._citation_dialog.destroyed.connect(self._on_citation_dialog_destroyed)
+
+        self._citation_dialog.show()
+        self._citation_dialog.raise_()
+        self._citation_dialog.activateWindow()
 
     def reset_selection(self):
         had_drift_points = self._clear_drift_overlays(keep_view=True)
@@ -8301,6 +8335,11 @@ class MainWindow(QMainWindow):
         try:
             if self._bug_report_dialog is not None:
                 self._bug_report_dialog.close()
+        except Exception:
+            pass
+        try:
+            if self._citation_dialog is not None:
+                self._citation_dialog.close()
         except Exception:
             pass
         try:
