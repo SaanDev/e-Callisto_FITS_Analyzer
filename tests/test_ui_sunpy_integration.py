@@ -56,6 +56,21 @@ def test_main_window_exposes_dst_action_and_opens_window():
     win.close()
 
 
+def test_main_window_exposes_kp_action_and_opens_window():
+    _app()
+    win = MainWindow(theme=None)
+    assert hasattr(win, "open_kp_action")
+    assert win.open_kp_action.text() == "GFZ Kp Index"
+
+    win.open_kp_action.trigger()
+    QApplication.processEvents()
+    assert win._kp_window is not None
+    assert win._kp_window.isVisible() is True
+
+    win._kp_window.close()
+    win.close()
+
+
 def test_sync_context_includes_sunpy_status(monkeypatch):
     _app()
     win = MainWindow(theme=None)
@@ -67,12 +82,14 @@ def test_sync_context_includes_sunpy_status(monkeypatch):
     monkeypatch.setattr(win, "_sync_window_to_cme", lambda *_a, **_k: False)
     monkeypatch.setattr(win, "_sync_window_to_sunpy", lambda *_a, **_k: True)
     monkeypatch.setattr(win, "_sync_window_to_dst", lambda *_a, **_k: True)
+    monkeypatch.setattr(win, "_sync_window_to_kp", lambda *_a, **_k: True)
 
     win.sync_current_time_window_to_solar_events()
     assert win._last_time_sync_context["goes_synced"] is True
     assert win._last_time_sync_context["cme_synced"] is False
     assert win._last_time_sync_context["sunpy_synced"] is True
     assert win._last_time_sync_context["dst_synced"] is True
+    assert win._last_time_sync_context["kp_synced"] is True
     win.close()
 
 

@@ -474,6 +474,8 @@ Use **About → Check for Updates...** to query the latest release from GitHub.
   - `python src/UI/main.py`
 - Start the standalone Kyoto Dst index plotter:
   - `python src/UI/dst_index_gui.py`
+- Start the standalone GFZ Kp index plotter:
+  - `python src/UI/kp_index_gui.py`
 
 ### Build dependencies
 - Install runtime dependencies:

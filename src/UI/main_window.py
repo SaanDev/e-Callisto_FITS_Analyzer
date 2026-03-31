@@ -123,6 +123,7 @@ from src.UI.dialogs.rfi_control_dialog import RFIControlDialog
 from src.UI.dst_index_gui import MainWindow as DstIndexWindow
 from src.UI.fits_header_viewer import FitsHeaderViewerDialog
 from src.UI.goes_xrs_gui import MainWindow as GoesXrsWindow
+from src.UI.kp_index_gui import MainWindow as KpIndexWindow
 from src.UI.gui_shared import (
     MplCanvas,
     _ext_from_filter,
@@ -183,6 +184,7 @@ class MainWindow(QMainWindow):
         self._sunpy_window = None
         self._goes_window = None
         self._dst_window = None
+        self._kp_window = None
         self._goes_overlay_enabled = False
         self._goes_overlay_payload: GoesOverlayPayload | None = None
         self._goes_overlay_payload_key: str | None = None
@@ -846,6 +848,9 @@ class MainWindow(QMainWindow):
         self.open_dst_action = QAction("Kyoto Dst Index", self)
         self.open_dst_action.triggered.connect(self.open_dst_window)
         geomagnetic_submenu.addAction(self.open_dst_action)
+        self.open_kp_action = QAction("GFZ Kp Index", self)
+        self.open_kp_action.triggered.connect(self.open_kp_window)
+        geomagnetic_submenu.addAction(self.open_kp_action)
 
         # Archives submenu
         archives_submenu = solar_events_menu.addMenu("Archives")
@@ -5888,6 +5893,26 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+    def open_kp_window(self):
+        try:
+            alive = self._kp_window is not None
+            if alive:
+                _ = self._kp_window.windowTitle()
+        except Exception:
+            alive = False
+        if not alive:
+            self._kp_window = KpIndexWindow()
+        self._kp_window.show()
+        self._kp_window.raise_()
+        self._kp_window.activateWindow()
+
+        window = self._current_time_window_utc()
+        if window and hasattr(self._kp_window, "set_time_window"):
+            try:
+                self._kp_window.set_time_window(window[0], window[1], auto_plot=True)
+            except Exception:
+                pass
+
     def open_soho_lasco_window(self):
         self.open_cme_viewer()
 
@@ -7488,6 +7513,16 @@ class MainWindow(QMainWindow):
         except Exception:
             return False
 
+    def _sync_window_to_kp(self, start_dt: datetime, end_dt: datetime, *, auto_plot: bool = True) -> bool:
+        if self._kp_window is None:
+            return False
+        if not hasattr(self._kp_window, "set_time_window"):
+            return False
+        try:
+            return bool(self._kp_window.set_time_window(start_dt, end_dt, auto_plot=auto_plot))
+        except Exception:
+            return False
+
     def sync_current_time_window_to_solar_events(self):
         window = self._current_time_window_utc()
         if not window:
@@ -7500,6 +7535,7 @@ class MainWindow(QMainWindow):
         cme_ok = self._sync_window_to_cme(mid_dt, auto_search=True)
         sunpy_ok = self._sync_window_to_sunpy(start_dt, end_dt, auto_query=False)
         dst_ok = self._sync_window_to_dst(start_dt, end_dt, auto_plot=True)
+        kp_ok = self._sync_window_to_kp(start_dt, end_dt, auto_plot=True)
 
         self._last_time_sync_context = {
             "start_utc": start_dt.isoformat(timespec="seconds"),
@@ -7509,9 +7545,10 @@ class MainWindow(QMainWindow):
             "cme_synced": bool(cme_ok),
             "sunpy_synced": bool(sunpy_ok),
             "dst_synced": bool(dst_ok),
+            "kp_synced": bool(kp_ok),
         }
         self._log_operation("Synced current time window to Solar Events panels.")
-        if not goes_ok and not cme_ok and not sunpy_ok and not dst_ok:
+        if not goes_ok and not cme_ok and not sunpy_ok and not dst_ok and not kp_ok:
             self.statusBar().showMessage("No open Solar Events windows to sync.", 4000)
         else:
             self.statusBar().showMessage("Synced current time window to Solar Events.", 4000)
