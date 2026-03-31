@@ -13,6 +13,8 @@ import platform
 import sys
 import threading
 
+from PySide6.QtCore import QTimer
+
 
 def _force_software_opengl() -> bool:
     raw = os.environ.get("CALLISTO_FORCE_SOFTWARE_OPENGL", "").strip().lower()
@@ -209,6 +211,7 @@ def _run_main_mode(app: QApplication) -> int:
         if not app_icon.isNull():
             window.setWindowIcon(app_icon)
     window.showMaximized()
+    QTimer.singleShot(0, window.check_for_startup_updates)
     return app.exec()
 
 

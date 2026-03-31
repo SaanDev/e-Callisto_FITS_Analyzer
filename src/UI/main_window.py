@@ -282,6 +282,7 @@ class MainWindow(QMainWindow):
         self._update_download_thread = None
         self._update_download_worker = None
         self._update_download_progress_dialog = None
+        self._update_check_interactive = True
         self._import_progress_dialog = None
         self._batch_processing_dialog = None
         self._bug_report_dialog = None
@@ -366,6 +367,9 @@ class MainWindow(QMainWindow):
 
         # Statusbar
         self.setStatusBar(QStatusBar())
+        self.update_status_label = QLabel("Updates: not checked")
+        self.update_status_label.setStyleSheet("padding-right: 12px;")
+        self.statusBar().addPermanentWidget(self.update_status_label)
         # Permanent label on right side for cursor coordinates
         self.cursor_label = QLabel("")
         self.cursor_label.setStyleSheet("padding-right: 8px;")
@@ -4894,11 +4898,25 @@ class MainWindow(QMainWindow):
             pass
         return had_drift_points
 
-    def check_for_app_updates(self):
+    def _set_update_status_label(self, text: str, *, tooltip: str | None = None):
+        label = getattr(self, "update_status_label", None)
+        if label is None:
+            return
+        content = str(text or "").strip()
+        label.setText(content)
+        label.setToolTip(str(tooltip or content or "").strip())
+
+    def check_for_startup_updates(self):
+        self.check_for_app_updates(interactive=False)
+
+    def check_for_app_updates(self, checked: bool = False, *, interactive: bool = True):
+        _ = checked
         if self._update_thread is not None:
             self.statusBar().showMessage("Update check is already running...", 3000)
             return
 
+        self._update_check_interactive = bool(interactive)
+        self._set_update_status_label("Updates: checking...", tooltip="Checking GitHub releases for updates.")
         self.statusBar().showMessage("Checking for updates...", 0)
         if hasattr(self, "check_updates_action"):
             self.check_updates_action.setEnabled(False)
@@ -4918,6 +4936,7 @@ class MainWindow(QMainWindow):
     def _on_update_check_thread_finished(self):
         self._update_worker = None
         self._update_thread = None
+        self._update_check_interactive = True
         if hasattr(self, "check_updates_action"):
             self.check_updates_action.setEnabled(True)
 
@@ -5247,33 +5266,48 @@ class MainWindow(QMainWindow):
             self._open_update_url(result.release_url)
 
     def _on_update_check_finished(self, result):
+        interactive = bool(getattr(self, "_update_check_interactive", True))
         now_utc = datetime.now(timezone.utc).isoformat(timespec="seconds")
         self._ui_settings.setValue("updates/last_checked_at", now_utc)
 
         if getattr(result, "is_error", False):
-            self.statusBar().showMessage("Update check failed.", 5000)
-            QMessageBox.warning(
-                self,
-                "Update Check Failed",
-                f"Could not check for updates.\n\n{result.error or 'Unknown error.'}",
-            )
+            detail = str(result.error or "Unknown error.").strip()
+            self._set_update_status_label("Updates: check failed", tooltip=detail or "Update check failed.")
+            self.statusBar().showMessage("Update check failed.", 5000 if interactive else 0)
+            if interactive:
+                QMessageBox.warning(
+                    self,
+                    "Update Check Failed",
+                    f"Could not check for updates.\n\n{detail or 'Unknown error.'}",
+                )
             return
 
         if getattr(result, "update_available", False):
             self._ui_settings.setValue("updates/last_seen_version", result.latest_version or "")
-            self.statusBar().showMessage(
-                f"Update available: v{result.latest_version}",
-                5000,
+            latest_version = str(result.latest_version or "").strip() or "new version"
+            self._set_update_status_label(
+                f"Updates: v{latest_version} available",
+                tooltip=f"Update available: v{latest_version}",
             )
-            self._show_update_available_dialog(result)
+            self.statusBar().showMessage(
+                f"Update available: v{latest_version}",
+                5000 if interactive else 0,
+            )
+            if interactive:
+                self._show_update_available_dialog(result)
             return
 
-        self.statusBar().showMessage("You are already using the latest version.", 5000)
-        QMessageBox.information(
-            self,
-            "Up to Date",
-            f"You are using the latest version.\n\nCurrent: v{APP_VERSION}",
+        self._set_update_status_label(
+            "Updates: up to date",
+            tooltip=f"You are already using the latest version (v{APP_VERSION}).",
         )
+        self.statusBar().showMessage("You are already using the latest version.", 5000 if interactive else 0)
+        if interactive:
+            QMessageBox.information(
+                self,
+                "Up to Date",
+                f"You are using the latest version.\n\nCurrent: v{APP_VERSION}",
+            )
 
     def show_about_dialog(self):
         QMessageBox.information(

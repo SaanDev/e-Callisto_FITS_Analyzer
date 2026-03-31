@@ -15,6 +15,7 @@ pytest.importorskip("requests")
 
 from PySide6.QtWidgets import QApplication
 
+from src.Backend.update_checker import UpdateCheckResult
 from src.UI.gui_main import MainWindow
 
 
@@ -91,3 +92,56 @@ def test_release_notes_preview_returns_plain_compiled_text():
     assert "feature A" in preview
     assert "feature B" in preview
     assert "fast mode" in preview
+
+
+def test_startup_update_check_delegates_to_non_interactive_path(monkeypatch):
+    _app()
+    window = MainWindow(theme=None)
+    captured = {}
+
+    def fake_check(_checked=False, *, interactive=True):
+        captured["interactive"] = interactive
+
+    monkeypatch.setattr(window, "check_for_app_updates", fake_check)
+    window.check_for_startup_updates()
+
+    assert captured["interactive"] is False
+
+
+def test_update_available_sets_status_bar_label_without_dialog_on_startup(monkeypatch):
+    _app()
+    window = MainWindow(theme=None)
+    shown = {"dialog": 0}
+
+    monkeypatch.setattr(window, "_show_update_available_dialog", lambda _result: shown.__setitem__("dialog", 1))
+
+    window._update_check_interactive = False
+    result = UpdateCheckResult(
+        status="update_available",
+        current_version="2.3.0",
+        latest_version="2.4.0",
+    )
+    window._on_update_check_finished(result)
+
+    assert window.update_status_label.text() == "Updates: v2.4.0 available"
+    assert window.statusBar().currentMessage() == "Update available: v2.4.0"
+    assert shown["dialog"] == 0
+
+
+def test_manual_update_check_keeps_dialog_behavior(monkeypatch):
+    _app()
+    window = MainWindow(theme=None)
+    shown = {"dialog": 0}
+
+    monkeypatch.setattr(window, "_show_update_available_dialog", lambda _result: shown.__setitem__("dialog", 1))
+
+    window._update_check_interactive = True
+    result = UpdateCheckResult(
+        status="update_available",
+        current_version="2.3.0",
+        latest_version="2.4.0",
+    )
+    window._on_update_check_finished(result)
+
+    assert window.update_status_label.text() == "Updates: v2.4.0 available"
+    assert shown["dialog"] == 1
