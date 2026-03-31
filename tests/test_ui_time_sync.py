@@ -16,10 +16,14 @@ pytest.importorskip("PySide6")
 pytest.importorskip("matplotlib")
 pytest.importorskip("requests")
 pytest.importorskip("bs4")
+pytest.importorskip("netCDF4")
+pytest.importorskip("cftime")
 
 from PySide6.QtWidgets import QApplication
 
+from src.Backend.sep_proton import SepProtonRangeData
 from src.UI.dst_index_gui import MainWindow as DstWindow
+from src.UI.goes_sgps_gui import MainWindow as SepWindow
 from src.UI.goes_xrs_gui import MainWindow as GoesWindow
 from src.UI.kp_index_gui import MainWindow as KpWindow
 from src.UI.soho_lasco_viewer import CMEViewer, CMECatalogRow, FetchOutcome, STATUS_OK
@@ -50,6 +54,82 @@ def test_goes_set_time_window_rejects_cross_day():
 
     ok = win.set_time_window(start_dt, end_dt, auto_plot=False)
     assert ok is False
+
+
+def test_sep_set_time_window_accepts_cross_day_range():
+    _app()
+    win = SepWindow()
+    start_dt = datetime(2026, 2, 10, 23, 0)
+    end_dt = datetime(2026, 2, 11, 1, 15)
+
+    ok = win.set_time_window(start_dt, end_dt, auto_plot=False)
+
+    assert ok is True
+    assert win.start_date.date().day() == 10
+    assert int(win.start_hour.currentData()) == 23
+    assert win.end_date.date().day() == 11
+    assert int(win.end_hour.currentData()) == 1
+    assert int(win.end_min.currentData()) == 15
+
+
+def test_sep_cursor_text_tracks_both_channels():
+    _app()
+    win = SepWindow()
+    result = SepProtonRangeData(
+        times=(
+            datetime(2026, 2, 10, 0, 0, 0),
+            datetime(2026, 2, 10, 0, 5, 0),
+        ),
+        low_flux=(1.0, 2.0),
+        high_flux=(10.0, 20.0),
+        low_channel_label="P2 (9-12 MeV)",
+        high_channel_label="P4 (90-120 MeV)",
+        units="pfu",
+        spacecraft="GOES-19",
+        source_files=("day1.nc",),
+    )
+    win.current_result = result
+    win.canvas.plot_sep(result, result.times[0], result.times[-1])
+
+    mid_x = float(win.canvas._time_nums[0] + win.canvas._time_nums[1]) / 2.0
+    text = win._format_cursor_text(mid_x, True)
+
+    assert "UTC = 2026-02-10 00:00:00" in text or "UTC = 2026-02-10 00:05:00" in text
+    assert "P2 (9-12 MeV) = " in text
+    assert "P4 (90-120 MeV) = " in text
+    assert "pfu" in text
+
+
+def test_sep_selection_updates_analysis_metrics():
+    _app()
+    win = SepWindow()
+    result = SepProtonRangeData(
+        times=(
+            datetime(2026, 2, 10, 0, 0, 0),
+            datetime(2026, 2, 10, 0, 5, 0),
+            datetime(2026, 2, 10, 0, 10, 0),
+        ),
+        low_flux=(1.0, 5.0, 2.0),
+        high_flux=(10.0, 12.0, 11.0),
+        low_channel_label="P2 (9-12 MeV)",
+        high_channel_label="P4 (90-120 MeV)",
+        units="pfu",
+        spacecraft="GOES-19",
+        source_files=("day1.nc",),
+    )
+    win.current_result = result
+    win.canvas.plot_sep(result, result.times[0], result.times[-1])
+
+    class _Evt:
+        def __init__(self, xdata):
+            self.xdata = xdata
+
+    win.canvas._on_select(_Evt(float(win.canvas._time_nums[0])), _Evt(float(win.canvas._time_nums[-1])))
+
+    assert "2026-02-10 00:00:00" in win.info_selection.text()
+    assert win.info_peak_flux.text().startswith("5.000e+00")
+    assert "00:05:00" in win.info_peak_time.text()
+    assert win.info_event_time.text() == "10m 00s"
 
 
 def test_dst_set_time_window_accepts_cross_day_range():

@@ -421,7 +421,22 @@ Features:
 
 ---
 
-## 20. SunPy Multi-Mission Explorer
+## 20. GOES SEP Proton Flux Viewer
+
+Path:
+
+- **Solar Events -> Energetic Particles -> GOES SEP Proton Flux**
+
+Features:
+
+- Plot GOES SEP proton flux from the NOAA SGPS archive across multi-day UTC ranges
+- Automatically try **GOES-19** through **GOES-16**, with manual spacecraft override available in the window
+- Show proton channels closest to about **10 MeV** and **100 MeV**, along with hover readouts and selection-based event metrics
+- Export both the plotted figure and the stitched flux table as PNG/CSV
+
+---
+
+## 21. SunPy Multi-Mission Explorer
 
 Path:
 
@@ -450,7 +465,7 @@ Known limitations:
 
 ---
 
-## 21. Check for Updates
+## 22. Check for Updates
 
 Use **About → Check for Updates...** to query the latest release from GitHub.
 
@@ -476,6 +491,8 @@ Use **About → Check for Updates...** to query the latest release from GitHub.
   - `python src/UI/dst_index_gui.py`
 - Start the standalone GFZ Kp index plotter:
   - `python src/UI/kp_index_gui.py`
+- Start the standalone GOES SEP proton flux plotter:
+  - `python src/UI/goes_sgps_gui.py`
 
 ### Build dependencies
 - Install runtime dependencies:

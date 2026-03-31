@@ -111,6 +111,7 @@ a = Analysis(
         "src.UI.utils.url_opener",
         "src.Backend.dst_index",
         "src.Backend.kp_index",
+        "src.Backend.sep_proton",
         "src.Backend.sunpy_archive",
         "src.Backend.sunpy_analysis",
         "sunpy.map",

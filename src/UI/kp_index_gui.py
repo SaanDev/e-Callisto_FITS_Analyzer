@@ -215,7 +215,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("Kp Index Plotter")
+        self.setWindowTitle("Kp Index")
         self.resize(1220, 760)
 
         self.theme = _get_theme()

@@ -122,6 +122,7 @@ from src.UI.dialogs.max_intensity_dialog import MaxIntensityPlotDialog
 from src.UI.dialogs.rfi_control_dialog import RFIControlDialog
 from src.UI.dst_index_gui import MainWindow as DstIndexWindow
 from src.UI.fits_header_viewer import FitsHeaderViewerDialog
+from src.UI.goes_sgps_gui import MainWindow as SepProtonWindow
 from src.UI.goes_xrs_gui import MainWindow as GoesXrsWindow
 from src.UI.kp_index_gui import MainWindow as KpIndexWindow
 from src.UI.gui_shared import (
@@ -183,6 +184,7 @@ class MainWindow(QMainWindow):
         self._cme_viewer = None
         self._sunpy_window = None
         self._goes_window = None
+        self._sep_window = None
         self._dst_window = None
         self._kp_window = None
         self._goes_overlay_enabled = False
@@ -842,6 +844,11 @@ class MainWindow(QMainWindow):
         goes_flux_action = QAction("GOES X-Ray Flux", self)
         goes_flux_action.triggered.connect(self.open_goes_xrs_window)
         flares_submenu.addAction(goes_flux_action)
+
+        energetic_particles_submenu = solar_events_menu.addMenu("Energetic Particles")
+        self.open_sep_action = QAction("GOES SEP Proton Flux", self)
+        self.open_sep_action.triggered.connect(self.open_sep_window)
+        energetic_particles_submenu.addAction(self.open_sep_action)
 
         # Geomagnetic submenu
         geomagnetic_submenu = solar_events_menu.addMenu("Geomagnetic")
@@ -5873,6 +5880,26 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+    def open_sep_window(self):
+        try:
+            alive = self._sep_window is not None
+            if alive:
+                _ = self._sep_window.windowTitle()
+        except Exception:
+            alive = False
+        if not alive:
+            self._sep_window = SepProtonWindow()
+        self._sep_window.show()
+        self._sep_window.raise_()
+        self._sep_window.activateWindow()
+
+        window = self._current_time_window_utc()
+        if window and hasattr(self._sep_window, "set_time_window"):
+            try:
+                self._sep_window.set_time_window(window[0], window[1], auto_plot=True)
+            except Exception:
+                pass
+
     def open_dst_window(self):
         try:
             alive = self._dst_window is not None
@@ -7513,6 +7540,16 @@ class MainWindow(QMainWindow):
         except Exception:
             return False
 
+    def _sync_window_to_sep(self, start_dt: datetime, end_dt: datetime, *, auto_plot: bool = True) -> bool:
+        if self._sep_window is None:
+            return False
+        if not hasattr(self._sep_window, "set_time_window"):
+            return False
+        try:
+            return bool(self._sep_window.set_time_window(start_dt, end_dt, auto_plot=auto_plot))
+        except Exception:
+            return False
+
     def _sync_window_to_kp(self, start_dt: datetime, end_dt: datetime, *, auto_plot: bool = True) -> bool:
         if self._kp_window is None:
             return False
@@ -7534,6 +7571,7 @@ class MainWindow(QMainWindow):
         goes_ok = self._sync_window_to_goes(start_dt, end_dt, auto_plot=True)
         cme_ok = self._sync_window_to_cme(mid_dt, auto_search=True)
         sunpy_ok = self._sync_window_to_sunpy(start_dt, end_dt, auto_query=False)
+        sep_ok = self._sync_window_to_sep(start_dt, end_dt, auto_plot=True)
         dst_ok = self._sync_window_to_dst(start_dt, end_dt, auto_plot=True)
         kp_ok = self._sync_window_to_kp(start_dt, end_dt, auto_plot=True)
 
@@ -7544,11 +7582,12 @@ class MainWindow(QMainWindow):
             "goes_synced": bool(goes_ok),
             "cme_synced": bool(cme_ok),
             "sunpy_synced": bool(sunpy_ok),
+            "sep_synced": bool(sep_ok),
             "dst_synced": bool(dst_ok),
             "kp_synced": bool(kp_ok),
         }
         self._log_operation("Synced current time window to Solar Events panels.")
-        if not goes_ok and not cme_ok and not sunpy_ok and not dst_ok and not kp_ok:
+        if not goes_ok and not cme_ok and not sunpy_ok and not sep_ok and not dst_ok and not kp_ok:
             self.statusBar().showMessage("No open Solar Events windows to sync.", 4000)
         else:
             self.statusBar().showMessage("Synced current time window to Solar Events.", 4000)
