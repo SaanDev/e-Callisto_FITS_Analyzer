@@ -9,14 +9,17 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import numpy as np
 import pytest
 
 pytest.importorskip("PySide6")
+pytest.importorskip("matplotlib")
 pytest.importorskip("requests")
 pytest.importorskip("bs4")
 
 from PySide6.QtWidgets import QApplication
 
+from src.UI.dst_index_gui import MainWindow as DstWindow
 from src.UI.goes_xrs_gui import MainWindow as GoesWindow
 from src.UI.soho_lasco_viewer import CMEViewer, CMECatalogRow, FetchOutcome, STATUS_OK
 
@@ -46,6 +49,39 @@ def test_goes_set_time_window_rejects_cross_day():
 
     ok = win.set_time_window(start_dt, end_dt, auto_plot=False)
     assert ok is False
+
+
+def test_dst_set_time_window_accepts_cross_day_range():
+    _app()
+    win = DstWindow()
+    start_dt = datetime(2026, 2, 10, 23, 0)
+    end_dt = datetime(2026, 2, 11, 1, 0)
+
+    ok = win.set_time_window(start_dt, end_dt, auto_plot=False)
+
+    assert ok is True
+    assert win.start_date.date().year() == 2026
+    assert win.start_date.date().day() == 10
+    assert int(win.start_hour.currentData()) == 23
+    assert win.end_date.date().day() == 11
+    assert int(win.end_hour.currentData()) == 1
+
+
+def test_dst_cursor_text_tracks_time_and_value_along_curve():
+    _app()
+    win = DstWindow()
+    start_dt = datetime(2026, 2, 10, 0, 0, 0)
+    end_dt = datetime(2026, 2, 10, 1, 0, 0)
+    times = np.array([start_dt, end_dt], dtype=object)
+    values = np.array([-20.0, -80.0], dtype=float)
+
+    win.canvas.plot_dst(times, values, start_dt, end_dt, ("Real-time",))
+    mid_x = float(win.canvas._time_nums[0] + win.canvas._time_nums[1]) / 2.0
+
+    text = win._format_cursor_text(mid_x, True)
+
+    assert "UTC = 2026-02-10 00:30:00" in text
+    assert "Dst = -50.0 nT" in text
 
 
 def test_cme_set_target_datetime_updates_controls_without_search(monkeypatch):

@@ -472,6 +472,8 @@ Use **About → Check for Updates...** to query the latest release from GitHub.
   - `python src/Installation/install_requirements.py`
 - Start the app:
   - `python src/UI/main.py`
+- Start the standalone Kyoto Dst index plotter:
+  - `python src/UI/dst_index_gui.py`
 
 ### Build dependencies
 - Install runtime dependencies:
