@@ -14,7 +14,6 @@ import sys
 import threading
 
 from PySide6.QtCore import QTimer
-from src.UI.runtime_paths import find_startup_logo_path, project_base_path
 
 
 def _force_software_opengl() -> bool:
@@ -93,7 +92,17 @@ def _is_cme_helper_mode_argv(argv: list[str]) -> bool:
 
 
 def _project_base_path() -> str:
-    return project_base_path(module_file=__file__)
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            return os.path.realpath(os.path.abspath(meipass))
+
+        exe_dir = os.path.realpath(os.path.abspath(os.path.dirname(sys.executable)))
+        if sys.platform == "darwin":
+            return os.path.realpath(os.path.abspath(os.path.join(exe_dir, "..", "Resources")))
+        return exe_dir
+
+    return os.path.realpath(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 
 def _configure_platform_env() -> None:
@@ -137,6 +146,7 @@ _install_macos_stderr_filter()
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
+from src.UI.runtime_paths import find_startup_logo_path
 from src.version import APP_NAME, APP_VERSION
 
 
