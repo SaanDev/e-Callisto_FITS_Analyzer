@@ -24,6 +24,7 @@ env/
 build/
 dist/
 dmg_tmp/
+*.dmg
 *.spec.bak
 
 # Pytest

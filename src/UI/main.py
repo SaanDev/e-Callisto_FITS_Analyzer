@@ -14,6 +14,7 @@ import sys
 import threading
 
 from PySide6.QtCore import QTimer
+from src.UI.runtime_paths import find_startup_logo_path, project_base_path
 
 
 def _force_software_opengl() -> bool:
@@ -92,10 +93,7 @@ def _is_cme_helper_mode_argv(argv: list[str]) -> bool:
 
 
 def _project_base_path() -> str:
-    # py2app executable lives in .../e-CALLISTO FITS Analyzer.app/Contents/MacOS
-    if getattr(sys, "frozen", False):
-        return os.path.abspath(os.path.join(os.path.dirname(sys.executable), "..", "Resources"))
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    return project_base_path(module_file=__file__)
 
 
 def _configure_platform_env() -> None:
@@ -180,15 +178,7 @@ def _load_app_icon() -> QIcon:
 
 
 def _find_startup_logo_path() -> str:
-    candidates = [
-        os.path.join(BASE_PATH, "assets", "FITS_analyzer.png"),
-        os.path.join(BASE_PATH, "assets", "icons", "FITS_analyzer.png"),
-        os.path.join(BASE_PATH, "FITS_analyzer.png"),
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            return path
-    return ""
+    return find_startup_logo_path(base_path=BASE_PATH)
 
 
 def _parse_cli_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
