@@ -139,6 +139,7 @@ _install_macos_stderr_filter()
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
+from src.version import APP_NAME, APP_VERSION
 
 
 # Must be set before QApplication is created.
@@ -178,6 +179,18 @@ def _load_app_icon() -> QIcon:
     return QIcon()
 
 
+def _find_startup_logo_path() -> str:
+    candidates = [
+        os.path.join(BASE_PATH, "assets", "FITS_analyzer.png"),
+        os.path.join(BASE_PATH, "assets", "icons", "FITS_analyzer.png"),
+        os.path.join(BASE_PATH, "FITS_analyzer.png"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return ""
+
+
 def _parse_cli_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--mode", choices=["main", "cme-helper", "goes-overlay-helper"], default="main")
@@ -191,26 +204,44 @@ def _parse_cli_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
 
 
 def _run_main_mode(app: QApplication) -> int:
-    from src.UI.main_window import MainWindow
-    from src.UI.mpl_style import apply_origin_style
-    from src.UI.theme_manager import AppTheme
-
     if sys.platform.startswith("win"):
         app.setStyle("Fusion")
         app_icon = _load_app_icon()
         if not app_icon.isNull():
             app.setWindowIcon(app_icon)
 
+    from src.UI.startup_loading import StartupLoadingScreen
+
+    startup_loading = StartupLoadingScreen(
+        app_name=APP_NAME,
+        version=APP_VERSION,
+        logo_path=_find_startup_logo_path(),
+    )
+    if not app.windowIcon().isNull():
+        startup_loading.setWindowIcon(app.windowIcon())
+    startup_loading.present()
+    startup_loading.set_progress(15, "Loading analysis modules...")
+
+    from src.UI.main_window import MainWindow
+    from src.UI.mpl_style import apply_origin_style
+    from src.UI.theme_manager import AppTheme
+
+    startup_loading.set_progress(45, "Applying interface styling...")
     apply_origin_style()
     theme = AppTheme(app)
     app.setProperty("theme_manager", theme)
 
+    startup_loading.set_progress(80, "Preparing the main workspace...")
     window = MainWindow(theme=theme)
     if sys.platform.startswith("win"):
         app_icon = app.windowIcon()
         if not app_icon.isNull():
             window.setWindowIcon(app_icon)
+    startup_loading.set_progress(100, "Opening analyzer...")
     window.showMaximized()
+    app.processEvents()
+    startup_loading.close()
+    startup_loading.deleteLater()
     QTimer.singleShot(0, window.check_for_startup_updates)
     return app.exec()
 
