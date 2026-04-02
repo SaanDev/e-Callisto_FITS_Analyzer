@@ -38,7 +38,17 @@ from src.UI.mpl_style import style_axes
 class AnalyzeDialog(QDialog):
     sessionChanged = Signal(dict)
 
-    def __init__(self, time_channels, freqs, filename, fundamental=True, harmonic=False, parent=None, session=None):
+    def __init__(
+        self,
+        time_channels,
+        freqs,
+        filename,
+        fundamental=True,
+        harmonic=False,
+        parent=None,
+        session=None,
+        time_seconds=None,
+    ):
         super().__init__(parent)
         self.fundamental = fundamental
         self.harmonic = harmonic
@@ -47,13 +57,15 @@ class AnalyzeDialog(QDialog):
         self.resize(1100, 700)
 
         self.time_channels = np.asarray(time_channels, dtype=float).reshape(-1)
-        self.time = self.time_channels * 0.25
+        self.time_seconds = self._resolve_time_seconds(self.time_channels, time_seconds)
+        self.time = self._build_analysis_time_axis(self.time_seconds)
         self.freq = np.asarray(freqs, dtype=float).reshape(-1)
         self.filename = filename.split(".")[0]
         self.current_plot_title = f"{self.filename}_Best_Fit"
         self._fit_params = None
         self._shock_summary = {}
         self._suppress_emit = False
+        self._fit_mask = np.isfinite(self.time) & np.isfinite(self.freq)
 
         # Canvas
         self.canvas = MplCanvas(self, width=8, height=5)
@@ -179,6 +191,52 @@ class AnalyzeDialog(QDialog):
             except Exception:
                 pass
 
+    @staticmethod
+    def _resolve_time_seconds(time_channels, time_seconds=None):
+        channels = np.asarray(time_channels, dtype=float).reshape(-1)
+        if time_seconds is not None:
+            arr = np.asarray(time_seconds, dtype=float).reshape(-1)
+            if arr.shape == channels.shape:
+                return arr
+        return channels * 0.25
+
+    def _build_analysis_time_axis(self, time_seconds):
+        arr = np.asarray(time_seconds, dtype=float).reshape(-1)
+        if arr.size == 0:
+            return arr
+        finite = np.isfinite(arr)
+        if not np.any(finite):
+            return np.arange(arr.size, dtype=float)
+        return np.where(finite, arr, np.nan)
+
+    @staticmethod
+    def _initial_power_law_guess(time_values, freq_values):
+        x = np.asarray(time_values, dtype=float).reshape(-1)
+        y = np.asarray(freq_values, dtype=float).reshape(-1)
+        mask = np.isfinite(x) & np.isfinite(y) & (x > 0) & (y > 0)
+        if np.count_nonzero(mask) >= 2:
+            lx = np.log(x[mask])
+            ly = np.log(y[mask])
+            try:
+                slope, intercept = np.polyfit(lx, ly, 1)
+                a0 = float(np.exp(intercept))
+                b0 = float(max(1e-9, -slope))
+                if np.isfinite(a0) and a0 > 0 and np.isfinite(b0):
+                    return a0, b0
+            except Exception:
+                pass
+
+        positive_freqs = y[np.isfinite(y) & (y > 0)]
+        if positive_freqs.size:
+            return float(np.nanmax(positive_freqs)), 0.5
+        return 1.0, 0.5
+
+    @staticmethod
+    def _power_law_fit_mask(time_values, freq_values):
+        x = np.asarray(time_values, dtype=float).reshape(-1)
+        y = np.asarray(freq_values, dtype=float).reshape(-1)
+        return np.isfinite(x) & np.isfinite(y) & (x > 0) & (y > 0)
+
     def _emit_session_changed(self):
         if self._suppress_emit:
             return
@@ -236,20 +294,43 @@ class AnalyzeDialog(QDialog):
         self.status.showMessage("Max intensities plotted successfully!", 3000)
 
     def plot_fit(self, _checked=False, params=None, std_errs=None):
-        def model_func(t, a, b): return a * t ** (b)
+        def model_func(x, a, b): return a * x ** (-b)
 
-        def drift_rate(t, a_, b_): return a_ * b_ * t ** (b_ - 1)
+        def drift_rate(x, a_, b_): return -a_ * b_ * x ** (-b_ - 1)
+
+        plot_time = np.asarray(self.time, dtype=float).reshape(-1)
+        plot_freq = np.asarray(self.freq, dtype=float).reshape(-1)
+        fit_mask = self._power_law_fit_mask(plot_time, plot_freq)
+        if np.count_nonzero(fit_mask) < 2:
+            QMessageBox.warning(
+                self,
+                "Analyzer",
+                "Power-law fitting requires at least two points with time > 0 s and frequency > 0 MHz.",
+            )
+            self.status.showMessage("Best fit failed: insufficient positive time samples.", 3000)
+            return
+
+        fit_time = plot_time[fit_mask]
+        fit_freq = plot_freq[fit_mask]
+        self._fit_mask = fit_mask
 
         if params is None:
-            params, cov = curve_fit(model_func, self.time, self.freq, maxfev=10000)
+            params, cov = curve_fit(
+                model_func,
+                fit_time,
+                fit_freq,
+                p0=self._initial_power_law_guess(fit_time, fit_freq),
+                bounds=([1e-12, 1e-9], [np.inf, np.inf]),
+                maxfev=10000,
+            )
             a, b = params
             std_errs = np.sqrt(np.diag(cov))
         else:
-            a, b = params
+            a, b = float(params[0]), abs(float(params[1]))
             if std_errs is None:
                 std_errs = np.array([np.nan, np.nan], dtype=float)
 
-        time_fit = np.linspace(self.time.min(), self.time.max(), 400)
+        time_fit = np.linspace(fit_time.min(), fit_time.max(), 400)
         freq_fit = model_func(time_fit, a, b)
 
         self.canvas.ax.clear()
@@ -257,8 +338,13 @@ class AnalyzeDialog(QDialog):
         self.canvas.ax = self.canvas.figure.add_subplot(111)
         style_axes(self.canvas.ax)
 
-        self.canvas.ax.scatter(self.time, self.freq, s=10, color='blue', label="Original Data")
-        self.canvas.ax.plot(time_fit, freq_fit, color='red', label=fr"Best Fit: $f = {a:.2f} \cdot t^{{{b:.2f}}}$")
+        self.canvas.ax.scatter(plot_time, plot_freq, s=10, color='blue', label="Original Data")
+        self.canvas.ax.plot(
+            time_fit,
+            freq_fit,
+            color='red',
+            label=fr"Best Fit: $f = {a:.2f} \cdot x^{{-{b:.2f}}}$",
+        )
         self.canvas.ax.set_title(f"{self.filename}_Best_Fit")
         self.canvas.ax.set_xlabel("Time (s)")
         self.canvas.ax.set_ylabel("Frequency (MHz)")
@@ -267,11 +353,11 @@ class AnalyzeDialog(QDialog):
         self.canvas.draw()
         self.current_plot_title = f"{self.filename}_Best_Fit"
 
-        predicted = model_func(self.time, a, b)
-        r2 = r2_score(self.freq, predicted)
-        rmse = np.sqrt(mean_squared_error(self.freq, predicted))
+        predicted = model_func(fit_time, a, b)
+        r2 = r2_score(fit_freq, predicted)
+        rmse = np.sqrt(mean_squared_error(fit_freq, predicted))
 
-        self.equation_display.setText(f"<b>f(t) = {a:.2f} · t<sup>{b:.2f}</sup></b>")
+        self.equation_display.setText(f"<b>f(x) = {a:.2f} · x<sup>-{b:.2f}</sup></b>")
         self.r2_display.setText(f"R² = {r2:.4f}")
         self.rmse_display.setText(f"RMSE = {rmse:.4f}")
 
@@ -287,17 +373,15 @@ class AnalyzeDialog(QDialog):
         except Exception:
             self._fit_params = None
 
-        drift_vals = drift_rate(self.time, a, b)
-        residuals = self.freq - predicted
+        drift_vals = drift_rate(fit_time, a, b)
+        residuals = fit_freq - predicted
         freq_err = np.std(residuals)
-        drift_errs = np.abs(drift_vals) * np.sqrt((std_errs[0] / a) ** 2 + (std_errs[1] / b) ** 2)
-
-        drift_vals = drift_rate(self.time, a, b)
-        residuals = self.freq - predicted
-        freq_err = np.std(residuals)
-        drift_errs = np.abs(drift_vals) * np.sqrt((std_errs[0] / a) ** 2 + (std_errs[1] / b) ** 2)
+        b_err_denom = max(abs(float(b)), 1e-9)
+        drift_errs = np.abs(drift_vals) * np.sqrt((std_errs[0] / a) ** 2 + (std_errs[1] / b_err_denom) ** 2)
 
         # Cache results so we can recompute shock params for different folds
+        self._fit_time = fit_time
+        self._fit_freq = fit_freq
         self._drift_vals = drift_vals
         self._drift_errs = drift_errs
         self.freq_err = freq_err
@@ -324,6 +408,7 @@ class AnalyzeDialog(QDialog):
             "source": {"filename": str(self.filename or "")},
             "max_intensity": {
                 "time_channels": np.asarray(self.time_channels, dtype=float),
+                "time_seconds": np.asarray(self.time_seconds, dtype=float),
                 "freqs": np.asarray(self.freq, dtype=float),
                 "fundamental": bool(self.fundamental),
                 "harmonic": bool(self.harmonic),
@@ -350,11 +435,14 @@ class AnalyzeDialog(QDialog):
             if max_block.get("time_channels") is not None and max_block.get("freqs") is not None:
                 try:
                     t_arr = np.asarray(max_block.get("time_channels"), dtype=float).reshape(-1)
+                    ts_arr = max_block.get("time_seconds", None)
                     f_arr = np.asarray(max_block.get("freqs"), dtype=float).reshape(-1)
                     if len(t_arr) == len(f_arr) and len(t_arr) > 0:
                         self.time_channels = t_arr
-                        self.time = self.time_channels * 0.25
+                        self.time_seconds = self._resolve_time_seconds(self.time_channels, ts_arr)
+                        self.time = self._build_analysis_time_axis(self.time_seconds)
                         self.freq = f_arr
+                        self._fit_mask = np.isfinite(self.time) & np.isfinite(self.freq)
                 except Exception:
                     pass
 
@@ -419,22 +507,25 @@ class AnalyzeDialog(QDialog):
     def _update_shock_parameters(self, n):
         # Your updated n-fold formulas
         denom = n * 3.385
-        drift_vals = self._drift_vals
-        drift_errs = self._drift_errs
+        freq_values = np.asarray(getattr(self, "_fit_freq", self.freq), dtype=float).reshape(-1)
+        drift_vals = np.asarray(self._drift_vals, dtype=float).reshape(-1)
+        drift_errs = np.asarray(self._drift_errs, dtype=float).reshape(-1)
+        if freq_values.size == 0 or drift_vals.size == 0 or freq_values.size != drift_vals.size:
+            return
 
         shock_speed = (13853221.38 * np.abs(drift_vals)) / (
-                self.freq * (np.log(self.freq ** 2 / denom) ** 2)
+                freq_values * (np.log(freq_values ** 2 / denom) ** 2)
         )
-        R_p = 4.32 * np.log(10) / np.log(self.freq ** 2 / denom)
+        R_p = 4.32 * np.log(10) / np.log(freq_values ** 2 / denom)
 
         # Starting frequency (same logic you already use)
         percentile = 90
-        start_freq = np.percentile(self.freq, percentile)
+        start_freq = np.percentile(freq_values, percentile)
         if self.harmonic:
             start_freq = start_freq / 2
 
-        idx = np.abs(self.freq - start_freq).argmin()
-        f0 = self.freq[idx]
+        idx = np.abs(freq_values - start_freq).argmin()
+        f0 = freq_values[idx]
         drift_err0 = drift_errs[idx]
 
         start_shock_speed = shock_speed[idx]
@@ -450,8 +541,8 @@ class AnalyzeDialog(QDialog):
         Rp_err = np.abs(dRp_df * self.freq_err)
 
         # Averages (drift and freq do not depend on n, speeds/heights do)
-        avg_freq = np.mean(self.freq)
-        avg_freq_err = np.std(self.freq) / np.sqrt(len(self.freq))
+        avg_freq = np.mean(freq_values)
+        avg_freq_err = np.std(freq_values) / np.sqrt(len(freq_values))
         avg_drift = np.mean(drift_vals)
         avg_drift_err = np.std(drift_vals) / np.sqrt(len(drift_vals))
 

@@ -49,6 +49,12 @@ def parse_filename(filepath):
     return station, date, time, receiver_id
 
 
+def _parse_observation_datetime(filepath):
+    station, obs_date, obs_time, receiver_id = parse_filename(filepath)
+    observed_at = datetime.strptime(f"{obs_date}{obs_time}", "%Y%m%d%H%M%S")
+    return station, observed_at, receiver_id
+
+
 def are_frequency_combinable(file_paths):
     if len(file_paths) < 2:
         return False
@@ -142,21 +148,19 @@ def are_time_combinable(file_paths):
     try:
         sorted_paths = sorted(
             file_paths,
-            key=lambda p: parse_filename(p)[2]  # time
+            key=lambda p: _parse_observation_datetime(p)[1]
         )
     except Exception:
         return False
 
-    s_ref, d_ref, t_ref, foc_ref = parse_filename(sorted_paths[0])
+    s_ref, dt_ref, foc_ref = _parse_observation_datetime(sorted_paths[0])
     _, freqs_ref, _ = load_fits(sorted_paths[0])
-    t_prev = datetime.strptime(t_ref, "%H%M%S")
+    t_prev = dt_ref
 
     for fp in sorted_paths[1:]:
-        s, d, t, foc = parse_filename(fp)
+        s, t_now, foc = _parse_observation_datetime(fp)
 
         if s != s_ref:
-            return False
-        if d != d_ref:
             return False
         if foc != foc_ref:
             return False
@@ -165,7 +169,6 @@ def are_time_combinable(file_paths):
         if not np.allclose(freqs, freqs_ref, atol=0.01):
             return False
 
-        t_now = datetime.strptime(t, "%H%M%S")
         diff = abs((t_now - t_prev).total_seconds())
 
         if not (750 <= diff <= 1050):
@@ -179,7 +182,7 @@ def are_time_combinable(file_paths):
 def combine_time(file_paths):
     sorted_paths = sorted(
         file_paths,
-        key=lambda p: parse_filename(p)[2]
+        key=lambda p: _parse_observation_datetime(p)[1]
     )
 
     combined_data = None

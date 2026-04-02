@@ -99,6 +99,7 @@ def _normalize_fit_params(raw: Mapping[str, Any] | None) -> dict[str, Any] | Non
     b = _safe_float(raw.get("b"))
     if a is None or b is None:
         return None
+    b = abs(float(b))
 
     std_errs_in = raw.get("std_errs")
     std_errs = [None, None]
@@ -139,13 +140,21 @@ def normalize_session(session: Mapping[str, Any] | None) -> dict[str, Any] | Non
 
     max_block_raw = dict(session.get("max_intensity") or {})
     time_channels = _to_1d_float_array(max_block_raw.get("time_channels"))
+    time_seconds = _to_1d_float_array(max_block_raw.get("time_seconds"))
     freqs = _to_1d_float_array(max_block_raw.get("freqs"))
 
     # Compatibility: accept previous top-level keys.
     if time_channels is None:
         time_channels = _to_1d_float_array(session.get("time_channels"))
+    if time_seconds is None:
+        time_seconds = _to_1d_float_array(session.get("time_seconds"))
     if freqs is None:
         freqs = _to_1d_float_array(session.get("freqs"))
+
+    if time_seconds is not None and time_channels is not None and len(time_seconds) != len(time_channels):
+        time_seconds = None
+    if time_seconds is not None and freqs is not None and len(time_seconds) != len(freqs):
+        time_seconds = None
 
     fundamental = _safe_bool(max_block_raw.get("fundamental", True), True)
     harmonic = _safe_bool(max_block_raw.get("harmonic", False), False)
@@ -177,6 +186,7 @@ def normalize_session(session: Mapping[str, Any] | None) -> dict[str, Any] | Non
         },
         "max_intensity": {
             "time_channels": time_channels,
+            "time_seconds": time_seconds,
             "freqs": freqs,
             "fundamental": bool(fundamental),
             "harmonic": bool(harmonic),
@@ -211,11 +221,16 @@ def to_project_payload(session: Mapping[str, Any] | None) -> tuple[dict[str, Any
 
     max_block = dict(meta_session.get("max_intensity") or {})
     time_channels = max_block.pop("time_channels", None)
+    time_seconds = max_block.pop("time_seconds", None)
     freqs = max_block.pop("freqs", None)
 
     if time_channels is not None:
         arrays["analysis_time_channels"] = np.asarray(time_channels, dtype=float)
         max_block["point_count"] = int(arrays["analysis_time_channels"].shape[0])
+    if time_seconds is not None:
+        arrays["analysis_time_seconds"] = np.asarray(time_seconds, dtype=float)
+        if "point_count" not in max_block:
+            max_block["point_count"] = int(arrays["analysis_time_seconds"].shape[0])
     if freqs is not None:
         arrays["analysis_freqs"] = np.asarray(freqs, dtype=float)
         if "point_count" not in max_block:
@@ -232,11 +247,14 @@ def from_legacy_max_intensity(meta: Mapping[str, Any], arrays: Mapping[str, Any]
         return None
 
     time_channels = _to_1d_float_array((arrays or {}).get("max_time_channels"))
+    time_seconds = _to_1d_float_array((arrays or {}).get("max_time_seconds"))
     freqs = _to_1d_float_array((arrays or {}).get("max_freqs"))
     if time_channels is None or freqs is None:
         return None
     if len(time_channels) == 0 or len(time_channels) != len(freqs):
         return None
+    if time_seconds is not None and len(time_seconds) != len(time_channels):
+        time_seconds = None
 
     analyzer_legacy = dict(legacy.get("analyzer") or {})
     fold = max(1, min(4, _safe_int(analyzer_legacy.get("fold", 1), 1)))
@@ -256,6 +274,7 @@ def from_legacy_max_intensity(meta: Mapping[str, Any], arrays: Mapping[str, Any]
         },
         "max_intensity": {
             "time_channels": time_channels,
+            "time_seconds": time_seconds,
             "freqs": freqs,
             "fundamental": bool(fundamental),
             "harmonic": bool(harmonic),
@@ -291,12 +310,15 @@ def validate_session_for_source(
 
     max_block = dict(normalized.get("max_intensity") or {})
     time_channels = _to_1d_float_array(max_block.get("time_channels"))
+    time_seconds = _to_1d_float_array(max_block.get("time_seconds"))
     freqs = _to_1d_float_array(max_block.get("freqs"))
     if time_channels is None or freqs is None:
         return False, "Analysis session has no max-intensity vectors."
 
     if len(time_channels) != len(freqs):
         return False, "Analysis vectors have mismatched lengths."
+    if time_seconds is not None and len(time_seconds) != len(freqs):
+        return False, "Analysis time-axis values do not match max-intensity vector length."
 
     if current_shape is not None:
         try:

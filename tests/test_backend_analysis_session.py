@@ -24,6 +24,7 @@ def test_normalize_session_valid_payload():
             "source": {"filename": "A.fit", "shape": [8, 5]},
             "max_intensity": {
                 "time_channels": [0, 1, 2, 3, 4],
+                "time_seconds": [0, 3, 6, 9, 12],
                 "freqs": [80, 79, 78, 77, 76],
                 "fundamental": True,
                 "harmonic": False,
@@ -42,7 +43,9 @@ def test_normalize_session_valid_payload():
     assert session["analysis_run_id"]
     assert session["source"]["filename"] == "A.fit"
     assert np.array_equal(session["max_intensity"]["time_channels"], np.array([0, 1, 2, 3, 4], dtype=float))
+    assert np.array_equal(session["max_intensity"]["time_seconds"], np.array([0, 3, 6, 9, 12], dtype=float))
     assert session["analyzer"]["fit_params"]["a"] == 20.0
+    assert session["analyzer"]["fit_params"]["b"] == 0.4
     assert session["analyzer"]["fold"] == 2
 
 
@@ -69,7 +72,7 @@ def test_from_legacy_max_intensity_migrates_payload():
     assert session is not None
     assert session["source"]["filename"] == "legacy.fit"
     assert session["analyzer"]["fold"] == 3
-    assert session["analyzer"]["fit_params"]["b"] == -0.3
+    assert session["analyzer"]["fit_params"]["b"] == 0.3
     assert len(session["max_intensity"]["time_channels"]) == 6
 
 
@@ -79,6 +82,7 @@ def test_to_project_payload_moves_vectors_to_arrays():
             "source": {"filename": "x.fit"},
             "max_intensity": {
                 "time_channels": [1, 2, 3],
+                "time_seconds": [3, 6, 9],
                 "freqs": [90, 80, 70],
             },
             "analyzer": {"fold": 1},
@@ -88,8 +92,10 @@ def test_to_project_payload_moves_vectors_to_arrays():
     meta_session, arrays = to_project_payload(session)
     assert meta_session is not None
     assert "time_channels" not in meta_session["max_intensity"]
+    assert "time_seconds" not in meta_session["max_intensity"]
     assert "freqs" not in meta_session["max_intensity"]
     assert np.array_equal(arrays["analysis_time_channels"], np.array([1, 2, 3], dtype=float))
+    assert np.array_equal(arrays["analysis_time_seconds"], np.array([3, 6, 9], dtype=float))
     assert np.array_equal(arrays["analysis_freqs"], np.array([90, 80, 70], dtype=float))
 
 

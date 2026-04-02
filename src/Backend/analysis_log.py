@@ -96,7 +96,7 @@ def build_log_row(
         "station": str(station or ""),
         "date_obs": str(date_obs or ""),
         "fit_a": _as_number_or_blank(fit.get("a")),
-        "fit_b": _as_number_or_blank(fit.get("b")),
+        "fit_b": _as_number_or_blank(abs(float(fit.get("b")))) if fit.get("b") not in (None, "") else "",
         "fit_r2": _as_number_or_blank(fit.get("r2")),
         "fit_rmse": _as_number_or_blank(fit.get("rmse")),
         "fold": _as_number_or_blank(analyzer.get("fold", shock.get("fold"))),
@@ -140,9 +140,10 @@ def append_csv_log(path: str, row: Mapping[str, Any]) -> str:
 def _txt_block(row: Mapping[str, Any]) -> str:
     fit_line = ""
     if row.get("fit_a", "") != "" and row.get("fit_b", "") != "":
+        fit_b = abs(float(row.get("fit_b")))
         fit_line = (
-            f"f(t) = {_fmt_number(row.get('fit_a'), digits=4)} * t^"
-            f"{_fmt_number(row.get('fit_b'), digits=4)}"
+            f"f(x) = {_fmt_number(row.get('fit_a'), digits=4)} * x^-"
+            f"{_fmt_number(fit_b, digits=4)}"
         )
 
     lines = [

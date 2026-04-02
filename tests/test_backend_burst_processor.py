@@ -107,6 +107,22 @@ def test_are_time_combinable_true(monkeypatch):
     assert burst_processor.are_time_combinable([f1, f2]) is True
 
 
+def test_are_time_combinable_true_across_midnight(monkeypatch):
+    freqs = np.array([100.0, 200.0])
+    data = np.zeros((2, 2))
+    times = np.array([0.0, 1.0])
+
+    def fake_load(_):
+        return data, freqs, times
+
+    monkeypatch.setattr(burst_processor, "load_fits", fake_load)
+
+    f1 = "STAT_20240331_235500_A.fit"
+    f2 = "STAT_20240401_001100_A.fit"
+
+    assert burst_processor.are_time_combinable([f1, f2]) is True
+
+
 def test_combine_frequency_merges_data(monkeypatch):
     data1 = np.ones((2, 2))
     data2 = np.zeros((2, 2))
@@ -160,3 +176,30 @@ def test_combine_time_stitches_time_axis(monkeypatch):
     assert np.array_equal(result["time"], np.array([0, 1, 2, 3, 4, 5], dtype=float))
     assert result["filename"] == "STAT_20240101_combined_time"
     assert result["ut_start_sec"] == 10
+
+
+def test_combine_time_sorts_across_midnight(monkeypatch):
+    freqs = np.array([100.0, 200.0])
+    time = np.array([0.0, 1.0, 2.0])
+    data1 = np.ones((2, 3))
+    data2 = np.zeros((2, 3))
+
+    hdr = fits.Header()
+    hdr["TIME-OBS"] = "23:55:00"
+
+    def fake_load(path, memmap=False):
+        if path.endswith("20240331_235500_A.fit"):
+            return fits_io.FitsLoadResult(data=data1, freqs=freqs, time=time, header0=hdr)
+        return fits_io.FitsLoadResult(data=data2, freqs=freqs, time=time, header0=hdr)
+
+    monkeypatch.setattr(burst_processor, "load_callisto_fits", fake_load)
+
+    result = burst_processor.combine_time([
+        "STAT_20240401_001100_A.fit",
+        "STAT_20240331_235500_A.fit",
+    ])
+
+    assert result["data"].shape == (2, 6)
+    assert np.array_equal(result["data"][:, :3], data1)
+    assert np.array_equal(result["data"][:, 3:], data2)
+    assert result["filename"] == "STAT_20240331_combined_time"

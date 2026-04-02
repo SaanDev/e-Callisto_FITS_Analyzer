@@ -38,7 +38,16 @@ class MaxIntensityPlotDialog(QDialog):
     sessionChanged = Signal(dict)
     requestOpenAnalyzer = Signal(dict)
 
-    def __init__(self, time_channels, max_freqs, filename, parent=None, session=None, auto_outlier_mode: bool = False):
+    def __init__(
+        self,
+        time_channels,
+        max_freqs,
+        filename,
+        parent=None,
+        session=None,
+        auto_outlier_mode: bool = False,
+        time_seconds=None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Maximum Intensities for Each Time Channel")
         self.resize(1000, 700)
@@ -50,6 +59,7 @@ class MaxIntensityPlotDialog(QDialog):
 
         # Data
         self.time_channels = np.asarray(time_channels, dtype=float).reshape(-1)
+        self.time_seconds = self._resolve_time_seconds(self.time_channels, time_seconds)
         self.freqs = np.asarray(max_freqs, dtype=float).reshape(-1)
         self.selected_mask = np.zeros_like(self.time_channels, dtype=bool)
         self.lasso = None
@@ -137,6 +147,29 @@ class MaxIntensityPlotDialog(QDialog):
         if isinstance(session, dict):
             self.restore_session(session, emit_change=False)
 
+    @staticmethod
+    def _resolve_time_seconds(time_channels, time_seconds=None):
+        channels = np.asarray(time_channels, dtype=float).reshape(-1)
+        if time_seconds is not None:
+            arr = np.asarray(time_seconds, dtype=float).reshape(-1)
+            if arr.shape == channels.shape:
+                return arr
+        return channels * 0.25
+
+    def _plot_time_values(self) -> np.ndarray:
+        if getattr(self, "time_seconds", None) is not None:
+            arr = np.asarray(self.time_seconds, dtype=float).reshape(-1)
+            if arr.shape == self.time_channels.shape:
+                return arr
+        return self.time_channels
+
+    def _time_axis_label(self) -> str:
+        if getattr(self, "time_seconds", None) is not None:
+            arr = np.asarray(self.time_seconds, dtype=float).reshape(-1)
+            if arr.shape == self.time_channels.shape:
+                return "Time (s)"
+        return "Time Channel Number"
+
     def set_auto_outlier_mode(self, enabled: bool):
         self._auto_outlier_mode = bool(enabled)
         if self._auto_outlier_mode:
@@ -147,8 +180,8 @@ class MaxIntensityPlotDialog(QDialog):
         self.canvas.figure.clf()
         self.canvas.ax = self.canvas.figure.add_subplot(111)
         style_axes(self.canvas.ax)
-        self.canvas.ax.scatter(self.time_channels, self.freqs, marker="o", s=5, color="red")
-        self.canvas.ax.set_xlabel("Time Channel Number")
+        self.canvas.ax.scatter(self._plot_time_values(), self.freqs, marker="o", s=5, color="red")
+        self.canvas.ax.set_xlabel(self._time_axis_label())
         self.canvas.ax.set_ylabel("Frequency (MHz)")
         self.canvas.ax.set_title(title)
         self.canvas.draw()
@@ -176,9 +209,11 @@ class MaxIntensityPlotDialog(QDialog):
         f = max_state.get("freqs", None)
         if t is not None and f is not None:
             t_arr = np.asarray(t, dtype=float).reshape(-1)
+            ts_arr = max_state.get("time_seconds", None)
             f_arr = np.asarray(f, dtype=float).reshape(-1)
             if len(t_arr) == len(f_arr) and len(t_arr) > 0:
                 self.time_channels = t_arr
+                self.time_seconds = self._resolve_time_seconds(self.time_channels, ts_arr)
                 self.freqs = f_arr
                 self.selected_mask = np.zeros_like(self.time_channels, dtype=bool)
 
@@ -212,7 +247,7 @@ class MaxIntensityPlotDialog(QDialog):
 
     def on_lasso_select(self, verts):
         path = Path(verts)
-        points = np.column_stack((self.time_channels, self.freqs))
+        points = np.column_stack((self._plot_time_values(), self.freqs))
         self.selected_mask = path.contains_points(points)
         if self.lasso:
             self.lasso.disconnect_events()
@@ -225,6 +260,7 @@ class MaxIntensityPlotDialog(QDialog):
             return
 
         self.time_channels = self.time_channels[~self.selected_mask]
+        self.time_seconds = self.time_seconds[~self.selected_mask]
         self.freqs = self.freqs[~self.selected_mask]
         self.selected_mask = np.zeros_like(self.time_channels, dtype=bool)
         self._analyzer_state = None
@@ -238,6 +274,7 @@ class MaxIntensityPlotDialog(QDialog):
             "source": {"filename": str(self.filename or "")},
             "max_intensity": {
                 "time_channels": np.asarray(self.time_channels, dtype=float),
+                "time_seconds": np.asarray(self.time_seconds, dtype=float),
                 "freqs": np.asarray(self.freqs, dtype=float),
                 "fundamental": bool(self.fundamental_radio.isChecked()),
                 "harmonic": bool(self.harmonic_radio.isChecked()),
@@ -264,9 +301,9 @@ class MaxIntensityPlotDialog(QDialog):
         try:
             with open(file_path, "w", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow(["Time Channel", "Frequency (MHz)"])
-                for t, fval in zip(self.time_channels * 0.25, self.freqs):
-                    writer.writerow([t, fval])
+                writer.writerow(["Time Channel", "Time (s)", "Frequency (MHz)"])
+                for channel, time_s, fval in zip(self.time_channels, self.time_seconds, self.freqs):
+                    writer.writerow([channel, time_s, fval])
             self.status.showMessage(f"Saved to {file_path}", 3000)
         except Exception as e:
             self.status.showMessage(f"Error: {e}", 3000)
@@ -351,6 +388,7 @@ class MaxIntensityPlotDialog(QDialog):
             fundamental=bool(fundamental),
             harmonic=bool(harmonic),
             parent=self,
+            time_seconds=self.time_seconds,
             session={"max_intensity": self.session_state().get("max_intensity"), "analyzer": self._analyzer_state},
         )
         dialog.exec()

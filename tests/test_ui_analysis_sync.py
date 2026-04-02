@@ -48,7 +48,7 @@ def test_analyze_dialog_session_state_contains_canonical_shock_summary():
     time_s = time_channels * 0.25
     freqs = 90.0 * np.power(time_s, -0.45)
 
-    dlg = AnalyzeDialog(time_channels, freqs, "demo.fit", fundamental=True, harmonic=False)
+    dlg = AnalyzeDialog(time_channels, freqs, "demo.fit", fundamental=True, harmonic=False, time_seconds=time_s)
     dlg.plot_fit()
 
     state = dlg.session_state()
@@ -57,6 +57,7 @@ def test_analyze_dialog_session_state_contains_canonical_shock_summary():
 
     assert "fit_params" in analyzer
     assert EXPECTED_SHOCK_KEYS.issubset(set(shock.keys()))
+    assert np.array_equal(np.asarray(state["max_intensity"]["time_seconds"], dtype=float), time_s)
 
     dlg.close()
 
@@ -146,9 +147,11 @@ def test_analysis_seed_uses_current_canvas_spectrum_not_cached_session():
     session = dict(win._analysis_session or {})
     max_block = dict(session.get("max_intensity") or {})
     t = np.asarray(max_block.get("time_channels"), dtype=float)
+    ts = np.asarray(max_block.get("time_seconds"), dtype=float)
     f = np.asarray(max_block.get("freqs"), dtype=float)
 
     assert t.shape[0] == 4
+    assert np.array_equal(ts, np.array([0.0, 1.0, 2.0, 3.0], dtype=float))
     assert f.shape[0] == 4
     assert np.array_equal(f, np.array([80.0, 80.0, 80.0, 80.0], dtype=float))
 
@@ -203,9 +206,11 @@ def test_isolated_seed_auto_filters_zero_columns():
     max_block = dict(session.get("max_intensity") or {})
     ui_block = dict(session.get("ui") or {})
     t = np.asarray(max_block.get("time_channels"), dtype=float)
+    ts = np.asarray(max_block.get("time_seconds"), dtype=float)
     f = np.asarray(max_block.get("freqs"), dtype=float)
 
     assert np.array_equal(t, np.array([1.0, 2.0, 3.0], dtype=float))
+    assert np.array_equal(ts, np.array([1.0, 2.0, 3.0], dtype=float))
     assert np.array_equal(f, np.array([80.0, 80.0, 80.0], dtype=float))
     assert bool(ui_block.get("auto_outlier_cleaned")) is True
     assert int(ui_block.get("auto_removed_count", 0)) == 2
@@ -268,10 +273,39 @@ def test_isolated_seed_respects_auto_clean_toggle():
     max_block = dict(session.get("max_intensity") or {})
     ui_block = dict(session.get("ui") or {})
     t = np.asarray(max_block.get("time_channels"), dtype=float)
+    ts = np.asarray(max_block.get("time_seconds"), dtype=float)
     assert t.shape[0] == 5
+    assert np.array_equal(ts, np.array([0.0, 1.0, 2.0, 3.0, 4.0], dtype=float))
     assert bool(ui_block.get("auto_outlier_cleaned")) is False
     assert int(ui_block.get("auto_removed_count", 0)) == 0
     win.close()
+
+
+def test_analyze_dialog_uses_real_time_seconds_for_fit_and_drift():
+    _app()
+    time_channels = np.arange(5, dtype=float)
+    time_s = np.array([0.0, 3.0, 6.0, 9.0, 12.0], dtype=float)
+    fit_x = np.array([3.0, 6.0, 9.0, 12.0], dtype=float)
+    freqs = np.array([95.0, *list(120.0 * np.power(fit_x, -0.5))], dtype=float)
+
+    dlg = AnalyzeDialog(
+        time_channels,
+        freqs,
+        "demo.fit",
+        fundamental=True,
+        harmonic=False,
+        time_seconds=time_s,
+    )
+    dlg.plot_fit()
+
+    assert np.allclose(dlg.time, time_s)
+    assert np.array_equal(dlg._fit_mask, np.array([False, True, True, True, True], dtype=bool))
+    assert np.isclose(dlg._fit_params["a"], 120.0, rtol=1e-3)
+    assert np.isclose(dlg._fit_params["b"], 0.5, rtol=1e-3)
+    assert np.allclose(dlg._drift_vals, -60.0 * np.power(fit_x, -1.5), rtol=1e-3, atol=1e-5)
+    assert "x<sup>-0.50</sup>" in dlg.equation_display.text()
+
+    dlg.close()
 
 
 def test_recovery_prompt_is_skipped_during_pytest(monkeypatch, tmp_path):
