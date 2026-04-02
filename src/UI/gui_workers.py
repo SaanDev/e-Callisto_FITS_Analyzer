@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import numpy as np
 import requests
@@ -57,26 +58,38 @@ class DownloaderImportWorker(QObject):
             return
 
         local_files = []
-        self.progress_text.emit("Downloading selected FITS files...")
+        remote_count = sum(1 for source in self.urls if _is_remote_source(source))
+        if remote_count == len(self.urls):
+            self.progress_text.emit("Downloading selected FITS files...")
+        elif remote_count == 0:
+            self.progress_text.emit("Preparing selected FITS files...")
+        else:
+            self.progress_text.emit("Downloading and preparing selected FITS files...")
         self.progress_range.emit(0, len(self.urls))
         self.progress_value.emit(0)
 
         try:
-            for i, url in enumerate(self.urls, start=1):
-                r = requests.get(url, timeout=25)
-                r.raise_for_status()
+            temp_dir = tempfile.mkdtemp(prefix="callisto_import_")
 
-                original_name = str(url).split("/")[-1] or f"import_{i}.fit"
-                temp_dir = tempfile.gettempdir()
-                local_path = os.path.join(temp_dir, original_name)
+            for i, source in enumerate(self.urls, start=1):
+                if _is_remote_source(source):
+                    r = requests.get(source, timeout=25)
+                    r.raise_for_status()
 
-                with open(local_path, "wb") as f:
-                    f.write(r.content)
+                    original_name = str(source).split("/")[-1] or f"import_{i}.fit"
+                    local_path = os.path.join(temp_dir, original_name)
+
+                    with open(local_path, "wb") as f:
+                        f.write(r.content)
+                else:
+                    local_path = os.path.abspath(os.fspath(source))
+                    if not os.path.isfile(local_path):
+                        raise FileNotFoundError(f"Local FITS file does not exist: {local_path}")
 
                 local_files.append(local_path)
                 self.progress_value.emit(i)
         except Exception as e:
-            self.failed.emit(f"Failed to download one or more FITS files:\n{e}")
+            self.failed.emit(f"Failed to prepare one or more FITS files:\n{e}")
             return
 
         if len(local_files) == 1:
@@ -121,6 +134,14 @@ class DownloaderImportWorker(QObject):
             self.finished.emit({"kind": "invalid"})
         except Exception as e:
             self.failed.emit(f"An error occurred while combining files:\n{e}")
+
+
+def _is_remote_source(value) -> bool:
+    try:
+        parsed = urlparse(str(value or "").strip())
+    except Exception:
+        return False
+    return parsed.scheme in {"http", "https"}
 
 
 class UpdateCheckWorker(QObject):

@@ -126,6 +126,7 @@ from src.UI.fits_header_viewer import FitsHeaderViewerDialog
 from src.UI.goes_sgps_gui import MainWindow as SepProtonWindow
 from src.UI.goes_xrs_gui import MainWindow as GoesXrsWindow
 from src.UI.kp_index_gui import MainWindow as KpIndexWindow
+from src.UI.learmonth_downloader import LearmonthDownloaderApp
 from src.UI.gui_shared import (
     MplCanvas,
     _ext_from_filter,
@@ -876,6 +877,9 @@ class MainWindow(QMainWindow):
         radio_action = QAction("e-CALLISTO", self)
         radio_action.triggered.connect(self.launch_downloader)
         radio_submenu.addAction(radio_action)
+        learmonth_action = QAction("Learmonth", self)
+        learmonth_action.triggered.connect(self.launch_learmonth_downloader)
+        radio_submenu.addAction(learmonth_action)
 
         solar_events_menu.addSeparator()
         self.sync_time_window_action = QAction("Sync Current Time Window", self)
@@ -2299,12 +2303,14 @@ class MainWindow(QMainWindow):
             return None
         max_block = dict(normalized.get("max_intensity") or {})
         t = max_block.get("time_channels")
+        ts = max_block.get("time_seconds")
         f = max_block.get("freqs")
         if t is None or f is None:
             return None
         analyzer = dict(normalized.get("analyzer") or {})
         return {
             "time_channels": np.asarray(t, dtype=float),
+            "time_seconds": np.asarray(ts, dtype=float) if ts is not None else None,
             "freqs": np.asarray(f, dtype=float),
             "fundamental": bool(max_block.get("fundamental", True)),
             "harmonic": bool(max_block.get("harmonic", False)),
@@ -2339,7 +2345,7 @@ class MainWindow(QMainWindow):
         lines = ["Session restored and synced."]
         if fit.get("a") is not None and fit.get("b") is not None:
             try:
-                lines.append(f"Fit: f(t) = {float(fit['a']):.2f} * t^{float(fit['b']):.2f}")
+                lines.append(f"Fit: f(x) = {float(fit['a']):.2f} * x^-{abs(float(fit['b'])):.2f}")
             except Exception:
                 pass
         if fit.get("r2") is not None:
@@ -2454,6 +2460,9 @@ class MainWindow(QMainWindow):
             return None
         nx = int(data.shape[1])
         time_channels = np.arange(nx, dtype=float)
+        time_seconds = np.asarray(self.time, dtype=float).reshape(-1) if self.time is not None else time_channels.copy()
+        if time_seconds.shape[0] != nx:
+            time_seconds = time_channels.copy()
         freqs = np.asarray(self.freqs, dtype=float)
         if freqs.ndim != 1 or len(freqs) == 0:
             return None
@@ -2468,12 +2477,16 @@ class MainWindow(QMainWindow):
                 max_freqs,
                 data,
             )
+            if time_seconds.shape[0] == nx:
+                valid_idx = np.isin(np.arange(nx, dtype=float), time_channels)
+                time_seconds = time_seconds[valid_idx]
             auto_outlier_cleaned = bool(auto_removed > 0)
 
         payload = {
             "source": self._analysis_source_context(),
             "max_intensity": {
                 "time_channels": time_channels,
+                "time_seconds": time_seconds,
                 "freqs": max_freqs,
                 "fundamental": True,
                 "harmonic": False,
@@ -2507,6 +2520,7 @@ class MainWindow(QMainWindow):
                     "source": self._analysis_source_context(),
                     "max_intensity": {
                         "time_channels": legacy.get("time_channels"),
+                        "time_seconds": legacy.get("time_seconds"),
                         "freqs": legacy.get("freqs"),
                         "fundamental": bool(legacy.get("fundamental", True)),
                         "harmonic": bool(legacy.get("harmonic", False)),
@@ -2567,6 +2581,7 @@ class MainWindow(QMainWindow):
                 parent=self,
                 session=candidate,
                 auto_outlier_mode=auto_outlier_mode,
+                time_seconds=max_block.get("time_seconds"),
             )
             dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
             dialog.sessionChanged.connect(lambda payload: self._on_analysis_session_changed(payload, source="max"))
@@ -2628,6 +2643,7 @@ class MainWindow(QMainWindow):
                 fundamental=bool(max_block.get("fundamental", True)),
                 harmonic=bool(max_block.get("harmonic", False)),
                 parent=self,
+                time_seconds=max_block.get("time_seconds"),
                 session={"max_intensity": max_block, "analyzer": analyzer_state},
             )
             dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -5585,19 +5601,27 @@ class MainWindow(QMainWindow):
         if getattr(self, "accel_canvas", None) is not None and self.accel_canvas.is_available:
             self.accel_canvas.set_time_mode(self.use_utc, self.ut_start_sec)
 
-    def _show_import_progress_dialog(self, total_steps: int):
+    def _active_import_dialog(self):
+        for attr_name in ("learmonth_downloader_dialog", "downloader_dialog"):
+            dlg = getattr(self, attr_name, None)
+            if dlg is None:
+                continue
+            try:
+                if dlg.isVisible():
+                    return dlg
+            except Exception:
+                continue
+        return None
+
+    def _show_import_progress_dialog(self, total_steps: int, *, label_text: str):
         self._close_import_progress_dialog()
 
         parent = self
-        downloader = getattr(self, "downloader_dialog", None)
+        downloader = self._active_import_dialog()
         if downloader is not None:
-            try:
-                if downloader.isVisible():
-                    parent = downloader
-            except Exception:
-                pass
+            parent = downloader
 
-        dlg = QProgressDialog("Downloading selected FITS files...", "", 0, max(1, int(total_steps)), parent)
+        dlg = QProgressDialog(str(label_text or "Importing FITS files..."), "", 0, max(1, int(total_steps)), parent)
         dlg.setWindowTitle("Importing FITS Files")
         dlg.setWindowModality(Qt.ApplicationModal)
         dlg.setWindowFlag(Qt.WindowStaysOnTopHint, True)
@@ -5662,7 +5686,7 @@ class MainWindow(QMainWindow):
         self._import_worker = None
 
     def _emit_downloader_import_success(self):
-        dlg = getattr(self, "downloader_dialog", None)
+        dlg = self._active_import_dialog()
         if dlg is None:
             return
         try:
@@ -5730,8 +5754,8 @@ class MainWindow(QMainWindow):
         self._close_import_progress_dialog()
         QMessageBox.critical(self, "Import Failed", str(message or "Import failed."))
 
-    def process_imported_files(self, urls):
-        if not urls:
+    def process_imported_files(self, sources):
+        if not sources:
             QMessageBox.warning(self, "No Files", "No files were received from the downloader.")
             return
 
@@ -5742,10 +5766,22 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Import In Progress", "Another FITS import is already running.")
             return
 
-        self._show_import_progress_dialog(len(urls))
+        source_list = list(sources or [])
+        remote_count = sum(
+            1 for source in source_list
+            if str(source or "").strip().lower().startswith(("http://", "https://"))
+        )
+        if remote_count == len(source_list):
+            label_text = "Downloading selected FITS files..."
+        elif remote_count == 0:
+            label_text = "Preparing selected FITS files..."
+        else:
+            label_text = "Downloading and preparing selected FITS files..."
+
+        self._show_import_progress_dialog(len(source_list), label_text=label_text)
 
         self._import_thread = QThread(self)
-        self._import_worker = DownloaderImportWorker(urls)
+        self._import_worker = DownloaderImportWorker(source_list)
         self._import_worker.moveToThread(self._import_thread)
 
         self._import_thread.started.connect(self._import_worker.run)
@@ -5927,6 +5963,15 @@ class MainWindow(QMainWindow):
         self.downloader_dialog.import_success.connect(self.import_success_signal)
 
         self.downloader_dialog.exec()
+
+    def launch_learmonth_downloader(self):
+        self.learmonth_downloader_dialog = LearmonthDownloaderApp()
+        self.learmonth_downloader_dialog.import_request.connect(self.process_imported_files)
+
+        self.learmonth_import_success_signal = lambda: self.learmonth_downloader_dialog.accept()
+        self.learmonth_downloader_dialog.import_success.connect(self.learmonth_import_success_signal)
+
+        self.learmonth_downloader_dialog.exec()
 
     def open_goes_xrs_window(self):
         try:
@@ -7785,6 +7830,7 @@ class MainWindow(QMainWindow):
                     "source": self._analysis_source_context(),
                     "max_intensity": {
                         "time_channels": self._max_intensity_state.get("time_channels"),
+                        "time_seconds": self._max_intensity_state.get("time_seconds"),
                         "freqs": self._max_intensity_state.get("freqs"),
                         "fundamental": bool(self._max_intensity_state.get("fundamental", True)),
                         "harmonic": bool(self._max_intensity_state.get("harmonic", False)),
@@ -7958,6 +8004,7 @@ class MainWindow(QMainWindow):
                     "source": self._analysis_source_context(),
                     "max_intensity": {
                         "time_channels": (getattr(self, "_max_intensity_state", {}) or {}).get("time_channels"),
+                        "time_seconds": (getattr(self, "_max_intensity_state", {}) or {}).get("time_seconds"),
                         "freqs": (getattr(self, "_max_intensity_state", {}) or {}).get("freqs"),
                         "fundamental": bool((getattr(self, "_max_intensity_state", {}) or {}).get("fundamental", True)),
                         "harmonic": bool((getattr(self, "_max_intensity_state", {}) or {}).get("harmonic", False)),
@@ -7984,6 +8031,7 @@ class MainWindow(QMainWindow):
                 }
                 arrays.update({
                     "max_time_channels": legacy.get("time_channels"),
+                    "max_time_seconds": legacy.get("time_seconds"),
                     "max_freqs": legacy.get("freqs"),
                 })
 
@@ -8145,6 +8193,7 @@ class MainWindow(QMainWindow):
                 session_payload = dict(analysis_meta)
                 max_block = dict(session_payload.get("max_intensity") or {})
                 max_block["time_channels"] = arrays.get("analysis_time_channels", None)
+                max_block["time_seconds"] = arrays.get("analysis_time_seconds", None)
                 max_block["freqs"] = arrays.get("analysis_freqs", None)
                 session_payload["max_intensity"] = max_block
                 loaded_session = normalize_analysis_session(session_payload)
