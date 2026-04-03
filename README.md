@@ -19,7 +19,7 @@ A desktop application for visualizing, processing, and analyzing e-CALLISTO sola
 
 ### Solar-event context tools
 - Open standalone viewers for GOES X-ray flux, GOES SEP proton flux, SOHO/LASCO CME catalog data, Kyoto Dst, and GFZ Kp.
-- Overlay GOES XRS curves directly on the main spectrum with automatic GOES-16 through GOES-19 fallback and flare-class guides.
+- Overlay GOES XRS curves directly on the main spectrum with automatic legacy/modern GOES fallback and flare-class guides.
 - Explore external archives with the SunPy Multi-Mission Explorer for SDO, SOHO, STEREO-A, and GOES products.
 - Sync the current analyzer time window across supported solar-event windows for faster cross-comparison.
 
@@ -364,8 +364,9 @@ Features:
 Features:
 
 - Open a standalone GOES X-ray viewer for time-window inspection and flare analysis
+- Select from historical and modern GOES XRS spacecraft directly in the standalone viewer
 - Enable **Solar Events → GOES Overlay → Long(XRS-B)** and/or **Short(XRS-A)** to draw GOES curves on the current FITS spectrum
-- Automatically fall back across **GOES-16** to **GOES-19** when loading overlay archives
+- Automatically fall back across date-appropriate **legacy and modern GOES XRS satellites** when loading overlay archives
 - Display GOES overlay curves with a dedicated right-side flare-class guide (**A / B / C / M / X**) without modifying the spectrogram data
 - Adjust time windows, extract flare parameters, and export plots/data from the standalone GOES viewer
 

@@ -22,6 +22,7 @@ pytest.importorskip("cftime")
 from PySide6.QtWidgets import QApplication
 
 from src.Backend.sep_proton import SepProtonRangeData
+from src.UI import goes_xrs_gui as goes_xrs_gui_module
 from src.UI.dst_index_gui import MainWindow as DstWindow
 from src.UI.goes_sgps_gui import MainWindow as SepWindow
 from src.UI.goes_xrs_gui import MainWindow as GoesWindow
@@ -44,6 +45,60 @@ def test_goes_set_time_window_success_same_day():
     assert win.start_date.date().year() == 2026
     assert int(win.start_hour.currentData()) == 1
     assert int(win.end_hour.currentData()) == 3
+
+
+def test_goes_spacecraft_selector_includes_legacy_satellites():
+    _app()
+    win = GoesWindow()
+
+    values = [int(win.spacecraft_cb.itemData(i)) for i in range(win.spacecraft_cb.count())]
+
+    assert values == list(range(8, 20))
+
+
+def test_goes_set_time_window_prefers_legacy_satellite_for_historic_day():
+    _app()
+    win = GoesWindow()
+    start_dt = datetime(2015, 3, 11, 1, 2)
+    end_dt = datetime(2015, 3, 11, 3, 4)
+
+    ok = win.set_time_window(start_dt, end_dt, auto_plot=False)
+
+    assert ok is True
+    assert int(win.spacecraft_cb.currentData()) == 15
+
+
+def test_load_goes_xrs_range_uses_archive_loader_for_legacy_satellites(monkeypatch):
+    start_dt = datetime(2015, 3, 11, 0, 0)
+    end_dt = datetime(2015, 3, 11, 0, 2)
+
+    monkeypatch.setattr(
+        goes_xrs_gui_module,
+        "fetch_goes_overlay",
+        lambda **_kwargs: {
+            "base_utc": datetime(2015, 3, 11, 0, 0, tzinfo=timezone.utc),
+            "series": {
+                "xrsa": {
+                    "x_seconds": np.array([0.0, 60.0], dtype=float),
+                    "flux_wm2": np.array([1e-8, 2e-8], dtype=float),
+                },
+                "xrsb": {
+                    "x_seconds": np.array([0.0, 60.0], dtype=float),
+                    "flux_wm2": np.array([2e-8, 3e-8], dtype=float),
+                },
+            },
+        },
+    )
+
+    times, xrsa, xrsb, source = goes_xrs_gui_module.load_goes_xrs_range(15, start_dt, end_dt)
+
+    assert tuple(times) == (
+        datetime(2015, 3, 11, 0, 0),
+        datetime(2015, 3, 11, 0, 1),
+    )
+    assert np.allclose(xrsa, np.array([1e-8, 2e-8], dtype=float))
+    assert np.allclose(xrsb, np.array([2e-8, 3e-8], dtype=float))
+    assert source == "GOES-15 XRS archive"
 
 
 def test_goes_set_time_window_rejects_cross_day():

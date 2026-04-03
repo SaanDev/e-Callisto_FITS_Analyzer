@@ -277,6 +277,65 @@ def test_goes_overlay_toggle_with_mocked_success_keeps_spectrogram_data(monkeypa
     window.close()
 
 
+def test_goes_overlay_request_context_uses_legacy_satellites_for_historic_data():
+    _app()
+    window = MainWindow(theme=None)
+    window.time = np.array([0.0, 60.0], dtype=float)
+    window.ut_start_sec = 0.0
+    window._fits_header0 = {"DATE-OBS": "2015-03-11T00:00:00Z"}
+
+    ctx = window._goes_overlay_request_context()
+
+    assert ctx is not None
+    assert ctx["satellite_numbers"] == (15, 14, 13, 12, 11, 10)
+    window.close()
+
+
+def test_goes_overlay_status_bar_includes_peak_time_for_overlay_axis_hover():
+    _app()
+    window = MainWindow(theme=None)
+    window.use_hw_live_preview = False
+    window.filename = "demo.fit"
+    window.freqs = np.array([100.0, 95.0, 90.0], dtype=float)
+    window.time = np.array([0.0, 60.0, 120.0], dtype=float)
+    window.raw_data = np.array(
+        [
+            [1.0, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+            [7.0, 8.0, 9.0],
+        ],
+        dtype=np.float32,
+    )
+
+    window.plot_data(window.raw_data, title="Raw")
+    QApplication.processEvents()
+
+    window._goes_overlay_payload = _make_goes_payload()
+    window._goes_overlay_enabled = True
+    window._set_goes_overlay_checked(("xrsb",))
+    window._render_goes_overlay()
+    window.canvas.draw()
+
+    overlay_ax = window._goes_overlay_mpl_ax
+    assert overlay_ax is not None
+
+    hover_px = window.canvas.ax.transData.transform((60.0, 95.0))
+    event = SimpleNamespace(
+        inaxes=overlay_ax,
+        x=float(hover_px[0]),
+        y=float(hover_px[1]),
+        xdata=60.0,
+        ydata=2.0e-8,
+    )
+
+    window.on_mouse_motion_status(event)
+
+    text = window.cursor_label.text()
+    assert "t = 60.00 s" in text
+    assert "Long(XRS-B) peak = 00:01:00 UT (60.00 s)" in text
+    window.close()
+
+
 def test_apply_loaded_dataset_invalidates_goes_overlay_and_requests_refresh(monkeypatch):
     _app()
     window = MainWindow(theme=None)

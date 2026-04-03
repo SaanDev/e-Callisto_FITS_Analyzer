@@ -92,6 +92,7 @@ from src.Backend.goes_overlay import (
     GoesOverlayPayload,
     goes_class_ticks_for_limits,
     goes_flux_axis_limits,
+    preferred_goes_satellite_numbers_for_time,
 )
 from src.Backend.presets import (
     PRESET_SCHEMA_VERSION,
@@ -3538,16 +3539,22 @@ class MainWindow(QMainWindow):
     def on_mouse_motion_status(self, event):
         """Show time, frequency and intensity under cursor in status bar."""
         in_axes = event.inaxes == self.canvas.ax and event.xdata is not None and event.ydata is not None
-        x = float(event.xdata) if in_axes else 0.0
-        y = float(event.ydata) if in_axes else 0.0
-        self._update_cursor_label_from_xy(x, y, in_axes)
+        if in_axes:
+            self._update_cursor_label_from_xy(float(event.xdata), float(event.ydata), True)
+            return
+
+        xy = self._event_data_in_main_axes(event)
+        if xy is None:
+            self._update_cursor_label_from_xy(0.0, 0.0, False)
+            return
+        self._update_cursor_label_from_xy(float(xy[0]), float(xy[1]), True)
 
     def on_accel_mouse_motion_status(self, x: float, y: float, inside: bool):
         self._update_cursor_label_from_xy(float(x), float(y), bool(inside))
 
     def _update_cursor_label_from_xy(self, x: float, y: float, inside: bool):
         if not inside:
-            self.cursor_label.setText("t = 0.00   |   f = 0.00 MHz   |   I = 0.00")
+            self.cursor_label.setText(self._append_goes_peak_status("t = 0.00   |   f = 0.00 MHz   |   I = 0.00"))
             return
 
         if self.current_display_data is None or self.time is None or self.freqs is None:
@@ -3584,7 +3591,7 @@ class MainWindow(QMainWindow):
             f"f = {f_val:.2f} MHz   |   "
             f"I = {intensity:.2f} {unit_label}"
         )
-        self.cursor_label.setText(msg)
+        self.cursor_label.setText(self._append_goes_peak_status(msg))
 
     def change_cmap(self, name):
         self._push_undo_state()
@@ -7191,6 +7198,76 @@ class MainWindow(QMainWindow):
                 out.append((key, series))
         return out
 
+    def _goes_overlay_status_series(self, payload=None, selected_channels=None) -> tuple[str | None, object | None]:
+        payload = self._goes_overlay_payload if payload is None else payload
+        if not self._goes_overlay_enabled or payload is None:
+            return None, None
+
+        visible_series = self._goes_overlay_visible_series(payload, selected_channels=selected_channels)
+        if not visible_series:
+            return None, None
+
+        series_map = {key: series for key, series in visible_series}
+        for key in ("xrsb", "xrsa"):
+            if key in series_map:
+                return key, series_map[key]
+        return visible_series[0]
+
+    def _coerce_goes_overlay_datetime(self, value) -> datetime | None:
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                return value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc)
+
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except Exception:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def _goes_overlay_peak_status_text(self) -> str:
+        key, series = self._goes_overlay_status_series()
+        if key is None or series is None:
+            return ""
+
+        try:
+            xs = np.asarray(self._goes_payload_field(series, "x_seconds", []), dtype=float)
+            flux = np.asarray(self._goes_payload_field(series, "flux_wm2", []), dtype=float)
+        except Exception:
+            return ""
+        if xs.size == 0 or flux.size == 0 or xs.size != flux.size:
+            return ""
+
+        mask = np.isfinite(xs) & np.isfinite(flux) & (flux > 0.0)
+        if not np.any(mask):
+            return ""
+
+        xs = np.asarray(xs[mask], dtype=float)
+        flux = np.asarray(flux[mask], dtype=float)
+        peak_idx = int(np.nanargmax(flux))
+        peak_seconds = float(xs[peak_idx])
+        display_label = str(
+            self._goes_payload_field(series, "display_label", GOES_OVERLAY_CHANNEL_LABELS.get(key, key.upper()))
+        )
+
+        base_utc = self._coerce_goes_overlay_datetime(self._goes_payload_field(self._goes_overlay_payload, "base_utc", None))
+        if base_utc is None:
+            return f"{display_label} peak = {peak_seconds:.2f} s"
+
+        peak_time_utc = base_utc + timedelta(seconds=peak_seconds)
+        return f"{display_label} peak = {peak_time_utc:%H:%M:%S} UT ({peak_seconds:.2f} s)"
+
+    def _append_goes_peak_status(self, message: str) -> str:
+        peak_text = self._goes_overlay_peak_status_text()
+        if not peak_text:
+            return message
+        return f"{message}   |   {peak_text}"
+
     def _goes_overlay_used_satellites(self, payload) -> tuple[int, ...]:
         values = self._goes_payload_field(payload, "satellite_numbers", ()) or ()
         out: list[int] = []
@@ -7305,7 +7382,7 @@ class MainWindow(QMainWindow):
         ) + timedelta(seconds=float(self.ut_start_sec))
         start_utc = base_utc + timedelta(seconds=time_min)
         end_utc = base_utc + timedelta(seconds=time_max)
-        satellite_numbers = (16, 17, 18, 19)
+        satellite_numbers = preferred_goes_satellite_numbers_for_time(obs_date)
         request_key = "|".join(
             (
                 "sats=" + ",".join(str(x) for x in satellite_numbers),

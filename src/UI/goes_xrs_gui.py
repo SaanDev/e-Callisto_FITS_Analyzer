@@ -10,7 +10,7 @@ import os
 import sys
 import csv
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
 
 import requests
@@ -32,6 +32,8 @@ from PySide6.QtWidgets import (
 )
 
 import tempfile, atexit, shutil
+from src.Backend.goes_overlay import fetch_goes_overlay, preferred_goes_satellite_numbers_for_time
+
 CACHE_DIR = tempfile.mkdtemp(prefix="goes_xrs_cache_")
 @atexit.register
 def _cleanup_cache_dir():
@@ -135,6 +137,93 @@ def _get_theme():
     return app.property("theme_manager")
 
 
+def _ensure_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _payload_field(payload, name: str, default=None):
+    if payload is None:
+        return default
+    if isinstance(payload, dict):
+        return payload.get(name, default)
+    return getattr(payload, name, default)
+
+
+def _payload_series_arrays(series):
+    xs = np.asarray(_payload_field(series, "x_seconds", []), dtype=float)
+    flux = np.asarray(_payload_field(series, "flux_wm2", []), dtype=float)
+    if xs.size == 0 or flux.size == 0 or xs.size != flux.size:
+        return None, None
+    mask = np.isfinite(xs) & np.isfinite(flux) & (flux > 0.0)
+    if not np.any(mask):
+        return None, None
+    return np.asarray(xs[mask], dtype=float), np.asarray(flux[mask], dtype=float)
+
+
+def _payload_to_plot_arrays(payload):
+    series_map = _payload_field(payload, "series", {}) or {}
+    xrsa_series = series_map.get("xrsa")
+    xrsb_series = series_map.get("xrsb")
+    if xrsa_series is None and xrsb_series is None:
+        raise RuntimeError("GOES/XRS archive did not provide usable XRS-A or XRS-B samples.")
+
+    x_arrays = []
+    xrsa_x, xrsa_flux = _payload_series_arrays(xrsa_series)
+    xrsb_x, xrsb_flux = _payload_series_arrays(xrsb_series)
+    if xrsa_x is not None:
+        x_arrays.append(xrsa_x)
+    if xrsb_x is not None:
+        x_arrays.append(xrsb_x)
+    if not x_arrays:
+        raise RuntimeError("GOES/XRS archive did not provide any plottable flux samples.")
+
+    merged_x = np.asarray(np.unique(np.concatenate(x_arrays)), dtype=float)
+    merged_x.sort()
+    xrsa = np.full(merged_x.shape, np.nan, dtype=float)
+    xrsb = np.full(merged_x.shape, np.nan, dtype=float)
+    index_map = {float(x_val): idx for idx, x_val in enumerate(merged_x.tolist())}
+
+    if xrsa_x is not None and xrsa_flux is not None:
+        for x_val, flux_val in zip(xrsa_x, xrsa_flux):
+            xrsa[index_map[float(x_val)]] = float(flux_val)
+    if xrsb_x is not None and xrsb_flux is not None:
+        for x_val, flux_val in zip(xrsb_x, xrsb_flux):
+            xrsb[index_map[float(x_val)]] = float(flux_val)
+
+    base_utc = _ensure_utc(_payload_field(payload, "base_utc", datetime.now(timezone.utc)))
+    times = np.array(
+        [(base_utc + timedelta(seconds=float(x_val))).replace(tzinfo=None) for x_val in merged_x],
+        dtype=object,
+    )
+    return times, xrsa, xrsb
+
+
+def _load_legacy_goes_range(goes_num: int, start_dt: datetime, end_dt: datetime, progress_cb=None):
+    start_utc = _ensure_utc(start_dt)
+    end_utc = _ensure_utc(end_dt)
+    payload = fetch_goes_overlay(
+        start_utc=start_utc,
+        end_utc=end_utc,
+        base_utc=start_utc,
+        cache_dir=CACHE_DIR,
+        satellite_numbers=(int(goes_num),),
+        progress_cb=progress_cb,
+    )
+    times, xrsa, xrsb = _payload_to_plot_arrays(payload)
+    return times, xrsa, xrsb, f"GOES-{int(goes_num)} XRS archive"
+
+
+def load_goes_xrs_range(goes_num: int, start_dt: datetime, end_dt: datetime, progress_cb=None):
+    year, month, day = day_parts(start_dt)
+    if int(goes_num) >= 16:
+        local_path = download_file(goes_num, year, month, day, progress_cb=progress_cb)
+        times, xrsa, xrsb = load_and_slice(local_path, start_dt, end_dt, progress_cb=progress_cb)
+        return times, xrsa, xrsb, local_path
+    return _load_legacy_goes_range(goes_num, start_dt, end_dt, progress_cb=progress_cb)
+
+
 from PySide6.QtCore import QObject, Signal, Slot, QThread
 
 class DataWorker(QObject):
@@ -151,10 +240,12 @@ class DataWorker(QObject):
     @Slot()
     def run(self):
         try:
-            local_path = download_file(self.goes_num, self.year, self.month, self.day,
-                                       progress_cb=lambda v,t: self.progress.emit(v, t))
-            times, xrsa, xrsb = load_and_slice(local_path, self.start_dt, self.end_dt,
-                                               progress_cb=lambda v,t: self.progress.emit(v, t))
+            times, xrsa, xrsb, local_path = load_goes_xrs_range(
+                self.goes_num,
+                self.start_dt,
+                self.end_dt,
+                progress_cb=lambda v, t: self.progress.emit(v, t),
+            )
             self.progress.emit(95, "Preparing plot…")
             self.finished.emit(times, xrsa, xrsb, local_path, self.goes_num)
         except Exception:
@@ -367,9 +458,10 @@ class MainWindow(QMainWindow):
         self.end_hour, self.end_min = _build_time_combo(1)
 
         self.spacecraft_cb = QComboBox()
-        for n in (16, 17, 18, 19):
+        for n in range(8, 20):
             self.spacecraft_cb.addItem(f"GOES-{n}", n)
-        self.spacecraft_cb.setCurrentIndex(0)
+        idx = self.spacecraft_cb.findData(16)
+        self.spacecraft_cb.setCurrentIndex(idx if idx >= 0 else 0)
 
         self.start_date.setDate(QDate.currentDate()); self.end_date.setDate(QDate.currentDate())
         self.start_hour.setCurrentIndex(0); self.start_min.setCurrentIndex(0)
@@ -491,6 +583,19 @@ class MainWindow(QMainWindow):
         self.end_hour.setCurrentIndex(23);  self.end_min.setCurrentIndex(59)
         self.sb.showMessage("Preset applied: Whole day 00:00–23:59")
 
+    def _set_preferred_spacecraft_for_time(self, dt: datetime) -> None:
+        preferred = preferred_goes_satellite_numbers_for_time(dt)
+        if not preferred:
+            return
+        idx = self.spacecraft_cb.findData(int(preferred[0]))
+        if idx < 0:
+            return
+        self.spacecraft_cb.setCurrentIndex(idx)
+        try:
+            self.current_goes_num = int(self.spacecraft_cb.currentData())
+        except Exception:
+            pass
+
     def set_time_window(self, start_dt: datetime, end_dt: datetime, auto_plot: bool = True) -> bool:
         """Programmatically set the GOES time range from an external caller."""
         try:
@@ -520,6 +625,7 @@ class MainWindow(QMainWindow):
 
             self.current_start_dt = start_dt
             self.current_end_dt = end_dt
+            self._set_preferred_spacecraft_for_time(start_dt)
             self.sb.showMessage(
                 f"Synced time window: {start_dt:%Y-%m-%d %H:%M} - {end_dt:%H:%M} UTC"
             )

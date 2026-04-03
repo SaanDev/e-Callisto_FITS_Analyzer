@@ -28,6 +28,7 @@ from src.Backend.goes_overlay import (
     normalize_goes_satellite_numbers,
     pick_goes_long_channel,
     pick_goes_short_channel,
+    preferred_goes_satellite_numbers_for_time,
 )
 
 
@@ -166,6 +167,12 @@ def test_build_goes_overlay_payload_accepts_legacy_a_flux_b_flux_columns():
 def test_normalize_goes_satellite_numbers_defaults_and_deduplicates():
     assert normalize_goes_satellite_numbers(None) == (16, 17, 18, 19)
     assert normalize_goes_satellite_numbers([17, 17, 18, -1, 0, 19]) == (17, 18, 19)
+
+
+def test_preferred_goes_satellite_numbers_for_time_prioritizes_legacy_eras():
+    assert preferred_goes_satellite_numbers_for_time(datetime(2026, 2, 10, 1, 0, tzinfo=timezone.utc)) == (19, 18, 17, 16)
+    assert preferred_goes_satellite_numbers_for_time(datetime(2015, 3, 11, 0, 0, tzinfo=timezone.utc)) == (15, 14, 13, 12, 11, 10)
+    assert preferred_goes_satellite_numbers_for_time(datetime(1998, 1, 15, 0, 0, tzinfo=timezone.utc)) == (10, 9, 8)
 
 
 def test_goes_class_ticks_and_limits_use_class_boundaries():

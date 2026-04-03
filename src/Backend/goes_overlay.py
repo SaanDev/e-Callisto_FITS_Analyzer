@@ -8,7 +8,7 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
 import re
@@ -30,6 +30,8 @@ GOES_OVERLAY_CHANNEL_LABELS: dict[str, str] = {
     "xrsa": "Short(XRS-A)",
     "xrsb": "Long(XRS-B)",
 }
+GOES_XRS_MODERN_SATELLITES: tuple[int, ...] = (16, 17, 18, 19)
+GOES_XRS_LEGACY_SATELLITES: tuple[int, ...] = (8, 9, 10, 11, 12, 13, 14, 15)
 
 
 @dataclass(slots=True)
@@ -172,7 +174,7 @@ def pick_goes_short_channel(columns: list[str]) -> str | None:
 
 def normalize_goes_satellite_numbers(values: Sequence[int] | int | None) -> tuple[int, ...]:
     if values is None:
-        return (16, 17, 18, 19)
+        return GOES_XRS_MODERN_SATELLITES
     if isinstance(values, (int, np.integer)):
         values = [int(values)]
 
@@ -185,7 +187,34 @@ def normalize_goes_satellite_numbers(values: Sequence[int] | int | None) -> tupl
         if sat < 1 or sat in out:
             continue
         out.append(sat)
-    return tuple(out) if out else (16, 17, 18, 19)
+    return tuple(out) if out else GOES_XRS_MODERN_SATELLITES
+
+
+def preferred_goes_satellite_numbers_for_time(value: date | datetime | None) -> tuple[int, ...]:
+    if value is None:
+        return GOES_XRS_MODERN_SATELLITES
+
+    year = int(value.year)
+    if year >= 2025:
+        return (19, 18, 17, 16)
+    if year >= 2022:
+        return (18, 17, 16, 15, 14, 13)
+    if year >= 2017:
+        return (17, 16, 15, 14, 13)
+    if year >= 2010:
+        return (15, 14, 13, 12, 11, 10)
+    if year >= 2003:
+        return (12, 11, 10, 9, 8)
+    if year >= 1997:
+        return (10, 9, 8)
+    return (9, 8)
+
+
+def _format_goes_satellite_scope(satellites: Sequence[int] | None) -> str:
+    normalized = normalize_goes_satellite_numbers(satellites)
+    if not normalized:
+        return "the requested GOES satellites"
+    return ", ".join(f"GOES-{sat}" for sat in normalized)
 
 
 def _import_goes_netcdf_dependencies():
@@ -770,9 +799,9 @@ def fetch_goes_overlay(
 ) -> GoesOverlayPayload:
     _raise_if_goes_overlay_cancelled(cancel_cb)
     satellites = normalize_goes_satellite_numbers(satellite_numbers)
+    sat_scope = _format_goes_satellite_scope(satellites)
     if progress_cb is not None:
-        sat_text = ", ".join(f"GOES-{sat}" for sat in satellites)
-        progress_cb(5, f"Searching {sat_text} XRS archives...")
+        progress_cb(5, f"Searching {sat_scope} XRS archives...")
 
     payload_candidates: list[GoesOverlayPayload] = []
     search_hits = 0
@@ -863,9 +892,9 @@ def fetch_goes_overlay(
         details = "\n".join(fetch_errors[:6])
         more = "" if len(fetch_errors) <= 6 else f"\n...and {len(fetch_errors) - 6} more."
         if search_hits == 0:
-            raise RuntimeError("No GOES/XRS files were found across GOES-16 to GOES-19 for the selected FITS observation window.")
+            raise RuntimeError(f"No GOES/XRS files were found across {sat_scope} for the selected FITS observation window.")
         raise RuntimeError(
-            "No usable GOES/XRS overlay channels could be loaded across GOES-16 to GOES-19."
+            f"No usable GOES/XRS overlay channels could be loaded across {sat_scope}."
             + (f"\n\nDetails:\n{details}{more}" if details else "")
         )
 
@@ -886,7 +915,7 @@ def fetch_goes_overlay(
         details = "\n".join(fetch_errors[:6])
         more = "" if len(fetch_errors) <= 6 else f"\n...and {len(fetch_errors) - 6} more."
         raise RuntimeError(
-            "No usable GOES/XRS overlay channels could be loaded across GOES-16 to GOES-19."
+            f"No usable GOES/XRS overlay channels could be loaded across {sat_scope}."
             + (f"\n\nDetails:\n{details}{more}" if details else "")
         )
 
