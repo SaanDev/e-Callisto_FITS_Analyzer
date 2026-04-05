@@ -23,6 +23,16 @@ class FitsLoadResult:
     header0: fits.Header
 
 
+@dataclass(frozen=True)
+class FitsPreviewResult:
+    freqs: np.ndarray
+    time: np.ndarray
+    header0: fits.Header
+    data_shape: tuple[int, int]
+    freq_source: str
+    time_source: str
+
+
 def _col_to_1d(col: Any) -> np.ndarray | None:
     if col is None:
         return None
@@ -81,6 +91,45 @@ def _get_col(table: Any, desired_names: Sequence[str]) -> Any | None:
     return None
 
 
+def _is_astropy_table_hdu(hdu: Any) -> bool:
+    mod = str(getattr(type(hdu), "__module__", "") or "")
+    return mod.startswith("astropy.io.fits")
+
+
+def _raw_table_from_hdu(hdu: Any) -> np.ndarray | None:
+    columns = getattr(hdu, "columns", None)
+    get_raw_data = getattr(hdu, "_get_raw_data", None)
+    if columns is None or not callable(get_raw_data):
+        return None
+
+    try:
+        dtype = columns.dtype
+        if dtype is None or not getattr(dtype, "names", None):
+            return None
+        dtype = dtype.newbyteorder(">")
+        nrows = int(getattr(hdu, "_nrows", 0) or 0)
+        data_offset = int(getattr(hdu, "_data_offset", 0) or 0)
+        raw = get_raw_data(nrows, dtype, data_offset)
+    except Exception:
+        return None
+
+    if raw is None:
+        return None
+    return np.asarray(raw)
+
+
+def _table_payload_from_hdu(hdu: Any) -> Any | None:
+    raw = _raw_table_from_hdu(hdu)
+    if raw is not None:
+        return raw
+
+    # Fallback for tests/fakes. Avoid Astropy's lazy .data property, which can
+    # construct FITS_rec listeners and crash under repeated threaded access.
+    if _is_astropy_table_hdu(hdu):
+        return None
+    return getattr(hdu, "data", None)
+
+
 def _axis_from_header(hdr: fits.Header, axis_num: int, length: int) -> np.ndarray | None:
     try:
         crval = hdr.get(f"CRVAL{axis_num}", None)
@@ -92,6 +141,107 @@ def _axis_from_header(hdr: fits.Header, axis_num: int, length: int) -> np.ndarra
         return float(crval) + (i - float(crpix)) * float(cdelt)
     except Exception:
         return None
+
+
+def _frequency_axis_from_range(hdr: fits.Header, length: int) -> np.ndarray | None:
+    try:
+        count = int(length)
+    except Exception:
+        return None
+    if count <= 0:
+        return None
+
+    try:
+        lo = hdr.get("FREQMIN", None)
+        hi = hdr.get("FREQMAX", None)
+        if lo is None or hi is None:
+            return None
+        lo = float(lo)
+        hi = float(hi)
+    except Exception:
+        return None
+
+    if not np.isfinite(lo) or not np.isfinite(hi):
+        return None
+    if count == 1:
+        return np.array([max(lo, hi)], dtype=float)
+
+    # CALLISTO spectrograms are typically stored with high frequency in the first row.
+    return np.linspace(max(lo, hi), min(lo, hi), count, dtype=float)
+
+
+def preview_callisto_fits(filepath: str, *, memmap: bool = False) -> FitsPreviewResult:
+    """
+    Load header and axis metadata without reading the primary image data.
+    Returns best-effort frequency/time axes and the declared 2D data shape.
+    """
+    with fits.open(filepath, memmap=memmap) as hdul:
+        header0 = hdul[0].header.copy()
+        nx = _safe_axis_length(header0.get("NAXIS1", 0))
+        ny = _safe_axis_length(header0.get("NAXIS2", 0))
+
+        freqs = None
+        time = None
+        freq_source = "missing"
+        time_source = "missing"
+
+        if len(hdul) > 1:
+            for hdu in hdul[1:]:
+                table = _table_payload_from_hdu(hdu)
+                if table is None:
+                    continue
+                if freqs is None:
+                    freqs = _col_to_1d(_get_col(table, ("frequency", "freq")))
+                    if freqs is not None:
+                        freq_source = "table"
+                if time is None:
+                    time = _col_to_1d(_get_col(table, ("time", "times")))
+                    if time is not None:
+                        time_source = "table"
+                if freqs is not None and time is not None:
+                    break
+
+        if ny <= 0 and freqs is not None:
+            ny = int(np.asarray(freqs).size)
+        if nx <= 0 and time is not None:
+            nx = int(np.asarray(time).size)
+
+        if freqs is None and ny > 0:
+            freqs = _axis_from_header(header0, 2, ny)
+            if freqs is not None:
+                freq_source = "header"
+        if freqs is None and ny > 0:
+            freqs = _frequency_axis_from_range(header0, ny)
+            if freqs is not None:
+                freq_source = "header-range"
+        if time is None and nx > 0:
+            time = _axis_from_header(header0, 1, nx)
+            if time is not None:
+                time_source = "header"
+
+        if freqs is None:
+            freqs = np.arange(max(ny, 0), dtype=float)
+            freq_source = "index"
+        if time is None:
+            time = np.arange(max(nx, 0), dtype=float)
+            time_source = "index"
+
+        freq_arr = np.asarray(freqs, dtype=float).ravel()
+        time_arr = np.asarray(time, dtype=float).ravel()
+
+        if ny <= 0:
+            ny = int(freq_arr.size)
+        if nx <= 0:
+            nx = int(time_arr.size)
+
+        return FitsPreviewResult(
+            freqs=freq_arr,
+            time=time_arr,
+            header0=header0,
+            data_shape=(int(ny), int(nx)),
+            freq_source=str(freq_source),
+            time_source=str(time_source),
+        )
 
 
 def load_callisto_fits(filepath: str, *, memmap: bool = False) -> FitsLoadResult:
@@ -108,7 +258,7 @@ def load_callisto_fits(filepath: str, *, memmap: bool = False) -> FitsLoadResult
         if raw is None:
             raise ValueError("Primary HDU has no data.")
 
-        data = np.asarray(raw, dtype=float)
+        data = np.array(raw, dtype=float, copy=True)
         data = np.squeeze(data)
         while data.ndim > 2:
             data = data[0]
@@ -120,7 +270,7 @@ def load_callisto_fits(filepath: str, *, memmap: bool = False) -> FitsLoadResult
 
         if len(hdul) > 1:
             for hdu in hdul[1:]:
-                table = getattr(hdu, "data", None)
+                table = _table_payload_from_hdu(hdu)
                 if table is None:
                     continue
                 if freqs is None:
@@ -133,6 +283,8 @@ def load_callisto_fits(filepath: str, *, memmap: bool = False) -> FitsLoadResult
         # Header-based WCS fallback
         if freqs is None:
             freqs = _axis_from_header(header0, 2, data.shape[0])
+        if freqs is None:
+            freqs = _frequency_axis_from_range(header0, data.shape[0])
         if time is None:
             time = _axis_from_header(header0, 1, data.shape[1])
 
@@ -166,6 +318,14 @@ def load_callisto_fits(filepath: str, *, memmap: bool = False) -> FitsLoadResult
                     time = np.arange(data.shape[1], dtype=float)
 
         return FitsLoadResult(data=data, freqs=freqs, time=time, header0=header0)
+
+
+def _safe_axis_length(value: Any) -> int:
+    try:
+        out = int(value)
+    except Exception:
+        out = 0
+    return max(out, 0)
 
 
 def extract_ut_start_sec(hdr: fits.Header | None) -> float | None:

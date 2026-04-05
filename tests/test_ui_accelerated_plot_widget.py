@@ -75,6 +75,46 @@ def test_accelerated_widget_update_image_no_crash():
     )
 
 
+def test_accelerated_widget_gap_rows_render_with_transparent_alpha():
+    _app()
+    widget = AcceleratedPlotWidget()
+    if not widget.is_available:
+        pytest.skip("pyqtgraph not available in test environment")
+
+    class _DummyCmap:
+        def __call__(self, x):
+            arr = np.asarray(x, dtype=float)
+            rgba = np.zeros((arr.size, 4), dtype=float)
+            rgba[:, 0] = arr
+            rgba[:, 1] = 1.0 - arr
+            rgba[:, 2] = 0.5
+            rgba[:, 3] = 1.0
+            return rgba
+
+    data = np.array(
+        [
+            [1.0, 2.0, 3.0],
+            [np.nan, np.nan, np.nan],
+            [4.0, 5.0, 6.0],
+        ],
+        dtype=np.float32,
+    )
+    widget.update_image(
+        data,
+        extent=[0.0, 3.0, 30.0, 0.0],
+        cmap=_DummyCmap(),
+        gap_row_mask=np.array([False, True, False], dtype=bool),
+        title="Preview",
+        x_label="Time [s]",
+        y_label="Frequency [MHz]",
+    )
+
+    rendered = np.asarray(widget._image.image)
+    assert rendered.ndim == 3
+    assert rendered.shape[2] == 4
+    assert np.all(rendered[1, :, 3] == 0)
+
+
 def test_accelerated_widget_export_item_available():
     _app()
     widget = AcceleratedPlotWidget()

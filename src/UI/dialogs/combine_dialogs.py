@@ -14,7 +14,6 @@ import tempfile
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.colors import LinearSegmentedColormap
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
@@ -28,6 +27,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from src.Backend.burst_processor import combine_frequency
+from src.Backend.frequency_axis import finite_data_limits, masked_display_data, matplotlib_extent, transparent_bad_cmap
 from src.Backend.fits_io import build_combined_header, extract_ut_start_sec, load_callisto_fits
 from src.UI.mpl_style import style_axes
 
@@ -72,6 +73,8 @@ class CombineFrequencyDialog(QDialog):
         self.combined_time = None
         self.combined_filename = "Combined_Frequency"
         self.combined_header0 = None
+        self.combined_gap_row_mask = None
+        self.combined_frequency_step_mhz = None
 
     def load_files(self):
         files, _ = QFileDialog.getOpenFileNames(
@@ -89,7 +92,7 @@ class CombineFrequencyDialog(QDialog):
 
         if station1 != station2:
             QMessageBox.critical(self, "Error",
-                                 "You must select consecutive frequency data files from the same station!")
+                                 "You must select non-overlapping frequency data files from the same station!")
             return
 
         self.file_paths = files
@@ -101,41 +104,35 @@ class CombineFrequencyDialog(QDialog):
         QApplication.processEvents()
 
         try:
-            res1 = load_callisto_fits(self.file_paths[0], memmap=False)
-            data1, freqs1, time1, hdr1 = res1.data, res1.freqs, res1.time, res1.header0
-            self.progress_bar.setValue(30)
-            QApplication.processEvents()
-
-            res2 = load_callisto_fits(self.file_paths[1], memmap=False)
-            data2, freqs2, time2 = res2.data, res2.freqs, res2.time
-            self.progress_bar.setValue(60)
-            QApplication.processEvents()
-
-            if not np.allclose(time1, time2, rtol=1e-2):
-                QMessageBox.critical(self, "Error", "Time arrays must match to combine frequencies.")
-                self.progress_bar.setVisible(False)
-                return
-
-            self.combined_data = np.vstack([data1, data2])
-            self.combined_freqs = np.concatenate([freqs1, freqs2])
-            self.combined_time = time1
-            self.combined_header0 = build_combined_header(
-                hdr1,
-                mode="frequency",
-                sources=self.file_paths,
-                data_shape=self.combined_data.shape,
-                freqs=self.combined_freqs,
-                time=self.combined_time,
-            )
+            combined = combine_frequency(self.file_paths)
+            self.combined_data = np.asarray(combined["data"])
+            self.combined_freqs = np.asarray(combined["freqs"], dtype=float)
+            self.combined_time = np.asarray(combined["time"], dtype=float)
+            self.combined_header0 = combined.get("header0", None)
+            self.combined_gap_row_mask = combined.get("gap_row_mask", None)
+            self.combined_frequency_step_mhz = combined.get("frequency_step_mhz", None)
             self.progress_bar.setValue(80)
             QApplication.processEvents()
 
             # Plot image
             fig, ax = plt.subplots(figsize=(6, 4))
             style_axes(ax)
-            extent = [0, self.combined_time[-1], self.combined_freqs[-1], self.combined_freqs[0]]
-            cmap = mcolors.LinearSegmentedColormap.from_list("custom", [(0.0, 'blue'), (0.5, 'red'), (1.0, 'yellow')])
-            ax.imshow(self.combined_data, aspect='auto', extent=extent, cmap=cmap)
+            cmap = transparent_bad_cmap(
+                mcolors.LinearSegmentedColormap.from_list("custom", [(0.0, 'blue'), (0.5, 'red'), (1.0, 'yellow')])
+            )
+            im = ax.imshow(
+                masked_display_data(self.combined_data),
+                aspect="auto",
+                extent=matplotlib_extent(
+                    self.combined_freqs,
+                    self.combined_time,
+                    default_step=self.combined_frequency_step_mhz,
+                ),
+                cmap=cmap,
+            )
+            vmin, vmax = finite_data_limits(self.combined_data)
+            if vmin is not None and vmax is not None:
+                im.set_clim(vmin, vmax)
             ax.set_xlabel("Time [s]")
             ax.set_ylabel("Frequency [MHz]")
             # Extract base filenames (e.g., 'BIR_20240720_123000_123000_00.fit.gz')
@@ -185,6 +182,8 @@ class CombineFrequencyDialog(QDialog):
             "combine_type": "frequency",
             "sources": list(self.file_paths),
             "header0": self.combined_header0,
+            "gap_row_mask": self.combined_gap_row_mask,
+            "frequency_step_mhz": self.combined_frequency_step_mhz,
         }
         self.main_window.load_combined_into_main(payload)
         self.close()

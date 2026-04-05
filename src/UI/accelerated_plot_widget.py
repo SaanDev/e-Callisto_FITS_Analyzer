@@ -12,6 +12,7 @@ from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
+from src.Backend.frequency_axis import finite_data_limits, invalid_row_mask
 from src.Backend.goes_overlay import GOES_OVERLAY_CHANNEL_ORDER, goes_class_ticks_for_limits, goes_flux_axis_limits
 
 try:
@@ -34,6 +35,28 @@ def _mpl_cmap_to_lookup(cmap):
         return color_map, lut
     except Exception:
         return None, None
+
+
+def _rgba_image_from_cmap(
+    arr: np.ndarray,
+    cmap,
+    *,
+    vmin: float,
+    vmax: float,
+    gap_row_mask: np.ndarray | None = None,
+) -> np.ndarray:
+    work = np.asarray(arr, dtype=np.float32)
+    scale = max(float(vmax) - float(vmin), 1e-12)
+    norm = np.clip((work - float(vmin)) / scale, 0.0, 1.0)
+    rgba = np.asarray(cmap(norm.reshape(-1)), dtype=float).reshape(work.shape + (4,))
+    rgba = np.clip(rgba, 0.0, 1.0)
+
+    alpha = np.isfinite(work)
+    row_mask = invalid_row_mask(work, gap_row_mask)
+    if row_mask.size == work.shape[0] and np.any(row_mask):
+        alpha[row_mask, :] = False
+    rgba[..., 3] = np.where(alpha, rgba[..., 3], 0.0)
+    return np.ascontiguousarray(np.rint(rgba * 255.0).astype(np.ubyte))
 
 
 if pg is not None:
@@ -886,6 +909,7 @@ class AcceleratedPlotWidget(QWidget):
         data: np.ndarray,
         extent,
         cmap,
+        gap_row_mask: np.ndarray | None = None,
         title: str = "",
         x_label: str = "Time [s]",
         y_label: str = "Frequency [MHz]",
@@ -900,7 +924,6 @@ class AcceleratedPlotWidget(QWidget):
             return
 
         arr = np.ascontiguousarray(arr, dtype=np.float32)
-        self._image.setImage(arr, autoLevels=False)
 
         x0, x1, y0, y1 = (float(extent[0]), float(extent[1]), float(extent[2]), float(extent[3]))
         self._image.setRect(QRectF(x0, y0, x1 - x0, y1 - y0))
@@ -909,22 +932,37 @@ class AcceleratedPlotWidget(QWidget):
             "ylim": (min(y0, y1), max(y0, y1)),
         }
 
-        finite = np.isfinite(arr)
-        if np.any(finite):
-            vmin = float(np.nanmin(arr))
-            vmax = float(np.nanmax(arr))
-            if vmax <= vmin:
-                vmax = vmin + 1e-6
+        vmin, vmax = finite_data_limits(arr)
+        row_mask = invalid_row_mask(arr, gap_row_mask)
+        has_invalid = bool(np.any(row_mask) or np.any(~np.isfinite(arr)))
+
+        if vmin is None or vmax is None:
+            self._image.clear()
+        elif has_invalid:
+            rgba = _rgba_image_from_cmap(arr, cmap, vmin=vmin, vmax=vmax, gap_row_mask=gap_row_mask)
+            try:
+                self._image.setLookupTable(None, update=False)
+            except Exception:
+                pass
+            self._image.setImage(rgba, autoLevels=False)
+        else:
+            self._image.setImage(arr, autoLevels=False)
             self._image.setLevels((vmin, vmax))
-            if self._color_bar is not None:
-                try:
-                    self._color_bar.setLevels((vmin, vmax))
-                except Exception:
-                    pass
+
+        if vmin is not None and vmax is not None and self._color_bar is not None:
+            try:
+                self._color_bar.setLevels((vmin, vmax))
+            except Exception:
+                pass
 
         color_map, lut = _mpl_cmap_to_lookup(cmap)
-        if lut is not None:
+        if lut is not None and not has_invalid:
             self._image.setLookupTable(lut, update=False)
+        elif has_invalid:
+            try:
+                self._image.setLookupTable(None, update=False)
+            except Exception:
+                pass
         if self._color_bar is not None and color_map is not None:
             try:
                 self._color_bar.setColorMap(color_map)

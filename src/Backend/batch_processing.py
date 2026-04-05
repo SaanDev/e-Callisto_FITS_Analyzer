@@ -10,13 +10,21 @@ from __future__ import annotations
 import os
 import re
 
+import matplotlib as mpl
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
-import matplotlib as mpl
 import numpy as np
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from matplotlib.ticker import FuncFormatter
+
+from src.Backend.frequency_axis import (
+    finite_data_limits,
+    masked_display_data,
+    matplotlib_extent,
+    transparent_bad_cmap,
+)
+from src.Backend.noise_reduction import subtract_background_rows
 
 
 _FIT_SUFFIXES = (".fit.gz", ".fits.gz", ".fit", ".fits")
@@ -76,20 +84,19 @@ def list_fit_files(input_dir: str, recursive: bool = False) -> list[str]:
     return files
 
 
-def subtract_background(data: np.ndarray, method: str = "mean") -> np.ndarray:
-    arr = np.asarray(data, dtype=np.float32)
-    if arr.ndim != 2:
-        raise ValueError(f"Expected 2D data for background subtraction, got ndim={arr.ndim}.")
-
-    mode = str(method or "").strip().lower() or "mean"
-    if mode == "mean":
-        baseline = arr.mean(axis=1, keepdims=True, dtype=np.float32)
-    elif mode == "median":
-        baseline = np.median(arr, axis=1, keepdims=True).astype(np.float32)
-    else:
-        raise ValueError(f"Unsupported subtraction method: {method}")
-
-    return (arr - baseline).astype(np.float32, copy=False)
+def subtract_background(
+    data: np.ndarray,
+    method: str = "mean",
+    *,
+    gap_row_mask: np.ndarray | None = None,
+    equalize_noise: bool = False,
+) -> np.ndarray:
+    return subtract_background_rows(
+        data,
+        method=method,
+        gap_row_mask=gap_row_mask,
+        equalize_noise=equalize_noise,
+    )
 
 
 def subtract_mean_background(data: np.ndarray) -> np.ndarray:
@@ -161,14 +168,21 @@ def save_background_subtracted_png(
     if abs(time_end - time_start) < 1e-12:
         time_end = time_start + 1.0
 
-    extent = [time_start, time_end, float(freq_arr[-1]), float(freq_arr[0])]
-    cmap = _resolve_cmap(cmap_name)
+    cmap = transparent_bad_cmap(_resolve_cmap(cmap_name))
 
     fig = Figure(figsize=(10, 6))
     FigureCanvasAgg(fig)
     try:
         ax = fig.add_subplot(111)
-        im = ax.imshow(data_db, aspect="auto", extent=extent, cmap=cmap)
+        im = ax.imshow(
+            masked_display_data(data_db),
+            aspect="auto",
+            extent=matplotlib_extent(freq_arr, time_arr),
+            cmap=cmap,
+        )
+        vmin, vmax = finite_data_limits(data_db)
+        if vmin is not None and vmax is not None:
+            im.set_clim(vmin, vmax)
         cbar = fig.colorbar(im, ax=ax)
         cbar.set_label("Intensity [dB]")
         ax.set_xlabel("Time [UT]")

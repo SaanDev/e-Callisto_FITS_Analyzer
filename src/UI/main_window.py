@@ -85,6 +85,14 @@ from src.Backend.annotations import (
     normalize_annotations,
     toggle_all_visibility,
 )
+from src.Backend.frequency_axis import (
+    finite_data_limits,
+    invalid_row_mask,
+    masked_display_data,
+    matplotlib_extent,
+    pyqtgraph_extent,
+    transparent_bad_cmap,
+)
 from src.Backend.fits_io import build_combined_header, extract_ut_start_sec, load_callisto_fits
 from src.Backend.goes_overlay import (
     GOES_OVERLAY_CHANNEL_LABELS,
@@ -110,6 +118,7 @@ from src.Backend.recovery_manager import (
     load_recovery_snapshot,
     save_recovery_snapshot,
 )
+from src.Backend.noise_reduction import rowwise_baseline, subtract_background_rows
 from src.Backend.rfi_filters import clean_rfi, config_dict as rfi_config_dict
 from src.Backend.update_checker import GITHUB_REPO
 from src.UI.accelerated_plot_widget import AcceleratedPlotWidget
@@ -1115,6 +1124,8 @@ class MainWindow(QMainWindow):
         self._is_combined = False
         self._combined_mode = None  # "time" or "frequency"
         self._combined_sources = []  # list of source files used to combine
+        self._gap_row_mask = None
+        self._frequency_step_mhz = None
 
         self.lasso = None
         self.lasso_mask = None
@@ -1128,6 +1139,7 @@ class MainWindow(QMainWindow):
 
         # Ensure project actions reflect initial state
         self._sync_project_actions()
+        self._sync_hardware_preview_action()
         self.set_hardware_live_preview_enabled(self.use_hw_live_preview)
         self._refresh_analysis_summary_panel()
         QTimer.singleShot(300, self._prompt_recovery_if_needed)
@@ -1799,6 +1811,27 @@ class MainWindow(QMainWindow):
             and self.accel_canvas.is_available
         )
 
+    def _sync_hardware_preview_action(self):
+        act = getattr(self, "hw_live_preview_action", None)
+        accel_available = bool(getattr(self, "accel_canvas", None) and self.accel_canvas.is_available)
+        if act is None:
+            return
+        act.setEnabled(accel_available)
+        act.setToolTip("")
+        act.setStatusTip("")
+
+    def _update_frequency_axis_state(self):
+        if self.freqs is not None and self._gap_row_mask is not None:
+            try:
+                gap_mask = np.asarray(self._gap_row_mask, dtype=bool).ravel()
+                if gap_mask.shape[0] != len(self.freqs):
+                    self._gap_row_mask = None
+                else:
+                    self._gap_row_mask = gap_mask.copy()
+            except Exception:
+                self._gap_row_mask = None
+        self._sync_hardware_preview_action()
+
     def _show_accel_canvas(self):
         if not self._hardware_mode_enabled():
             return False
@@ -1863,7 +1896,7 @@ class MainWindow(QMainWindow):
             pass
 
     def _refresh_accel_plot(self, data=None, title=None, view=None, preserve_view=True):
-        if not bool(getattr(self, "accel_canvas", None) and self.accel_canvas.is_available):
+        if not self._hardware_mode_enabled():
             return False
         if self.time is None or self.freqs is None or len(self.time) == 0 or len(self.freqs) == 0:
             return False
@@ -1893,7 +1926,11 @@ class MainWindow(QMainWindow):
         # Hardware canvas uses a Cartesian Y axis (increasing upward), so use
         # top-to-bottom frequency extent to keep the spectrum orientation
         # consistent with the previous display.
-        extent = [0, self.time[-1], self.freqs[0], self.freqs[-1]]
+        extent = pyqtgraph_extent(
+            self.freqs,
+            self.time,
+            default_step=self._frequency_step_mhz,
+        )
         cbar_label = "" if self.remove_titles else ("Intensity [Digits]" if not self.use_db else "Intensity [dB]")
         tick_font_px = self.tick_font_px
         axis_label_font_px = self.axis_label_font_px
@@ -1918,6 +1955,7 @@ class MainWindow(QMainWindow):
             display_data,
             extent=extent,
             cmap=self.get_current_cmap(),
+            gap_row_mask=self._current_gap_row_mask(),
             title=plot_title,
             x_label=x_label,
             y_label=y_label,
@@ -2467,19 +2505,30 @@ class MainWindow(QMainWindow):
         freqs = np.asarray(self.freqs, dtype=float)
         if freqs.ndim != 1 or len(freqs) == 0:
             return None
-        peak_indices = np.argmax(data, axis=0)
+        finite = np.isfinite(data)
+        valid_cols = np.any(finite, axis=0)
+        if not np.any(valid_cols):
+            return None
+        peak_source = np.where(finite, data, -np.inf)
+        peak_indices = np.argmax(peak_source, axis=0)
         max_freqs = freqs[peak_indices]
         auto_removed = 0
         auto_outlier_cleaned = False
 
+        if not np.all(valid_cols):
+            time_channels = time_channels[valid_cols]
+            time_seconds = time_seconds[valid_cols]
+            max_freqs = max_freqs[valid_cols]
+
         if self._is_isolated_burst_plot() and bool(getattr(self, "_max_auto_clean_isolated", True)):
+            time_channels_before_filter = time_channels.copy()
             time_channels, max_freqs, auto_removed = self._auto_filter_isolated_maxima(
                 time_channels,
                 max_freqs,
                 data,
             )
-            if time_seconds.shape[0] == nx:
-                valid_idx = np.isin(np.arange(nx, dtype=float), time_channels)
+            if time_seconds.shape[0] == time_channels_before_filter.shape[0]:
+                valid_idx = np.isin(time_channels_before_filter, time_channels)
                 time_seconds = time_seconds[valid_idx]
             auto_outlier_cleaned = bool(auto_removed > 0)
 
@@ -2780,6 +2829,8 @@ class MainWindow(QMainWindow):
         ut_start_sec: float | None = None,
         combined_mode: str | None = None,
         combined_sources: list[str] | None = None,
+        gap_row_mask=None,
+        frequency_step_mhz: float | None = None,
         plot_title: str = "Raw",
         log_message: str | None = None,
     ):
@@ -2795,6 +2846,9 @@ class MainWindow(QMainWindow):
         self._is_combined = bool(combined_mode)
         self._combined_mode = combined_mode
         self._combined_sources = list(combined_sources or [])
+        self._gap_row_mask = None if gap_row_mask is None else np.asarray(gap_row_mask, dtype=bool).ravel()
+        self._frequency_step_mhz = None if frequency_step_mhz is None else float(frequency_step_mhz)
+        self._update_frequency_axis_state()
 
         if ut_start_sec is None and header0 is not None:
             ut_start_sec = extract_ut_start_sec(header0)
@@ -2865,8 +2919,9 @@ class MainWindow(QMainWindow):
                     "   • Same station\n"
                     "   • Same date\n"
                     "   • Same timestamp (HHMMSS)\n"
-                    "   • Different receiver IDs\n"
-                    "   • Matching time arrays\n\n"
+                    "   • Distinct focus codes\n"
+                    "   • Matching time bases\n"
+                    "   • Non-overlapping frequency bands (gaps allowed)\n\n"
                     "2. Time Combine:\n"
                     "   • Same station\n"
                     "   • Same receiver ID\n"
@@ -3174,6 +3229,38 @@ class MainWindow(QMainWindow):
         cold_digits, _ = self._db_hot_cold_digits()
         return ((vmin - cold_digits) * self.DB_SCALE, (vmax - cold_digits) * self.DB_SCALE)
 
+    def _current_gap_row_mask(self) -> np.ndarray | None:
+        if self.freqs is None or self._gap_row_mask is None:
+            return None
+        try:
+            mask = np.asarray(self._gap_row_mask, dtype=bool).ravel()
+        except Exception:
+            return None
+        return mask if mask.shape[0] == len(self.freqs) else None
+
+    def _plot_cmap(self):
+        if self.current_cmap_name == "Custom":
+            colors = [(0.0, "blue"), (0.5, "red"), (1.0, "yellow")]
+            cmap = mcolors.LinearSegmentedColormap.from_list("custom_RdYlBu", colors)
+        else:
+            cmap = plt.get_cmap(self.current_cmap_name)
+        return transparent_bad_cmap(cmap)
+
+    def _rowwise_baseline(self, data: np.ndarray, method: str = "mean") -> np.ndarray:
+        return rowwise_baseline(
+            data,
+            method=method,
+            gap_row_mask=self._current_gap_row_mask(),
+        )
+
+    def _set_gap_rows_nan(self, data: np.ndarray) -> np.ndarray:
+        arr = np.asarray(data, dtype=np.float32)
+        out = np.array(arr, copy=True)
+        row_mask = invalid_row_mask(out, self._current_gap_row_mask())
+        if np.any(row_mask):
+            out[row_mask, :] = np.nan
+        return out
+
     def update_units(self):
         self.set_units_mode(bool(self.units_db_radio.isChecked()))
 
@@ -3284,6 +3371,8 @@ class MainWindow(QMainWindow):
             ut_start_sec=combined.get("ut_start_sec", None),
             combined_mode=combine_type,
             combined_sources=sources,
+            gap_row_mask=combined.get("gap_row_mask", None),
+            frequency_step_mhz=combined.get("frequency_step_mhz", None),
             plot_title="Raw",
             log_message="Loaded combined dataset into main window.",
         )
@@ -3316,8 +3405,13 @@ class MainWindow(QMainWindow):
             return self._noise_base_data
 
         arr = np.asarray(self.raw_data, dtype=np.float32)
-        row_mean = arr.mean(axis=1, keepdims=True, dtype=np.float32)
-        self._noise_base_data = arr - row_mean
+        gap_row_mask = self._current_gap_row_mask()
+        self._noise_base_data = subtract_background_rows(
+            arr,
+            method="robust",
+            gap_row_mask=gap_row_mask,
+            equalize_noise=False,
+        ).astype(np.float32, copy=False)
         self._noise_base_source_id = source_id
         return self._noise_base_data
 
@@ -3371,8 +3465,7 @@ class MainWindow(QMainWindow):
         self.noise_reduced_original = data.copy()
         self.noise_reduced_original_plot_type = "Background Subtracted"
 
-        self.noise_vmin = float(np.nanmin(data)) if data.size else None
-        self.noise_vmax = float(np.nanmax(data)) if data.size else None
+        self.noise_vmin, self.noise_vmax = finite_data_limits(data)
         self.current_plot_type = "Background Subtracted"
 
         if self._update_live_preview_canvas(data):
@@ -3466,16 +3559,7 @@ class MainWindow(QMainWindow):
         self.canvas.figure.clf()
         self.canvas.ax = self.canvas.figure.add_subplot(111)
 
-        # Define colormap
-        # Choose cmap
-        if self.current_cmap_name == "Custom":
-            colors = [(0.0, 'blue'), (0.5, 'red'), (1.0, 'yellow')]
-            cmap = mcolors.LinearSegmentedColormap.from_list('custom_RdYlBu', colors)
-        else:
-            cmap = plt.get_cmap(self.current_cmap_name)
-
-        # x-axis always in seconds, UT formatting handled separately
-        extent = [0, self.time[-1], self.freqs[-1], self.freqs[0]]
+        cmap = self._plot_cmap()
 
         # Prepare colorbar axis
         divider = make_axes_locatable(self.canvas.ax)
@@ -3487,8 +3571,15 @@ class MainWindow(QMainWindow):
 
         self.current_display_data = display_data
         self._current_plot_source_data = np.asarray(data)
-
-        im = self.canvas.ax.imshow(display_data, aspect='auto', extent=extent, cmap=cmap)
+        im = self.canvas.ax.imshow(
+            masked_display_data(display_data),
+            aspect="auto",
+            extent=matplotlib_extent(self.freqs, self.time, default_step=self._frequency_step_mhz),
+            cmap=cmap,
+        )
+        vmin, vmax = finite_data_limits(display_data)
+        if vmin is not None and vmax is not None:
+            im.set_clim(vmin, vmax)
 
         self.current_colorbar = self.canvas.figure.colorbar(im, cax=cax)
 
@@ -3981,8 +4072,8 @@ class MainWindow(QMainWindow):
         path = Path(verts_arr, closed=True)
 
         ny, nx = self.noise_reduced_data.shape
-        y = np.linspace(self.freqs[0], self.freqs[-1], ny)
-        x = np.linspace(0, self.time[-1], nx)
+        y = np.asarray(self.freqs, dtype=float)
+        x = np.asarray(self.time, dtype=float)
         X, Y = np.meshgrid(x, y)
 
         coords = np.column_stack((X.flatten(), Y.flatten()))
@@ -4013,8 +4104,11 @@ class MainWindow(QMainWindow):
             getattr(self, "current_plot_type", "Background Subtracted")
         )
         # Build isolated data array
-        burst_isolated = np.zeros_like(self.noise_reduced_data)
+        burst_isolated = np.zeros_like(self.noise_reduced_data, dtype=np.float32)
         burst_isolated[mask] = self.noise_reduced_data[mask]
+        gap_rows = invalid_row_mask(self.noise_reduced_data, self._current_gap_row_mask())
+        if np.any(gap_rows):
+            burst_isolated[gap_rows, :] = np.nan
 
         self._clear_current_colorbar_artists()
 
@@ -4024,11 +4118,7 @@ class MainWindow(QMainWindow):
         self.canvas.ax = self.canvas.figure.add_subplot(111)
         style_axes(self.canvas.ax)
 
-        # Restore extent
-        extent = [0, self.time[-1], self.freqs[-1], self.freqs[0]]
-
-        # Get SAME colormap user selected
-        cmap = self.get_current_cmap()
+        cmap = self._plot_cmap()
 
         # === CREATE COLORBAR AXIS HERE (must exist before colorbar) ===
         divider = make_axes_locatable(self.canvas.ax)
@@ -4040,9 +4130,9 @@ class MainWindow(QMainWindow):
         vmin, vmax = self._intensity_range_for_display(self.noise_vmin, self.noise_vmax)
 
         im = self.canvas.ax.imshow(
-            display_burst,
-            aspect='auto',
-            extent=extent,
+            masked_display_data(display_burst),
+            aspect="auto",
+            extent=matplotlib_extent(self.freqs, self.time, default_step=self._frequency_step_mhz),
             cmap=cmap,
             vmin=vmin,
             vmax=vmax,
@@ -5748,7 +5838,7 @@ class MainWindow(QMainWindow):
                     self,
                     "Invalid Selection",
                     "Selected files cannot be time-combined or frequency-combined.\n"
-                    "Please ensure they are consecutive in time or adjacent in frequency."
+                    "Please ensure they are consecutive in time or use non-overlapping frequency bands (gaps allowed)."
                 )
                 return
 
@@ -6094,6 +6184,7 @@ class MainWindow(QMainWindow):
                 getattr(self, "noise_reduced_original_plot_type", "Background Subtracted")
             ),
             "lasso_mask": None if self.lasso_mask is None else self.lasso_mask.copy(),
+            "gap_row_mask": None if self._gap_row_mask is None else np.asarray(self._gap_row_mask, dtype=bool).copy(),
             "freqs": None if self.freqs is None else self.freqs.copy(),
             "time": None if self.time is None else self.time.copy(),
             "filename": self.filename,
@@ -6106,6 +6197,7 @@ class MainWindow(QMainWindow):
             "use_db": self.use_db,
             "use_utc": self.use_utc,
             "cmap": self.current_cmap_name,
+            "frequency_step_mhz": self._frequency_step_mhz,
             "view": self._capture_view(),
         }
         return state
@@ -6209,6 +6301,7 @@ class MainWindow(QMainWindow):
             state.get("noise_reduced_original_plot_type", "Background Subtracted")
         )
         self.lasso_mask = state["lasso_mask"]
+        self._gap_row_mask = state.get("gap_row_mask", None)
         self.freqs = state["freqs"]
         self.time = state["time"]
         self.filename = state["filename"]
@@ -6216,6 +6309,8 @@ class MainWindow(QMainWindow):
         self.use_db = state["use_db"]
         self.use_utc = state["use_utc"]
         self.current_cmap_name = state["cmap"]
+        self._frequency_step_mhz = state.get("frequency_step_mhz", None)
+        self._update_frequency_axis_state()
         low, high, scale = self._noise_thresholds_from_mapping(
             state,
             default_low=self.noise_clip_low,
@@ -8017,6 +8112,7 @@ class MainWindow(QMainWindow):
             "noise_reduced_data": state["noise_reduced_data"],
             "noise_reduced_original": state["noise_reduced_original"],
             "lasso_mask": state["lasso_mask"],
+            "gap_row_mask": state["gap_row_mask"],
             "freqs": state["freqs"],
             "time": state["time"],
         }
@@ -8055,6 +8151,7 @@ class MainWindow(QMainWindow):
             "use_utc": bool(state["use_utc"]),
             "ut_start_sec": self.ut_start_sec,
             "cmap": state["cmap"],
+            "frequency_step_mhz": state.get("frequency_step_mhz", None),
             "view": state["view"],
             "noise_vmin": self.noise_vmin,
             "noise_vmax": self.noise_vmax,
@@ -8130,6 +8227,7 @@ class MainWindow(QMainWindow):
                 meta.get("noise_reduced_original_plot_type", "Background Subtracted")
             )
             self.lasso_mask = arrays.get("lasso_mask", None)
+            self._gap_row_mask = arrays.get("gap_row_mask", None)
             self.freqs = arrays.get("freqs", None)
             self.time = arrays.get("time", None)
 
@@ -8141,6 +8239,11 @@ class MainWindow(QMainWindow):
                         setattr(self, name, val.copy())
                     except Exception:
                         pass
+            if self._gap_row_mask is not None:
+                try:
+                    self._gap_row_mask = self._gap_row_mask.copy()
+                except Exception:
+                    pass
 
             self.filename = meta.get("filename", "") or ""
             self.current_plot_type = self._normalize_plot_type(meta.get("current_plot_type", "Raw"))
@@ -8149,6 +8252,7 @@ class MainWindow(QMainWindow):
             self.use_utc = bool(meta.get("use_utc", False))
             self.ut_start_sec = meta.get("ut_start_sec", None)
             self.current_cmap_name = meta.get("cmap", "Custom") or "Custom"
+            self._frequency_step_mhz = meta.get("frequency_step_mhz", None)
 
             self.noise_vmin = meta.get("noise_vmin", None)
             self.noise_vmax = meta.get("noise_vmax", None)
@@ -8164,6 +8268,7 @@ class MainWindow(QMainWindow):
             self._is_combined = bool(meta.get("is_combined", False))
             self._combined_mode = meta.get("combined_mode", None)
             self._combined_sources = list(meta.get("combined_sources", []) or [])
+            self._update_frequency_axis_state()
             self._rfi_config = dict(meta.get("rfi") or self._rfi_config)
             self._annotations = normalize_annotations(meta.get("annotations", []))
             self._annotation_style_defaults = self._merge_annotation_style_defaults(

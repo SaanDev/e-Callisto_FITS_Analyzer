@@ -71,6 +71,7 @@ Features:
 - High-resolution lower and upper clipping sliders for smoother Vmin / Vmax adjustment
 - Live threshold readouts next to each slider for quick feedback while dragging
 - Optional **Logarithmic Threshold Scale** checkbox for finer control near zero
+- Robust per-channel background subtraction for both single-band and frequency-combined plots
 - Dynamic spectrum refreshes automatically
 - No data are lost when switching x-axis units (seconds ↔ UT)
 
@@ -272,7 +273,7 @@ Features:
 Two combination modes are supported.
 
 ### **Combine Frequency**
-Merge consecutive frequency bands when time bases match.
+Merge non-overlapping frequency bands with matching time bases. Gaps between bands are inserted as zero-filled rows so the combined data behave like one regular frequency grid.
 
 ### **Combine Time**
 Merge consecutive time segments from the same station and date.
