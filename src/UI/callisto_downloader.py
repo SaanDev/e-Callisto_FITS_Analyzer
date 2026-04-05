@@ -14,8 +14,10 @@ from html import unescape
 from urllib.parse import urljoin
 import numpy as np
 import requests
+from requests.adapters import HTTPAdapter
 from astropy.io import fits
 from src.Backend.fits_io import load_callisto_fits
+from urllib3.util.retry import Retry
 
 from PySide6.QtCore import (
     Qt, QDate, QThread, Signal, QObject, QRunnable, Slot,
@@ -31,7 +33,10 @@ from PySide6.QtWidgets import (
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
-BASE_URL = "http://soleil80.cs.technik.fhnw.ch/solarradio/data/2002-20yy_Callisto/"
+BASE_URL = "https://soleil.i4ds.ch/solarradio/data/2002-20yy_Callisto/"
+REQUEST_TIMEOUT = 15
+DOWNLOAD_TIMEOUT = 30
+_REQUEST_RETRY_STATUS_CODES = (429, 500, 502, 503, 504)
 _HREF_RE = re.compile(
     r"""<a\b[^>]*\bhref\s*=\s*(?P<quote>['"]?)(?P<href>[^"' >]+)(?P=quote)""",
     re.IGNORECASE,
@@ -57,6 +62,24 @@ def extract_fits_links(html: str) -> list[str]:
     return links
 
 
+def build_archive_session() -> requests.Session:
+    retry = Retry(
+        total=3,
+        connect=3,
+        read=3,
+        backoff_factor=0.5,
+        status_forcelist=_REQUEST_RETRY_STATUS_CODES,
+        allowed_methods=frozenset({"HEAD", "GET"}),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session = requests.Session()
+    session.headers.update({"User-Agent": "e-CALLISTO FITS Analyzer/2.3.0"})
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
 # -----------------------------
 # Worker: fetch list of files
 # -----------------------------
@@ -70,14 +93,33 @@ class FetchWorker(QObject):
         self.date = date_py          # datetime.date
         self.station = station
 
-    def _check_server(self) -> tuple[bool, str]:
+    def _check_server(self, client=None) -> tuple[bool, str]:
+        session = client or build_archive_session()
+        close_session = client is None
+
         try:
-            r = requests.head(BASE_URL, timeout=8, allow_redirects=True)
-            if r.status_code >= 400:
-                return False, f"HTTP {r.status_code}"
-            return True, ""
+            try:
+                response = session.head(BASE_URL, timeout=8, allow_redirects=True)
+                try:
+                    if response.status_code < 400:
+                        return True, ""
+                finally:
+                    response.close()
+            except Exception:
+                pass
+
+            response = session.get(BASE_URL, timeout=REQUEST_TIMEOUT, allow_redirects=True, stream=True)
+            try:
+                if response.status_code >= 400:
+                    return False, f"HTTP {response.status_code}"
+                return True, ""
+            finally:
+                response.close()
         except Exception as e:
             return False, str(e)
+        finally:
+            if close_session:
+                session.close()
 
     def _day_url(self) -> str:
         return f"{BASE_URL}{self.date.year}/{self.date.month:02}/{self.date.day:02}/"
@@ -85,40 +127,43 @@ class FetchWorker(QObject):
     def run(self):
         results: list[tuple[str, str]] = []
 
-        ok, msg = self._check_server()
-        if not ok:
-            results.append(("__SERVER_UNREACHABLE__", msg))
-            self.finished.emit(results)
-            return
+        with build_archive_session() as session:
+            ok, msg = self._check_server(session)
+            if not ok:
+                results.append(("__SERVER_UNREACHABLE__", msg))
+                self.finished.emit(results)
+                return
 
-        url_day = self._day_url()
+            url_day = self._day_url()
 
-        try:
-            page = requests.get(url_day, timeout=15)
-            if page.status_code >= 400:
-                raise RuntimeError(f"HTTP {page.status_code} for {url_day}")
+            try:
+                with session.get(url_day, timeout=REQUEST_TIMEOUT) as page:
+                    if page.status_code >= 400:
+                        raise RuntimeError(f"HTTP {page.status_code} for {url_day}")
 
-            # Avoid DOM parsers here; a lightweight href scan is enough for the
-            # Apache directory listings served by the e-CALLISTO archive.
-            hrefs = extract_fits_links(page.text)
+                    # Avoid DOM parsers here; a lightweight href scan is enough for the
+                    # Apache directory listings served by the e-CALLISTO archive.
+                    hrefs = extract_fits_links(page.text)
 
-            self.progressMax.emit(len(hrefs))
+                self.progressMax.emit(len(hrefs))
 
-            station_key = self.station.strip().lower()
+                station_key = self.station.strip().lower()
 
-            for i, href in enumerate(hrefs, start=1):
-                # Build absolute URL safely (some listings use relative links)
-                abs_url = urljoin(url_day, href)
-                filename = os.path.basename(href)
+                for i, href in enumerate(hrefs, start=1):
+                    # Build absolute URL safely (some listings use relative links)
+                    abs_url = urljoin(url_day, href)
+                    filename = os.path.basename(href)
 
-                # Filter by station for the whole day
-                if station_key in filename.lower():
-                    results.append((filename, abs_url))
+                    # Filter by station for the whole day
+                    if station_key in filename.lower():
+                        results.append((filename, abs_url))
 
-                self.progressStep.emit(i)
+                    self.progressStep.emit(i)
 
-        except Exception as e:
-            results = [("__FETCH_ERROR__", str(e))]
+            except requests.RequestException as e:
+                results = [("__SERVER_UNREACHABLE__", str(e))]
+            except Exception as e:
+                results = [("__FETCH_ERROR__", str(e))]
 
         self.finished.emit(results)
 
@@ -139,12 +184,13 @@ class DownloadTask(QObject, QRunnable):
     @Slot()
     def run(self):
         try:
-            with requests.get(self.url, stream=True, timeout=30) as r:
-                r.raise_for_status()
-                with open(self.out_path, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=1024 * 128):
-                        if chunk:
-                            f.write(chunk)
+            with build_archive_session() as session:
+                with session.get(self.url, stream=True, timeout=DOWNLOAD_TIMEOUT) as r:
+                    r.raise_for_status()
+                    with open(self.out_path, "wb") as f:
+                        for chunk in r.iter_content(chunk_size=1024 * 128):
+                            if chunk:
+                                f.write(chunk)
             self.done.emit(True)
         except Exception:
             self.done.emit(False)
@@ -563,13 +609,14 @@ class CallistoDownloaderApp(QDialog):
 
             try:
                 # Download to temp file, then open with astropy
-                r = requests.get(url, timeout=30)
-                r.raise_for_status()
+                with build_archive_session() as session:
+                    with session.get(url, timeout=DOWNLOAD_TIMEOUT) as r:
+                        r.raise_for_status()
 
-                suffix = ".fit.gz" if name.lower().endswith(".fit.gz") else ".fit"
-                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                    tmp.write(r.content)
-                    tmp_path = tmp.name
+                        suffix = ".fit.gz" if name.lower().endswith(".fit.gz") else ".fit"
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                            tmp.write(r.content)
+                            tmp_path = tmp.name
 
                 win = PreviewWindow(tmp_path, name, parent=self)
                 win.show()
