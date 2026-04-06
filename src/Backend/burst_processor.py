@@ -24,6 +24,8 @@ FREQUENCY_ALIGN_ATOL_MHZ = 1e-3
 HEADER_RANGE_TOL_FRACTION = 0.5
 GRID_ALIGN_TOL_FRACTION = 0.25
 HEADER_FOCUS_KEYS = ("FOCUS", "FOCUSID", "RECEIVER", "RECEIVERID", "RCVR", "RCVRID")
+GAP_FILL_EDGE_ROWS = 4
+GAP_FILL_BACKGROUND_PERCENTILE = 25.0
 
 def load_fits(filepath):
     res = load_callisto_fits(filepath, memmap=False)
@@ -125,7 +127,7 @@ def combine_frequency(file_paths):
     combined_header["FREQMIN"] = (float(np.nanmin(combined_freqs)), "Min frequency (MHz)")
     combined_header["FREQMAX"] = (float(np.nanmax(combined_freqs)), "Max frequency (MHz)")
     combined_header["HISTORY"] = f"Regularized frequency grid step: {step_mhz:.6f} MHz"
-    combined_header["HISTORY"] = f"Inserted zero-filled gap rows: {gap_row_count}"
+    combined_header["HISTORY"] = f"Inserted background-interpolated gap rows: {gap_row_count}"
 
     return {
         "data": combined_data,
@@ -276,6 +278,14 @@ def _prepare_frequency_blocks(file_paths):
         loaded_block["data"] = data_arr
         blocks.append(loaded_block)
 
+    _fill_frequency_gap_background(
+        combined_asc,
+        filled_row_mask_asc,
+        freq_grid_asc,
+        edge_rows=GAP_FILL_EDGE_ROWS,
+        percentile=GAP_FILL_BACKGROUND_PERCENTILE,
+    )
+
     combined_data = combined_asc[::-1, :]
     combined_freqs = freq_grid_asc[::-1]
     gap_row_count = int(np.count_nonzero(~filled_row_mask_asc))
@@ -303,6 +313,98 @@ def _header_focus_code(header0) -> str:
         if text:
             return text
     return ""
+
+
+def _fill_frequency_gap_background(
+    data_asc: np.ndarray,
+    filled_row_mask_asc: np.ndarray,
+    freqs_asc: np.ndarray,
+    *,
+    edge_rows: int,
+    percentile: float,
+) -> None:
+    mask = np.asarray(filled_row_mask_asc, dtype=bool).ravel()
+    if mask.size == 0 or np.all(mask):
+        return
+
+    freqs = np.asarray(freqs_asc, dtype=float).ravel()
+    nrows = mask.size
+    idx = 0
+    while idx < nrows:
+        if mask[idx]:
+            idx += 1
+            continue
+
+        start = idx
+        while idx < nrows and not mask[idx]:
+            idx += 1
+        end = idx
+
+        left_rows = _neighbor_rows(data_asc, mask, start, direction=-1, max_rows=edge_rows)
+        right_rows = _neighbor_rows(data_asc, mask, end, direction=1, max_rows=edge_rows)
+        left_bg = _edge_background_trace(left_rows, percentile=percentile)
+        right_bg = _edge_background_trace(right_rows, percentile=percentile)
+
+        if left_bg is None and right_bg is None:
+            continue
+        if left_bg is None:
+            left_bg = np.asarray(right_bg, dtype=float).copy()
+        if right_bg is None:
+            right_bg = np.asarray(left_bg, dtype=float).copy()
+
+        if start > 0 and end < nrows:
+            left_freq = float(freqs[start - 1])
+            right_freq = float(freqs[end])
+            span = float(right_freq - left_freq)
+            if abs(span) > 1e-12:
+                alphas = ((freqs[start:end] - left_freq) / span).astype(float)
+            else:
+                alphas = np.full(end - start, 0.5, dtype=float)
+        else:
+            count = end - start
+            alphas = np.linspace(1.0 / (count + 1), count / (count + 1), count, dtype=float)
+
+        data_asc[start:end, :] = (
+            (1.0 - alphas)[:, None] * left_bg[None, :]
+            + alphas[:, None] * right_bg[None, :]
+        )
+
+
+def _neighbor_rows(
+    data_asc: np.ndarray,
+    filled_row_mask_asc: np.ndarray,
+    anchor: int,
+    *,
+    direction: int,
+    max_rows: int,
+) -> np.ndarray | None:
+    rows = []
+    step = -1 if int(direction) < 0 else 1
+    idx = int(anchor) - 1 if step < 0 else int(anchor)
+    nrows = int(np.asarray(filled_row_mask_asc).size)
+
+    while 0 <= idx < nrows and len(rows) < int(max_rows):
+        if not bool(filled_row_mask_asc[idx]):
+            break
+        rows.append(np.asarray(data_asc[idx, :], dtype=float))
+        idx += step
+
+    if not rows:
+        return None
+    if step < 0:
+        rows.reverse()
+    return np.vstack(rows)
+
+
+def _edge_background_trace(rows: np.ndarray | None, *, percentile: float) -> np.ndarray | None:
+    if rows is None:
+        return None
+    arr = np.asarray(rows, dtype=float)
+    if arr.ndim != 2 or arr.shape[0] == 0:
+        return None
+    if arr.shape[0] == 1:
+        return arr[0].astype(float, copy=True)
+    return np.nanpercentile(arr, float(percentile), axis=0).astype(float, copy=False)
 
 
 def _normalize_focus_code(value) -> str:

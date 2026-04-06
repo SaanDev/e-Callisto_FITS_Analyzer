@@ -273,7 +273,7 @@ Features:
 Two combination modes are supported.
 
 ### **Combine Frequency**
-Merge non-overlapping frequency bands with matching time bases. Gaps between bands are inserted as zero-filled rows so the combined data behave like one regular frequency grid.
+Merge non-overlapping frequency bands with matching time bases. Gaps between bands are filled with interpolated background values so the combined data behave like one regular frequency grid without creating an artificial zero band.
 
 ### **Combine Time**
 Merge consecutive time segments from the same station and date.

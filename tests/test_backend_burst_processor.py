@@ -282,7 +282,22 @@ def test_combine_frequency_regularizes_order_and_inserts_gap_rows(monkeypatch):
     assert np.array_equal(result["freqs"], np.array([130.0, 120.0, 110.0, 100.0, 90.0, 80.0, 70.0, 60.0, 50.0, 40.0, 30.0, 20.0, 10.0]))
     assert result["data"].shape == (13, 2)
     assert result["gap_row_mask"] is None
-    assert np.array_equal(result["data"][2:11], np.zeros((9, 2)))
+    assert np.allclose(
+        result["data"][2:11],
+        np.array(
+            [
+                [30.5, 31.5],
+                [28.5, 29.5],
+                [26.5, 27.5],
+                [24.5, 25.5],
+                [22.5, 23.5],
+                [20.5, 21.5],
+                [18.5, 19.5],
+                [16.5, 17.5],
+                [14.5, 15.5],
+            ]
+        ),
+    )
     assert np.array_equal(result["data"][:2], np.array([[30.0, 31.0], [40.0, 41.0]]))
     assert np.array_equal(result["data"][-2:], np.array([[10.0, 11.0], [20.0, 21.0]]))
     assert float(result["frequency_step_mhz"]) == pytest.approx(10.0)
@@ -377,7 +392,7 @@ def test_combine_frequency_regularizes_different_channel_spacings(monkeypatch):
     assert result["frequency_step_mhz"] == pytest.approx(10.0)
     assert result["data"].shape == (33, 2)
     assert result["gap_row_mask"] is None
-    assert np.array_equal(result["data"][26], np.array([0.0, 0.0]))
+    assert np.allclose(result["data"][26], np.array([53.75, 59.25]))
     assert np.array_equal(result["data"][0], np.array([10.0, 20.0]))
     assert np.array_equal(result["data"][5], np.array([30.0, 40.0]))
     assert np.array_equal(result["data"][-1], np.array([11.0, 12.0]))
@@ -425,7 +440,8 @@ def test_combine_frequency_accepts_irregular_axes_with_non_integer_grid_span(mon
     assert result["freqs"][-1] == pytest.approx(87.495)
     assert result["data"].shape[0] == 67
     assert result["gap_row_mask"] is None
-    assert np.any(np.all(result["data"] == 0.0, axis=1))
+    assert not np.any(np.all(result["data"] == 0.0, axis=1))
+    assert np.all(np.isfinite(result["data"]))
     assert np.array_equal(result["data"][0], np.array([30.0, 31.0]))
     assert np.array_equal(result["data"][-1], np.array([16.0, 17.0]))
 
