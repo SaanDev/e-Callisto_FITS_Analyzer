@@ -9,11 +9,11 @@ A desktop application for visualizing, processing, and analyzing e-CALLISTO sola
 - Load `.fit`, `.fits`, `.fit.gz`, and `.fits.gz` files, including combined time/frequency datasets.
 - Use hardware-accelerated plotting with live cursor readouts, rectangular zoom, lock/unlock navigation, and **Edit → Reset to Raw** controls.
 - Adjust intensity thresholds live with high-resolution sliders, value readouts, optional signed-log scaling, dB or Digits/ADU display modes, and graph-property controls.
-- Inspect FITS headers, customize titles and labels, and export publication-ready figures from the current analysis view.
+- Inspect FITS headers from the **View** menu, customize titles and labels, and export publication-ready figures from the current analysis view.
 
 ### Processing and analysis
 - Apply deterministic RFI cleaning with preview/apply/reset controls for median smoothing, hot-channel masking, masked-channel repair, and percentile clipping.
-- Isolate radio bursts, extract maximum intensities, remove outliers manually or automatically, and run best-fit / shock-parameter analysis.
+- Isolate radio bursts, extract maximum intensities, remove outliers manually or automatically, run best-fit / shock-parameter analysis, and perform Type II band-splitting analysis from noise-reduced data.
 - Keep polygon, line, and text annotations inside the accelerated view, with editable text styling and project persistence.
 - Save and reuse processing presets, reopen restored analysis sessions, and run batch processing for folder-based FIT/FITS exports.
 
@@ -197,7 +197,7 @@ Only the selected region is retained for further analysis.
 
 # 10. Maximum Intensities Extraction
 
-Click **Plot Maximum Intensities** to compute the maximum frequency for each time channel after noise reduction or burst isolation.
+Use **Analysis → Maximum Intensities → Open Maximum Intensities** to compute the maximum frequency for each time channel after noise reduction or burst isolation.
 
 ### Example: Maximum Intensities
 ![Maximum Intensities](assets/screenshots/maximum_intensity.png)
@@ -247,7 +247,27 @@ Export options:
 
 ---
 
-# 13. FITS Downloader
+# 13. Type II Band-Splitting Analyzer
+
+Use **Analysis → Type II Band-splitting → Open Type II Band-splitting** to analyze split bands directly from the current noise-reduced dynamic spectrum.
+
+Workflow:
+
+- Add arbitrary points along the upper band
+- Switch to the lower band and add points there
+- Fit both bands with power-law curves
+- Calculate:
+  - Shock speed
+  - Shock height
+  - Bandwidth
+  - Compression ratio
+  - Alfven Mach number
+  - Alfven speed
+  - Magnetic field
+
+---
+
+# 14. FITS Downloader
 
 Open via **Download → Launch FITS Downloader**.
 

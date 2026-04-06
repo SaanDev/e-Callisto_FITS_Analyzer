@@ -131,6 +131,7 @@ from src.UI.dialogs.citation_dialog import CitationDialog
 from src.UI.dialogs.combine_dialogs import CombineFrequencyDialog, CombineTimeDialog
 from src.UI.dialogs.max_intensity_dialog import MaxIntensityPlotDialog
 from src.UI.dialogs.rfi_control_dialog import RFIControlDialog
+from src.UI.dialogs.type_ii_band_splitting_dialog import TypeIIBandSplittingDialog
 from src.UI.dst_index_gui import MainWindow as DstIndexWindow
 from src.UI.fits_header_viewer import FitsHeaderViewerDialog
 from src.UI.goes_sgps_gui import MainWindow as SepProtonWindow
@@ -901,16 +902,13 @@ class MainWindow(QMainWindow):
         self.goes_overlay_menu.addAction(self.goes_overlay_long_action)
         self.goes_overlay_menu.addAction(self.goes_overlay_short_action)
 
-        # FITS View Menu
-        fits_view_menu = menubar.addMenu("FITS View")
-        self.view_fits_header_action = QAction("View FITS Header", self)
-        self.view_fits_header_action.setEnabled(False)
-        fits_view_menu.addAction(self.view_fits_header_action)
-        self.view_fits_header_action.triggered.connect(self.open_fits_header_viewer)
-
-
         # View Menu
         view_menu = menubar.addMenu("View")
+        self.view_fits_header_action = QAction("View FITS Header", self)
+        self.view_fits_header_action.setEnabled(False)
+        view_menu.addAction(self.view_fits_header_action)
+        self.view_fits_header_action.triggered.connect(self.open_fits_header_viewer)
+        view_menu.addSeparator()
         theme_menu = view_menu.addMenu("Theme")
         mode_menu = view_menu.addMenu("Mode")
 
@@ -930,6 +928,16 @@ class MainWindow(QMainWindow):
         for a in (self.mode_action_classic, self.mode_action_modern):
             view_mode_group.addAction(a)
             mode_menu.addAction(a)
+
+        analysis_menu = menubar.addMenu("Analysis")
+        self.maximum_intensities_menu = analysis_menu.addMenu("Maximum Intensities")
+        self.open_maximum_intensities_action = QAction("Open Maximum Intensities", self)
+        self.open_maximum_intensities_action.setEnabled(False)
+        self.maximum_intensities_menu.addAction(self.open_maximum_intensities_action)
+        self.type_ii_band_splitting_menu = analysis_menu.addMenu("Type II Band-splitting")
+        self.open_type_ii_band_splitting_action = QAction("Open Type II Band-splitting", self)
+        self.open_type_ii_band_splitting_action.setEnabled(False)
+        self.type_ii_band_splitting_menu.addAction(self.open_type_ii_band_splitting_action)
 
         processing_menu = menubar.addMenu("Processing")
         hw_menu = processing_menu.addMenu("Hardware Acceleration")
@@ -1077,6 +1085,8 @@ class MainWindow(QMainWindow):
         self.preset_apply_action.triggered.connect(self.apply_saved_preset)
         self.preset_delete_action.triggered.connect(self.delete_saved_preset)
         self.max_auto_clean_isolated_action.toggled.connect(self.set_max_auto_clean_isolated_enabled)
+        self.open_maximum_intensities_action.triggered.connect(self.plot_max_intensities)
+        self.open_type_ii_band_splitting_action.triggered.connect(self._open_or_focus_type_ii_dialog)
         self.open_restored_analysis_action.triggered.connect(self.open_restored_analysis_windows)
         self.open_batch_processing_action.triggered.connect(self.open_batch_processing_window)
 
@@ -1114,8 +1124,9 @@ class MainWindow(QMainWindow):
         self._analysis_session = None
         self._max_intensity_dialog = None
         self._analyze_dialog = None
+        self._type_ii_dialog = None
         self._analysis_sync_guard = False
-        self._pending_analysis_restore = {"open_max": False, "open_analyzer": False, "warning": ""}
+        self._pending_analysis_restore = {"open_max": False, "open_analyzer": False, "open_type_ii": False, "warning": ""}
 
         # FITS export metadata
         self._fits_header0 = None  # primary header template
@@ -1796,6 +1807,7 @@ class MainWindow(QMainWindow):
         self.tb_reset_to_raw.setEnabled(has_file)
         self.tb_reset_all.setEnabled(has_file)
         self._sync_fits_view_actions()
+        self._sync_analysis_menu_actions()
         self._sync_nav_actions()
 
     def _show_plot_canvas(self):
@@ -2380,6 +2392,8 @@ class MainWindow(QMainWindow):
         fit = dict(analyzer.get("fit_params") or {})
         shock = dict(analyzer.get("shock_summary") or {})
         fold = int(analyzer.get("fold", shock.get("fold", 1) or 1))
+        type_ii = dict(session.get("type_ii") or {})
+        type_ii_results = dict(type_ii.get("results") or {})
 
         lines = ["Session restored and synced."]
         if fit.get("a") is not None and fit.get("b") is not None:
@@ -2403,9 +2417,31 @@ class MainWindow(QMainWindow):
                 lines.append(f"Avg shock height: {float(shock['avg_shock_height_rs']):.3f} Rs")
             except Exception:
                 pass
+        if type_ii_results.get("shock_speed_km_s") is not None:
+            try:
+                lines.append(f"Type II V_s: {float(type_ii_results['shock_speed_km_s']):.2f} km/s")
+            except Exception:
+                pass
+        if type_ii_results.get("shock_height_rs") is not None:
+            try:
+                lines.append(f"Type II height: {float(type_ii_results['shock_height_rs']):.4f} Rs")
+            except Exception:
+                pass
+        if type_ii_results.get("magnetic_field_g") is not None:
+            try:
+                lines.append(f"Type II B: {float(type_ii_results['magnetic_field_g']):.4f} G")
+            except Exception:
+                pass
         lbl.setText("\n".join(lines))
 
     def _close_analysis_windows(self):
+        if self._dialog_alive(getattr(self, "_type_ii_dialog", None)):
+            try:
+                self._type_ii_dialog.close()
+            except Exception:
+                pass
+        self._type_ii_dialog = None
+
         if self._dialog_alive(getattr(self, "_analyze_dialog", None)):
             try:
                 self._analyze_dialog.close()
@@ -2425,7 +2461,7 @@ class MainWindow(QMainWindow):
             self._close_analysis_windows()
         self._analysis_session = None
         self._max_intensity_state = None
-        self._pending_analysis_restore = {"open_max": False, "open_analyzer": False, "warning": ""}
+        self._pending_analysis_restore = {"open_max": False, "open_analyzer": False, "open_type_ii": False, "warning": ""}
         self._refresh_analysis_summary_panel()
 
     def _current_dynamic_spectrum_source_data(self) -> np.ndarray | None:
@@ -2558,6 +2594,29 @@ class MainWindow(QMainWindow):
         normalized["source"] = self._analysis_source_context()
         return normalize_analysis_session(normalized)
 
+    def _merge_seed_with_existing_analysis(self, seed: dict | None, existing: dict | None) -> dict | None:
+        seed_session = normalize_analysis_session(seed)
+        existing_session = self._analysis_session_with_context(existing)
+        if seed_session is None:
+            return existing_session
+        if existing_session is None:
+            return seed_session
+
+        merged_ui = dict(seed_session.get("ui") or {})
+        existing_ui = dict(existing_session.get("ui") or {})
+        for key in ("restore_analyzer_window", "restore_type_ii_window"):
+            if key in existing_ui:
+                merged_ui[key] = bool(existing_ui.get(key))
+
+        merged = {
+            "source": seed_session.get("source") or self._analysis_source_context(),
+            "max_intensity": dict(seed_session.get("max_intensity") or {}),
+            "analyzer": dict(existing_session.get("analyzer") or seed_session.get("analyzer") or {}),
+            "type_ii": dict(existing_session.get("type_ii") or {}),
+            "ui": merged_ui,
+        }
+        return normalize_analysis_session(merged)
+
     def _best_available_analysis_session(self) -> dict | None:
         session = self._analysis_session_with_context(getattr(self, "_analysis_session", None))
         if session is not None:
@@ -2576,7 +2635,11 @@ class MainWindow(QMainWindow):
                         "harmonic": bool(legacy.get("harmonic", False)),
                     },
                     "analyzer": dict(legacy.get("analyzer") or {}),
-                    "ui": {"restore_max_window": True, "restore_analyzer_window": bool(legacy.get("analyzer"))},
+                    "ui": {
+                        "restore_max_window": True,
+                        "restore_analyzer_window": bool(legacy.get("analyzer")),
+                        "restore_type_ii_window": False,
+                    },
                 }
             )
             if session is not None:
@@ -2609,6 +2672,13 @@ class MainWindow(QMainWindow):
         if candidate is None:
             self.statusBar().showMessage("Analysis window requires a plotted dynamic spectrum.", 4000)
             return None
+
+        max_block = dict(candidate.get("max_intensity") or {})
+        if max_block.get("time_channels") is None or max_block.get("freqs") is None:
+            candidate = self._merge_seed_with_existing_analysis(self._build_analysis_seed_from_current_data(), candidate)
+            if candidate is None:
+                self.statusBar().showMessage("Analysis window requires a plotted dynamic spectrum.", 4000)
+                return None
 
         ui_block = dict(candidate.get("ui") or {})
         auto_outlier_mode = bool(
@@ -2673,12 +2743,15 @@ class MainWindow(QMainWindow):
         )
         if candidate is None:
             candidate = self._build_analysis_seed_from_current_data()
+        elif dict(candidate.get("max_intensity") or {}).get("time_channels") is None:
+            candidate = self._merge_seed_with_existing_analysis(self._build_analysis_seed_from_current_data(), candidate)
         if candidate is None:
             self.statusBar().showMessage("Analyzer requires max-intensity data first.", 4000)
             return None
 
         max_block = dict(candidate.get("max_intensity") or {})
         analyzer_state = dict(candidate.get("analyzer") or {})
+        type_ii_state = dict(candidate.get("type_ii") or {})
         time_channels = max_block.get("time_channels")
         freqs = max_block.get("freqs")
         if time_channels is None or freqs is None:
@@ -2694,7 +2767,7 @@ class MainWindow(QMainWindow):
                 harmonic=bool(max_block.get("harmonic", False)),
                 parent=self,
                 time_seconds=max_block.get("time_seconds"),
-                session={"max_intensity": max_block, "analyzer": analyzer_state},
+                session={"max_intensity": max_block, "analyzer": analyzer_state, "type_ii": type_ii_state},
             )
             dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
             dialog.sessionChanged.connect(lambda payload: self._on_analysis_session_changed(payload, source="analyzer"))
@@ -2703,7 +2776,10 @@ class MainWindow(QMainWindow):
             dialog.show()
         else:
             try:
-                self._analyze_dialog.restore_session({"max_intensity": max_block, "analyzer": analyzer_state}, emit_change=False)
+                self._analyze_dialog.restore_session(
+                    {"max_intensity": max_block, "analyzer": analyzer_state, "type_ii": type_ii_state},
+                    emit_change=False,
+                )
             except Exception:
                 pass
             self._analyze_dialog.show()
@@ -2711,6 +2787,63 @@ class MainWindow(QMainWindow):
         self._analyze_dialog.raise_()
         self._analyze_dialog.activateWindow()
         return self._analyze_dialog
+
+    def _open_or_focus_type_ii_dialog(self, session: dict | None = None):
+        if self.noise_reduced_data is None or self.time is None or self.freqs is None:
+            self.statusBar().showMessage("Type II band-splitting requires noise-reduced data.", 4000)
+            return None
+
+        if not self._dialog_alive(getattr(self, "_type_ii_dialog", None)):
+            self._type_ii_dialog = None
+
+        candidate = self._analysis_session_with_context(session) or self._analysis_session_with_context(
+            getattr(self, "_analysis_session", None)
+        )
+        if candidate is None:
+            candidate = {
+                "source": self._analysis_source_context(),
+                "max_intensity": {},
+                "analyzer": {},
+                "type_ii": {},
+                "ui": {
+                    "restore_max_window": False,
+                    "restore_analyzer_window": False,
+                    "restore_type_ii_window": True,
+                },
+            }
+
+        display_data = self._intensity_for_display(self.noise_reduced_data)
+        display_unit = "dB" if self.use_db else "Digits"
+        cmap = self._plot_cmap()
+
+        if self._type_ii_dialog is None:
+            dialog = TypeIIBandSplittingDialog(
+                self.noise_reduced_data,
+                self.freqs,
+                self.time,
+                self.filename,
+                parent=self,
+                session=candidate,
+                display_data=display_data,
+                display_unit=display_unit,
+                cmap=cmap,
+                frequency_step_mhz=self._frequency_step_mhz,
+            )
+            dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            dialog.sessionChanged.connect(lambda payload: self._on_analysis_session_changed(payload, source="type_ii"))
+            dialog.finished.connect(lambda _code: setattr(self, "_type_ii_dialog", None))
+            self._type_ii_dialog = dialog
+            dialog.show()
+        else:
+            try:
+                self._type_ii_dialog.restore_session(candidate, emit_change=False)
+            except Exception:
+                pass
+            self._type_ii_dialog.show()
+
+        self._type_ii_dialog.raise_()
+        self._type_ii_dialog.activateWindow()
+        return self._type_ii_dialog
 
     def _on_analysis_session_changed(
         self,
@@ -2733,14 +2866,19 @@ class MainWindow(QMainWindow):
             self._max_intensity_state = self._session_to_legacy_max_state(session)
             self._refresh_analysis_summary_panel()
 
-            if source == "analyzer" and self._dialog_alive(getattr(self, "_max_intensity_dialog", None)):
+            if source != "max" and self._dialog_alive(getattr(self, "_max_intensity_dialog", None)):
                 try:
                     self._max_intensity_dialog.restore_session(session, emit_change=False)
                 except Exception:
                     pass
-            elif source == "max" and self._dialog_alive(getattr(self, "_analyze_dialog", None)):
+            if source != "analyzer" and self._dialog_alive(getattr(self, "_analyze_dialog", None)):
                 try:
                     self._analyze_dialog.restore_session(session, emit_change=False)
+                except Exception:
+                    pass
+            if source != "type_ii" and self._dialog_alive(getattr(self, "_type_ii_dialog", None)):
+                try:
+                    self._type_ii_dialog.restore_session(session, emit_change=False)
                 except Exception:
                     pass
         finally:
@@ -2757,6 +2895,7 @@ class MainWindow(QMainWindow):
         warning = str(pending.get("warning", "") or "").strip()
         open_max = bool(pending.get("open_max", False))
         open_analyzer = bool(pending.get("open_analyzer", False))
+        open_type_ii = bool(pending.get("open_type_ii", False))
 
         if warning:
             self.statusBar().showMessage(warning, 5500)
@@ -2764,15 +2903,27 @@ class MainWindow(QMainWindow):
             self._open_or_focus_max_dialog(self._analysis_session, auto_open_analyzer=open_analyzer)
         elif open_analyzer:
             self._open_or_focus_analyzer_dialog(self._analysis_session)
+        if open_type_ii:
+            self._open_or_focus_type_ii_dialog(self._analysis_session)
 
-        self._pending_analysis_restore = {"open_max": False, "open_analyzer": False, "warning": ""}
+        self._pending_analysis_restore = {"open_max": False, "open_analyzer": False, "open_type_ii": False, "warning": ""}
 
     def open_restored_analysis_windows(self):
         session = self._best_available_analysis_session()
         if session is None:
             self.statusBar().showMessage("No saved analysis session is available.", 4000)
             return
-        self._open_or_focus_max_dialog(session, auto_open_analyzer=True)
+        ui_block = dict((session or {}).get("ui") or {})
+        open_max = bool(ui_block.get("restore_max_window", False))
+        open_analyzer = bool(ui_block.get("restore_analyzer_window", False))
+        open_type_ii = bool(ui_block.get("restore_type_ii_window", False))
+
+        if open_max:
+            self._open_or_focus_max_dialog(session, auto_open_analyzer=open_analyzer)
+        elif open_analyzer:
+            self._open_or_focus_analyzer_dialog(session)
+        if open_type_ii:
+            self._open_or_focus_type_ii_dialog(session)
 
     def _reset_feature_state_for_new_data(self):
         self._clear_analysis_session_state(close_windows=True)
@@ -8078,6 +8229,13 @@ class MainWindow(QMainWindow):
         if act is not None:
             act.setEnabled(bool(has_data))
 
+    def _sync_analysis_menu_actions(self):
+        has_noise = getattr(self, "noise_reduced_data", None) is not None
+        for name in ("open_maximum_intensities_action", "open_type_ii_band_splitting_action"):
+            act = getattr(self, name, None)
+            if act is not None:
+                act.setEnabled(bool(has_noise))
+
     def _maybe_prompt_save_dirty(self) -> bool:
         if not getattr(self, "_project_dirty", False):
             return True
@@ -8367,6 +8525,7 @@ class MainWindow(QMainWindow):
             self._max_intensity_state = None
             pending_open_max = False
             pending_open_analyzer = False
+            pending_open_type_ii = False
             pending_warning = ""
 
             analysis_meta = meta.get("analysis_session")
@@ -8378,6 +8537,16 @@ class MainWindow(QMainWindow):
                 max_block["time_seconds"] = arrays.get("analysis_time_seconds", None)
                 max_block["freqs"] = arrays.get("analysis_freqs", None)
                 session_payload["max_intensity"] = max_block
+                type_ii_block = dict(session_payload.get("type_ii") or {})
+                upper_block = dict(type_ii_block.get("upper") or {})
+                lower_block = dict(type_ii_block.get("lower") or {})
+                upper_block["time_seconds"] = arrays.get("type_ii_upper_time_seconds", None)
+                upper_block["freqs"] = arrays.get("type_ii_upper_freqs", None)
+                lower_block["time_seconds"] = arrays.get("type_ii_lower_time_seconds", None)
+                lower_block["freqs"] = arrays.get("type_ii_lower_freqs", None)
+                type_ii_block["upper"] = upper_block
+                type_ii_block["lower"] = lower_block
+                session_payload["type_ii"] = type_ii_block
                 loaded_session = normalize_analysis_session(session_payload)
 
             if loaded_session is None:
@@ -8400,12 +8569,14 @@ class MainWindow(QMainWindow):
                     ui_block = dict((loaded_session or {}).get("ui") or {})
                     pending_open_max = bool(ui_block.get("restore_max_window", True))
                     pending_open_analyzer = bool(ui_block.get("restore_analyzer_window", False))
+                    pending_open_type_ii = bool(ui_block.get("restore_type_ii_window", False))
                 else:
                     pending_warning = f"Analysis restore loaded with warning: {reason}"
 
             self._pending_analysis_restore = {
                 "open_max": bool(pending_open_max),
                 "open_analyzer": bool(pending_open_analyzer),
+                "open_type_ii": bool(pending_open_type_ii),
                 "warning": str(pending_warning or ""),
             }
             self._refresh_analysis_summary_panel()

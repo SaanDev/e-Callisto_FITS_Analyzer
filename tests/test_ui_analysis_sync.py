@@ -14,7 +14,7 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import QApplication
 
-from src.UI.gui_main import AnalyzeDialog, MainWindow, MaxIntensityPlotDialog
+from src.UI.gui_main import AnalyzeDialog, MainWindow, MaxIntensityPlotDialog, TypeIIBandSplittingDialog
 
 
 EXPECTED_SHOCK_KEYS = {
@@ -40,6 +40,13 @@ EXPECTED_SHOCK_KEYS = {
 
 def _app():
     return QApplication.instance() or QApplication([])
+
+
+def _find_top_menu(window: MainWindow, text: str):
+    for action in window.menuBar().actions():
+        if action.text() == text:
+            return action
+    return None
 
 
 def test_analyze_dialog_session_state_contains_canonical_shock_summary():
@@ -249,6 +256,150 @@ def test_max_dialog_manual_outlier_removal_still_works_in_auto_mode():
     assert dlg.selected_mask.shape[0] == 4
 
     dlg.close()
+
+
+def test_type_ii_dialog_session_state_contains_results_block():
+    _app()
+    data = np.arange(20, dtype=float).reshape(4, 5)
+    freqs = np.array([120.0, 110.0, 100.0, 90.0], dtype=float)
+    times = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=float)
+    dlg = TypeIIBandSplittingDialog(data, freqs, times, "demo.fit")
+
+    dlg._upper_points = [(1.0, 100.0), (2.0, 76.0), (3.0, 64.0)]
+    dlg._lower_points = [(1.0, 82.0), (2.0, 68.0), (3.0, 57.0)]
+    dlg._fit_both_bands()
+    dlg._calculate_parameters()
+
+    state = dlg.session_state()
+    type_ii = dict(state.get("type_ii") or {})
+    results = dict(type_ii.get("results") or {})
+
+    assert type_ii.get("upper_fit")
+    assert type_ii.get("lower_fit")
+    assert results.get("shock_speed_km_s") is not None
+    assert results.get("shock_height_rs") is not None
+    assert "Shock speed V_s" in dlg.shock_speed_label.text()
+    assert "Shock height" in dlg.shock_height_label.text()
+
+    dlg.close()
+
+
+def test_analysis_menu_contains_required_entries_and_moves_fits_header():
+    _app()
+    win = MainWindow(theme=None)
+
+    top_level = [action.text() for action in win.menuBar().actions()]
+    assert "FITS View" not in top_level
+    assert "Analysis" in top_level
+
+    view_action = _find_top_menu(win, "View")
+    analysis_action = _find_top_menu(win, "Analysis")
+
+    assert view_action is not None
+    assert analysis_action is not None
+    view_menu = view_action.menu()
+    analysis_menu = analysis_action.menu()
+    assert any(action.text() == "View FITS Header" for action in view_menu.actions())
+
+    analysis_submenus = {action.text(): action for action in analysis_menu.actions() if action.menu() is not None}
+    assert "Maximum Intensities" in analysis_submenus
+    assert "Type II Band-splitting" in analysis_submenus
+    assert any(
+        action.text() == "Open Maximum Intensities"
+        for action in analysis_submenus["Maximum Intensities"].menu().actions()
+    )
+    assert any(
+        action.text() == "Open Type II Band-splitting"
+        for action in analysis_submenus["Type II Band-splitting"].menu().actions()
+    )
+
+    win.close()
+
+
+def test_type_ii_action_requires_noise_reduced_data():
+    _app()
+    win = MainWindow(theme=None)
+
+    assert win.open_type_ii_band_splitting_action.isEnabled() is False
+
+    win.filename = "demo.fit"
+    win.freqs = np.array([100.0, 90.0, 80.0], dtype=float)
+    win.time = np.array([0.0, 1.0, 2.0, 3.0], dtype=float)
+    win.raw_data = np.array(
+        [
+            [1.0, 2.0, 3.0, 4.0],
+            [2.0, 3.0, 4.0, 5.0],
+            [3.0, 4.0, 5.0, 6.0],
+        ],
+        dtype=float,
+    )
+    win.noise_reduced_data = win.raw_data.copy()
+    win._sync_toolbar_enabled_states()
+
+    assert win.open_type_ii_band_splitting_action.isEnabled() is True
+    assert win.open_maximum_intensities_action.isEnabled() is True
+    win.close()
+
+
+def test_type_ii_dialog_opens_from_main_window_and_calculates():
+    _app()
+    win = MainWindow(theme=None)
+    win.filename = "demo.fit"
+    win.freqs = np.array([120.0, 110.0, 100.0, 90.0], dtype=float)
+    win.time = np.array([1.0, 2.0, 3.0, 4.0], dtype=float)
+    win.raw_data = np.arange(16, dtype=float).reshape(4, 4)
+    win.noise_reduced_data = win.raw_data.copy()
+    win.plot_data(win.noise_reduced_data, title="Background Subtracted")
+    QApplication.processEvents()
+
+    dlg = win._open_or_focus_type_ii_dialog()
+    assert dlg is not None
+
+    dlg._upper_points = [(1.0, 100.0), (2.0, 76.0), (3.0, 64.0)]
+    dlg._lower_points = [(1.0, 82.0), (2.0, 68.0), (3.0, 57.0)]
+    dlg._fit_both_bands()
+    dlg._calculate_parameters()
+    QApplication.processEvents()
+
+    session = dict(win._analysis_session or {})
+    results = dict((session.get("type_ii") or {}).get("results") or {})
+
+    assert results.get("shock_speed_km_s") is not None
+    assert results.get("shock_height_rs") is not None
+    assert dlg.calculate_button.isEnabled() is True
+
+    dlg.close()
+    win.close()
+
+
+def test_open_restored_analysis_opens_type_ii_when_flagged():
+    _app()
+    win = MainWindow(theme=None)
+    win.raw_data = np.ones((3, 3), dtype=float)
+    win.noise_reduced_data = np.ones((3, 3), dtype=float)
+    win.freqs = np.array([100.0, 90.0, 80.0], dtype=float)
+    win.time = np.array([1.0, 2.0, 3.0], dtype=float)
+    win._analysis_session = {
+        "source": {"filename": "demo.fit", "shape": [3, 3]},
+        "type_ii": {
+            "upper": {"time_seconds": [1.0, 2.0], "freqs": [90.0, 80.0]},
+            "lower": {"time_seconds": [1.0, 2.0], "freqs": [80.0, 72.0]},
+            "fold": 1,
+        },
+        "ui": {"restore_max_window": False, "restore_analyzer_window": False, "restore_type_ii_window": True},
+    }
+
+    seen = {"called": False}
+
+    def _fake_open(session=None):
+        seen["called"] = session is not None
+        return None
+
+    win._open_or_focus_type_ii_dialog = _fake_open
+    win.open_restored_analysis_windows()
+
+    assert seen["called"] is True
+    win.close()
 
 
 def test_isolated_seed_respects_auto_clean_toggle():
@@ -546,7 +697,6 @@ def test_noise_value_labels_follow_units_and_reset_to_zero():
     win.set_units_mode(True)
     QApplication.processEvents()
     prior_lower_text = win.lower_value_label.text()
-    prior_lower_sub_text = win.lower_value_sub_label.text()
     low_disp, high_disp, unit = win._noise_clip_display_values()
     assert unit == "dB"
     assert win.lower_value_label.text() == win._format_noise_clip_threshold_digits(win.noise_clip_low)
@@ -559,7 +709,8 @@ def test_noise_value_labels_follow_units_and_reset_to_zero():
     win.lower_slider.setValue(win._noise_threshold_to_slider(-8.0))
     QApplication.processEvents()
     assert win.lower_value_label.text() != prior_lower_text
-    assert win.lower_value_sub_label.text() != prior_lower_sub_text
+    low_disp, _high_disp, unit = win._noise_clip_display_values()
+    assert win.lower_value_sub_label.text() == win._format_noise_clip_value(low_disp, unit)
     assert win.lower_value_label.text() == win._format_noise_clip_threshold_digits(-8.0)
 
     win.reset_to_raw()

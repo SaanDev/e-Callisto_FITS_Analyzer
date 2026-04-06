@@ -223,7 +223,7 @@ def test_reset_all_restores_sidebar_controls_to_defaults():
     assert win.time_ut_radio.isChecked() is False
     assert win.cmap_combo.currentText() == "Custom"
     assert win.title_edit.text() == ""
-    assert win.title_edit.isEnabled() is True
+    assert win.title_edit.isEnabled() is False
     assert win.font_combo.currentText() == "Default"
     assert win.remove_titles_chk.isChecked() is False
     assert win.title_bold_chk.isChecked() is False

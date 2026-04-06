@@ -54,6 +54,7 @@ class MaxIntensityPlotDialog(QDialog):
         self.filename = filename
         self.current_plot_type = "MaxIntensityPlot"
         self._analyzer_state = None
+        self._type_ii_state = None
         self._suppress_emit = False
         self._auto_outlier_mode = bool(auto_outlier_mode)
 
@@ -200,10 +201,12 @@ class MaxIntensityPlotDialog(QDialog):
     def restore_session(self, session: dict, *, emit_change: bool = False):
         max_state = dict(session.get("max_intensity") or session) if isinstance(session, dict) else {}
         analyzer_state = None
+        type_ii_state = None
         if isinstance(session, dict):
             analyzer_state = session.get("analyzer", None)
             if analyzer_state is None:
                 analyzer_state = max_state.get("analyzer", None)
+            type_ii_state = session.get("type_ii", None)
 
         t = max_state.get("time_channels", None)
         f = max_state.get("freqs", None)
@@ -231,6 +234,10 @@ class MaxIntensityPlotDialog(QDialog):
             self._analyzer_state = dict(analyzer_state)
         elif analyzer_state is None:
             self._analyzer_state = None
+        if isinstance(type_ii_state, dict):
+            self._type_ii_state = dict(type_ii_state)
+        elif type_ii_state is None:
+            self._type_ii_state = None
 
         self._redraw_points("Maximum Intensity for Each Time Channel")
         if emit_change:
@@ -280,9 +287,11 @@ class MaxIntensityPlotDialog(QDialog):
                 "harmonic": bool(self.harmonic_radio.isChecked()),
             },
             "analyzer": dict(self._analyzer_state or {}),
+            "type_ii": dict(self._type_ii_state or {}),
             "ui": {
                 "restore_max_window": True,
                 "restore_analyzer_window": bool(self._analyzer_state),
+                "restore_type_ii_window": bool(self._type_ii_state),
             },
         }
 
@@ -389,12 +398,17 @@ class MaxIntensityPlotDialog(QDialog):
             harmonic=bool(harmonic),
             parent=self,
             time_seconds=self.time_seconds,
-            session={"max_intensity": self.session_state().get("max_intensity"), "analyzer": self._analyzer_state},
+            session={
+                "max_intensity": self.session_state().get("max_intensity"),
+                "analyzer": self._analyzer_state,
+                "type_ii": self._type_ii_state,
+            },
         )
         dialog.exec()
         try:
             restored = dialog.session_state()
             self._analyzer_state = dict((restored or {}).get("analyzer") or {})
+            self._type_ii_state = dict((restored or {}).get("type_ii") or {})
             self._emit_session_changed()
         except Exception:
             pass

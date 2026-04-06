@@ -99,6 +99,32 @@ def test_to_project_payload_moves_vectors_to_arrays():
     assert np.array_equal(arrays["analysis_freqs"], np.array([90, 80, 70], dtype=float))
 
 
+def test_type_ii_payload_round_trip_moves_points_to_arrays():
+    session = normalize_session(
+        {
+            "source": {"filename": "x.fit", "shape": [8, 5]},
+            "type_ii": {
+                "upper": {"time_seconds": [1.0, 2.0, 3.0], "freqs": [90.0, 84.0, 79.0]},
+                "lower": {"time_seconds": [1.0, 2.0, 3.0], "freqs": [78.0, 73.0, 69.0]},
+                "upper_fit": {"a": 90.0, "b": 0.4, "std_errs": [0.1, 0.01], "r2": 0.98, "rmse": 0.5},
+                "lower_fit": {"a": 78.0, "b": 0.38, "std_errs": [0.1, 0.01], "r2": 0.97, "rmse": 0.6},
+                "fold": 2,
+                "results": {"shock_speed_km_s": 980.0, "shock_height_rs": 1.45, "magnetic_field_g": 0.52},
+            },
+            "ui": {"restore_type_ii_window": True},
+        }
+    )
+
+    meta_session, arrays = to_project_payload(session)
+    assert meta_session is not None
+    assert "time_seconds" not in meta_session["type_ii"]["upper"]
+    assert "freqs" not in meta_session["type_ii"]["upper"]
+    assert np.array_equal(arrays["type_ii_upper_time_seconds"], np.array([1.0, 2.0, 3.0], dtype=float))
+    assert np.array_equal(arrays["type_ii_upper_freqs"], np.array([90.0, 84.0, 79.0], dtype=float))
+    assert np.array_equal(arrays["type_ii_lower_time_seconds"], np.array([1.0, 2.0, 3.0], dtype=float))
+    assert np.array_equal(arrays["type_ii_lower_freqs"], np.array([78.0, 73.0, 69.0], dtype=float))
+
+
 def test_validate_session_for_source_mismatch_reports_error():
     session = normalize_session(
         {
@@ -113,3 +139,21 @@ def test_validate_session_for_source_mismatch_reports_error():
     ok, reason = validate_session_for_source(session, current_shape=(100, 6))
     assert ok is False
     assert "time-axis length" in reason or "shape" in reason
+
+
+def test_validate_session_accepts_type_ii_only_payload():
+    session = normalize_session(
+        {
+            "source": {"filename": "x.fit", "shape": [100, 5]},
+            "type_ii": {
+                "upper": {"time_seconds": [1.0, 2.0], "freqs": [90.0, 85.0]},
+                "lower": {"time_seconds": [1.0, 2.0], "freqs": [80.0, 76.0]},
+                "fold": 1,
+            },
+            "ui": {"restore_type_ii_window": True},
+        }
+    )
+
+    ok, reason = validate_session_for_source(session, current_shape=(100, 5))
+    assert ok is True
+    assert reason == ""

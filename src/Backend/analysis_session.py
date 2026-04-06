@@ -36,6 +36,37 @@ SHOCK_SUMMARY_FIELDS = (
     "harmonic",
 )
 
+TYPE_II_POINT_FIELDS = ("time_seconds", "freqs")
+TYPE_II_RESULT_FIELDS = (
+    "start_time_s",
+    "upper_start_freq_mhz",
+    "lower_start_freq_mhz",
+    "bandwidth_mhz",
+    "compression_ratio",
+    "upper_drift_mhz_s",
+    "shock_speed_km_s",
+    "shock_height_rs",
+    "alfven_mach_number",
+    "alfven_speed_km_s",
+    "magnetic_field_g",
+    "fold",
+    "lower_extrapolated",
+    "warning",
+)
+TYPE_II_RESULT_NUMERIC_FIELDS = (
+    "start_time_s",
+    "upper_start_freq_mhz",
+    "lower_start_freq_mhz",
+    "bandwidth_mhz",
+    "compression_ratio",
+    "upper_drift_mhz_s",
+    "shock_speed_km_s",
+    "shock_height_rs",
+    "alfven_mach_number",
+    "alfven_speed_km_s",
+    "magnetic_field_g",
+)
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
@@ -131,6 +162,54 @@ def _normalize_shock_summary(raw: Mapping[str, Any] | None, *, fold: int, fundam
     return out
 
 
+def _normalize_type_ii_points(raw: Mapping[str, Any] | None) -> dict[str, Any]:
+    src = dict(raw or {})
+    time_seconds = _to_1d_float_array(src.get("time_seconds"))
+    freqs = _to_1d_float_array(src.get("freqs"))
+    if time_seconds is None or freqs is None or len(time_seconds) != len(freqs) or len(time_seconds) == 0:
+        time_seconds = None
+        freqs = None
+    return {
+        "time_seconds": time_seconds,
+        "freqs": freqs,
+    }
+
+
+def _normalize_type_ii_fit(raw: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    fit = _normalize_fit_params(raw)
+    if fit is None:
+        return None
+    point_count = max(0, _safe_int((raw or {}).get("point_count", 0), 0))
+    fit["point_count"] = point_count or None
+    return fit
+
+
+def _normalize_type_ii_results(raw: Mapping[str, Any] | None, *, fold: int) -> dict[str, Any]:
+    src = dict(raw or {})
+    out: dict[str, Any] = {}
+    for key in TYPE_II_RESULT_NUMERIC_FIELDS:
+        out[key] = _safe_float(src.get(key))
+    out["fold"] = int(_safe_int(src.get("fold", fold), fold))
+    out["lower_extrapolated"] = _safe_bool(src.get("lower_extrapolated", False), False)
+    out["warning"] = str(src.get("warning") or "").strip()
+    return out
+
+
+def _has_type_ii_payload(type_ii: Mapping[str, Any] | None) -> bool:
+    if not isinstance(type_ii, Mapping):
+        return False
+    upper = dict(type_ii.get("upper") or {})
+    lower = dict(type_ii.get("lower") or {})
+    results = dict(type_ii.get("results") or {})
+    if upper.get("time_seconds") is not None or lower.get("time_seconds") is not None:
+        return True
+    if type_ii.get("upper_fit") is not None or type_ii.get("lower_fit") is not None:
+        return True
+    if any(results.get(key) is not None for key in TYPE_II_RESULT_NUMERIC_FIELDS):
+        return True
+    return bool(results.get("warning", ""))
+
+
 def normalize_session(session: Mapping[str, Any] | None) -> dict[str, Any] | None:
     """Normalize a session payload into the canonical in-memory structure."""
     if not isinstance(session, Mapping):
@@ -143,7 +222,6 @@ def normalize_session(session: Mapping[str, Any] | None) -> dict[str, Any] | Non
     time_seconds = _to_1d_float_array(max_block_raw.get("time_seconds"))
     freqs = _to_1d_float_array(max_block_raw.get("freqs"))
 
-    # Compatibility: accept previous top-level keys.
     if time_channels is None:
         time_channels = _to_1d_float_array(session.get("time_channels"))
     if time_seconds is None:
@@ -169,9 +247,23 @@ def normalize_session(session: Mapping[str, Any] | None) -> dict[str, Any] | Non
         harmonic=harmonic,
     )
 
+    type_ii_raw = dict(session.get("type_ii") or {})
+    type_ii_fold = max(1, min(4, _safe_int(type_ii_raw.get("fold", 1), 1)))
+    type_ii = {
+        "upper": _normalize_type_ii_points(type_ii_raw.get("upper")),
+        "lower": _normalize_type_ii_points(type_ii_raw.get("lower")),
+        "upper_fit": _normalize_type_ii_fit(type_ii_raw.get("upper_fit")),
+        "lower_fit": _normalize_type_ii_fit(type_ii_raw.get("lower_fit")),
+        "fold": type_ii_fold,
+        "results": _normalize_type_ii_results(type_ii_raw.get("results"), fold=type_ii_fold),
+    }
+
     has_max = time_channels is not None and freqs is not None and len(time_channels) == len(freqs) and len(time_channels) > 0
-    has_analyzer = fit_params is not None or any(v is not None for k, v in shock_summary.items() if k not in {"fold", "fundamental", "harmonic"})
-    if not has_max and not has_analyzer:
+    has_analyzer = fit_params is not None or any(
+        v is not None for k, v in shock_summary.items() if k not in {"fold", "fundamental", "harmonic"}
+    )
+    has_type_ii = _has_type_ii_payload(type_ii)
+    if not has_max and not has_analyzer and not has_type_ii:
         return None
 
     normalized = {
@@ -196,11 +288,16 @@ def normalize_session(session: Mapping[str, Any] | None) -> dict[str, Any] | Non
             "fold": fold,
             "shock_summary": shock_summary,
         },
+        "type_ii": type_ii,
         "ui": {
             "restore_max_window": _safe_bool((session.get("ui") or {}).get("restore_max_window", has_max), has_max),
             "restore_analyzer_window": _safe_bool(
                 (session.get("ui") or {}).get("restore_analyzer_window", has_analyzer),
                 has_analyzer,
+            ),
+            "restore_type_ii_window": _safe_bool(
+                (session.get("ui") or {}).get("restore_type_ii_window", has_type_ii),
+                has_type_ii,
             ),
             "auto_outlier_cleaned": _safe_bool((session.get("ui") or {}).get("auto_outlier_cleaned", False), False),
             "auto_removed_count": max(0, _safe_int((session.get("ui") or {}).get("auto_removed_count", 0), 0)),
@@ -237,6 +334,22 @@ def to_project_payload(session: Mapping[str, Any] | None) -> tuple[dict[str, Any
             max_block["point_count"] = int(arrays["analysis_freqs"].shape[0])
 
     meta_session["max_intensity"] = max_block
+
+    type_ii = dict(meta_session.get("type_ii") or {})
+    for band_name in ("upper", "lower"):
+        band_meta = dict(type_ii.get(band_name) or {})
+        band_time = band_meta.pop("time_seconds", None)
+        band_freqs = band_meta.pop("freqs", None)
+        if band_time is not None:
+            arrays[f"type_ii_{band_name}_time_seconds"] = np.asarray(band_time, dtype=float)
+            band_meta["point_count"] = int(arrays[f"type_ii_{band_name}_time_seconds"].shape[0])
+        if band_freqs is not None:
+            arrays[f"type_ii_{band_name}_freqs"] = np.asarray(band_freqs, dtype=float)
+            if "point_count" not in band_meta:
+                band_meta["point_count"] = int(arrays[f"type_ii_{band_name}_freqs"].shape[0])
+        type_ii[band_name] = band_meta
+
+    meta_session["type_ii"] = type_ii
     return meta_session, arrays
 
 
@@ -292,6 +405,7 @@ def from_legacy_max_intensity(meta: Mapping[str, Any], arrays: Mapping[str, Any]
         "ui": {
             "restore_max_window": True,
             "restore_analyzer_window": bool(analyzer_legacy),
+            "restore_type_ii_window": False,
         },
         "updated_at": _now_iso(),
     }
@@ -303,7 +417,7 @@ def validate_session_for_source(
     *,
     current_shape: Sequence[int] | None = None,
 ) -> tuple[bool, str]:
-    """Validate max-intensity vectors against the current source shape."""
+    """Validate analysis vectors against the current source shape."""
     normalized = normalize_session(session)
     if normalized is None:
         return False, "No analysis session payload."
@@ -312,21 +426,22 @@ def validate_session_for_source(
     time_channels = _to_1d_float_array(max_block.get("time_channels"))
     time_seconds = _to_1d_float_array(max_block.get("time_seconds"))
     freqs = _to_1d_float_array(max_block.get("freqs"))
-    if time_channels is None or freqs is None:
-        return False, "Analysis session has no max-intensity vectors."
 
-    if len(time_channels) != len(freqs):
-        return False, "Analysis vectors have mismatched lengths."
-    if time_seconds is not None and len(time_seconds) != len(freqs):
-        return False, "Analysis time-axis values do not match max-intensity vector length."
+    if time_channels is not None or freqs is not None:
+        if time_channels is None or freqs is None:
+            return False, "Analysis session has incomplete max-intensity vectors."
+        if len(time_channels) != len(freqs):
+            return False, "Analysis vectors have mismatched lengths."
+        if time_seconds is not None and len(time_seconds) != len(freqs):
+            return False, "Analysis time-axis values do not match max-intensity vector length."
 
-    if current_shape is not None:
-        try:
-            current_cols = int(current_shape[1])
-        except Exception:
-            current_cols = 0
-        if current_cols > 0 and len(time_channels) != current_cols:
-            return False, "Analysis vector length does not match current dataset time-axis length."
+        if current_shape is not None:
+            try:
+                current_cols = int(current_shape[1])
+            except Exception:
+                current_cols = 0
+            if current_cols > 0 and len(time_channels) != current_cols:
+                return False, "Analysis vector length does not match current dataset time-axis length."
 
     src_shape = _shape_from((normalized.get("source") or {}).get("shape"))
     cur_shape = _shape_from(current_shape)

@@ -17,6 +17,8 @@ import numpy as np
 import requests
 from astropy.io import fits
 
+from src.Backend.frequency_axis import orient_frequency_rows
+
 
 BASE_URL = "https://downloads.sws.bom.gov.au/wdc/wdc_spec/data/learmonth/raw/"
 DEFAULT_RECEIVER_ID = "01"
@@ -214,6 +216,7 @@ def write_learmonth_chunk_fit(
 
     times = _build_time_axis(scan_times)
     freqs = _build_frequency_axis(file_meta["start_freq1"], file_meta["end_freq2"])
+    data, freqs = orient_frequency_rows(data, freqs)
     header = _build_primary_header(
         chunk=chunk,
         day_path=path,
@@ -377,11 +380,11 @@ def _infer_chunk_end(
     last_positive_step: float,
     nominal_step: float,
 ) -> datetime:
-    if previous_scan_dt is not None:
+    step = nominal_step if nominal_step > 0 else last_positive_step
+    if step <= 0 and previous_scan_dt is not None:
         inferred = (current_dt - previous_scan_dt).total_seconds()
         if inferred > 0:
-            return current_dt + timedelta(seconds=float(inferred))
-    step = last_positive_step if last_positive_step > 0 else nominal_step
+            step = float(inferred)
     return current_dt + timedelta(seconds=float(step or 3.0))
 
 

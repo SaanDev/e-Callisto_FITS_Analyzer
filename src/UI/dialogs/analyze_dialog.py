@@ -64,6 +64,7 @@ class AnalyzeDialog(QDialog):
         self.current_plot_title = f"{self.filename}_Best_Fit"
         self._fit_params = None
         self._shock_summary = {}
+        self._type_ii_state = None
         self._suppress_emit = False
         self._fit_mask = np.isfinite(self.time) & np.isfinite(self.freq)
 
@@ -418,9 +419,11 @@ class AnalyzeDialog(QDialog):
                 "fold": fold,
                 "shock_summary": shock,
             },
+            "type_ii": dict(self._type_ii_state or {}),
             "ui": {
                 "restore_max_window": True,
                 "restore_analyzer_window": True,
+                "restore_type_ii_window": bool(self._type_ii_state),
             },
         }
 
@@ -429,6 +432,7 @@ class AnalyzeDialog(QDialog):
         try:
             max_block = dict(state.get("max_intensity") or state) if isinstance(state, dict) else {}
             analyzer = dict(state.get("analyzer") or state) if isinstance(state, dict) else {}
+            type_ii = dict(state.get("type_ii") or {}) if isinstance(state, dict) else {}
             fit = analyzer.get("fit_params", None)
             shock = analyzer.get("shock_summary", None)
 
@@ -482,6 +486,8 @@ class AnalyzeDialog(QDialog):
             elif isinstance(shock, dict):
                 self._shock_summary = dict(shock)
                 self._set_summary_labels_from_dict(self._shock_summary)
+
+            self._type_ii_state = dict(type_ii) if isinstance(type_ii, dict) and type_ii else None
         finally:
             self._suppress_emit = False
         if emit_change:

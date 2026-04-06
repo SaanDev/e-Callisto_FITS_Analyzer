@@ -103,3 +103,23 @@ def test_write_learmonth_chunk_fit_round_trips_with_actual_scan_offsets(tmp_path
     assert result.header0["TIME-OBS"] == "00:00:00"
     assert result.header0["TIME-END"] == "00:00:19"
     assert result.header0["RAWFILE"] == "LM240401.srs"
+
+
+def test_write_learmonth_chunk_fit_reorients_frequency_axis_descending(tmp_path):
+    scan_a = np.arange(802, dtype=np.uint8)
+    scan_b = ((np.arange(802, dtype=np.int16) + 10) % 256).astype(np.uint8)
+    rows = [
+        (datetime(2024, 4, 1, 0, 0, 0), scan_a),
+        (datetime(2024, 4, 1, 0, 0, 3), scan_b),
+    ]
+    day_path = build_test_learmonth_srs(tmp_path / "LM240401.srs", rows)
+    chunk = list_learmonth_chunks(day_path)[0]
+
+    fit_path = write_learmonth_chunk_fit(day_path, chunk, tmp_path / "converted" / "LEARMONTH_20240401_000000_01.fit")
+    result = load_callisto_fits(fit_path, memmap=False)
+
+    assert result.freqs[0] > result.freqs[-1]
+    assert result.data[0, 0] == scan_a[-1]
+    assert result.data[-1, 0] == scan_a[0]
+    assert result.data[0, 1] == scan_b[-1]
+    assert result.data[-1, 1] == scan_b[0]
