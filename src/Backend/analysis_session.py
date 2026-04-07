@@ -37,19 +37,31 @@ SHOCK_SUMMARY_FIELDS = (
 )
 
 TYPE_II_POINT_FIELDS = ("time_seconds", "freqs")
+TYPE_II_ANALYSIS_INPUT_FIELDS = (
+    "initial_shock_speed_km_s",
+    "avg_shock_speed_km_s",
+    "initial_shock_height_rs",
+    "avg_shock_height_rs",
+    "start_freq_mhz",
+    "fold",
+    "speed_mode",
+)
+TYPE_II_ANALYSIS_INPUT_NUMERIC_FIELDS = (
+    "initial_shock_speed_km_s",
+    "avg_shock_speed_km_s",
+    "initial_shock_height_rs",
+    "avg_shock_height_rs",
+    "start_freq_mhz",
+)
 TYPE_II_RESULT_FIELDS = (
     "start_time_s",
     "upper_start_freq_mhz",
     "lower_start_freq_mhz",
     "bandwidth_mhz",
     "compression_ratio",
-    "upper_drift_mhz_s",
-    "shock_speed_km_s",
-    "shock_height_rs",
     "alfven_mach_number",
     "alfven_speed_km_s",
     "magnetic_field_g",
-    "fold",
     "lower_extrapolated",
     "warning",
 )
@@ -59,12 +71,14 @@ TYPE_II_RESULT_NUMERIC_FIELDS = (
     "lower_start_freq_mhz",
     "bandwidth_mhz",
     "compression_ratio",
-    "upper_drift_mhz_s",
-    "shock_speed_km_s",
-    "shock_height_rs",
     "alfven_mach_number",
     "alfven_speed_km_s",
     "magnetic_field_g",
+)
+TYPE_II_LEGACY_RESULT_NUMERIC_FIELDS = (
+    "upper_drift_mhz_s",
+    "shock_speed_km_s",
+    "shock_height_rs",
 )
 
 
@@ -184,12 +198,46 @@ def _normalize_type_ii_fit(raw: Mapping[str, Any] | None) -> dict[str, Any] | No
     return fit
 
 
+def _normalize_type_ii_speed_mode(value: Any) -> str:
+    mode = str(value or "initial").strip().lower()
+    return mode if mode in {"initial", "average"} else "initial"
+
+
+def _normalize_type_ii_analysis_inputs(
+    raw: Mapping[str, Any] | None,
+    *,
+    analyzer_fold: int,
+    shock_summary: Mapping[str, Any] | None,
+    legacy_fold: Any = None,
+) -> dict[str, Any]:
+    src = dict(raw or {})
+    shock = dict(shock_summary or {})
+    out: dict[str, Any] = {}
+    for key in TYPE_II_ANALYSIS_INPUT_NUMERIC_FIELDS:
+        value = _safe_float(shock.get(key))
+        if value is None:
+            value = _safe_float(src.get(key))
+        out[key] = value
+
+    shock_has_numeric_inputs = any(_safe_float(shock.get(key)) is not None for key in TYPE_II_ANALYSIS_INPUT_NUMERIC_FIELDS)
+    if shock_has_numeric_inputs:
+        fold_source = shock.get("fold", analyzer_fold)
+        fold_default = analyzer_fold if analyzer_fold > 0 else _safe_int(legacy_fold, 1)
+    else:
+        fold_source = src.get("fold", legacy_fold)
+        fold_default = _safe_int(legacy_fold, analyzer_fold if analyzer_fold > 0 else 1)
+
+    fold_value = _safe_int(fold_source, fold_default)
+    out["fold"] = max(1, min(4, int(fold_value or 1)))
+    out["speed_mode"] = _normalize_type_ii_speed_mode(src.get("speed_mode"))
+    return out
+
+
 def _normalize_type_ii_results(raw: Mapping[str, Any] | None, *, fold: int) -> dict[str, Any]:
     src = dict(raw or {})
     out: dict[str, Any] = {}
     for key in TYPE_II_RESULT_NUMERIC_FIELDS:
         out[key] = _safe_float(src.get(key))
-    out["fold"] = int(_safe_int(src.get("fold", fold), fold))
     out["lower_extrapolated"] = _safe_bool(src.get("lower_extrapolated", False), False)
     out["warning"] = str(src.get("warning") or "").strip()
     return out
@@ -201,11 +249,16 @@ def _has_type_ii_payload(type_ii: Mapping[str, Any] | None) -> bool:
     upper = dict(type_ii.get("upper") or {})
     lower = dict(type_ii.get("lower") or {})
     results = dict(type_ii.get("results") or {})
+    analysis_inputs = dict(type_ii.get("analysis_inputs") or {})
     if upper.get("time_seconds") is not None or lower.get("time_seconds") is not None:
         return True
     if type_ii.get("upper_fit") is not None or type_ii.get("lower_fit") is not None:
         return True
     if any(results.get(key) is not None for key in TYPE_II_RESULT_NUMERIC_FIELDS):
+        return True
+    if any(results.get(key) is not None for key in TYPE_II_LEGACY_RESULT_NUMERIC_FIELDS):
+        return True
+    if any(analysis_inputs.get(key) is not None for key in TYPE_II_ANALYSIS_INPUT_NUMERIC_FIELDS):
         return True
     return bool(results.get("warning", ""))
 
@@ -254,9 +307,16 @@ def normalize_session(session: Mapping[str, Any] | None) -> dict[str, Any] | Non
         "lower": _normalize_type_ii_points(type_ii_raw.get("lower")),
         "upper_fit": _normalize_type_ii_fit(type_ii_raw.get("upper_fit")),
         "lower_fit": _normalize_type_ii_fit(type_ii_raw.get("lower_fit")),
+        "analysis_inputs": _normalize_type_ii_analysis_inputs(
+            type_ii_raw.get("analysis_inputs"),
+            analyzer_fold=fold,
+            shock_summary=shock_summary,
+            legacy_fold=type_ii_raw.get("fold", type_ii_fold),
+        ),
         "fold": type_ii_fold,
         "results": _normalize_type_ii_results(type_ii_raw.get("results"), fold=type_ii_fold),
     }
+    type_ii["fold"] = int(type_ii["analysis_inputs"].get("fold", type_ii_fold) or type_ii_fold)
 
     has_max = time_channels is not None and freqs is not None and len(time_channels) == len(freqs) and len(time_channels) > 0
     has_analyzer = fit_params is not None or any(

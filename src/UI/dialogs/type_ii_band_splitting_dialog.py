@@ -146,9 +146,10 @@ class TypeIIBandSplittingDialog(QDialog):
         self.fit_both_button = QPushButton("Fit Both Bands")
         self.fit_both_button.clicked.connect(self._fit_both_bands)
 
-        self.fold_combo = QComboBox()
-        self.fold_combo.addItems(["1", "2", "3", "4"])
-        self.fold_combo.currentIndexChanged.connect(self._on_fold_changed)
+        self.speed_mode_combo = QComboBox()
+        self.speed_mode_combo.addItem("Initial Shock Speed", "initial")
+        self.speed_mode_combo.addItem("Average Shock Speed", "average")
+        self.speed_mode_combo.currentIndexChanged.connect(self._on_speed_mode_changed)
 
         self.calculate_button = QPushButton("Calculate")
         self.calculate_button.clicked.connect(self._calculate_parameters)
@@ -161,8 +162,8 @@ class TypeIIBandSplittingDialog(QDialog):
         controls.addWidget(self.clear_button)
         controls.addWidget(self.fit_active_button)
         controls.addWidget(self.fit_both_button)
-        controls.addWidget(QLabel("Fold-number:"))
-        controls.addWidget(self.fold_combo)
+        controls.addWidget(QLabel("Shock Speed:"))
+        controls.addWidget(self.speed_mode_combo)
         controls.addWidget(self.calculate_button)
         controls.addStretch(1)
 
@@ -174,13 +175,18 @@ class TypeIIBandSplittingDialog(QDialog):
         self.upper_stats_label = QLabel("")
         self.lower_fit_label = QLabel("")
         self.lower_stats_label = QLabel("")
+        self.analyzer_fold_label = QLabel("")
+        self.analyzer_start_freq_label = QLabel("")
+        self.analyzer_initial_speed_label = QLabel("")
+        self.analyzer_avg_speed_label = QLabel("")
+        self.analyzer_initial_height_label = QLabel("")
+        self.analyzer_avg_height_label = QLabel("")
+        self.analyzer_status_label = QLabel("")
+        self.analyzer_status_label.setWordWrap(True)
         self.start_time_label = QLabel("")
         self.start_freq_label = QLabel("")
         self.bandwidth_label = QLabel("")
         self.compression_label = QLabel("")
-        self.drift_label = QLabel("")
-        self.shock_speed_label = QLabel("")
-        self.shock_height_label = QLabel("")
         self.mach_label = QLabel("")
         self.alfven_speed_label = QLabel("")
         self.magnetic_field_label = QLabel("")
@@ -189,20 +195,25 @@ class TypeIIBandSplittingDialog(QDialog):
 
         right_inner = QVBoxLayout()
         for widget in (
+            QLabel("<b>Analyzer Shock Inputs</b>"),
+            self.analyzer_fold_label,
+            self.analyzer_start_freq_label,
+            self.analyzer_initial_speed_label,
+            self.analyzer_avg_speed_label,
+            self.analyzer_initial_height_label,
+            self.analyzer_avg_height_label,
+            self.analyzer_status_label,
             QLabel("<b>Upper Band Fit</b>"),
             self.upper_fit_label,
             self.upper_stats_label,
             QLabel("<b>Lower Band Fit</b>"),
             self.lower_fit_label,
             self.lower_stats_label,
-            QLabel("<b>Derived Parameters</b>"),
+            QLabel("<b>Plasma Parameters</b>"),
             self.start_time_label,
             self.start_freq_label,
             self.bandwidth_label,
             self.compression_label,
-            self.drift_label,
-            self.shock_speed_label,
-            self.shock_height_label,
             self.mach_label,
             self.alfven_speed_label,
             self.magnetic_field_label,
@@ -235,6 +246,7 @@ class TypeIIBandSplittingDialog(QDialog):
         else:
             self._refresh_plot()
             self._update_fit_labels()
+            self._update_analysis_input_labels()
             self._update_result_labels()
             self._sync_controls()
 
@@ -253,11 +265,96 @@ class TypeIIBandSplittingDialog(QDialog):
         else:
             self._lower_fit = fit
 
-    def _selected_fold(self) -> int:
+    @staticmethod
+    def _safe_float_value(value) -> float | None:
         try:
-            return max(1, min(4, int(self.fold_combo.currentText())))
+            if value is None:
+                return None
+            return float(value)
         except Exception:
-            return 1
+            return None
+
+    @staticmethod
+    def _normalize_speed_mode(value: Any) -> str:
+        mode = str(value or "initial").strip().lower()
+        return mode if mode in {"initial", "average"} else "initial"
+
+    def _selected_speed_mode(self) -> str:
+        return self._normalize_speed_mode(self.speed_mode_combo.currentData())
+
+    def _analysis_inputs_from_context(self) -> dict[str, Any]:
+        type_ii = dict((self._session_context or {}).get("type_ii") or {})
+        saved = dict(type_ii.get("analysis_inputs") or {})
+        analyzer = dict((self._session_context or {}).get("analyzer") or {})
+        shock = dict(analyzer.get("shock_summary") or {})
+
+        def _pick_numeric(key: str) -> float | None:
+            value = self._safe_float_value(shock.get(key))
+            if value is None:
+                value = self._safe_float_value(saved.get(key))
+            return value
+
+        fold_value = analyzer.get("fold", shock.get("fold", saved.get("fold", type_ii.get("fold", 1))))
+        try:
+            fold = max(1, min(4, int(fold_value)))
+        except Exception:
+            fold = 1
+
+        return {
+            "initial_shock_speed_km_s": _pick_numeric("initial_shock_speed_km_s"),
+            "avg_shock_speed_km_s": _pick_numeric("avg_shock_speed_km_s"),
+            "initial_shock_height_rs": _pick_numeric("initial_shock_height_rs"),
+            "avg_shock_height_rs": _pick_numeric("avg_shock_height_rs"),
+            "start_freq_mhz": _pick_numeric("start_freq_mhz"),
+            "fold": fold,
+            "speed_mode": self._selected_speed_mode(),
+        }
+
+    def _analysis_inputs_ready(self, inputs: dict[str, Any] | None = None) -> bool:
+        data = dict(inputs or self._analysis_inputs_from_context())
+        required = (
+            "initial_shock_speed_km_s",
+            "avg_shock_speed_km_s",
+            "initial_shock_height_rs",
+            "avg_shock_height_rs",
+            "start_freq_mhz",
+        )
+        for key in required:
+            value = self._safe_float_value(data.get(key))
+            if value is None or not np.isfinite(value):
+                return False
+        return True
+
+    def _selected_analysis_shock_speed(self, inputs: dict[str, Any] | None = None) -> float | None:
+        data = dict(inputs or self._analysis_inputs_from_context())
+        key = "avg_shock_speed_km_s" if self._selected_speed_mode() == "average" else "initial_shock_speed_km_s"
+        value = self._safe_float_value(data.get(key))
+        if value is None or not np.isfinite(value) or value <= 0.0:
+            return None
+        return value
+
+    def _analysis_inputs_match_saved(self, saved: dict[str, Any], current: dict[str, Any]) -> bool:
+        if self._normalize_speed_mode(saved.get("speed_mode")) != self._normalize_speed_mode(current.get("speed_mode")):
+            return False
+        try:
+            if int(saved.get("fold")) != int(current.get("fold")):
+                return False
+        except Exception:
+            return False
+        for key in (
+            "initial_shock_speed_km_s",
+            "avg_shock_speed_km_s",
+            "initial_shock_height_rs",
+            "avg_shock_height_rs",
+            "start_freq_mhz",
+        ):
+            saved_value = self._safe_float_value(saved.get(key))
+            current_value = self._safe_float_value(current.get(key))
+            if saved_value is None or current_value is None:
+                return False
+            if not np.isclose(saved_value, current_value, rtol=0.0, atol=1e-9):
+                return False
+        return True
 
     @staticmethod
     def _compact_fit_state(fit: dict[str, Any] | None) -> dict[str, Any]:
@@ -305,6 +402,7 @@ class TypeIIBandSplittingDialog(QDialog):
         upper_t, upper_f = self._points_to_arrays(self._upper_points)
         lower_t, lower_f = self._points_to_arrays(self._lower_points)
         ui_block = dict(base.get("ui") or {})
+        analysis_inputs = dict(self._analysis_inputs_from_context())
         return {
             "source": dict(base.get("source") or {}),
             "max_intensity": dict(base.get("max_intensity") or {}),
@@ -320,7 +418,8 @@ class TypeIIBandSplittingDialog(QDialog):
                 },
                 "upper_fit": self._compact_fit_state(self._upper_fit),
                 "lower_fit": self._compact_fit_state(self._lower_fit),
-                "fold": self._selected_fold(),
+                "analysis_inputs": analysis_inputs,
+                "fold": int(analysis_inputs.get("fold", 1) or 1),
                 "results": dict(self._results or {}),
             },
             "ui": {
@@ -350,12 +449,16 @@ class TypeIIBandSplittingDialog(QDialog):
             self._lower_fit = self._compact_fit_state(type_ii.get("lower_fit")) or None
             self._results = dict(type_ii.get("results") or {})
 
-            fold = int(type_ii.get("fold", self._selected_fold()) or self._selected_fold())
-            fold = max(1, min(4, fold))
-            self.fold_combo.setCurrentIndex(fold - 1)
+            analysis_inputs = dict(type_ii.get("analysis_inputs") or {})
+            speed_mode = self._normalize_speed_mode(analysis_inputs.get("speed_mode"))
+            self.speed_mode_combo.setCurrentIndex(1 if speed_mode == "average" else 0)
+            current_inputs = self._analysis_inputs_from_context()
+            if self._results and not self._analysis_inputs_match_saved(analysis_inputs, current_inputs):
+                self._results = {}
 
             self._refresh_plot()
             self._update_fit_labels()
+            self._update_analysis_input_labels()
             self._update_result_labels()
             self._sync_controls()
         finally:
@@ -382,11 +485,11 @@ class TypeIIBandSplittingDialog(QDialog):
         else:
             self.status.showMessage("Point capture paused.")
 
-    def _on_fold_changed(self, _index: int) -> None:
+    def _on_speed_mode_changed(self, _index: int) -> None:
         if self._results:
             self._invalidate_results()
             self._update_result_labels()
-            self.status.showMessage("Fold number changed. Recalculate derived parameters.", 3000)
+            self.status.showMessage("Shock speed source changed. Recalculate plasma parameters.", 3000)
             self._emit_session_changed()
         self._sync_controls()
 
@@ -478,6 +581,23 @@ class TypeIIBandSplittingDialog(QDialog):
             QMessageBox.information(self, "Type II Band-splitting", "Fit both bands before calculating.")
             return
 
+        analysis_inputs = self._analysis_inputs_from_context()
+        if not self._analysis_inputs_ready(analysis_inputs):
+            message = (
+                "Run the usual analysis window first so the initial/average shock speeds, "
+                "shock heights, and starting frequency are available."
+            )
+            QMessageBox.information(self, "Type II Band-splitting", message)
+            self.status.showMessage(message, 5000)
+            return
+
+        selected_shock_speed = self._selected_analysis_shock_speed(analysis_inputs)
+        if selected_shock_speed is None:
+            message = "The selected analyzer shock speed is unavailable."
+            QMessageBox.information(self, "Type II Band-splitting", message)
+            self.status.showMessage(message, 4000)
+            return
+
         upper_t, upper_f = self._points_to_arrays(self._upper_points)
         lower_t, lower_f = self._points_to_arrays(self._lower_points)
         try:
@@ -488,7 +608,8 @@ class TypeIIBandSplittingDialog(QDialog):
                 lower_freqs_mhz=lower_f,
                 upper_fit=self._upper_fit,
                 lower_fit=self._lower_fit,
-                fold=self._selected_fold(),
+                analysis_start_freq_mhz=float(analysis_inputs["start_freq_mhz"]),
+                analysis_shock_speed_km_s=float(selected_shock_speed),
             )
         except ValueError as exc:
             QMessageBox.warning(self, "Type II Band-splitting", str(exc))
@@ -601,15 +722,38 @@ class TypeIIBandSplittingDialog(QDialog):
         _set_for(self._upper_fit, self.upper_fit_label, self.upper_stats_label, "Upper Fit")
         _set_for(self._lower_fit, self.lower_fit_label, self.lower_stats_label, "Lower Fit")
 
+    def _update_analysis_input_labels(self) -> None:
+        inputs = self._analysis_inputs_from_context()
+        self.analyzer_fold_label.setText(f"Analyzer fold: <b>{int(inputs.get('fold', 1) or 1)}</b>")
+        self.analyzer_start_freq_label.setText(
+            f"Analyzer starting frequency: <b>{self._format_value(inputs.get('start_freq_mhz'), 4, ' MHz')}</b>"
+        )
+        self.analyzer_initial_speed_label.setText(
+            f"Initial shock speed: <b>{self._format_value(inputs.get('initial_shock_speed_km_s'), 2, ' km/s')}</b>"
+        )
+        self.analyzer_avg_speed_label.setText(
+            f"Average shock speed: <b>{self._format_value(inputs.get('avg_shock_speed_km_s'), 2, ' km/s')}</b>"
+        )
+        self.analyzer_initial_height_label.setText(
+            f"Initial shock height: <b>{self._format_value(inputs.get('initial_shock_height_rs'), 4, ' R_s')}</b>"
+        )
+        self.analyzer_avg_height_label.setText(
+            f"Average shock height: <b>{self._format_value(inputs.get('avg_shock_height_rs'), 4, ' R_s')}</b>"
+        )
+
+        if self._analysis_inputs_ready(inputs):
+            self.analyzer_status_label.setText("")
+        else:
+            self.analyzer_status_label.setText(
+                "Run the usual Analyzer window first to populate the shock speeds, shock heights, and starting frequency."
+            )
+
     def _update_result_labels(self) -> None:
         if not self._results:
             self.start_time_label.setText("Start time: ")
             self.start_freq_label.setText("Start frequencies: ")
             self.bandwidth_label.setText("Bandwidth: ")
             self.compression_label.setText("Compression ratio X: ")
-            self.drift_label.setText("Upper-band drift rate: ")
-            self.shock_speed_label.setText("Shock speed V_s: ")
-            self.shock_height_label.setText("Shock height: ")
             self.mach_label.setText("Alfven Mach number M_A: ")
             self.alfven_speed_label.setText("Alfven speed V_A: ")
             self.magnetic_field_label.setText("Magnetic field B: ")
@@ -625,11 +769,6 @@ class TypeIIBandSplittingDialog(QDialog):
         )
         self.bandwidth_label.setText(f"Bandwidth (f_u - f_l): <b>{self._format_value(result.get('bandwidth_mhz'), 4, ' MHz')}</b>")
         self.compression_label.setText(f"Compression ratio X: <b>{self._format_value(result.get('compression_ratio'), 4)}</b>")
-        self.drift_label.setText(
-            f"Upper-band drift rate: <b>{self._format_value(result.get('upper_drift_mhz_s'), 4, ' MHz/s')}</b>"
-        )
-        self.shock_speed_label.setText(f"Shock speed V_s: <b>{self._format_value(result.get('shock_speed_km_s'), 2, ' km/s')}</b>")
-        self.shock_height_label.setText(f"Shock height: <b>{self._format_value(result.get('shock_height_rs'), 4, ' R_s')}</b>")
         self.mach_label.setText(f"Alfven Mach number M_A: <b>{self._format_value(result.get('alfven_mach_number'), 4)}</b>")
         self.alfven_speed_label.setText(
             f"Alfven speed V_A: <b>{self._format_value(result.get('alfven_speed_km_s'), 2, ' km/s')}</b>"
@@ -645,7 +784,9 @@ class TypeIIBandSplittingDialog(QDialog):
         self.clear_button.setEnabled(active_points > 0)
         self.fit_active_button.setEnabled(active_points >= 2)
         self.fit_both_button.setEnabled(len(self._upper_points) >= 2 and len(self._lower_points) >= 2)
-        self.calculate_button.setEnabled(self._upper_fit is not None and self._lower_fit is not None)
+        inputs_ready = self._analysis_inputs_ready()
+        self.speed_mode_combo.setEnabled(inputs_ready)
+        self.calculate_button.setEnabled(self._upper_fit is not None and self._lower_fit is not None and inputs_ready)
 
     def closeEvent(self, event) -> None:
         try:

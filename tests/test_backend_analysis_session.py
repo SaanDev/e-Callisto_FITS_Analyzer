@@ -108,8 +108,16 @@ def test_type_ii_payload_round_trip_moves_points_to_arrays():
                 "lower": {"time_seconds": [1.0, 2.0, 3.0], "freqs": [78.0, 73.0, 69.0]},
                 "upper_fit": {"a": 90.0, "b": 0.4, "std_errs": [0.1, 0.01], "r2": 0.98, "rmse": 0.5},
                 "lower_fit": {"a": 78.0, "b": 0.38, "std_errs": [0.1, 0.01], "r2": 0.97, "rmse": 0.6},
-                "fold": 2,
-                "results": {"shock_speed_km_s": 980.0, "shock_height_rs": 1.45, "magnetic_field_g": 0.52},
+                "analysis_inputs": {
+                    "initial_shock_speed_km_s": 980.0,
+                    "avg_shock_speed_km_s": 820.0,
+                    "initial_shock_height_rs": 1.32,
+                    "avg_shock_height_rs": 1.48,
+                    "start_freq_mhz": 63.0,
+                    "fold": 2,
+                    "speed_mode": "average",
+                },
+                "results": {"compression_ratio": 1.44, "alfven_speed_km_s": 520.0, "magnetic_field_g": 0.52},
             },
             "ui": {"restore_type_ii_window": True},
         }
@@ -123,6 +131,27 @@ def test_type_ii_payload_round_trip_moves_points_to_arrays():
     assert np.array_equal(arrays["type_ii_upper_freqs"], np.array([90.0, 84.0, 79.0], dtype=float))
     assert np.array_equal(arrays["type_ii_lower_time_seconds"], np.array([1.0, 2.0, 3.0], dtype=float))
     assert np.array_equal(arrays["type_ii_lower_freqs"], np.array([78.0, 73.0, 69.0], dtype=float))
+    assert meta_session["type_ii"]["analysis_inputs"]["speed_mode"] == "average"
+    assert meta_session["type_ii"]["analysis_inputs"]["fold"] == 2
+
+
+def test_normalize_session_accepts_legacy_type_ii_shock_result_fields():
+    session = normalize_session(
+        {
+            "source": {"filename": "x.fit", "shape": [100, 5]},
+            "type_ii": {
+                "upper": {"time_seconds": [1.0, 2.0], "freqs": [90.0, 85.0]},
+                "lower": {"time_seconds": [1.0, 2.0], "freqs": [80.0, 76.0]},
+                "fold": 2,
+                "results": {"shock_speed_km_s": 980.0, "shock_height_rs": 1.45, "magnetic_field_g": 0.52},
+            },
+        }
+    )
+
+    assert session is not None
+    assert session["type_ii"]["fold"] == 2
+    assert session["type_ii"]["results"]["magnetic_field_g"] == 0.52
+    assert "shock_speed_km_s" not in session["type_ii"]["results"]
 
 
 def test_validate_session_for_source_mismatch_reports_error():

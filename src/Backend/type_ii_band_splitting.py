@@ -1,5 +1,5 @@
 """
-Helpers for Type II band-splitting fitting and derived plasma/shock parameters.
+Helpers for Type II band-splitting fitting and derived plasma parameters.
 """
 
 from __future__ import annotations
@@ -131,7 +131,8 @@ def calculate_type_ii_parameters(
     lower_freqs_mhz: Any,
     upper_fit: dict[str, Any],
     lower_fit: dict[str, Any],
-    fold: int,
+    analysis_start_freq_mhz: float,
+    analysis_shock_speed_km_s: float,
 ) -> dict[str, Any]:
     upper_times = np.asarray(upper_time_seconds, dtype=float).reshape(-1)
     lower_times = np.asarray(lower_time_seconds, dtype=float).reshape(-1)
@@ -148,7 +149,6 @@ def calculate_type_ii_parameters(
 
     f_upper = float(power_law(t_start, upper_a, upper_b))
     f_lower = float(power_law(t_start, lower_a, lower_b))
-    drift_upper = float(power_law_drift_rate(t_start, upper_a, upper_b))
     bandwidth = float(f_upper - f_lower)
     compression_ratio = float((f_upper / f_lower) ** 2)
 
@@ -159,15 +159,16 @@ def calculate_type_ii_parameters(
     if mach <= 0.0 or not math.isfinite(mach):
         raise ValueError("Failed to derive a valid Alfven Mach number.")
 
-    denom = max(1.0, int(fold)) * 3.385
-    log_term = math.log((f_upper ** 2) / denom)
-    if abs(log_term) <= 1e-12:
-        raise ValueError("Shock calculations are undefined for the selected starting frequency.")
+    analysis_freq = float(analysis_start_freq_mhz)
+    if not math.isfinite(analysis_freq) or analysis_freq <= 0.0:
+        raise ValueError("Analyzer starting frequency must be positive.")
 
-    shock_speed = float((13853221.38 * abs(drift_upper)) / (f_upper * (log_term ** 2)))
-    shock_height = float((4.32 * math.log(10.0)) / log_term)
-    alfven_speed = float(shock_speed / mach)
-    electron_density_cm3 = electron_density_cm3_from_frequency_mhz(f_upper)
+    analysis_shock_speed = float(analysis_shock_speed_km_s)
+    if not math.isfinite(analysis_shock_speed) or analysis_shock_speed <= 0.0:
+        raise ValueError("Analyzer shock speed must be positive.")
+
+    alfven_speed = float(analysis_shock_speed / mach)
+    electron_density_cm3 = electron_density_cm3_from_frequency_mhz(analysis_freq)
     magnetic_field_g = magnetic_field_gauss_from_alfven_speed(alfven_speed, electron_density_cm3)
 
     lower_fit_times = np.asarray(lower_times[lower_mask], dtype=float)
@@ -182,13 +183,9 @@ def calculate_type_ii_parameters(
         "lower_start_freq_mhz": f_lower,
         "bandwidth_mhz": bandwidth,
         "compression_ratio": compression_ratio,
-        "upper_drift_mhz_s": drift_upper,
-        "shock_speed_km_s": shock_speed,
-        "shock_height_rs": shock_height,
         "alfven_mach_number": mach,
         "alfven_speed_km_s": alfven_speed,
         "magnetic_field_g": magnetic_field_g,
-        "fold": int(max(1, int(fold))),
         "lower_extrapolated": lower_extrapolated,
         "warning": warning,
     }

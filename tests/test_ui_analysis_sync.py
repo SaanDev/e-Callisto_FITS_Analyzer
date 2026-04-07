@@ -49,6 +49,24 @@ def _find_top_menu(window: MainWindow, text: str):
     return None
 
 
+def _type_ii_analyzer_session():
+    return {
+        "source": {"filename": "demo.fit", "shape": [4, 5]},
+        "analyzer": {
+            "fold": 2,
+            "shock_summary": {
+                "start_freq_mhz": 63.0,
+                "initial_shock_speed_km_s": 920.0,
+                "avg_shock_speed_km_s": 760.0,
+                "initial_shock_height_rs": 1.31,
+                "avg_shock_height_rs": 1.47,
+            },
+        },
+        "type_ii": {},
+        "ui": {"restore_type_ii_window": True},
+    }
+
+
 def test_analyze_dialog_session_state_contains_canonical_shock_summary():
     _app()
     time_channels = np.arange(1, 30, dtype=float)
@@ -263,7 +281,7 @@ def test_type_ii_dialog_session_state_contains_results_block():
     data = np.arange(20, dtype=float).reshape(4, 5)
     freqs = np.array([120.0, 110.0, 100.0, 90.0], dtype=float)
     times = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=float)
-    dlg = TypeIIBandSplittingDialog(data, freqs, times, "demo.fit")
+    dlg = TypeIIBandSplittingDialog(data, freqs, times, "demo.fit", session=_type_ii_analyzer_session())
 
     dlg._upper_points = [(1.0, 100.0), (2.0, 76.0), (3.0, 64.0)]
     dlg._lower_points = [(1.0, 82.0), (2.0, 68.0), (3.0, 57.0)]
@@ -272,14 +290,37 @@ def test_type_ii_dialog_session_state_contains_results_block():
 
     state = dlg.session_state()
     type_ii = dict(state.get("type_ii") or {})
+    analysis_inputs = dict(type_ii.get("analysis_inputs") or {})
     results = dict(type_ii.get("results") or {})
 
     assert type_ii.get("upper_fit")
     assert type_ii.get("lower_fit")
-    assert results.get("shock_speed_km_s") is not None
-    assert results.get("shock_height_rs") is not None
-    assert "Shock speed V_s" in dlg.shock_speed_label.text()
-    assert "Shock height" in dlg.shock_height_label.text()
+    assert analysis_inputs.get("speed_mode") == "initial"
+    assert results.get("compression_ratio") is not None
+    assert results.get("alfven_speed_km_s") is not None
+    assert results.get("magnetic_field_g") is not None
+    assert "shock_speed_km_s" not in results
+    assert "920.00" in dlg.analyzer_initial_speed_label.text()
+    assert "760.00" in dlg.analyzer_avg_speed_label.text()
+    assert "1.3100" in dlg.analyzer_initial_height_label.text()
+    assert "1.4700" in dlg.analyzer_avg_height_label.text()
+
+    dlg.close()
+
+
+def test_type_ii_dialog_requires_analyzer_shock_results_before_calculation():
+    _app()
+    data = np.arange(20, dtype=float).reshape(4, 5)
+    freqs = np.array([120.0, 110.0, 100.0, 90.0], dtype=float)
+    times = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=float)
+    dlg = TypeIIBandSplittingDialog(data, freqs, times, "demo.fit")
+
+    dlg._upper_points = [(1.0, 100.0), (2.0, 76.0), (3.0, 64.0)]
+    dlg._lower_points = [(1.0, 82.0), (2.0, 68.0), (3.0, 57.0)]
+    dlg._fit_both_bands()
+
+    assert dlg.calculate_button.isEnabled() is False
+    assert "Analyzer" in dlg.analyzer_status_label.text()
 
     dlg.close()
 
@@ -349,6 +390,7 @@ def test_type_ii_dialog_opens_from_main_window_and_calculates():
     win.time = np.array([1.0, 2.0, 3.0, 4.0], dtype=float)
     win.raw_data = np.arange(16, dtype=float).reshape(4, 4)
     win.noise_reduced_data = win.raw_data.copy()
+    win._analysis_session = _type_ii_analyzer_session()
     win.plot_data(win.noise_reduced_data, title="Background Subtracted")
     QApplication.processEvents()
 
@@ -364,12 +406,41 @@ def test_type_ii_dialog_opens_from_main_window_and_calculates():
     session = dict(win._analysis_session or {})
     results = dict((session.get("type_ii") or {}).get("results") or {})
 
-    assert results.get("shock_speed_km_s") is not None
-    assert results.get("shock_height_rs") is not None
+    assert results.get("compression_ratio") is not None
+    assert results.get("alfven_mach_number") is not None
+    assert results.get("alfven_speed_km_s") is not None
+    assert results.get("magnetic_field_g") is not None
+    assert results.get("shock_speed_km_s") is None
     assert dlg.calculate_button.isEnabled() is True
 
     dlg.close()
     win.close()
+
+
+def test_type_ii_speed_mode_changes_alfven_terms_only():
+    _app()
+    data = np.arange(20, dtype=float).reshape(4, 5)
+    freqs = np.array([120.0, 110.0, 100.0, 90.0], dtype=float)
+    times = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=float)
+    dlg = TypeIIBandSplittingDialog(data, freqs, times, "demo.fit", session=_type_ii_analyzer_session())
+
+    dlg._upper_points = [(1.0, 100.0), (2.0, 76.0), (3.0, 64.0)]
+    dlg._lower_points = [(1.0, 82.0), (2.0, 68.0), (3.0, 57.0)]
+    dlg._fit_both_bands()
+    dlg._calculate_parameters()
+    initial = dict(dlg._results)
+
+    dlg.speed_mode_combo.setCurrentIndex(1)
+    assert dlg.calculate_button.isEnabled() is True
+    dlg._calculate_parameters()
+    average = dict(dlg._results)
+
+    assert initial["compression_ratio"] == pytest.approx(average["compression_ratio"])
+    assert initial["alfven_mach_number"] == pytest.approx(average["alfven_mach_number"])
+    assert initial["alfven_speed_km_s"] != pytest.approx(average["alfven_speed_km_s"])
+    assert initial["magnetic_field_g"] != pytest.approx(average["magnetic_field_g"])
+
+    dlg.close()
 
 
 def test_open_restored_analysis_opens_type_ii_when_flagged():

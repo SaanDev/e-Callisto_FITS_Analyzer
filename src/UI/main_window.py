@@ -2417,14 +2417,19 @@ class MainWindow(QMainWindow):
                 lines.append(f"Avg shock height: {float(shock['avg_shock_height_rs']):.3f} Rs")
             except Exception:
                 pass
-        if type_ii_results.get("shock_speed_km_s") is not None:
+        if type_ii_results.get("compression_ratio") is not None:
             try:
-                lines.append(f"Type II V_s: {float(type_ii_results['shock_speed_km_s']):.2f} km/s")
+                lines.append(f"Type II X: {float(type_ii_results['compression_ratio']):.4f}")
             except Exception:
                 pass
-        if type_ii_results.get("shock_height_rs") is not None:
+        if type_ii_results.get("alfven_mach_number") is not None:
             try:
-                lines.append(f"Type II height: {float(type_ii_results['shock_height_rs']):.4f} Rs")
+                lines.append(f"Type II M_A: {float(type_ii_results['alfven_mach_number']):.4f}")
+            except Exception:
+                pass
+        if type_ii_results.get("alfven_speed_km_s") is not None:
+            try:
+                lines.append(f"Type II V_A: {float(type_ii_results['alfven_speed_km_s']):.2f} km/s")
             except Exception:
                 pass
         if type_ii_results.get("magnetic_field_g") is not None:
