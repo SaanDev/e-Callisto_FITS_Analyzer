@@ -10,8 +10,8 @@ from typing import Any
 
 from matplotlib import colormaps
 import numpy as np
-from PySide6.QtCore import QRectF, Signal, QSize, Qt
-from PySide6.QtGui import QIcon, QPalette
+from PySide6.QtCore import Signal, QSize, Qt
+from PySide6.QtGui import QIcon, QImage, QPainter, QPageLayout, QPalette, QPdfWriter
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -27,16 +27,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.Backend.frequency_axis import finite_data_limits, pyqtgraph_extent
+from src.Backend.frequency_axis import axis_edges, finite_data_limits, frequency_edges
 from src.Backend.type_ii_band_splitting import calculate_type_ii_parameters, fit_power_law, power_law
 from src.UI.accelerated_plot_widget import _mpl_cmap_to_lookup, _rgba_image_from_cmap, pg
-from src.UI.gui_shared import resource_path
+from src.UI.gui_shared import pick_export_path, resource_path
 
 
 class TypeIIBandSplittingDialog(QDialog):
     sessionChanged = Signal(dict)
-    _ICON_SIZE = QSize(36, 36)
-    _ICON_BUTTON_SIZE = QSize(44, 44)
+    _ICON_SIZE = QSize(40, 40)
+    _ICON_BUTTON_SIZE = QSize(52, 52)
 
     def __init__(
         self,
@@ -155,6 +155,9 @@ class TypeIIBandSplittingDialog(QDialog):
         self.fit_both_button = self._build_icon_button("Fit Both Bands", "fit_both_bands.svg")
         self.fit_both_button.clicked.connect(self._fit_both_bands)
 
+        self.save_plot_button = self._build_icon_button("Save Plot", "save_plot.svg")
+        self.save_plot_button.clicked.connect(self._save_plot)
+
         self.bvr_button = self._build_icon_button("BvR", "plot_BvR.svg")
         self.bvr_button.clicked.connect(lambda: self._show_placeholder_action("BvR"))
 
@@ -175,6 +178,7 @@ class TypeIIBandSplittingDialog(QDialog):
         controls.addWidget(self.clear_button)
         controls.addWidget(self.fit_active_button)
         controls.addWidget(self.fit_both_button)
+        controls.addWidget(self.save_plot_button)
         controls.addWidget(self.bvr_button)
         controls.addWidget(self.settings_button)
         controls.addStretch(1)
@@ -409,6 +413,7 @@ class TypeIIBandSplittingDialog(QDialog):
             getattr(self, "clear_button", None),
             getattr(self, "fit_active_button", None),
             getattr(self, "fit_both_button", None),
+            getattr(self, "save_plot_button", None),
             getattr(self, "bvr_button", None),
             getattr(self, "settings_button", None),
         ):
@@ -424,6 +429,149 @@ class TypeIIBandSplittingDialog(QDialog):
 
     def _on_theme_changed(self, _dark: bool) -> None:
         self._apply_toolbar_icons()
+
+    @staticmethod
+    def _normalize_export_extension(ext_value: str) -> str:
+        if not ext_value:
+            return "png"
+        value = str(ext_value).strip().lower()
+        if value.startswith("."):
+            value = value[1:]
+        if "(*." in value:
+            try:
+                value = value.split("(*.", 1)[1].split(")", 1)[0].split()[0].strip()
+            except Exception:
+                pass
+        return value or "png"
+
+    def _default_export_name(self) -> str:
+        return f"{self.filename}_Type_II_Band_Splitting"
+
+    def _time_step_seconds(self) -> float:
+        arr = np.asarray(self.time_seconds, dtype=float).reshape(-1)
+        if arr.size < 2:
+            return 1.0
+        diffs = np.diff(arr)
+        diffs = np.abs(diffs[np.isfinite(diffs)])
+        diffs = diffs[diffs > 1e-9]
+        if diffs.size == 0:
+            return 1.0
+        return float(np.nanmedian(diffs))
+
+    def _plot_exporter_module(self):
+        if self.plot_item is None:
+            raise RuntimeError("Type II plot is not available for export.")
+        try:
+            import pyqtgraph.exporters as pg_exporters
+        except Exception as exc:
+            raise RuntimeError("PyQtGraph exporters are unavailable.") from exc
+        return pg_exporters
+
+    def _render_export_image(self, *, min_width: int = 2400) -> QImage:
+        pg_exporters = self._plot_exporter_module()
+        QApplication.processEvents()
+        exporter = pg_exporters.ImageExporter(self.plot_item)
+        params = exporter.parameters()
+        try:
+            width = max(
+                min_width,
+                int(self.plot_widget.width() * self.plot_widget.devicePixelRatioF()),
+                int(self.plot_item.sceneBoundingRect().width()),
+            )
+        except Exception:
+            width = max(min_width, int(self.plot_widget.width()))
+        params["width"] = max(1, width)
+        image = exporter.export(toBytes=True)
+        if image is None or image.isNull():
+            raise RuntimeError("Could not render the Type II plot image.")
+        return image
+
+    def _export_plot_raster(self, file_path: str, ext: str) -> None:
+        pg_exporters = self._plot_exporter_module()
+        QApplication.processEvents()
+        exporter = pg_exporters.ImageExporter(self.plot_item)
+        params = exporter.parameters()
+        try:
+            width = max(
+                2400,
+                int(self.plot_widget.width() * self.plot_widget.devicePixelRatioF()),
+                int(self.plot_item.sceneBoundingRect().width()),
+            )
+        except Exception:
+            width = max(2400, int(self.plot_widget.width()))
+        params["width"] = max(1, width)
+        if not exporter.export(file_path):
+            raise RuntimeError(f"Could not save raster export as {ext}.")
+
+    def _export_plot_pdf(self, file_path: str) -> None:
+        image = self._render_export_image(min_width=2600)
+        writer = QPdfWriter(file_path)
+        writer.setResolution(300)
+        writer.setPageOrientation(QPageLayout.Orientation.Landscape)
+        painter = QPainter(writer)
+        try:
+            target = writer.pageLayout().paintRectPixels(writer.resolution())
+            scaled = image.scaled(target.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            x = int(target.x() + (target.width() - scaled.width()) / 2)
+            y = int(target.y() + (target.height() - scaled.height()) / 2)
+            painter.drawImage(x, y, scaled)
+        finally:
+            painter.end()
+
+    def _export_plot_svg(self, file_path: str) -> None:
+        pg_exporters = self._plot_exporter_module()
+        QApplication.processEvents()
+        exporter = pg_exporters.SVGExporter(self.plot_item)
+        params = exporter.parameters()
+        try:
+            params["width"] = max(2400.0, float(self.plot_item.sceneBoundingRect().width()))
+        except Exception:
+            pass
+        exporter.export(file_path)
+
+    def _save_plot(self) -> None:
+        formats = "PNG (*.png);;PDF (*.pdf);;SVG (*.svg);;TIFF (*.tiff);;JPG (*.jpg *.jpeg)"
+        file_path, ext = pick_export_path(
+            self,
+            "Export Figure",
+            self._default_export_name(),
+            formats,
+            default_filter="PNG (*.png)",
+        )
+        if not file_path:
+            return
+
+        if sys.platform.startswith("win") and file_path.lower().startswith("c:\\program files"):
+            QMessageBox.warning(
+                self,
+                "Permission Denied",
+                "Windows does not allow saving files inside Program Files.\n"
+                "Please choose another folder such as Documents or Desktop."
+            )
+            return
+
+        try:
+            root, current_ext = os.path.splitext(file_path)
+            if current_ext == "":
+                ext_final = self._normalize_export_extension(ext)
+                file_path = f"{file_path}.{ext_final}"
+            else:
+                ext_final = current_ext.lower().lstrip(".")
+
+            if ext_final in {"png", "tif", "tiff", "jpg", "jpeg"}:
+                self._export_plot_raster(file_path, ext_final)
+            elif ext_final == "pdf":
+                self._export_plot_pdf(file_path)
+            elif ext_final == "svg":
+                self._export_plot_svg(file_path)
+            else:
+                raise RuntimeError(f"Unsupported export format: {ext_final}")
+
+            QMessageBox.information(self, "Export Complete", f"Plot saved:\n{file_path}")
+            self.status.showMessage("Export successful!", 3000)
+        except Exception as exc:
+            QMessageBox.critical(self, "Export Failed", f"Could not save file:\n{exc}")
+            self.status.showMessage("Export failed!", 3000)
 
     @staticmethod
     def _safe_float_value(value) -> float | None:
@@ -803,9 +951,12 @@ class TypeIIBandSplittingDialog(QDialog):
             return
 
         arr = np.ascontiguousarray(np.asarray(self.display_data, dtype=np.float32))
-        extent = pyqtgraph_extent(self.freqs, self.time_seconds, default_step=self.frequency_step_mhz)
-        x0, x1, y0, y1 = (float(extent[0]), float(extent[1]), float(extent[2]), float(extent[3]))
-        self.image_item.setRect(QRectF(x0, y0, x1 - x0, y1 - y0))
+        freq_edges = frequency_edges(self.freqs, default_step=self.frequency_step_mhz or 1.0)
+        time_edges = axis_edges(self.time_seconds, default_step=self._time_step_seconds())
+        x0 = float(time_edges[0])
+        x1 = float(time_edges[-1])
+        y0 = float(freq_edges[0])
+        y1 = float(freq_edges[-1])
 
         vmin, vmax = finite_data_limits(arr)
         if vmin is None or vmax is None:
@@ -825,6 +976,8 @@ class TypeIIBandSplittingDialog(QDialog):
                 _color_map, lut = _mpl_cmap_to_lookup(self.cmap)
                 if lut is not None:
                     self.image_item.setLookupTable(lut, update=False)
+
+            self.image_item.setRect(x0, y0, x1 - x0, y1 - y0)
 
             if self.color_bar is not None:
                 try:

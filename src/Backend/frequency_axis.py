@@ -62,8 +62,8 @@ def frequency_step_mhz(freqs: np.ndarray, default: float = 1.0) -> float:
     return float(np.nanmedian(diffs))
 
 
-def frequency_edges(freqs: np.ndarray, default_step: float = 1.0) -> np.ndarray:
-    arr = np.asarray(freqs, dtype=float).ravel()
+def axis_edges(values: np.ndarray, default_step: float = 1.0) -> np.ndarray:
+    arr = np.asarray(values, dtype=float).ravel()
     if arr.size == 0:
         return np.empty(0, dtype=float)
 
@@ -76,6 +76,10 @@ def frequency_edges(freqs: np.ndarray, default_step: float = 1.0) -> np.ndarray:
     edges[0] = float(arr[0]) + 0.5 * float(arr[0] - arr[1])
     edges[-1] = float(arr[-1]) + 0.5 * float(arr[-1] - arr[-2])
     return edges
+
+
+def frequency_edges(freqs: np.ndarray, default_step: float = 1.0) -> np.ndarray:
+    return axis_edges(freqs, default_step=default_step)
 
 
 def time_bounds(time: np.ndarray) -> tuple[float, float]:

@@ -12,6 +12,8 @@ import pytest
 
 pytest.importorskip("PySide6")
 
+from PySide6.QtCore import QPointF
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
 
 from src.UI.accelerated_plot_widget import pg
@@ -82,6 +84,7 @@ def test_type_ii_dialog_uses_pyqtgraph_plot_widget():
     assert isinstance(dlg.plot_widget, pg.GraphicsLayoutWidget)
     assert dlg.plot_item is not None
     assert dlg.image_item is not None
+    assert dlg.save_plot_button is not None
     assert dlg.bvr_button is not None
     assert dlg.settings_button is not None
     assert dlg.add_points_button.icon().isNull() is False
@@ -89,7 +92,66 @@ def test_type_ii_dialog_uses_pyqtgraph_plot_widget():
     assert dlg.clear_button.icon().isNull() is False
     assert dlg.fit_active_button.icon().isNull() is False
     assert dlg.fit_both_button.icon().isNull() is False
+    assert dlg.save_plot_button.icon().isNull() is False
     assert dlg.bvr_button.icon().isNull() is False
     assert dlg.settings_button.icon().isNull() is False
+
+    dlg.close()
+
+
+def test_type_ii_dialog_maps_image_to_time_and_frequency_edges():
+    _app()
+    if pg is None:
+        pytest.skip("PyQtGraph is unavailable")
+
+    data = np.arange(12, dtype=float).reshape(3, 4)
+    freqs = np.array([100.0, 90.0, 80.0], dtype=float)
+    times = np.array([1.0, 2.0, 3.0, 4.0], dtype=float)
+    dlg = TypeIIBandSplittingDialog(data, freqs, times, "demo.fit")
+    dlg.show()
+    QApplication.processEvents()
+
+    top_left = dlg.image_item.mapToParent(QPointF(0.0, 0.0))
+    bottom_right = dlg.image_item.mapToParent(QPointF(float(data.shape[1]), float(data.shape[0])))
+
+    assert np.isclose(top_left.x(), 0.5)
+    assert np.isclose(top_left.y(), 105.0)
+    assert np.isclose(bottom_right.x(), 4.5)
+    assert np.isclose(bottom_right.y(), 75.0)
+
+    dlg.close()
+
+
+def test_type_ii_dialog_save_plot_exports_png(tmp_path, monkeypatch):
+    _app()
+
+    dlg = TypeIIBandSplittingDialog(
+        np.arange(12, dtype=float).reshape(3, 4),
+        np.array([100.0, 90.0, 80.0], dtype=float),
+        np.array([1.0, 2.0, 3.0, 4.0], dtype=float),
+        "demo.fit",
+    )
+
+    out_path = tmp_path / "type_ii_plot.png"
+    monkeypatch.setattr(
+        "src.UI.dialogs.type_ii_band_splitting_dialog.pick_export_path",
+        lambda *_a, **_k: (str(out_path), "png"),
+    )
+    monkeypatch.setattr(
+        "src.UI.dialogs.type_ii_band_splitting_dialog.QMessageBox.information",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "src.UI.dialogs.type_ii_band_splitting_dialog.QMessageBox.critical",
+        lambda *_a, **_k: None,
+    )
+
+    dlg._save_plot()
+
+    assert out_path.exists()
+    assert out_path.stat().st_size > 0
+    image = QImage(str(out_path))
+    assert image.isNull() is False
+    assert image.width() >= 2000
 
     dlg.close()
