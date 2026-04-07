@@ -55,6 +55,8 @@ def _type_ii_analyzer_session():
         "analyzer": {
             "fold": 2,
             "shock_summary": {
+                "avg_drift_mhz_s": -0.124,
+                "avg_drift_err_mhz_s": 0.011,
                 "start_freq_mhz": 63.0,
                 "initial_shock_speed_km_s": 920.0,
                 "avg_shock_speed_km_s": 760.0,

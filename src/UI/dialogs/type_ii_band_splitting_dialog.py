@@ -11,11 +11,12 @@ from typing import Any
 from matplotlib import colormaps
 import numpy as np
 from PySide6.QtCore import Signal, QSize, Qt
-from PySide6.QtGui import QIcon, QImage, QPainter, QPageLayout, QPalette, QPdfWriter
+from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPageLayout, QPalette, QPdfWriter
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QDialog,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMessageBox,
@@ -195,59 +196,112 @@ class TypeIIBandSplittingDialog(QDialog):
         self.speed_mode_label = QLabel("Shock Speed:")
         self.analyzer_fold_label = QLabel("")
         self.analyzer_start_freq_label = QLabel("")
+        self.analyzer_avg_drift_label = QLabel("")
         self.analyzer_initial_speed_label = QLabel("")
         self.analyzer_avg_speed_label = QLabel("")
         self.analyzer_initial_height_label = QLabel("")
         self.analyzer_avg_height_label = QLabel("")
         self.analyzer_status_label = QLabel("")
-        self.analyzer_status_label.setWordWrap(True)
+        self.interval_label = QLabel("")
         self.start_time_label = QLabel("")
         self.start_freq_label = QLabel("")
+        self.avg_freqs_label = QLabel("")
         self.bandwidth_label = QLabel("")
+        self.upper_drift_label = QLabel("")
         self.compression_label = QLabel("")
         self.mach_label = QLabel("")
         self.alfven_speed_label = QLabel("")
         self.magnetic_field_label = QLabel("")
         self.warning_label = QLabel("")
-        self.warning_label.setWordWrap(True)
 
-        controls_panel = QWidget()
+        for label in (
+            self.upper_fit_label,
+            self.upper_stats_label,
+            self.lower_fit_label,
+            self.lower_stats_label,
+            self.analyzer_fold_label,
+            self.analyzer_start_freq_label,
+            self.analyzer_avg_drift_label,
+            self.analyzer_initial_speed_label,
+            self.analyzer_avg_speed_label,
+            self.analyzer_initial_height_label,
+            self.analyzer_avg_height_label,
+            self.analyzer_status_label,
+            self.interval_label,
+            self.start_time_label,
+            self.start_freq_label,
+            self.avg_freqs_label,
+            self.bandwidth_label,
+            self.upper_drift_label,
+            self.compression_label,
+            self.mach_label,
+            self.alfven_speed_label,
+            self.magnetic_field_label,
+            self.warning_label,
+        ):
+            self._configure_detail_label(label)
+
+        controls_panel = QGroupBox("Controls")
         controls_panel_layout = QVBoxLayout(controls_panel)
         controls_panel_layout.setContentsMargins(0, 0, 0, 0)
         controls_panel_layout.setSpacing(8)
-        controls_panel_layout.addWidget(QLabel("<b>Controls</b>"))
         controls_panel_layout.addWidget(self.active_band_label)
         controls_panel_layout.addWidget(self.band_combo)
         controls_panel_layout.addWidget(self.speed_mode_label)
         controls_panel_layout.addWidget(self.speed_mode_combo)
         controls_panel_layout.addWidget(self.calculate_button)
 
+        analyzer_panel = self._make_section_box(
+            "Analyzer Reference",
+            (
+                self.analyzer_status_label,
+                self.analyzer_fold_label,
+                self.analyzer_start_freq_label,
+                self.analyzer_avg_drift_label,
+                self.analyzer_initial_speed_label,
+                self.analyzer_avg_speed_label,
+                self.analyzer_initial_height_label,
+                self.analyzer_avg_height_label,
+            ),
+        )
+        fit_panel = self._make_section_box(
+            "Fitted Bands",
+            (
+                self.upper_fit_label,
+                self.upper_stats_label,
+                self.lower_fit_label,
+                self.lower_stats_label,
+            ),
+        )
+        averaging_panel = self._make_section_box(
+            "Averaged Band-Splitting Quantities",
+            (
+                self.interval_label,
+                self.start_time_label,
+                self.start_freq_label,
+                self.avg_freqs_label,
+                self.bandwidth_label,
+                self.upper_drift_label,
+                self.warning_label,
+            ),
+        )
+        plasma_panel = self._make_section_box(
+            "Plasma Parameters",
+            (
+                self.compression_label,
+                self.mach_label,
+                self.alfven_speed_label,
+                self.magnetic_field_label,
+            ),
+        )
+
         right_inner = QVBoxLayout()
         for widget in (
             controls_panel,
-            QLabel("<b>Analyzer Shock Inputs</b>"),
-            self.analyzer_fold_label,
-            self.analyzer_start_freq_label,
-            self.analyzer_initial_speed_label,
-            self.analyzer_avg_speed_label,
-            self.analyzer_initial_height_label,
-            self.analyzer_avg_height_label,
-            self.analyzer_status_label,
-            QLabel("<b>Upper Band Fit</b>"),
-            self.upper_fit_label,
-            self.upper_stats_label,
-            QLabel("<b>Lower Band Fit</b>"),
-            self.lower_fit_label,
-            self.lower_stats_label,
-            QLabel("<b>Plasma Parameters</b>"),
-            self.start_time_label,
-            self.start_freq_label,
-            self.bandwidth_label,
-            self.compression_label,
-            self.mach_label,
-            self.alfven_speed_label,
-            self.magnetic_field_label,
-            self.warning_label,
+            analyzer_panel,
+            fit_panel,
+            averaging_panel,
+            plasma_panel,
         ):
             right_inner.addWidget(widget)
         right_inner.addStretch(1)
@@ -271,6 +325,7 @@ class TypeIIBandSplittingDialog(QDialog):
         root.addWidget(self.status)
         self.setLayout(root)
         self._apply_toolbar_icons()
+        self._apply_plot_theme()
 
         if isinstance(session, dict):
             self.restore_session(session, emit_change=False)
@@ -406,6 +461,33 @@ class TypeIIBandSplittingDialog(QDialog):
         button.setMaximumSize(self._ICON_BUTTON_SIZE)
         return button
 
+    @staticmethod
+    def _configure_detail_label(label: QLabel) -> None:
+        label.setWordWrap(True)
+        label.setTextFormat(Qt.TextFormat.RichText)
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        label.setMargin(2)
+
+    @staticmethod
+    def _make_section_box(title: str, widgets: tuple[QWidget, ...]) -> QGroupBox:
+        box = QGroupBox(title)
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(6)
+        for widget in widgets:
+            layout.addWidget(widget)
+        return box
+
+    @staticmethod
+    def _detail_block(title: str, value_html: str, *, muted: bool = False) -> str:
+        color = "#7a7a7a" if muted else "#5f7693"
+        return (
+            f"<div style='margin-bottom:6px;'>"
+            f"<span style='font-size:11px; color:{color};'><b>{title}</b></span><br>"
+            f"<span style='font-size:13px;'><b>{value_html}</b></span>"
+            f"</div>"
+        )
+
     def _apply_toolbar_icons(self) -> None:
         for button in (
             getattr(self, "add_points_button", None),
@@ -424,11 +506,54 @@ class TypeIIBandSplittingDialog(QDialog):
                 continue
             button.setIcon(self._band_splitting_icon(filename))
 
+    def _plot_theme_colors(self) -> tuple[str, str]:
+        if self._is_dark_ui():
+            return "#111111", "#f2f2f2"
+        return "#ffffff", "#101010"
+
+    def _apply_plot_theme(self) -> None:
+        if self.plot_widget is None or self.plot_item is None or pg is None:
+            return
+
+        bg, fg = self._plot_theme_colors()
+        self.plot_widget.setBackground(bg)
+
+        try:
+            view_box = self.plot_item.getViewBox()
+            if view_box is not None and hasattr(view_box, "setBackgroundColor"):
+                view_box.setBackgroundColor(bg)
+        except Exception:
+            pass
+
+        axis_pen = pg.mkPen(fg, width=1.0)
+        for axis_name in ("bottom", "left"):
+            try:
+                axis = self.plot_item.getAxis(axis_name)
+                if axis is None:
+                    continue
+                axis.setPen(axis_pen)
+                axis.setTextPen(axis_pen)
+            except Exception:
+                pass
+
+        try:
+            self.plot_item.titleLabel.item.setDefaultTextColor(QColor(fg))
+        except Exception:
+            pass
+
+        if self.color_bar is not None:
+            try:
+                self.color_bar.axis.setPen(axis_pen)
+                self.color_bar.axis.setTextPen(axis_pen)
+            except Exception:
+                pass
+
     def _show_placeholder_action(self, label: str) -> None:
         self.status.showMessage(f"{label} is not implemented yet.", 3000)
 
     def _on_theme_changed(self, _dark: bool) -> None:
         self._apply_toolbar_icons()
+        self._apply_plot_theme()
 
     @staticmethod
     def _normalize_export_extension(ext_value: str) -> str:
@@ -614,6 +739,8 @@ class TypeIIBandSplittingDialog(QDialog):
             "initial_shock_height_rs": _pick_numeric("initial_shock_height_rs"),
             "avg_shock_height_rs": _pick_numeric("avg_shock_height_rs"),
             "start_freq_mhz": _pick_numeric("start_freq_mhz"),
+            "avg_drift_mhz_s": _pick_numeric("avg_drift_mhz_s"),
+            "avg_drift_err_mhz_s": _pick_numeric("avg_drift_err_mhz_s"),
             "fold": fold,
             "speed_mode": self._selected_speed_mode(),
         }
@@ -696,6 +823,16 @@ class TypeIIBandSplittingDialog(QDialog):
             return f"{float(value):.{digits}f}{suffix}"
         except Exception:
             return ""
+
+    @classmethod
+    def _format_pm(cls, value, error, digits: int = 4, suffix: str = "") -> str:
+        base = cls._format_value(value, digits)
+        if not base:
+            return "—"
+        err = cls._format_value(error, digits)
+        if err:
+            return f"{base} ± {err}{suffix}"
+        return f"{base}{suffix}"
 
     def _emit_session_changed(self) -> None:
         if self._suppress_emit:
@@ -918,6 +1055,7 @@ class TypeIIBandSplittingDialog(QDialog):
                 lower_fit=self._lower_fit,
                 analysis_start_freq_mhz=float(analysis_inputs["start_freq_mhz"]),
                 analysis_shock_speed_km_s=float(selected_shock_speed),
+                available_time_seconds=self.time_seconds,
             )
         except ValueError as exc:
             QMessageBox.warning(self, "Type II Band-splitting", str(exc))
@@ -957,6 +1095,7 @@ class TypeIIBandSplittingDialog(QDialog):
         x1 = float(time_edges[-1])
         y0 = float(freq_edges[0])
         y1 = float(freq_edges[-1])
+        _, fg = self._plot_theme_colors()
 
         vmin, vmax = finite_data_limits(arr)
         if vmin is None or vmax is None:
@@ -982,7 +1121,7 @@ class TypeIIBandSplittingDialog(QDialog):
             if self.color_bar is not None:
                 try:
                     self.color_bar.setLevels((vmin, vmax))
-                    self.color_bar.axis.setLabel(f"Intensity [{self.display_unit}]")
+                    self.color_bar.axis.setLabel(f"Intensity [{self.display_unit}]", color=fg)
                     color_map, _lut = _mpl_cmap_to_lookup(self.cmap)
                     if color_map is not None:
                         self.color_bar.setColorMap(color_map)
@@ -990,8 +1129,8 @@ class TypeIIBandSplittingDialog(QDialog):
                     pass
 
         self.plot_item.setTitle(f"{self.filename}_Type_II_Band_Splitting")
-        self.plot_item.setLabel("bottom", "Time (s)")
-        self.plot_item.setLabel("left", "Frequency (MHz)")
+        self.plot_item.setLabel("bottom", "Time (s)", color=fg)
+        self.plot_item.setLabel("left", "Frequency (MHz)", color=fg)
 
         if self._upper_points:
             upper = np.asarray(self._upper_points, dtype=float)
@@ -1015,21 +1154,31 @@ class TypeIIBandSplittingDialog(QDialog):
         else:
             self.lower_curve_item.setData([], [])
 
+        self._apply_plot_theme()
         self.plot_item.enableAutoRange()
 
     def _update_fit_labels(self) -> None:
         def _set_for(band_fit: dict[str, Any] | None, eq_label: QLabel, stats_label: QLabel, band_name: str) -> None:
+            band_symbol = "u" if "Upper" in band_name else "l"
             if not band_fit:
-                eq_label.setText(f"{band_name}: not fitted.")
-                stats_label.setText(f"{band_name} points: {len(self._band_points('upper' if 'Upper' in band_name else 'lower'))}")
+                eq_label.setText(self._detail_block(
+                    f"{band_name}",
+                    f"f<sub>{band_symbol}</sub>(t) not fitted",
+                    muted=True,
+                ))
+                stats_label.setText(self._detail_block(
+                    "Selected points",
+                    str(len(self._band_points('upper' if 'Upper' in band_name else 'lower'))),
+                ))
                 return
-            eq_label.setText(
-                f"{band_name}: <b>f(x) = {float(band_fit['a']):.2f} · x<sup>-{float(band_fit['b']):.2f}</sup></b>"
-            )
+            eq_label.setText(self._detail_block(
+                f"{band_name}",
+                f"f<sub>{band_symbol}</sub>(t) = {float(band_fit['a']):.2f} t<sup>-{float(band_fit['b']):.2f}</sup>",
+            ))
             stats_label.setText(
-                "R² = "
-                f"{self._format_value(band_fit.get('r2'), 4)} | RMSE = {self._format_value(band_fit.get('rmse'), 4)} | "
-                f"Points = {int(band_fit.get('point_count', 0) or 0)}"
+                self._detail_block("R<sup>2</sup>", self._format_value(band_fit.get('r2'), 4) or "—")
+                + self._detail_block("RMSE", self._format_value(band_fit.get('rmse'), 4) or "—")
+                + self._detail_block("Selected points", str(int(band_fit.get('point_count', 0) or 0)))
             )
 
         _set_for(self._upper_fit, self.upper_fit_label, self.upper_stats_label, "Upper Fit")
@@ -1037,59 +1186,122 @@ class TypeIIBandSplittingDialog(QDialog):
 
     def _update_analysis_input_labels(self) -> None:
         inputs = self._analysis_inputs_from_context()
-        self.analyzer_fold_label.setText(f"Analyzer fold: <b>{int(inputs.get('fold', 1) or 1)}</b>")
-        self.analyzer_start_freq_label.setText(
-            f"Analyzer starting frequency: <b>{self._format_value(inputs.get('start_freq_mhz'), 4, ' MHz')}</b>"
+        self.analyzer_fold_label.setText(self._detail_block("Newkirk model", f"{int(inputs.get('fold', 1) or 1)}-fold"))
+        self.analyzer_start_freq_label.setText(self._detail_block(
+            "f<sub>start</sub>",
+            self._format_value(inputs.get('start_freq_mhz'), 4, ' MHz') or "—",
+        ))
+        self.analyzer_avg_drift_label.setText(
+            self._detail_block(
+                "⟨df/dt⟩<sub>Analyzer</sub>",
+                self._format_pm(inputs.get('avg_drift_mhz_s'), inputs.get('avg_drift_err_mhz_s'), 4, ' MHz/s'),
+            )
         )
-        self.analyzer_initial_speed_label.setText(
-            f"Initial shock speed: <b>{self._format_value(inputs.get('initial_shock_speed_km_s'), 2, ' km/s')}</b>"
-        )
-        self.analyzer_avg_speed_label.setText(
-            f"Average shock speed: <b>{self._format_value(inputs.get('avg_shock_speed_km_s'), 2, ' km/s')}</b>"
-        )
-        self.analyzer_initial_height_label.setText(
-            f"Initial shock height: <b>{self._format_value(inputs.get('initial_shock_height_rs'), 4, ' R_s')}</b>"
-        )
-        self.analyzer_avg_height_label.setText(
-            f"Average shock height: <b>{self._format_value(inputs.get('avg_shock_height_rs'), 4, ' R_s')}</b>"
-        )
+        self.analyzer_initial_speed_label.setText(self._detail_block(
+            "V<sub>s,0</sub>",
+            self._format_value(inputs.get('initial_shock_speed_km_s'), 2, ' km/s') or "—",
+        ))
+        self.analyzer_avg_speed_label.setText(self._detail_block(
+            "⟨V<sub>s</sub>⟩",
+            self._format_value(inputs.get('avg_shock_speed_km_s'), 2, ' km/s') or "—",
+        ))
+        self.analyzer_initial_height_label.setText(self._detail_block(
+            "R<sub>p,0</sub>",
+            self._format_value(inputs.get('initial_shock_height_rs'), 4, ' R<sub>s</sub>') or "—",
+        ))
+        self.analyzer_avg_height_label.setText(self._detail_block(
+            "⟨R<sub>p</sub>⟩",
+            self._format_value(inputs.get('avg_shock_height_rs'), 4, ' R<sub>s</sub>') or "—",
+        ))
 
         if self._analysis_inputs_ready(inputs):
-            self.analyzer_status_label.setText("")
+            self.analyzer_status_label.setText(
+                "<span style='color:#2e7d32;'><b>Analyzer reference data loaded.</b></span>"
+            )
         else:
             self.analyzer_status_label.setText(
+                "<span style='color:#b26a00;'><b>Analyzer input missing.</b></span><br>"
                 "Run the usual Analyzer window first to populate the shock speeds, shock heights, and starting frequency."
             )
 
     def _update_result_labels(self) -> None:
         if not self._results:
-            self.start_time_label.setText("Start time: ")
-            self.start_freq_label.setText("Start frequencies: ")
-            self.bandwidth_label.setText("Bandwidth: ")
-            self.compression_label.setText("Compression ratio X: ")
-            self.mach_label.setText("Alfven Mach number M_A: ")
-            self.alfven_speed_label.setText("Alfven speed V_A: ")
-            self.magnetic_field_label.setText("Magnetic field B: ")
+            self.interval_label.setText(self._detail_block("Averaging interval", "—"))
+            self.start_time_label.setText(self._detail_block("t<sub>start</sub>", "—"))
+            self.start_freq_label.setText(
+                self._detail_block("f<sub>u</sub>(t<sub>start</sub>)", "—")
+                + self._detail_block("f<sub>l</sub>(t<sub>start</sub>)", "—")
+            )
+            self.avg_freqs_label.setText(
+                self._detail_block("⟨f<sub>u</sub>⟩", "—")
+                + self._detail_block("⟨f<sub>l</sub>⟩", "—")
+            )
+            self.bandwidth_label.setText(self._detail_block("⟨Δf⟩ = ⟨f<sub>u</sub> - f<sub>l</sub>⟩", "—"))
+            self.upper_drift_label.setText(self._detail_block("⟨df<sub>u</sub>/dt⟩", "—"))
+            self.compression_label.setText(self._detail_block("X = (⟨f<sub>u</sub>⟩ / ⟨f<sub>l</sub>⟩)<sup>2</sup>", "—"))
+            self.mach_label.setText(self._detail_block("M<sub>A</sub>", "—"))
+            self.alfven_speed_label.setText(self._detail_block("V<sub>A</sub>", "—"))
+            self.magnetic_field_label.setText(self._detail_block("B", "—"))
             self.warning_label.setText("")
             return
 
         result = dict(self._results)
-        self.start_time_label.setText(f"Start time: <b>{self._format_value(result.get('start_time_s'), 4, ' s')}</b>")
+        self.interval_label.setText(self._detail_block(
+            "Averaging interval",
+            f"[{self._format_value(result.get('start_time_s'), 4, ' s')}, {self._format_value(result.get('end_time_s'), 4, ' s')}]",
+        ))
+        self.start_time_label.setText(self._detail_block(
+            "t<sub>start</sub>",
+            self._format_value(result.get('start_time_s'), 4, ' s') or "—",
+        ))
         self.start_freq_label.setText(
-            "Start frequencies: "
-            f"<b>f_u = {self._format_value(result.get('upper_start_freq_mhz'), 4, ' MHz')}</b>, "
-            f"<b>f_l = {self._format_value(result.get('lower_start_freq_mhz'), 4, ' MHz')}</b>"
+            self._detail_block(
+                "f<sub>u</sub>(t<sub>start</sub>)",
+                self._format_value(result.get('upper_start_freq_mhz'), 4, ' MHz') or "—",
+            )
+            + self._detail_block(
+                "f<sub>l</sub>(t<sub>start</sub>)",
+                self._format_value(result.get('lower_start_freq_mhz'), 4, ' MHz') or "—",
+            )
         )
-        self.bandwidth_label.setText(f"Bandwidth (f_u - f_l): <b>{self._format_value(result.get('bandwidth_mhz'), 4, ' MHz')}</b>")
-        self.compression_label.setText(f"Compression ratio X: <b>{self._format_value(result.get('compression_ratio'), 4)}</b>")
-        self.mach_label.setText(f"Alfven Mach number M_A: <b>{self._format_value(result.get('alfven_mach_number'), 4)}</b>")
-        self.alfven_speed_label.setText(
-            f"Alfven speed V_A: <b>{self._format_value(result.get('alfven_speed_km_s'), 2, ' km/s')}</b>"
+        self.avg_freqs_label.setText(
+            self._detail_block(
+                "⟨f<sub>u</sub>⟩",
+                self._format_value(result.get('avg_upper_freq_mhz'), 4, ' MHz') or "—",
+            )
+            + self._detail_block(
+                "⟨f<sub>l</sub>⟩",
+                self._format_value(result.get('avg_lower_freq_mhz'), 4, ' MHz') or "—",
+            )
         )
-        self.magnetic_field_label.setText(
-            f"Magnetic field B: <b>{self._format_value(result.get('magnetic_field_g'), 4, ' G')}</b>"
+        self.bandwidth_label.setText(self._detail_block(
+            "⟨Δf⟩ = ⟨f<sub>u</sub> - f<sub>l</sub>⟩",
+            self._format_value(result.get('bandwidth_mhz'), 4, ' MHz') or "—",
+        ))
+        self.upper_drift_label.setText(self._detail_block(
+            "⟨df<sub>u</sub>/dt⟩",
+            self._format_value(result.get('upper_avg_drift_mhz_s'), 4, ' MHz/s') or "—",
+        ))
+        self.compression_label.setText(self._detail_block(
+            "X = (⟨f<sub>u</sub>⟩ / ⟨f<sub>l</sub>⟩)<sup>2</sup>",
+            self._format_value(result.get('compression_ratio'), 4) or "—",
+        ))
+        self.mach_label.setText(self._detail_block(
+            "M<sub>A</sub>",
+            self._format_value(result.get('alfven_mach_number'), 4) or "—",
+        ))
+        self.alfven_speed_label.setText(self._detail_block(
+            "V<sub>A</sub>",
+            self._format_value(result.get('alfven_speed_km_s'), 2, ' km/s') or "—",
+        ))
+        self.magnetic_field_label.setText(self._detail_block(
+            "B",
+            self._format_value(result.get('magnetic_field_g'), 4, ' G') or "—",
+        ))
+        warning = str(result.get("warning") or "").strip()
+        self.warning_label.setText(
+            f"<span style='color:#b26a00;'><b>Warning:</b> {warning}</span>" if warning else ""
         )
-        self.warning_label.setText(str(result.get("warning") or ""))
 
     def _sync_controls(self) -> None:
         active_points = len(self._band_points(self._active_band_key()))

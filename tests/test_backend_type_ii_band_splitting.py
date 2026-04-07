@@ -9,6 +9,7 @@ from src.Backend.type_ii_band_splitting import (
     electron_density_cm3_from_frequency_mhz,
     fit_power_law,
     magnetic_field_gauss_from_alfven_speed,
+    power_law_drift_rate,
 )
 
 
@@ -44,22 +45,31 @@ def test_calculate_type_ii_parameters_matches_expected_plasma_formulae():
         lower_fit=lower_fit,
         analysis_start_freq_mhz=analyzer_start_freq,
         analysis_shock_speed_km_s=analyzer_shock_speed,
+        available_time_seconds=upper_t,
     )
 
     start_time = 1.0
+    end_time = 3.0
     upper_start = 100.0
     lower_start = 82.0
-    bandwidth = upper_start - lower_start
-    compression = (upper_start / lower_start) ** 2
+    avg_upper = float(np.mean(upper_f))
+    avg_lower = float(np.mean(lower_f))
+    bandwidth = float(np.mean(upper_f - lower_f))
+    upper_avg_drift = float(np.mean(power_law_drift_rate(upper_t, upper_fit["a"], upper_fit["b"])))
+    compression = (avg_upper / avg_lower) ** 2
     mach = math.sqrt((compression * (compression + 5.0)) / (2.0 * (4.0 - compression)))
     alfven_speed = analyzer_shock_speed / mach
     density_cm3 = electron_density_cm3_from_frequency_mhz(analyzer_start_freq)
     magnetic_field = magnetic_field_gauss_from_alfven_speed(alfven_speed, density_cm3)
 
     assert math.isclose(result["start_time_s"], start_time, rel_tol=1e-9)
+    assert math.isclose(result["end_time_s"], end_time, rel_tol=1e-9)
     assert math.isclose(result["upper_start_freq_mhz"], upper_start, rel_tol=1e-9)
     assert math.isclose(result["lower_start_freq_mhz"], lower_start, rel_tol=1e-9)
+    assert math.isclose(result["avg_upper_freq_mhz"], avg_upper, rel_tol=1e-9)
+    assert math.isclose(result["avg_lower_freq_mhz"], avg_lower, rel_tol=1e-9)
     assert math.isclose(result["bandwidth_mhz"], bandwidth, rel_tol=1e-9)
+    assert math.isclose(result["upper_avg_drift_mhz_s"], upper_avg_drift, rel_tol=1e-9)
     assert math.isclose(result["compression_ratio"], compression, rel_tol=1e-9)
     assert math.isclose(result["alfven_mach_number"], mach, rel_tol=1e-9)
     assert math.isclose(result["alfven_speed_km_s"], alfven_speed, rel_tol=1e-9)
@@ -87,6 +97,7 @@ def test_calculate_type_ii_parameters_uses_supplied_analyzer_speed_for_alfven_te
         lower_fit=lower_fit,
         analysis_start_freq_mhz=55.0,
         analysis_shock_speed_km_s=900.0,
+        available_time_seconds=upper_t,
     )
     average = calculate_type_ii_parameters(
         upper_time_seconds=upper_t,
@@ -97,6 +108,7 @@ def test_calculate_type_ii_parameters_uses_supplied_analyzer_speed_for_alfven_te
         lower_fit=lower_fit,
         analysis_start_freq_mhz=55.0,
         analysis_shock_speed_km_s=700.0,
+        available_time_seconds=upper_t,
     )
 
     assert math.isclose(initial["compression_ratio"], average["compression_ratio"], rel_tol=1e-9)
@@ -118,6 +130,7 @@ def test_calculate_type_ii_parameters_marks_lower_extrapolation():
         lower_fit=lower_fit,
         analysis_start_freq_mhz=54.0,
         analysis_shock_speed_km_s=860.0,
+        available_time_seconds=np.array([1.0, 2.0, 3.0], dtype=float),
     )
 
     assert result["lower_extrapolated"] is True

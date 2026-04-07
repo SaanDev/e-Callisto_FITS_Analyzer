@@ -12,7 +12,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import QPointF
+from PySide6.QtCore import QObject, QPointF, Signal
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
 
@@ -120,6 +120,51 @@ def test_type_ii_dialog_maps_image_to_time_and_frequency_edges():
     assert np.isclose(bottom_right.y(), 75.0)
 
     dlg.close()
+
+
+def test_type_ii_dialog_plot_background_follows_theme():
+    app = _app()
+    if pg is None:
+        pytest.skip("PyQtGraph is unavailable")
+
+    class _Theme(QObject):
+        themeChanged = Signal(bool)
+
+        def __init__(self, dark: bool):
+            super().__init__()
+            self._dark = bool(dark)
+
+        def is_dark(self) -> bool:
+            return self._dark
+
+        def set_dark(self, dark: bool) -> None:
+            self._dark = bool(dark)
+            self.themeChanged.emit(self._dark)
+
+    previous = app.property("theme_manager")
+    theme = _Theme(False)
+    app.setProperty("theme_manager", theme)
+    try:
+        dlg = TypeIIBandSplittingDialog(
+            np.arange(12, dtype=float).reshape(3, 4),
+            np.array([100.0, 90.0, 80.0], dtype=float),
+            np.array([1.0, 2.0, 3.0, 4.0], dtype=float),
+            "demo.fit",
+        )
+        dlg.show()
+        QApplication.processEvents()
+
+        lightness_light = dlg.plot_widget.backgroundBrush().color().lightness()
+        assert lightness_light > 200
+
+        theme.set_dark(True)
+        QApplication.processEvents()
+        lightness_dark = dlg.plot_widget.backgroundBrush().color().lightness()
+        assert lightness_dark < 80
+
+        dlg.close()
+    finally:
+        app.setProperty("theme_manager", previous)
 
 
 def test_type_ii_dialog_save_plot_exports_png(tmp_path, monkeypatch):

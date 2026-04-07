@@ -43,6 +43,8 @@ TYPE_II_ANALYSIS_INPUT_FIELDS = (
     "initial_shock_height_rs",
     "avg_shock_height_rs",
     "start_freq_mhz",
+    "avg_drift_mhz_s",
+    "avg_drift_err_mhz_s",
     "fold",
     "speed_mode",
 )
@@ -52,12 +54,18 @@ TYPE_II_ANALYSIS_INPUT_NUMERIC_FIELDS = (
     "initial_shock_height_rs",
     "avg_shock_height_rs",
     "start_freq_mhz",
+    "avg_drift_mhz_s",
+    "avg_drift_err_mhz_s",
 )
 TYPE_II_RESULT_FIELDS = (
     "start_time_s",
+    "end_time_s",
     "upper_start_freq_mhz",
     "lower_start_freq_mhz",
+    "avg_upper_freq_mhz",
+    "avg_lower_freq_mhz",
     "bandwidth_mhz",
+    "upper_avg_drift_mhz_s",
     "compression_ratio",
     "alfven_mach_number",
     "alfven_speed_km_s",
@@ -67,9 +75,13 @@ TYPE_II_RESULT_FIELDS = (
 )
 TYPE_II_RESULT_NUMERIC_FIELDS = (
     "start_time_s",
+    "end_time_s",
     "upper_start_freq_mhz",
     "lower_start_freq_mhz",
+    "avg_upper_freq_mhz",
+    "avg_lower_freq_mhz",
     "bandwidth_mhz",
+    "upper_avg_drift_mhz_s",
     "compression_ratio",
     "alfven_mach_number",
     "alfven_speed_km_s",

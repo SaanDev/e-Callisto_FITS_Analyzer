@@ -123,6 +123,31 @@ def magnetic_field_gauss_from_alfven_speed(alfven_speed_km_s: float, electron_de
     return float(b_t * 1e4)
 
 
+def _sampling_times_for_interval(
+    *,
+    t_start: float,
+    t_end: float,
+    upper_fit_times: np.ndarray,
+    available_time_seconds: Any = None,
+) -> np.ndarray:
+    if available_time_seconds is not None:
+        samples = np.asarray(available_time_seconds, dtype=float).reshape(-1)
+        mask = np.isfinite(samples) & (samples >= t_start) & (samples <= t_end)
+        samples = np.asarray(samples[mask], dtype=float)
+        if samples.size >= 2:
+            return np.unique(samples)
+
+    samples = np.unique(np.asarray(upper_fit_times, dtype=float).reshape(-1))
+    samples = samples[np.isfinite(samples) & (samples >= t_start) & (samples <= t_end)]
+    if samples.size >= 2:
+        return samples
+
+    if math.isclose(t_start, t_end, rel_tol=0.0, abs_tol=1e-9):
+        return np.array([t_start], dtype=float)
+
+    return np.linspace(t_start, t_end, 512, dtype=float)
+
+
 def calculate_type_ii_parameters(
     *,
     upper_time_seconds: Any,
@@ -133,6 +158,7 @@ def calculate_type_ii_parameters(
     lower_fit: dict[str, Any],
     analysis_start_freq_mhz: float,
     analysis_shock_speed_km_s: float,
+    available_time_seconds: Any = None,
 ) -> dict[str, Any]:
     upper_times = np.asarray(upper_time_seconds, dtype=float).reshape(-1)
     lower_times = np.asarray(lower_time_seconds, dtype=float).reshape(-1)
@@ -141,16 +167,33 @@ def calculate_type_ii_parameters(
     if np.count_nonzero(upper_mask) < 2 or np.count_nonzero(lower_mask) < 2:
         raise ValueError("Both bands need at least two positive-time points before calculations.")
 
-    t_start = float(np.min(upper_times[upper_mask]))
+    fit_upper_times = np.asarray(upper_times[upper_mask], dtype=float)
+    fit_lower_times = np.asarray(lower_times[lower_mask], dtype=float)
+
+    t_start = float(np.min(fit_upper_times))
+    t_end = float(np.max(fit_upper_times))
     upper_a = float(upper_fit["a"])
     upper_b = float(upper_fit["b"])
     lower_a = float(lower_fit["a"])
     lower_b = float(lower_fit["b"])
 
+    sample_times = _sampling_times_for_interval(
+        t_start=t_start,
+        t_end=t_end,
+        upper_fit_times=fit_upper_times,
+        available_time_seconds=available_time_seconds,
+    )
+    upper_curve = np.asarray(power_law(sample_times, upper_a, upper_b), dtype=float)
+    lower_curve = np.asarray(power_law(sample_times, lower_a, lower_b), dtype=float)
+    upper_drift = np.asarray(power_law_drift_rate(sample_times, upper_a, upper_b), dtype=float)
+
     f_upper = float(power_law(t_start, upper_a, upper_b))
     f_lower = float(power_law(t_start, lower_a, lower_b))
-    bandwidth = float(f_upper - f_lower)
-    compression_ratio = float((f_upper / f_lower) ** 2)
+    avg_upper_freq = float(np.mean(upper_curve))
+    avg_lower_freq = float(np.mean(lower_curve))
+    bandwidth = float(np.mean(upper_curve - lower_curve))
+    avg_upper_drift = float(np.mean(upper_drift))
+    compression_ratio = float((avg_upper_freq / avg_lower_freq) ** 2)
 
     if compression_ratio <= 0.0 or compression_ratio >= 4.0:
         raise ValueError("Compression ratio X must stay between 0 and 4 for the selected Mach-number formula.")
@@ -171,17 +214,23 @@ def calculate_type_ii_parameters(
     electron_density_cm3 = electron_density_cm3_from_frequency_mhz(analysis_freq)
     magnetic_field_g = magnetic_field_gauss_from_alfven_speed(alfven_speed, electron_density_cm3)
 
-    lower_fit_times = np.asarray(lower_times[lower_mask], dtype=float)
-    lower_extrapolated = bool(t_start < float(np.min(lower_fit_times)) or t_start > float(np.max(lower_fit_times)))
+    lower_extrapolated = bool(
+        t_start < float(np.min(fit_lower_times))
+        or t_end > float(np.max(fit_lower_times))
+    )
     warning = ""
     if lower_extrapolated:
-        warning = "Lower-band fit was extrapolated at the upper-band start time."
+        warning = "Lower-band fit was extrapolated over part of the averaging interval."
 
     return {
         "start_time_s": t_start,
+        "end_time_s": t_end,
         "upper_start_freq_mhz": f_upper,
         "lower_start_freq_mhz": f_lower,
+        "avg_upper_freq_mhz": avg_upper_freq,
+        "avg_lower_freq_mhz": avg_lower_freq,
         "bandwidth_mhz": bandwidth,
+        "upper_avg_drift_mhz_s": avg_upper_drift,
         "compression_ratio": compression_ratio,
         "alfven_mach_number": mach,
         "alfven_speed_km_s": alfven_speed,
