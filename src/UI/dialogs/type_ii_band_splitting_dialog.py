@@ -5,12 +5,15 @@ Type II band-splitting analysis dialog.
 from __future__ import annotations
 
 import os
+import sys
 from typing import Any
 
 from matplotlib import colormaps
 import numpy as np
-from PySide6.QtCore import QRectF, Signal, Qt
+from PySide6.QtCore import QRectF, Signal, QSize, Qt
+from PySide6.QtGui import QIcon, QPalette
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QDialog,
     QHBoxLayout,
@@ -19,6 +22,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QStatusBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -26,10 +30,13 @@ from PySide6.QtWidgets import (
 from src.Backend.frequency_axis import finite_data_limits, pyqtgraph_extent
 from src.Backend.type_ii_band_splitting import calculate_type_ii_parameters, fit_power_law, power_law
 from src.UI.accelerated_plot_widget import _mpl_cmap_to_lookup, _rgba_image_from_cmap, pg
+from src.UI.gui_shared import resource_path
 
 
 class TypeIIBandSplittingDialog(QDialog):
     sessionChanged = Signal(dict)
+    _ICON_SIZE = QSize(36, 36)
+    _ICON_BUTTON_SIZE = QSize(44, 44)
 
     def __init__(
         self,
@@ -60,6 +67,9 @@ class TypeIIBandSplittingDialog(QDialog):
         self._session_context = dict(session or {})
         self._suppress_emit = False
         self._using_pyqtgraph = pg is not None
+        self.theme = QApplication.instance().property("theme_manager") if QApplication.instance() else None
+        if self.theme and hasattr(self.theme, "themeChanged"):
+            self.theme.themeChanged.connect(self._on_theme_changed)
 
         self._upper_points: list[tuple[float, float]] = []
         self._lower_points: list[tuple[float, float]] = []
@@ -130,21 +140,26 @@ class TypeIIBandSplittingDialog(QDialog):
         self.band_combo.addItem("Lower Band", "lower")
         self.band_combo.currentIndexChanged.connect(self._on_active_band_changed)
 
-        self.add_points_button = QPushButton("Add Points")
-        self.add_points_button.setCheckable(True)
+        self.add_points_button = self._build_icon_button("Add Points", "add_points.svg", checkable=True)
         self.add_points_button.toggled.connect(self._on_add_points_toggled)
 
-        self.undo_button = QPushButton("Undo Last Point")
+        self.undo_button = self._build_icon_button("Undo Last Point", "undo_last_point.svg")
         self.undo_button.clicked.connect(self._undo_last_point)
 
-        self.clear_button = QPushButton("Clear Active Band")
+        self.clear_button = self._build_icon_button("Clear Active Band", "clear_active_band.svg")
         self.clear_button.clicked.connect(self._clear_active_band)
 
-        self.fit_active_button = QPushButton("Fit Active Band")
+        self.fit_active_button = self._build_icon_button("Fit Active Band", "fit_active_band.svg")
         self.fit_active_button.clicked.connect(self._fit_active_band)
 
-        self.fit_both_button = QPushButton("Fit Both Bands")
+        self.fit_both_button = self._build_icon_button("Fit Both Bands", "fit_both_bands.svg")
         self.fit_both_button.clicked.connect(self._fit_both_bands)
+
+        self.bvr_button = self._build_icon_button("BvR", "plot_BvR.svg")
+        self.bvr_button.clicked.connect(lambda: self._show_placeholder_action("BvR"))
+
+        self.settings_button = self._build_icon_button("Settings", "settings.svg")
+        self.settings_button.clicked.connect(lambda: self._show_placeholder_action("Settings"))
 
         self.speed_mode_combo = QComboBox()
         self.speed_mode_combo.addItem("Initial Shock Speed", "initial")
@@ -155,16 +170,13 @@ class TypeIIBandSplittingDialog(QDialog):
         self.calculate_button.clicked.connect(self._calculate_parameters)
 
         controls = QHBoxLayout()
-        controls.addWidget(QLabel("Active Band:"))
-        controls.addWidget(self.band_combo)
         controls.addWidget(self.add_points_button)
         controls.addWidget(self.undo_button)
         controls.addWidget(self.clear_button)
         controls.addWidget(self.fit_active_button)
         controls.addWidget(self.fit_both_button)
-        controls.addWidget(QLabel("Shock Speed:"))
-        controls.addWidget(self.speed_mode_combo)
-        controls.addWidget(self.calculate_button)
+        controls.addWidget(self.bvr_button)
+        controls.addWidget(self.settings_button)
         controls.addStretch(1)
 
         left_layout = QVBoxLayout()
@@ -175,6 +187,8 @@ class TypeIIBandSplittingDialog(QDialog):
         self.upper_stats_label = QLabel("")
         self.lower_fit_label = QLabel("")
         self.lower_stats_label = QLabel("")
+        self.active_band_label = QLabel("Active Band:")
+        self.speed_mode_label = QLabel("Shock Speed:")
         self.analyzer_fold_label = QLabel("")
         self.analyzer_start_freq_label = QLabel("")
         self.analyzer_initial_speed_label = QLabel("")
@@ -193,8 +207,20 @@ class TypeIIBandSplittingDialog(QDialog):
         self.warning_label = QLabel("")
         self.warning_label.setWordWrap(True)
 
+        controls_panel = QWidget()
+        controls_panel_layout = QVBoxLayout(controls_panel)
+        controls_panel_layout.setContentsMargins(0, 0, 0, 0)
+        controls_panel_layout.setSpacing(8)
+        controls_panel_layout.addWidget(QLabel("<b>Controls</b>"))
+        controls_panel_layout.addWidget(self.active_band_label)
+        controls_panel_layout.addWidget(self.band_combo)
+        controls_panel_layout.addWidget(self.speed_mode_label)
+        controls_panel_layout.addWidget(self.speed_mode_combo)
+        controls_panel_layout.addWidget(self.calculate_button)
+
         right_inner = QVBoxLayout()
         for widget in (
+            controls_panel,
             QLabel("<b>Analyzer Shock Inputs</b>"),
             self.analyzer_fold_label,
             self.analyzer_start_freq_label,
@@ -240,6 +266,7 @@ class TypeIIBandSplittingDialog(QDialog):
         root.addLayout(content)
         root.addWidget(self.status)
         self.setLayout(root)
+        self._apply_toolbar_icons()
 
         if isinstance(session, dict):
             self.restore_session(session, emit_change=False)
@@ -264,6 +291,139 @@ class TypeIIBandSplittingDialog(QDialog):
             self._upper_fit = fit
         else:
             self._lower_fit = fit
+
+    def _is_dark_ui(self) -> bool:
+        theme = getattr(self, "theme", None)
+        if theme is not None:
+            flag = getattr(theme, "is_dark", None)
+            try:
+                if callable(flag):
+                    return bool(flag())
+                return bool(flag)
+            except Exception:
+                pass
+
+        app = QApplication.instance()
+        if not app:
+            return False
+        return app.palette().color(QPalette.Window).lightness() < 128
+
+    def _load_icon_file(self, path: str) -> QIcon:
+        icon = QIcon(path)
+        if not icon.isNull():
+            return icon
+
+        if not str(path).lower().endswith(".svg"):
+            return QIcon()
+
+        try:
+            from PySide6.QtSvg import QSvgRenderer
+        except Exception:
+            return QIcon()
+
+        try:
+            renderer = QSvgRenderer(path)
+            if not renderer.isValid():
+                return QIcon()
+
+            size = renderer.defaultSize()
+            width = max(32, int(size.width())) if size.isValid() else 48
+            height = max(32, int(size.height())) if size.isValid() else 48
+
+            from PySide6.QtGui import QPainter, QPixmap
+
+            pixmap = QPixmap(width, height)
+            pixmap.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pixmap)
+            renderer.render(painter)
+            painter.end()
+            return QIcon(pixmap)
+        except Exception:
+            return QIcon()
+
+    def _band_splitting_icon(self, filename: str) -> QIcon:
+        folder = "dark" if self._is_dark_ui() else "light"
+        rels = [
+            os.path.join("assets", "band_splitting_icons", folder, filename),
+            os.path.join("assets", "band_splitting_icons", "light", filename),
+        ]
+
+        bases = []
+        if getattr(sys, "frozen", False):
+            bases.append(os.path.abspath(os.path.join(os.path.dirname(sys.executable), "..", "Resources")))
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            bases.append(os.path.abspath(meipass))
+
+        here = os.path.abspath(os.path.dirname(__file__))
+        bases.extend(
+            [
+                os.path.abspath(os.path.join(here, "..", "..", "..")),
+                os.path.abspath(os.getcwd()),
+                os.path.abspath(os.path.join(os.getcwd(), "..")),
+            ]
+        )
+
+        seen = set()
+        for base in bases:
+            if not base or base in seen:
+                continue
+            seen.add(base)
+            for rel in rels:
+                path = os.path.normpath(os.path.join(base, rel))
+                if os.path.exists(path):
+                    icon = self._load_icon_file(path)
+                    if not icon.isNull():
+                        return icon
+
+        for rel in rels:
+            try:
+                path = resource_path(rel)
+                if os.path.exists(path):
+                    icon = self._load_icon_file(path)
+                    if not icon.isNull():
+                        return icon
+            except Exception:
+                pass
+        return QIcon()
+
+    def _build_icon_button(self, label: str, icon_filename: str, *, checkable: bool = False) -> QToolButton:
+        button = QToolButton(self)
+        button.setText("")
+        button.setCheckable(checkable)
+        button.setAutoRaise(False)
+        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        button.setIconSize(self._ICON_SIZE)
+        button.setToolTip(label)
+        button.setStatusTip(label)
+        button.setAccessibleName(label)
+        button.setProperty("band_icon_filename", icon_filename)
+        button.setMinimumSize(self._ICON_BUTTON_SIZE)
+        button.setMaximumSize(self._ICON_BUTTON_SIZE)
+        return button
+
+    def _apply_toolbar_icons(self) -> None:
+        for button in (
+            getattr(self, "add_points_button", None),
+            getattr(self, "undo_button", None),
+            getattr(self, "clear_button", None),
+            getattr(self, "fit_active_button", None),
+            getattr(self, "fit_both_button", None),
+            getattr(self, "bvr_button", None),
+            getattr(self, "settings_button", None),
+        ):
+            if button is None:
+                continue
+            filename = str(button.property("band_icon_filename") or "")
+            if not filename:
+                continue
+            button.setIcon(self._band_splitting_icon(filename))
+
+    def _show_placeholder_action(self, label: str) -> None:
+        self.status.showMessage(f"{label} is not implemented yet.", 3000)
+
+    def _on_theme_changed(self, _dark: bool) -> None:
+        self._apply_toolbar_icons()
 
     @staticmethod
     def _safe_float_value(value) -> float | None:

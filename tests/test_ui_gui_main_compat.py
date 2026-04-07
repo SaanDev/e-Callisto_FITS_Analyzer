@@ -82,5 +82,14 @@ def test_type_ii_dialog_uses_pyqtgraph_plot_widget():
     assert isinstance(dlg.plot_widget, pg.GraphicsLayoutWidget)
     assert dlg.plot_item is not None
     assert dlg.image_item is not None
+    assert dlg.bvr_button is not None
+    assert dlg.settings_button is not None
+    assert dlg.add_points_button.icon().isNull() is False
+    assert dlg.undo_button.icon().isNull() is False
+    assert dlg.clear_button.icon().isNull() is False
+    assert dlg.fit_active_button.icon().isNull() is False
+    assert dlg.fit_both_button.icon().isNull() is False
+    assert dlg.bvr_button.icon().isNull() is False
+    assert dlg.settings_button.icon().isNull() is False
 
     dlg.close()
