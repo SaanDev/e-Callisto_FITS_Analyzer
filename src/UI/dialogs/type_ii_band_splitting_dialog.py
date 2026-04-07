@@ -1193,7 +1193,7 @@ class TypeIIBandSplittingDialog(QDialog):
         ))
         self.analyzer_avg_drift_label.setText(
             self._detail_block(
-                "⟨df/dt⟩<sub>Analyzer</sub>",
+                "⟨df/dt⟩",
                 self._format_pm(inputs.get('avg_drift_mhz_s'), inputs.get('avg_drift_err_mhz_s'), 4, ' MHz/s'),
             )
         )
