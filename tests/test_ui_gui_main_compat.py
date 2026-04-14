@@ -200,3 +200,51 @@ def test_type_ii_dialog_save_plot_exports_png(tmp_path, monkeypatch):
     assert image.width() >= 2000
 
     dlg.close()
+
+
+def test_type_ii_dialog_bvr_button_switches_plot_mode():
+    _app()
+    if pg is None:
+        pytest.skip("PyQtGraph is unavailable")
+
+    dlg = TypeIIBandSplittingDialog(
+        np.arange(20, dtype=float).reshape(4, 5),
+        np.array([120.0, 110.0, 100.0, 90.0], dtype=float),
+        np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=float),
+        "demo.fit",
+        session={
+            "source": {"filename": "demo.fit", "shape": [4, 5]},
+            "analyzer": {
+                "fold": 2,
+                "shock_summary": {
+                    "start_freq_mhz": 63.0,
+                    "initial_shock_speed_km_s": 920.0,
+                    "avg_shock_speed_km_s": 760.0,
+                    "initial_shock_height_rs": 1.31,
+                    "avg_shock_height_rs": 1.47,
+                    "avg_drift_mhz_s": -0.12,
+                    "avg_drift_err_mhz_s": 0.01,
+                },
+            },
+        },
+    )
+    dlg._upper_points = [(1.0, 100.0), (2.0, 76.0), (3.0, 64.0)]
+    dlg._lower_points = [(1.0, 82.0), (2.0, 68.0), (3.0, 57.0)]
+    dlg._fit_both_bands()
+
+    dlg.bvr_button.setChecked(True)
+    QApplication.processEvents()
+
+    assert dlg._plot_mode == "bvr"
+    assert dlg.image_item.isVisible() is False
+    assert dlg.bvr_scatter_item.isVisible() is True
+    assert "Shock Height" in dlg.plot_item.getAxis("bottom").labelText
+    assert "Magnetic Field" in dlg.plot_item.getAxis("left").labelText
+
+    dlg.bvr_button.setChecked(False)
+    QApplication.processEvents()
+
+    assert dlg._plot_mode == "spectrum"
+    assert dlg.image_item.isVisible() is True
+
+    dlg.close()

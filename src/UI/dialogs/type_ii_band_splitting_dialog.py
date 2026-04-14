@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.Backend.frequency_axis import axis_edges, finite_data_limits, frequency_edges
-from src.Backend.type_ii_band_splitting import calculate_type_ii_parameters, fit_power_law, power_law
+from src.Backend.type_ii_band_splitting import calculate_b_vs_r_profile, calculate_type_ii_parameters, fit_power_law, power_law
 from src.UI.accelerated_plot_widget import _mpl_cmap_to_lookup, _rgba_image_from_cmap, pg
 from src.UI.gui_shared import pick_export_path, resource_path
 
@@ -77,6 +77,7 @@ class TypeIIBandSplittingDialog(QDialog):
         self._upper_fit: dict[str, Any] | None = None
         self._lower_fit: dict[str, Any] | None = None
         self._results: dict[str, Any] = {}
+        self._plot_mode = "spectrum"
 
         self.plot_widget = None
         self.plot_item = None
@@ -85,6 +86,8 @@ class TypeIIBandSplittingDialog(QDialog):
         self.lower_scatter_item = None
         self.upper_curve_item = None
         self.lower_curve_item = None
+        self.bvr_scatter_item = None
+        self.bvr_curve_item = None
         self.color_bar = None
 
         if not self._using_pyqtgraph:
@@ -115,10 +118,21 @@ class TypeIIBandSplittingDialog(QDialog):
         )
         self.upper_curve_item = pg.PlotCurveItem(pen=pg.mkPen("#ff5a1f", width=2.0), antialias=True)
         self.lower_curve_item = pg.PlotCurveItem(pen=pg.mkPen("#0ea5e9", width=2.0), antialias=True)
+        self.bvr_scatter_item = pg.ScatterPlotItem(
+            size=8,
+            pen=pg.mkPen("#10b981", width=1.3),
+            brush=pg.mkBrush("#34d399"),
+            pxMode=True,
+        )
+        self.bvr_curve_item = pg.PlotCurveItem(pen=pg.mkPen("#f59e0b", width=2.2), antialias=True)
         self.plot_item.addItem(self.upper_curve_item)
         self.plot_item.addItem(self.lower_curve_item)
         self.plot_item.addItem(self.upper_scatter_item)
         self.plot_item.addItem(self.lower_scatter_item)
+        self.plot_item.addItem(self.bvr_curve_item)
+        self.plot_item.addItem(self.bvr_scatter_item)
+        self.bvr_scatter_item.hide()
+        self.bvr_curve_item.hide()
 
         try:
             sample = np.linspace(0.0, 1.0, 256)
@@ -159,8 +173,8 @@ class TypeIIBandSplittingDialog(QDialog):
         self.save_plot_button = self._build_icon_button("Save Plot", "save_plot.svg")
         self.save_plot_button.clicked.connect(self._save_plot)
 
-        self.bvr_button = self._build_icon_button("BvR", "plot_BvR.svg")
-        self.bvr_button.clicked.connect(lambda: self._show_placeholder_action("BvR"))
+        self.bvr_button = self._build_icon_button("BvR", "plot_BvR.svg", checkable=True)
+        self.bvr_button.toggled.connect(self._on_bvr_toggled)
 
         self.settings_button = self._build_icon_button("Settings", "settings.svg")
         self.settings_button.clicked.connect(lambda: self._show_placeholder_action("Settings"))
@@ -555,6 +569,61 @@ class TypeIIBandSplittingDialog(QDialog):
         self._apply_toolbar_icons()
         self._apply_plot_theme()
 
+    def _set_bvr_button_checked(self, checked: bool) -> None:
+        if self.bvr_button is None:
+            return
+        blocked = self.bvr_button.blockSignals(True)
+        try:
+            self.bvr_button.setChecked(bool(checked))
+        finally:
+            self.bvr_button.blockSignals(blocked)
+
+    def _build_bvr_profile(self) -> dict[str, Any]:
+        if self._upper_fit is None or self._lower_fit is None:
+            raise ValueError("Fit both bands before plotting B versus R.")
+
+        analysis_inputs = self._analysis_inputs_from_context()
+        if not self._analysis_inputs_ready(analysis_inputs):
+            raise ValueError(
+                "Run the usual Analyzer window first so the shock-speed and height references are available."
+            )
+
+        selected_shock_speed = self._selected_analysis_shock_speed(analysis_inputs)
+        if selected_shock_speed is None:
+            raise ValueError("The selected analyzer shock speed is unavailable.")
+
+        upper_t, upper_f = self._points_to_arrays(self._upper_points)
+        lower_t, lower_f = self._points_to_arrays(self._lower_points)
+        return calculate_b_vs_r_profile(
+            upper_time_seconds=upper_t,
+            upper_freqs_mhz=upper_f,
+            lower_time_seconds=lower_t,
+            lower_freqs_mhz=lower_f,
+            upper_fit=self._upper_fit,
+            lower_fit=self._lower_fit,
+            analysis_shock_speed_km_s=float(selected_shock_speed),
+            fold=int(analysis_inputs.get("fold", 1) or 1),
+            available_time_seconds=self.time_seconds,
+        )
+
+    def _on_bvr_toggled(self, checked: bool) -> None:
+        if checked:
+            try:
+                self._build_bvr_profile()
+            except ValueError as exc:
+                QMessageBox.information(self, "Type II Band-splitting", str(exc))
+                self.status.showMessage(str(exc), 4000)
+                self._set_bvr_button_checked(False)
+                return
+            self._plot_mode = "bvr"
+            self.add_points_button.setChecked(False)
+            self.status.showMessage("Showing magnetic field versus shock height.", 3000)
+        else:
+            self._plot_mode = "spectrum"
+            self.status.showMessage("Returned to the Type II dynamic spectrum.", 3000)
+        self._refresh_plot()
+        self._sync_controls()
+
     @staticmethod
     def _normalize_export_extension(ext_value: str) -> str:
         if not ext_value:
@@ -936,9 +1005,13 @@ class TypeIIBandSplittingDialog(QDialog):
             self._update_result_labels()
             self.status.showMessage("Shock speed source changed. Recalculate plasma parameters.", 3000)
             self._emit_session_changed()
+        if self._plot_mode == "bvr":
+            self._refresh_plot()
         self._sync_controls()
 
     def _on_plot_clicked(self, event) -> None:
+        if self._plot_mode != "spectrum":
+            return
         if not self.add_points_button.isChecked() or event is None:
             return
         if event.button() != Qt.MouseButton.LeftButton:
@@ -1084,10 +1157,29 @@ class TypeIIBandSplittingDialog(QDialog):
         ys = np.asarray(power_law(xs, float(fit["a"]), float(fit["b"])), dtype=float)
         return xs, ys
 
-    def _refresh_plot(self) -> None:
-        if self.plot_item is None or self.image_item is None:
-            return
+    def _show_spectrum_items(self) -> None:
+        self.image_item.show()
+        self.upper_scatter_item.show()
+        self.lower_scatter_item.show()
+        self.upper_curve_item.show()
+        self.lower_curve_item.show()
+        self.bvr_scatter_item.hide()
+        self.bvr_curve_item.hide()
+        if self.color_bar is not None:
+            self.color_bar.show()
 
+    def _show_bvr_items(self) -> None:
+        self.image_item.hide()
+        self.upper_scatter_item.hide()
+        self.lower_scatter_item.hide()
+        self.upper_curve_item.hide()
+        self.lower_curve_item.hide()
+        self.bvr_scatter_item.show()
+        self.bvr_curve_item.show()
+        if self.color_bar is not None:
+            self.color_bar.hide()
+
+    def _refresh_spectrum_plot(self) -> None:
         arr = np.ascontiguousarray(np.asarray(self.display_data, dtype=np.float32))
         freq_edges = frequency_edges(self.freqs, default_step=self.frequency_step_mhz or 1.0)
         time_edges = axis_edges(self.time_seconds, default_step=self._time_step_seconds())
@@ -1096,6 +1188,8 @@ class TypeIIBandSplittingDialog(QDialog):
         y0 = float(freq_edges[0])
         y1 = float(freq_edges[-1])
         _, fg = self._plot_theme_colors()
+
+        self._show_spectrum_items()
 
         vmin, vmax = finite_data_limits(arr)
         if vmin is None or vmax is None:
@@ -1153,6 +1247,40 @@ class TypeIIBandSplittingDialog(QDialog):
             self.lower_curve_item.setData(lower_curve[0], lower_curve[1])
         else:
             self.lower_curve_item.setData([], [])
+
+    def _refresh_bvr_plot(self) -> None:
+        _, fg = self._plot_theme_colors()
+        profile = self._build_bvr_profile()
+        heights = np.asarray(profile.get("heights_rs", []), dtype=float).reshape(-1)
+        magnetic = np.asarray(profile.get("magnetic_field_g", []), dtype=float).reshape(-1)
+        fit = dict(profile.get("fit") or {})
+        if heights.size < 2 or magnetic.size < 2 or not fit:
+            raise ValueError("B versus R plotting requires a valid magnetic-field profile.")
+
+        self._show_bvr_items()
+        self.bvr_scatter_item.setData(x=heights, y=magnetic)
+        xs = np.linspace(float(np.min(heights)), float(np.max(heights)), 400)
+        ys = np.asarray(power_law(xs, float(fit["a"]), float(fit["b"])), dtype=float)
+        self.bvr_curve_item.setData(xs, ys)
+
+        self.plot_item.setTitle(f"{self.filename}_Magnetic_Field_vs_Shock_Height")
+        self.plot_item.setLabel("bottom", "Shock Height (R<sub>s</sub>)", color=fg)
+        self.plot_item.setLabel("left", "Magnetic Field (G)", color=fg)
+
+    def _refresh_plot(self) -> None:
+        if self.plot_item is None or self.image_item is None:
+            return
+        if self._plot_mode == "bvr":
+            try:
+                self._refresh_bvr_plot()
+            except ValueError as exc:
+                self._plot_mode = "spectrum"
+                self._set_bvr_button_checked(False)
+                self._show_spectrum_items()
+                self.status.showMessage(str(exc), 4000)
+                self._refresh_spectrum_plot()
+        else:
+            self._refresh_spectrum_plot()
 
         self._apply_plot_theme()
         self.plot_item.enableAutoRange()
@@ -1305,10 +1433,13 @@ class TypeIIBandSplittingDialog(QDialog):
 
     def _sync_controls(self) -> None:
         active_points = len(self._band_points(self._active_band_key()))
-        self.undo_button.setEnabled(active_points > 0)
-        self.clear_button.setEnabled(active_points > 0)
-        self.fit_active_button.setEnabled(active_points >= 2)
-        self.fit_both_button.setEnabled(len(self._upper_points) >= 2 and len(self._lower_points) >= 2)
+        spectrum_mode = self._plot_mode == "spectrum"
+        self.add_points_button.setEnabled(spectrum_mode)
+        self.undo_button.setEnabled(spectrum_mode and active_points > 0)
+        self.clear_button.setEnabled(spectrum_mode and active_points > 0)
+        self.fit_active_button.setEnabled(spectrum_mode and active_points >= 2)
+        self.fit_both_button.setEnabled(spectrum_mode and len(self._upper_points) >= 2 and len(self._lower_points) >= 2)
+        self.bvr_button.setEnabled(self._upper_fit is not None and self._lower_fit is not None and self._analysis_inputs_ready())
         inputs_ready = self._analysis_inputs_ready()
         self.speed_mode_combo.setEnabled(inputs_ready)
         self.calculate_button.setEnabled(self._upper_fit is not None and self._lower_fit is not None and inputs_ready)

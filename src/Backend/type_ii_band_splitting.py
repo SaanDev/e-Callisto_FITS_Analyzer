@@ -123,6 +123,15 @@ def magnetic_field_gauss_from_alfven_speed(alfven_speed_km_s: float, electron_de
     return float(b_t * 1e4)
 
 
+def newkirk_height_rs_from_frequency_mhz(freq_mhz: Any, fold: int) -> np.ndarray:
+    freq = np.asarray(freq_mhz, dtype=float)
+    denom = max(1, int(fold)) * 3.385
+    ratio = np.square(freq) / float(denom)
+    if np.any(~np.isfinite(ratio)) or np.any(ratio <= 1.0):
+        raise ValueError("Frequencies must stay above the Newkirk cutoff to derive shock height.")
+    return 4.32 * np.log(10.0) / np.log(ratio)
+
+
 def _sampling_times_for_interval(
     *,
     t_start: float,
@@ -148,7 +157,7 @@ def _sampling_times_for_interval(
     return np.linspace(t_start, t_end, 512, dtype=float)
 
 
-def calculate_type_ii_parameters(
+def _sample_type_ii_fits(
     *,
     upper_time_seconds: Any,
     upper_freqs_mhz: Any,
@@ -156,8 +165,6 @@ def calculate_type_ii_parameters(
     lower_freqs_mhz: Any,
     upper_fit: dict[str, Any],
     lower_fit: dict[str, Any],
-    analysis_start_freq_mhz: float,
-    analysis_shock_speed_km_s: float,
     available_time_seconds: Any = None,
 ) -> dict[str, Any]:
     upper_times = np.asarray(upper_time_seconds, dtype=float).reshape(-1)
@@ -186,17 +193,126 @@ def calculate_type_ii_parameters(
     upper_curve = np.asarray(power_law(sample_times, upper_a, upper_b), dtype=float)
     lower_curve = np.asarray(power_law(sample_times, lower_a, lower_b), dtype=float)
     upper_drift = np.asarray(power_law_drift_rate(sample_times, upper_a, upper_b), dtype=float)
+    compression = np.square(upper_curve / lower_curve)
+    if np.any(~np.isfinite(compression)) or np.any(compression <= 0.0) or np.any(compression >= 4.0):
+        raise ValueError("Compression ratio X must stay between 0 and 4 over the selected interval.")
 
-    f_upper = float(power_law(t_start, upper_a, upper_b))
-    f_lower = float(power_law(t_start, lower_a, lower_b))
+    lower_extrapolated = bool(
+        t_start < float(np.min(fit_lower_times))
+        or t_end > float(np.max(fit_lower_times))
+    )
+    warning = ""
+    if lower_extrapolated:
+        warning = "Lower-band fit was extrapolated over part of the averaging interval."
+
+    return {
+        "t_start": t_start,
+        "t_end": t_end,
+        "sample_times_s": sample_times,
+        "upper_curve_mhz": upper_curve,
+        "lower_curve_mhz": lower_curve,
+        "upper_drift_mhz_s": upper_drift,
+        "compression_ratio": compression,
+        "lower_extrapolated": lower_extrapolated,
+        "warning": warning,
+    }
+
+
+def calculate_b_vs_r_profile(
+    *,
+    upper_time_seconds: Any,
+    upper_freqs_mhz: Any,
+    lower_time_seconds: Any,
+    lower_freqs_mhz: Any,
+    upper_fit: dict[str, Any],
+    lower_fit: dict[str, Any],
+    analysis_shock_speed_km_s: float,
+    fold: int,
+    available_time_seconds: Any = None,
+) -> dict[str, Any]:
+    sampled = _sample_type_ii_fits(
+        upper_time_seconds=upper_time_seconds,
+        upper_freqs_mhz=upper_freqs_mhz,
+        lower_time_seconds=lower_time_seconds,
+        lower_freqs_mhz=lower_freqs_mhz,
+        upper_fit=upper_fit,
+        lower_fit=lower_fit,
+        available_time_seconds=available_time_seconds,
+    )
+
+    analysis_shock_speed = float(analysis_shock_speed_km_s)
+    if not math.isfinite(analysis_shock_speed) or analysis_shock_speed <= 0.0:
+        raise ValueError("Analyzer shock speed must be positive.")
+
+    compression = np.asarray(sampled["compression_ratio"], dtype=float)
+    mach = np.sqrt((compression * (compression + 5.0)) / (2.0 * (4.0 - compression)))
+    if np.any(~np.isfinite(mach)) or np.any(mach <= 0.0):
+        raise ValueError("Failed to derive a valid Alfven Mach number over the selected interval.")
+
+    alfven_speed = analysis_shock_speed / mach
+    upper_curve = np.asarray(sampled["upper_curve_mhz"], dtype=float)
+    densities_cm3 = np.square(upper_curve / PLASMA_FREQ_COEFF_MHZ)
+    magnetic_field_g = np.asarray(
+        [magnetic_field_gauss_from_alfven_speed(float(va), float(ne)) for va, ne in zip(alfven_speed, densities_cm3)],
+        dtype=float,
+    )
+    heights_rs = np.asarray(newkirk_height_rs_from_frequency_mhz(upper_curve, fold), dtype=float)
+    order = np.argsort(heights_rs)
+    heights_sorted = heights_rs[order]
+    magnetic_sorted = magnetic_field_g[order]
+
+    fit = fit_power_law(heights_sorted, magnetic_sorted)
+
+    return {
+        "sample_times_s": np.asarray(sampled["sample_times_s"], dtype=float),
+        "heights_rs": heights_sorted,
+        "magnetic_field_g": magnetic_sorted,
+        "alfven_mach_number": np.asarray(mach, dtype=float)[order],
+        "alfven_speed_km_s": np.asarray(alfven_speed, dtype=float)[order],
+        "compression_ratio": compression[order],
+        "fit": fit,
+        "lower_extrapolated": bool(sampled["lower_extrapolated"]),
+        "warning": str(sampled["warning"] or ""),
+        "start_time_s": float(sampled["t_start"]),
+        "end_time_s": float(sampled["t_end"]),
+    }
+
+
+def calculate_type_ii_parameters(
+    *,
+    upper_time_seconds: Any,
+    upper_freqs_mhz: Any,
+    lower_time_seconds: Any,
+    lower_freqs_mhz: Any,
+    upper_fit: dict[str, Any],
+    lower_fit: dict[str, Any],
+    analysis_start_freq_mhz: float,
+    analysis_shock_speed_km_s: float,
+    available_time_seconds: Any = None,
+) -> dict[str, Any]:
+    sampled = _sample_type_ii_fits(
+        upper_time_seconds=upper_time_seconds,
+        upper_freqs_mhz=upper_freqs_mhz,
+        lower_time_seconds=lower_time_seconds,
+        lower_freqs_mhz=lower_freqs_mhz,
+        upper_fit=upper_fit,
+        lower_fit=lower_fit,
+        available_time_seconds=available_time_seconds,
+    )
+    t_start = float(sampled["t_start"])
+    t_end = float(sampled["t_end"])
+    upper_curve = np.asarray(sampled["upper_curve_mhz"], dtype=float)
+    lower_curve = np.asarray(sampled["lower_curve_mhz"], dtype=float)
+    upper_drift = np.asarray(sampled["upper_drift_mhz_s"], dtype=float)
+    compression_series = np.asarray(sampled["compression_ratio"], dtype=float)
+
+    f_upper = float(upper_curve[0])
+    f_lower = float(lower_curve[0])
     avg_upper_freq = float(np.mean(upper_curve))
     avg_lower_freq = float(np.mean(lower_curve))
     bandwidth = float(np.mean(upper_curve - lower_curve))
     avg_upper_drift = float(np.mean(upper_drift))
     compression_ratio = float((avg_upper_freq / avg_lower_freq) ** 2)
-
-    if compression_ratio <= 0.0 or compression_ratio >= 4.0:
-        raise ValueError("Compression ratio X must stay between 0 and 4 for the selected Mach-number formula.")
 
     mach = float(math.sqrt((compression_ratio * (compression_ratio + 5.0)) / (2.0 * (4.0 - compression_ratio))))
     if mach <= 0.0 or not math.isfinite(mach):
@@ -214,14 +330,6 @@ def calculate_type_ii_parameters(
     electron_density_cm3 = electron_density_cm3_from_frequency_mhz(analysis_freq)
     magnetic_field_g = magnetic_field_gauss_from_alfven_speed(alfven_speed, electron_density_cm3)
 
-    lower_extrapolated = bool(
-        t_start < float(np.min(fit_lower_times))
-        or t_end > float(np.max(fit_lower_times))
-    )
-    warning = ""
-    if lower_extrapolated:
-        warning = "Lower-band fit was extrapolated over part of the averaging interval."
-
     return {
         "start_time_s": t_start,
         "end_time_s": t_end,
@@ -235,6 +343,6 @@ def calculate_type_ii_parameters(
         "alfven_mach_number": mach,
         "alfven_speed_km_s": alfven_speed,
         "magnetic_field_g": magnetic_field_g,
-        "lower_extrapolated": lower_extrapolated,
-        "warning": warning,
+        "lower_extrapolated": bool(sampled["lower_extrapolated"]),
+        "warning": str(sampled["warning"] or ""),
     }

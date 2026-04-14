@@ -5,10 +5,12 @@ import math
 import numpy as np
 
 from src.Backend.type_ii_band_splitting import (
+    calculate_b_vs_r_profile,
     calculate_type_ii_parameters,
     electron_density_cm3_from_frequency_mhz,
     fit_power_law,
     magnetic_field_gauss_from_alfven_speed,
+    newkirk_height_rs_from_frequency_mhz,
     power_law_drift_rate,
 )
 
@@ -135,3 +137,38 @@ def test_calculate_type_ii_parameters_marks_lower_extrapolation():
 
     assert result["lower_extrapolated"] is True
     assert "extrapolated" in result["warning"].lower()
+
+
+def test_calculate_b_vs_r_profile_returns_height_series_and_power_law_fit():
+    upper_fit = {"a": 100.0, "b": 0.4}
+    lower_fit = {"a": 82.0, "b": 0.35}
+    upper_t = np.array([1.0, 2.0, 3.0], dtype=float)
+    lower_t = np.array([1.0, 2.0, 3.0], dtype=float)
+    upper_f = 100.0 * np.power(upper_t, -0.4)
+    lower_f = 82.0 * np.power(lower_t, -0.35)
+
+    profile = calculate_b_vs_r_profile(
+        upper_time_seconds=upper_t,
+        upper_freqs_mhz=upper_f,
+        lower_time_seconds=lower_t,
+        lower_freqs_mhz=lower_f,
+        upper_fit=upper_fit,
+        lower_fit=lower_fit,
+        analysis_shock_speed_km_s=980.0,
+        fold=2,
+        available_time_seconds=upper_t,
+    )
+
+    heights = np.asarray(profile["heights_rs"], dtype=float)
+    magnetic = np.asarray(profile["magnetic_field_g"], dtype=float)
+
+    assert heights.shape == magnetic.shape
+    assert heights.size == upper_t.size
+    assert np.all(np.isfinite(heights))
+    assert np.all(np.isfinite(magnetic))
+    assert np.all(heights > 0.0)
+    assert np.all(magnetic > 0.0)
+    assert np.all(np.diff(heights) >= 0.0)
+    assert profile["fit"]["a"] > 0.0
+    assert profile["fit"]["b"] > 0.0
+    assert np.isclose(heights[0], newkirk_height_rs_from_frequency_mhz(np.array([upper_f[0]]), 2)[0], rtol=1e-9)
