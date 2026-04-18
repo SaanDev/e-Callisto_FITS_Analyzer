@@ -11,7 +11,7 @@ from typing import Any
 from matplotlib import colormaps
 import numpy as np
 from PySide6.QtCore import Signal, QSize, Qt
-from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPageLayout, QPalette, QPdfWriter
+from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPageLayout, QPalette, QPdfWriter
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -28,9 +28,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.Backend.analysis_session import (
+    TYPE_II_PLOT_STYLE_BOOLEAN_FIELDS,
+    TYPE_II_PLOT_STYLE_COLOR_FIELDS,
+    TYPE_II_PLOT_STYLE_DEFAULTS,
+    TYPE_II_PLOT_STYLE_NUMERIC_FIELDS,
+)
 from src.Backend.frequency_axis import axis_edges, finite_data_limits, frequency_edges
 from src.Backend.type_ii_band_splitting import calculate_b_vs_r_profile, calculate_type_ii_parameters, fit_power_law, power_law
 from src.UI.accelerated_plot_widget import _mpl_cmap_to_lookup, _rgba_image_from_cmap, pg
+from src.UI.dialogs.type_ii_graph_settings_dialog import TypeIIGraphSettingsDialog
 from src.UI.gui_shared import pick_export_path, resource_path
 
 
@@ -78,6 +85,12 @@ class TypeIIBandSplittingDialog(QDialog):
         self._lower_fit: dict[str, Any] | None = None
         self._results: dict[str, Any] = {}
         self._plot_mode = "spectrum"
+        self._plot_title = ""
+        self._x_axis_label = "Time (s)"
+        self._y_axis_label = "Frequency (MHz)"
+        self._plot_style = self._default_plot_style()
+        self._current_plot_style = dict(self._plot_style)
+        self._settings_dialog: TypeIIGraphSettingsDialog | None = None
 
         self.plot_widget = None
         self.plot_item = None
@@ -177,7 +190,7 @@ class TypeIIBandSplittingDialog(QDialog):
         self.bvr_button.toggled.connect(self._on_bvr_toggled)
 
         self.settings_button = self._build_icon_button("Settings", "settings.svg")
-        self.settings_button.clicked.connect(lambda: self._show_placeholder_action("Settings"))
+        self.settings_button.clicked.connect(self._open_or_focus_settings_dialog)
 
         self.speed_mode_combo = QComboBox()
         self.speed_mode_combo.addItem("Initial Shock Speed", "initial")
@@ -502,6 +515,67 @@ class TypeIIBandSplittingDialog(QDialog):
             f"</div>"
         )
 
+    @staticmethod
+    def _default_plot_style() -> dict[str, Any]:
+        return dict(TYPE_II_PLOT_STYLE_DEFAULTS)
+
+    @staticmethod
+    def _safe_color(value: Any, default: str) -> str:
+        text = str(value or "").strip()
+        if text.startswith("#") and len(text) in {4, 7}:
+            return text.lower()
+        return str(default).lower()
+
+    @classmethod
+    def _normalize_plot_style(cls, raw: dict[str, Any] | None) -> dict[str, Any]:
+        src = dict(raw or {})
+        out: dict[str, Any] = {"font_family": str(src.get("font_family") or TYPE_II_PLOT_STYLE_DEFAULTS["font_family"]).strip()}
+        for key in TYPE_II_PLOT_STYLE_NUMERIC_FIELDS:
+            default = int(TYPE_II_PLOT_STYLE_DEFAULTS[key])
+            try:
+                value = int(src.get(key, default))
+            except Exception:
+                value = default
+            out[key] = max(1, value)
+        for key in TYPE_II_PLOT_STYLE_BOOLEAN_FIELDS:
+            out[key] = bool(src.get(key, TYPE_II_PLOT_STYLE_DEFAULTS[key]))
+        for key in TYPE_II_PLOT_STYLE_COLOR_FIELDS:
+            out[key] = cls._safe_color(src.get(key), TYPE_II_PLOT_STYLE_DEFAULTS[key])
+        return out
+
+    def _build_font(self, px: int, bold: bool, italic: bool, font_family: str) -> QFont:
+        font = QFont()
+        if font_family:
+            font.setFamily(str(font_family))
+        font.setPixelSize(max(1, int(px)))
+        font.setBold(bool(bold))
+        font.setItalic(bool(italic))
+        return font
+
+    def _axis_label_style(self, style: dict[str, Any], fg: str) -> dict[str, str]:
+        label_style = {
+            "color": fg,
+            "font-size": f"{int(style['axis_label_font_px'])}px",
+            "font-weight": "bold" if style.get("axis_bold") else "normal",
+            "font-style": "italic" if style.get("axis_italic") else "normal",
+        }
+        if style.get("font_family"):
+            label_style["font-family"] = str(style["font_family"])
+        return label_style
+
+    @staticmethod
+    def _title_style(style: dict[str, Any], fg: str) -> dict[str, str]:
+        return {
+            "color": fg,
+            "size": f"{int(style['title_font_px'])}px",
+        }
+
+    def _marker_pen(self, color: str):
+        return pg.mkPen(color, width=1.3) if pg is not None else color
+
+    def _series_pen(self, color: str, width: int | float):
+        return pg.mkPen(color, width=float(width)) if pg is not None else color
+
     def _apply_toolbar_icons(self) -> None:
         for button in (
             getattr(self, "add_points_button", None),
@@ -526,12 +600,52 @@ class TypeIIBandSplittingDialog(QDialog):
         return "#ffffff", "#101010"
 
     def _apply_plot_theme(self) -> None:
+        self._apply_plot_style(self._current_plot_style, persist=False, emit_session=False)
+
+    def _on_theme_changed(self, _dark: bool) -> None:
+        self._apply_toolbar_icons()
+        self._apply_plot_theme()
+
+    def _open_or_focus_settings_dialog(self) -> TypeIIGraphSettingsDialog:
+        if self._settings_dialog is None:
+            dialog = TypeIIGraphSettingsDialog(
+                initial_style=self._plot_style,
+                defaults=self._default_plot_style(),
+                parent=self,
+            )
+            dialog.previewStyleChanged.connect(lambda style: self._apply_plot_style(style, persist=False, emit_session=False))
+            dialog.styleApplied.connect(self._on_settings_style_applied)
+            dialog.finished.connect(lambda _code: setattr(self, "_settings_dialog", None))
+            self._settings_dialog = dialog
+
+        self._settings_dialog.show()
+        self._settings_dialog.raise_()
+        self._settings_dialog.activateWindow()
+        return self._settings_dialog
+
+    def _on_settings_style_applied(self, style: dict[str, Any]) -> None:
+        self._apply_plot_style(style, persist=True, emit_session=True)
+        if self._settings_dialog is not None:
+            self._settings_dialog.load_applied_style(self._plot_style)
+        self.status.showMessage("Type II graph style updated.", 2500)
+
+    def _apply_plot_style(
+        self,
+        style: dict[str, Any] | None,
+        *,
+        persist: bool,
+        emit_session: bool = False,
+    ) -> None:
         if self.plot_widget is None or self.plot_item is None or pg is None:
             return
 
+        normalized = self._normalize_plot_style(style)
+        self._current_plot_style = dict(normalized)
+        if persist:
+            self._plot_style = dict(normalized)
+
         bg, fg = self._plot_theme_colors()
         self.plot_widget.setBackground(bg)
-
         try:
             view_box = self.plot_item.getViewBox()
             if view_box is not None and hasattr(view_box, "setBackgroundColor"):
@@ -540,34 +654,62 @@ class TypeIIBandSplittingDialog(QDialog):
             pass
 
         axis_pen = pg.mkPen(fg, width=1.0)
-        for axis_name in ("bottom", "left"):
+        tick_font = self._build_font(
+            int(normalized["tick_font_px"]),
+            bool(normalized["ticks_bold"]),
+            bool(normalized["ticks_italic"]),
+            str(normalized.get("font_family") or ""),
+        )
+        label_style = self._axis_label_style(normalized, fg)
+        for axis_name, label in (("bottom", self._x_axis_label), ("left", self._y_axis_label)):
             try:
                 axis = self.plot_item.getAxis(axis_name)
                 if axis is None:
                     continue
                 axis.setPen(axis_pen)
                 axis.setTextPen(axis_pen)
+                axis.setStyle(tickFont=tick_font)
+                axis.setLabel(label, **label_style)
             except Exception:
                 pass
-
-        try:
-            self.plot_item.titleLabel.item.setDefaultTextColor(QColor(fg))
-        except Exception:
-            pass
 
         if self.color_bar is not None:
             try:
                 self.color_bar.axis.setPen(axis_pen)
                 self.color_bar.axis.setTextPen(axis_pen)
+                self.color_bar.axis.setStyle(tickFont=tick_font)
+                self.color_bar.axis.setLabel(f"Intensity [{self.display_unit}]", **label_style)
             except Exception:
                 pass
 
-    def _show_placeholder_action(self, label: str) -> None:
-        self.status.showMessage(f"{label} is not implemented yet.", 3000)
+        self.plot_item.setTitle(self._plot_title, **self._title_style(normalized, fg))
+        try:
+            title_font = self._build_font(
+                int(normalized["title_font_px"]),
+                bool(normalized["title_bold"]),
+                bool(normalized["title_italic"]),
+                str(normalized.get("font_family") or ""),
+            )
+            self.plot_item.titleLabel.item.setFont(title_font)
+            self.plot_item.titleLabel.item.setDefaultTextColor(QColor(fg))
+        except Exception:
+            pass
 
-    def _on_theme_changed(self, _dark: bool) -> None:
-        self._apply_toolbar_icons()
-        self._apply_plot_theme()
+        self.upper_curve_item.setPen(self._series_pen(normalized["upper_line_color"], normalized["upper_line_width"]))
+        self.lower_curve_item.setPen(self._series_pen(normalized["lower_line_color"], normalized["lower_line_width"]))
+        self.upper_scatter_item.setPen(self._marker_pen(normalized["upper_marker_color"]))
+        self.upper_scatter_item.setBrush(pg.mkBrush(normalized["upper_marker_color"]))
+        self.upper_scatter_item.setSize(int(normalized["upper_marker_size"]))
+        self.lower_scatter_item.setPen(self._marker_pen(normalized["lower_marker_color"]))
+        self.lower_scatter_item.setBrush(pg.mkBrush(normalized["lower_marker_color"]))
+        self.lower_scatter_item.setSize(int(normalized["lower_marker_size"]))
+        self.bvr_curve_item.setPen(self._series_pen(normalized["bvr_line_color"], normalized["bvr_line_width"]))
+        self.bvr_scatter_item.setPen(self._marker_pen(normalized["bvr_marker_color"]))
+        self.bvr_scatter_item.setBrush(pg.mkBrush(normalized["bvr_marker_color"]))
+        self.bvr_scatter_item.setSize(int(normalized["bvr_marker_size"]))
+
+        if emit_session:
+            self._emit_session_changed()
 
     def _set_bvr_button_checked(self, checked: bool) -> None:
         if self.bvr_button is None:
@@ -935,6 +1077,7 @@ class TypeIIBandSplittingDialog(QDialog):
                 "analysis_inputs": analysis_inputs,
                 "fold": int(analysis_inputs.get("fold", 1) or 1),
                 "results": dict(self._results or {}),
+                "plot_style": dict(self._plot_style),
             },
             "ui": {
                 "restore_max_window": bool(ui_block.get("restore_max_window", bool(base.get("max_intensity")))),
@@ -962,6 +1105,10 @@ class TypeIIBandSplittingDialog(QDialog):
             self._upper_fit = self._compact_fit_state(type_ii.get("upper_fit")) or None
             self._lower_fit = self._compact_fit_state(type_ii.get("lower_fit")) or None
             self._results = dict(type_ii.get("results") or {})
+            self._plot_style = self._normalize_plot_style(type_ii.get("plot_style"))
+            self._current_plot_style = dict(self._plot_style)
+            if self._settings_dialog is not None:
+                self._settings_dialog.load_applied_style(self._plot_style)
 
             analysis_inputs = dict(type_ii.get("analysis_inputs") or {})
             speed_mode = self._normalize_speed_mode(analysis_inputs.get("speed_mode"))
@@ -1187,7 +1334,6 @@ class TypeIIBandSplittingDialog(QDialog):
         x1 = float(time_edges[-1])
         y0 = float(freq_edges[0])
         y1 = float(freq_edges[-1])
-        _, fg = self._plot_theme_colors()
 
         self._show_spectrum_items()
 
@@ -1215,16 +1361,15 @@ class TypeIIBandSplittingDialog(QDialog):
             if self.color_bar is not None:
                 try:
                     self.color_bar.setLevels((vmin, vmax))
-                    self.color_bar.axis.setLabel(f"Intensity [{self.display_unit}]", color=fg)
                     color_map, _lut = _mpl_cmap_to_lookup(self.cmap)
                     if color_map is not None:
                         self.color_bar.setColorMap(color_map)
                 except Exception:
                     pass
 
-        self.plot_item.setTitle(f"{self.filename}_Type_II_Band_Splitting")
-        self.plot_item.setLabel("bottom", "Time (s)", color=fg)
-        self.plot_item.setLabel("left", "Frequency (MHz)", color=fg)
+        self._plot_title = f"{self.filename}_Type_II_Band_Splitting"
+        self._x_axis_label = "Time (s)"
+        self._y_axis_label = "Frequency (MHz)"
 
         if self._upper_points:
             upper = np.asarray(self._upper_points, dtype=float)
@@ -1249,7 +1394,6 @@ class TypeIIBandSplittingDialog(QDialog):
             self.lower_curve_item.setData([], [])
 
     def _refresh_bvr_plot(self) -> None:
-        _, fg = self._plot_theme_colors()
         profile = self._build_bvr_profile()
         heights = np.asarray(profile.get("heights_rs", []), dtype=float).reshape(-1)
         magnetic = np.asarray(profile.get("magnetic_field_g", []), dtype=float).reshape(-1)
@@ -1263,9 +1407,9 @@ class TypeIIBandSplittingDialog(QDialog):
         ys = np.asarray(power_law(xs, float(fit["a"]), float(fit["b"])), dtype=float)
         self.bvr_curve_item.setData(xs, ys)
 
-        self.plot_item.setTitle(f"{self.filename}_Magnetic_Field_vs_Shock_Height")
-        self.plot_item.setLabel("bottom", "Shock Height (R<sub>s</sub>)", color=fg)
-        self.plot_item.setLabel("left", "Magnetic Field (G)", color=fg)
+        self._plot_title = f"{self.filename}_Magnetic_Field_vs_Shock_Height"
+        self._x_axis_label = "Shock Height (R<sub>s</sub>)"
+        self._y_axis_label = "Magnetic Field (G)"
 
     def _refresh_plot(self) -> None:
         if self.plot_item is None or self.image_item is None:

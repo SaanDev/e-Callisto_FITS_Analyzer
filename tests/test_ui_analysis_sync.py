@@ -294,6 +294,7 @@ def test_type_ii_dialog_session_state_contains_results_block():
     type_ii = dict(state.get("type_ii") or {})
     analysis_inputs = dict(type_ii.get("analysis_inputs") or {})
     results = dict(type_ii.get("results") or {})
+    plot_style = dict(type_ii.get("plot_style") or {})
 
     assert type_ii.get("upper_fit")
     assert type_ii.get("lower_fit")
@@ -302,6 +303,7 @@ def test_type_ii_dialog_session_state_contains_results_block():
     assert results.get("alfven_speed_km_s") is not None
     assert results.get("magnetic_field_g") is not None
     assert "shock_speed_km_s" not in results
+    assert plot_style.get("upper_line_width") == 2
     assert "920.00" in dlg.analyzer_initial_speed_label.text()
     assert "760.00" in dlg.analyzer_avg_speed_label.text()
     assert "1.3100" in dlg.analyzer_initial_height_label.text()
@@ -473,6 +475,32 @@ def test_open_restored_analysis_opens_type_ii_when_flagged():
 
     assert seen["called"] is True
     win.close()
+
+
+def test_type_ii_dialog_restores_saved_plot_style():
+    _app()
+    dlg = TypeIIBandSplittingDialog(
+        np.arange(12, dtype=float).reshape(3, 4),
+        np.array([100.0, 90.0, 80.0], dtype=float),
+        np.array([1.0, 2.0, 3.0, 4.0], dtype=float),
+        "demo.fit",
+        session={
+            "source": {"filename": "demo.fit", "shape": [3, 4]},
+            "type_ii": {
+                "plot_style": {
+                    "title_font_px": 19,
+                    "upper_line_width": 6,
+                    "bvr_line_width": 7,
+                },
+            },
+        },
+    )
+
+    assert dlg.plot_item.titleLabel.item.font().pixelSize() == 19
+    assert dlg.upper_curve_item.opts["pen"].widthF() == pytest.approx(6.0)
+    assert dlg.session_state()["type_ii"]["plot_style"]["bvr_line_width"] == 7
+
+    dlg.close()
 
 
 def test_isolated_seed_respects_auto_clean_toggle():

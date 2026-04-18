@@ -92,6 +92,57 @@ TYPE_II_LEGACY_RESULT_NUMERIC_FIELDS = (
     "shock_speed_km_s",
     "shock_height_rs",
 )
+TYPE_II_PLOT_STYLE_DEFAULTS = {
+    "font_family": "",
+    "title_font_px": 14,
+    "axis_label_font_px": 12,
+    "tick_font_px": 11,
+    "title_bold": False,
+    "title_italic": False,
+    "axis_bold": False,
+    "axis_italic": False,
+    "ticks_bold": False,
+    "ticks_italic": False,
+    "upper_line_color": "#ff5a1f",
+    "upper_marker_color": "#ff8c42",
+    "upper_line_width": 2,
+    "upper_marker_size": 9,
+    "lower_line_color": "#0ea5e9",
+    "lower_marker_color": "#38bdf8",
+    "lower_line_width": 2,
+    "lower_marker_size": 9,
+    "bvr_line_color": "#f59e0b",
+    "bvr_marker_color": "#34d399",
+    "bvr_line_width": 2,
+    "bvr_marker_size": 8,
+}
+TYPE_II_PLOT_STYLE_NUMERIC_FIELDS = (
+    "title_font_px",
+    "axis_label_font_px",
+    "tick_font_px",
+    "upper_line_width",
+    "upper_marker_size",
+    "lower_line_width",
+    "lower_marker_size",
+    "bvr_line_width",
+    "bvr_marker_size",
+)
+TYPE_II_PLOT_STYLE_BOOLEAN_FIELDS = (
+    "title_bold",
+    "title_italic",
+    "axis_bold",
+    "axis_italic",
+    "ticks_bold",
+    "ticks_italic",
+)
+TYPE_II_PLOT_STYLE_COLOR_FIELDS = (
+    "upper_line_color",
+    "upper_marker_color",
+    "lower_line_color",
+    "lower_marker_color",
+    "bvr_line_color",
+    "bvr_marker_color",
+)
 
 
 def _now_iso() -> str:
@@ -118,6 +169,15 @@ def _safe_float(value: Any) -> float | None:
         return float(value)
     except Exception:
         return None
+
+
+def _safe_color(value: Any, default: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return str(default)
+    if text.startswith("#") and len(text) in {4, 7}:
+        return text.lower()
+    return str(default)
 
 
 def _shape_from(value: Any) -> list[int] | None:
@@ -255,6 +315,21 @@ def _normalize_type_ii_results(raw: Mapping[str, Any] | None, *, fold: int) -> d
     return out
 
 
+def _normalize_type_ii_plot_style(raw: Mapping[str, Any] | None) -> dict[str, Any]:
+    src = dict(raw or {})
+    out: dict[str, Any] = {}
+    out["font_family"] = str(src.get("font_family") or TYPE_II_PLOT_STYLE_DEFAULTS["font_family"]).strip()
+    for key in TYPE_II_PLOT_STYLE_NUMERIC_FIELDS:
+        default = TYPE_II_PLOT_STYLE_DEFAULTS[key]
+        value = _safe_int(src.get(key), default)
+        out[key] = max(1, int(value))
+    for key in TYPE_II_PLOT_STYLE_BOOLEAN_FIELDS:
+        out[key] = _safe_bool(src.get(key, TYPE_II_PLOT_STYLE_DEFAULTS[key]), TYPE_II_PLOT_STYLE_DEFAULTS[key])
+    for key in TYPE_II_PLOT_STYLE_COLOR_FIELDS:
+        out[key] = _safe_color(src.get(key), TYPE_II_PLOT_STYLE_DEFAULTS[key])
+    return out
+
+
 def _has_type_ii_payload(type_ii: Mapping[str, Any] | None) -> bool:
     if not isinstance(type_ii, Mapping):
         return False
@@ -262,6 +337,7 @@ def _has_type_ii_payload(type_ii: Mapping[str, Any] | None) -> bool:
     lower = dict(type_ii.get("lower") or {})
     results = dict(type_ii.get("results") or {})
     analysis_inputs = dict(type_ii.get("analysis_inputs") or {})
+    plot_style = dict(type_ii.get("plot_style") or {})
     if upper.get("time_seconds") is not None or lower.get("time_seconds") is not None:
         return True
     if type_ii.get("upper_fit") is not None or type_ii.get("lower_fit") is not None:
@@ -271,6 +347,8 @@ def _has_type_ii_payload(type_ii: Mapping[str, Any] | None) -> bool:
     if any(results.get(key) is not None for key in TYPE_II_LEGACY_RESULT_NUMERIC_FIELDS):
         return True
     if any(analysis_inputs.get(key) is not None for key in TYPE_II_ANALYSIS_INPUT_NUMERIC_FIELDS):
+        return True
+    if plot_style and any(plot_style.get(key) != TYPE_II_PLOT_STYLE_DEFAULTS.get(key) for key in TYPE_II_PLOT_STYLE_DEFAULTS):
         return True
     return bool(results.get("warning", ""))
 
@@ -327,6 +405,7 @@ def normalize_session(session: Mapping[str, Any] | None) -> dict[str, Any] | Non
         ),
         "fold": type_ii_fold,
         "results": _normalize_type_ii_results(type_ii_raw.get("results"), fold=type_ii_fold),
+        "plot_style": _normalize_type_ii_plot_style(type_ii_raw.get("plot_style")),
     }
     type_ii["fold"] = int(type_ii["analysis_inputs"].get("fold", type_ii_fold) or type_ii_fold)
 

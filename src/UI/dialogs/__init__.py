@@ -16,6 +16,7 @@ from src.UI.dialogs.combine_dialogs import CombineFrequencyDialog, CombineTimeDi
 from src.UI.dialogs.max_intensity_dialog import MaxIntensityPlotDialog
 from src.UI.dialogs.rfi_control_dialog import RFIControlDialog
 from src.UI.dialogs.type_ii_band_splitting_dialog import TypeIIBandSplittingDialog
+from src.UI.dialogs.type_ii_graph_settings_dialog import TypeIIGraphSettingsDialog
 
 __all__ = [
     "AnalyzeDialog",
@@ -28,4 +29,5 @@ __all__ = [
     "MaxIntensityPlotDialog",
     "RFIControlDialog",
     "TypeIIBandSplittingDialog",
+    "TypeIIGraphSettingsDialog",
 ]

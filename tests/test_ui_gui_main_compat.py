@@ -248,3 +248,92 @@ def test_type_ii_dialog_bvr_button_switches_plot_mode():
     assert dlg.image_item.isVisible() is True
 
     dlg.close()
+
+
+def test_type_ii_settings_dialog_live_preview_reverts_on_close_without_apply():
+    _app()
+    if pg is None:
+        pytest.skip("PyQtGraph is unavailable")
+
+    dlg = TypeIIBandSplittingDialog(
+        np.arange(12, dtype=float).reshape(3, 4),
+        np.array([100.0, 90.0, 80.0], dtype=float),
+        np.array([1.0, 2.0, 3.0, 4.0], dtype=float),
+        "demo.fit",
+    )
+    settings = dlg._open_or_focus_settings_dialog()
+    assert settings is dlg._open_or_focus_settings_dialog()
+
+    settings.title_font_spin.setValue(20)
+    settings.upper_line_width_spin.setValue(5)
+    QApplication.processEvents()
+
+    assert dlg.plot_item.titleLabel.item.font().pixelSize() == 20
+    assert dlg.upper_curve_item.opts["pen"].widthF() == pytest.approx(5.0)
+
+    settings.close()
+    QApplication.processEvents()
+
+    assert dlg.plot_item.titleLabel.item.font().pixelSize() == 14
+    assert dlg.upper_curve_item.opts["pen"].widthF() == pytest.approx(2.0)
+    assert dlg.session_state()["type_ii"]["plot_style"]["upper_line_width"] == 2
+
+    dlg.close()
+
+
+def test_type_ii_settings_dialog_apply_persists_style_for_spectrum_and_bvr():
+    _app()
+    if pg is None:
+        pytest.skip("PyQtGraph is unavailable")
+
+    dlg = TypeIIBandSplittingDialog(
+        np.arange(20, dtype=float).reshape(4, 5),
+        np.array([120.0, 110.0, 100.0, 90.0], dtype=float),
+        np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=float),
+        "demo.fit",
+        session={
+            "source": {"filename": "demo.fit", "shape": [4, 5]},
+            "analyzer": {
+                "fold": 2,
+                "shock_summary": {
+                    "start_freq_mhz": 63.0,
+                    "initial_shock_speed_km_s": 920.0,
+                    "avg_shock_speed_km_s": 760.0,
+                    "initial_shock_height_rs": 1.31,
+                    "avg_shock_height_rs": 1.47,
+                    "avg_drift_mhz_s": -0.12,
+                    "avg_drift_err_mhz_s": 0.01,
+                },
+            },
+        },
+    )
+    dlg._upper_points = [(1.0, 100.0), (2.0, 76.0), (3.0, 64.0)]
+    dlg._lower_points = [(1.0, 82.0), (2.0, 68.0), (3.0, 57.0)]
+    dlg._fit_both_bands()
+
+    settings = dlg._open_or_focus_settings_dialog()
+    settings.upper_line_width_spin.setValue(4)
+    settings.bvr_line_width_spin.setValue(6)
+    settings.bvr_marker_size_spin.setValue(13)
+    settings.apply_button.click()
+    QApplication.processEvents()
+
+    assert dlg.upper_curve_item.opts["pen"].widthF() == pytest.approx(4.0)
+    assert dlg.session_state()["type_ii"]["plot_style"]["upper_line_width"] == 4
+
+    dlg.bvr_button.setChecked(True)
+    QApplication.processEvents()
+
+    assert dlg.bvr_curve_item.opts["pen"].widthF() == pytest.approx(6.0)
+    assert dlg.bvr_scatter_item.opts["size"] == 13
+
+    settings.reset_button.click()
+    QApplication.processEvents()
+    assert dlg.bvr_curve_item.opts["pen"].widthF() == pytest.approx(2.0)
+
+    settings.apply_button.click()
+    QApplication.processEvents()
+    assert dlg.session_state()["type_ii"]["plot_style"]["bvr_line_width"] == 2
+    assert dlg.session_state()["type_ii"]["plot_style"]["bvr_marker_size"] == 8
+
+    dlg.close()

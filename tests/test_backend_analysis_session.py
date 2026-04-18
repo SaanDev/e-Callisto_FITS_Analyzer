@@ -129,6 +129,12 @@ def test_type_ii_payload_round_trip_moves_points_to_arrays():
                     "alfven_speed_km_s": 520.0,
                     "magnetic_field_g": 0.52,
                 },
+                "plot_style": {
+                    "font_family": "Helvetica",
+                    "title_font_px": 18,
+                    "upper_line_width": 5,
+                    "bvr_marker_size": 12,
+                },
             },
             "ui": {"restore_type_ii_window": True},
         }
@@ -144,6 +150,34 @@ def test_type_ii_payload_round_trip_moves_points_to_arrays():
     assert np.array_equal(arrays["type_ii_lower_freqs"], np.array([78.0, 73.0, 69.0], dtype=float))
     assert meta_session["type_ii"]["analysis_inputs"]["speed_mode"] == "average"
     assert meta_session["type_ii"]["analysis_inputs"]["fold"] == 2
+    assert meta_session["type_ii"]["plot_style"]["font_family"] == "Helvetica"
+    assert meta_session["type_ii"]["plot_style"]["title_font_px"] == 18
+    assert meta_session["type_ii"]["plot_style"]["upper_line_width"] == 5
+    assert meta_session["type_ii"]["plot_style"]["bvr_marker_size"] == 12
+
+
+def test_normalize_session_default_fills_type_ii_plot_style():
+    session = normalize_session(
+        {
+            "source": {"filename": "x.fit", "shape": [8, 5]},
+            "type_ii": {
+                "upper": {"time_seconds": [1.0, 2.0], "freqs": [90.0, 84.0]},
+                "lower": {"time_seconds": [1.0, 2.0], "freqs": [78.0, 73.0]},
+                "plot_style": {
+                    "title_font_px": 20,
+                    "upper_line_color": "#ABCDEF",
+                },
+            },
+        }
+    )
+
+    style = dict(session["type_ii"]["plot_style"])
+    assert style["title_font_px"] == 20
+    assert style["upper_line_color"] == "#abcdef"
+    assert style["axis_label_font_px"] == 12
+    assert style["tick_font_px"] == 11
+    assert style["lower_line_width"] == 2
+    assert style["bvr_marker_size"] == 8
 
 
 def test_normalize_session_accepts_legacy_type_ii_shock_result_fields():
