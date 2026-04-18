@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from src.Backend.frequency_axis import finite_data_limits, invalid_row_mask
 from src.Backend.goes_overlay import GOES_OVERLAY_CHANNEL_ORDER, goes_class_ticks_for_limits, goes_flux_axis_limits
+from src.UI.font_utils import normalize_font_family
 
 try:
     import pyqtgraph as pg
@@ -460,7 +461,7 @@ class AcceleratedPlotWidget(QWidget):
         ticks_bold: bool = False,
         ticks_italic: bool = False,
     ) -> None:
-        self._font_family = str(font_family or "")
+        self._font_family = normalize_font_family(font_family)
         self._tick_font_px = max(1, int(tick_font_px))
         self._axis_label_font_px = max(1, int(axis_label_font_px))
         self._title_font_px = max(1, int(title_font_px))
@@ -1096,7 +1097,7 @@ class AcceleratedPlotWidget(QWidget):
                     txt = str(ann.get("text") or "")
                     item = pg.TextItem(text=txt, color=color, anchor=(0, 1))
                     font = QFont()
-                    font_family = str(ann.get("font_family") or "").strip()
+                    font_family = normalize_font_family(str(ann.get("font_family") or "").strip())
                     if font_family:
                         font.setFamily(font_family)
                     try:

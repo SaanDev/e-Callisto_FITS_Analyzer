@@ -146,6 +146,7 @@ _install_macos_stderr_filter()
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
+from src.UI.font_utils import sanitize_application_font
 from src.UI.runtime_paths import find_startup_logo_path
 from src.version import APP_NAME, APP_VERSION
 
@@ -298,6 +299,7 @@ def main(argv: list[str] | None = None) -> int:
 
     qt_argv = [argv[0], *qt_args]
     app = QApplication(qt_argv)
+    sanitize_application_font(app)
 
     if args.mode == "cme-helper":
         return _run_cme_helper_mode(

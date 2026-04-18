@@ -7,6 +7,8 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -200,6 +202,29 @@ def test_type_ii_dialog_save_plot_exports_png(tmp_path, monkeypatch):
     assert image.width() >= 2000
 
     dlg.close()
+
+
+def test_type_ii_dialog_refresh_without_points_emits_no_scatter_warnings():
+    _app()
+    if pg is None:
+        pytest.skip("PyQtGraph is unavailable")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        dlg = TypeIIBandSplittingDialog(
+            np.arange(12, dtype=float).reshape(3, 4),
+            np.array([100.0, 90.0, 80.0], dtype=float),
+            np.array([1.0, 2.0, 3.0, 4.0], dtype=float),
+            "demo.fit",
+        )
+        dlg.show()
+        QApplication.processEvents()
+        dlg._refresh_plot()
+        QApplication.processEvents()
+        dlg.close()
+
+    messages = [str(w.message) for w in caught]
+    assert all("All-NaN slice encountered" not in message for message in messages)
 
 
 def test_type_ii_dialog_bvr_button_switches_plot_mode():

@@ -134,6 +134,7 @@ from src.UI.dialogs.rfi_control_dialog import RFIControlDialog
 from src.UI.dialogs.type_ii_band_splitting_dialog import TypeIIBandSplittingDialog
 from src.UI.dst_index_gui import MainWindow as DstIndexWindow
 from src.UI.fits_header_viewer import FitsHeaderViewerDialog
+from src.UI.font_utils import normalize_font_family
 from src.UI.goes_sgps_gui import MainWindow as SepProtonWindow
 from src.UI.goes_xrs_gui import MainWindow as GoesXrsWindow
 from src.UI.kp_index_gui import MainWindow as KpIndexWindow
@@ -2191,7 +2192,7 @@ class MainWindow(QMainWindow):
         self.graph_title_override = self.title_edit.text().strip()
 
         font_choice = self.font_combo.currentText()
-        self.graph_font_family = "" if font_choice == "Default" else font_choice
+        self.graph_font_family = normalize_font_family("" if font_choice == "Default" else font_choice)
 
         self.tick_font_px = int(self.tick_font_spin.value())
         self.axis_label_font_px = int(self.axis_font_spin.value())
@@ -2204,7 +2205,7 @@ class MainWindow(QMainWindow):
         def _style(italic: bool) -> str:
             return "italic" if italic else "normal"
 
-        fontfam = self.graph_font_family if self.graph_font_family else None
+        fontfam = normalize_font_family(self.graph_font_family) or None
 
         # -----------------------------
         # 2) APPLY TITLES / LABELS
@@ -2265,7 +2266,7 @@ class MainWindow(QMainWindow):
         if self.current_colorbar is not None:
             try:
                 cax = self.current_colorbar.ax
-                fontfam = (self.graph_font_family if self.graph_font_family else None)
+                fontfam = normalize_font_family(self.graph_font_family) or None
 
                 # ---- ticks ----
                 cax.tick_params(labelsize=self.tick_font_px)
@@ -7301,7 +7302,8 @@ class MainWindow(QMainWindow):
         self.ticks_bold_chk.setChecked(bool(graph.get("ticks_bold", self.ticks_bold_chk.isChecked())))
         self.ticks_italic_chk.setChecked(bool(graph.get("ticks_italic", self.ticks_italic_chk.isChecked())))
         self.title_edit.setText(str(graph.get("title_override", self.title_edit.text())))
-        self.font_combo.setCurrentText(str(graph.get("font_family", self.font_combo.currentText() or "Default")))
+        restored_font = normalize_font_family(str(graph.get("font_family", "")))
+        self.font_combo.setCurrentText(restored_font if restored_font else "Default")
         self.tick_font_spin.setValue(int(graph.get("tick_font_px", self.tick_font_spin.value())))
         self.axis_font_spin.setValue(int(graph.get("axis_label_font_px", self.axis_font_spin.value())))
         self.title_font_spin.setValue(int(graph.get("title_font_px", self.title_font_spin.value())))
@@ -7663,7 +7665,7 @@ class MainWindow(QMainWindow):
         if ax is None:
             return
         fg = self._goes_overlay_fg_color()
-        fontfam = self.graph_font_family if self.graph_font_family else None
+        fontfam = normalize_font_family(self.graph_font_family) or None
         weight = "bold" if self.axis_bold else "normal"
         style = "italic" if self.axis_italic else "normal"
         tick_weight = "bold" if self.ticks_bold else "normal"
@@ -8505,7 +8507,7 @@ class MainWindow(QMainWindow):
 
                 self.title_edit.setText(str(graph.get("title_override", "")) or "")
 
-                font_family = str(graph.get("font_family", "")) or ""
+                font_family = normalize_font_family(str(graph.get("font_family", "")))
                 self.font_combo.setCurrentText(font_family if font_family else "Default")
 
                 self.tick_font_spin.setValue(int(graph.get("tick_font_px", self.tick_font_spin.value())))

@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from src.UI.font_utils import normalize_font_family, preferred_ui_font_family
 
 
 class _ColorButton(QPushButton):
@@ -79,7 +80,9 @@ class TypeIIGraphSettingsDialog(QDialog):
         self._defaults = dict(defaults or {})
         self._applied_style = dict(initial_style or self._defaults)
         self._syncing = False
-        self._app_default_font_family = QApplication.font().family().strip()
+        self._app_default_font_family = (
+            normalize_font_family(QApplication.font().family().strip()) or preferred_ui_font_family()
+        )
 
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 14, 14, 14)
@@ -239,7 +242,7 @@ class TypeIIGraphSettingsDialog(QDialog):
             control.valueChanged.connect(self._on_control_changed)
 
     def _style_from_controls(self) -> dict[str, Any]:
-        font_family = self.font_combo.currentFont().family().strip()
+        font_family = normalize_font_family(self.font_combo.currentFont().family().strip())
         if font_family == self._app_default_font_family and not str(self._applied_style.get("font_family") or "").strip():
             font_family = ""
         return {

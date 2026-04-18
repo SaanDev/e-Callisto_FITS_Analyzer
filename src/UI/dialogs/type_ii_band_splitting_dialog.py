@@ -38,6 +38,7 @@ from src.Backend.frequency_axis import axis_edges, finite_data_limits, frequency
 from src.Backend.type_ii_band_splitting import calculate_b_vs_r_profile, calculate_type_ii_parameters, fit_power_law, power_law
 from src.UI.accelerated_plot_widget import _mpl_cmap_to_lookup, _rgba_image_from_cmap, pg
 from src.UI.dialogs.type_ii_graph_settings_dialog import TypeIIGraphSettingsDialog
+from src.UI.font_utils import normalize_font_family
 from src.UI.gui_shared import pick_export_path, resource_path
 
 
@@ -61,7 +62,7 @@ class TypeIIBandSplittingDialog(QDialog):
         frequency_step_mhz=None,
     ):
         super().__init__(parent)
-        self.setWindowTitle("Type II Band-splitting")
+        self.setWindowTitle("Type II Band-splitting (Experimental)")
         self.resize(1280, 760)
 
         self.spectrum_data = np.asarray(spectrum_data, dtype=float).copy()
@@ -144,6 +145,10 @@ class TypeIIBandSplittingDialog(QDialog):
         self.plot_item.addItem(self.lower_scatter_item)
         self.plot_item.addItem(self.bvr_curve_item)
         self.plot_item.addItem(self.bvr_scatter_item)
+        self.upper_scatter_item.hide()
+        self.lower_scatter_item.hide()
+        self.upper_curve_item.hide()
+        self.lower_curve_item.hide()
         self.bvr_scatter_item.hide()
         self.bvr_curve_item.hide()
 
@@ -529,7 +534,7 @@ class TypeIIBandSplittingDialog(QDialog):
     @classmethod
     def _normalize_plot_style(cls, raw: dict[str, Any] | None) -> dict[str, Any]:
         src = dict(raw or {})
-        out: dict[str, Any] = {"font_family": str(src.get("font_family") or TYPE_II_PLOT_STYLE_DEFAULTS["font_family"]).strip()}
+        out: dict[str, Any] = {"font_family": normalize_font_family(src.get("font_family") or TYPE_II_PLOT_STYLE_DEFAULTS["font_family"])}
         for key in TYPE_II_PLOT_STYLE_NUMERIC_FIELDS:
             default = int(TYPE_II_PLOT_STYLE_DEFAULTS[key])
             try:
@@ -575,6 +580,35 @@ class TypeIIBandSplittingDialog(QDialog):
 
     def _series_pen(self, color: str, width: int | float):
         return pg.mkPen(color, width=float(width)) if pg is not None else color
+
+    @staticmethod
+    def _finite_xy(x_values, y_values) -> tuple[np.ndarray, np.ndarray]:
+        x_arr = np.asarray(x_values if x_values is not None else [], dtype=float).reshape(-1)
+        y_arr = np.asarray(y_values if y_values is not None else [], dtype=float).reshape(-1)
+        if x_arr.size == 0 or y_arr.size == 0 or x_arr.size != y_arr.size:
+            return np.array([], dtype=float), np.array([], dtype=float)
+        mask = np.isfinite(x_arr) & np.isfinite(y_arr)
+        if not np.any(mask):
+            return np.array([], dtype=float), np.array([], dtype=float)
+        return np.asarray(x_arr[mask], dtype=float), np.asarray(y_arr[mask], dtype=float)
+
+    def _set_scatter_item_data(self, item, x_values, y_values) -> None:
+        xs, ys = self._finite_xy(x_values, y_values)
+        if xs.size == 0:
+            item.hide()
+            item.setData(pos=np.empty((0, 2), dtype=float))
+            return
+        item.setData(x=xs, y=ys)
+        item.show()
+
+    def _set_curve_item_data(self, item, x_values, y_values) -> None:
+        xs, ys = self._finite_xy(x_values, y_values)
+        if xs.size == 0:
+            item.hide()
+            item.setData([], [])
+            return
+        item.setData(xs, ys)
+        item.show()
 
     def _apply_toolbar_icons(self) -> None:
         for button in (
@@ -658,7 +692,7 @@ class TypeIIBandSplittingDialog(QDialog):
             int(normalized["tick_font_px"]),
             bool(normalized["ticks_bold"]),
             bool(normalized["ticks_italic"]),
-            str(normalized.get("font_family") or ""),
+            normalize_font_family(normalized.get("font_family") or ""),
         )
         label_style = self._axis_label_style(normalized, fg)
         for axis_name, label in (("bottom", self._x_axis_label), ("left", self._y_axis_label)):
@@ -688,7 +722,7 @@ class TypeIIBandSplittingDialog(QDialog):
                 int(normalized["title_font_px"]),
                 bool(normalized["title_bold"]),
                 bool(normalized["title_italic"]),
-                str(normalized.get("font_family") or ""),
+                normalize_font_family(normalized.get("font_family") or ""),
             )
             self.plot_item.titleLabel.item.setFont(title_font)
             self.plot_item.titleLabel.item.setDefaultTextColor(QColor(fg))
@@ -1306,10 +1340,6 @@ class TypeIIBandSplittingDialog(QDialog):
 
     def _show_spectrum_items(self) -> None:
         self.image_item.show()
-        self.upper_scatter_item.show()
-        self.lower_scatter_item.show()
-        self.upper_curve_item.show()
-        self.lower_curve_item.show()
         self.bvr_scatter_item.hide()
         self.bvr_curve_item.hide()
         if self.color_bar is not None:
@@ -1373,25 +1403,25 @@ class TypeIIBandSplittingDialog(QDialog):
 
         if self._upper_points:
             upper = np.asarray(self._upper_points, dtype=float)
-            self.upper_scatter_item.setData(x=upper[:, 0], y=upper[:, 1])
+            self._set_scatter_item_data(self.upper_scatter_item, upper[:, 0], upper[:, 1])
         else:
-            self.upper_scatter_item.setData([], [])
+            self._set_scatter_item_data(self.upper_scatter_item, [], [])
         if self._lower_points:
             lower = np.asarray(self._lower_points, dtype=float)
-            self.lower_scatter_item.setData(x=lower[:, 0], y=lower[:, 1])
+            self._set_scatter_item_data(self.lower_scatter_item, lower[:, 0], lower[:, 1])
         else:
-            self.lower_scatter_item.setData([], [])
+            self._set_scatter_item_data(self.lower_scatter_item, [], [])
 
         upper_curve = self._fit_curve_samples("upper")
         if upper_curve is not None:
-            self.upper_curve_item.setData(upper_curve[0], upper_curve[1])
+            self._set_curve_item_data(self.upper_curve_item, upper_curve[0], upper_curve[1])
         else:
-            self.upper_curve_item.setData([], [])
+            self._set_curve_item_data(self.upper_curve_item, [], [])
         lower_curve = self._fit_curve_samples("lower")
         if lower_curve is not None:
-            self.lower_curve_item.setData(lower_curve[0], lower_curve[1])
+            self._set_curve_item_data(self.lower_curve_item, lower_curve[0], lower_curve[1])
         else:
-            self.lower_curve_item.setData([], [])
+            self._set_curve_item_data(self.lower_curve_item, [], [])
 
     def _refresh_bvr_plot(self) -> None:
         profile = self._build_bvr_profile()
@@ -1402,10 +1432,10 @@ class TypeIIBandSplittingDialog(QDialog):
             raise ValueError("B versus R plotting requires a valid magnetic-field profile.")
 
         self._show_bvr_items()
-        self.bvr_scatter_item.setData(x=heights, y=magnetic)
+        self._set_scatter_item_data(self.bvr_scatter_item, heights, magnetic)
         xs = np.linspace(float(np.min(heights)), float(np.max(heights)), 400)
         ys = np.asarray(power_law(xs, float(fit["a"]), float(fit["b"])), dtype=float)
-        self.bvr_curve_item.setData(xs, ys)
+        self._set_curve_item_data(self.bvr_curve_item, xs, ys)
 
         self._plot_title = f"{self.filename}_Magnetic_Field_vs_Shock_Height"
         self._x_axis_label = "Shock Height (R<sub>s</sub>)"
