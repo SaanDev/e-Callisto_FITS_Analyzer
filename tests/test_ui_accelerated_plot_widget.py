@@ -13,6 +13,8 @@ from pathlib import Path
 
 pytest.importorskip("PySide6")
 
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from src.UI.accelerated_plot_widget import AcceleratedPlotWidget
@@ -73,6 +75,51 @@ def test_accelerated_widget_update_image_no_crash():
         axis_italic=True,
         ticks_bold=True,
     )
+
+
+def test_accelerated_widget_left_drag_pans_plot():
+    _app()
+    widget = AcceleratedPlotWidget()
+    if not widget.is_available:
+        pytest.skip("pyqtgraph not available in test environment")
+
+    class _DummyCmap:
+        def __call__(self, x):
+            arr = np.asarray(x, dtype=float)
+            rgba = np.zeros((arr.size, 4), dtype=float)
+            rgba[:, 0] = arr
+            rgba[:, 1] = 1.0 - arr
+            rgba[:, 2] = 0.5
+            rgba[:, 3] = 1.0
+            return rgba
+
+    widget.resize(800, 500)
+    widget.show()
+    QApplication.processEvents()
+    widget.update_image(
+        np.random.rand(16, 32).astype(np.float32),
+        extent=[0.0, 10.0, 20.0, 80.0],
+        cmap=_DummyCmap(),
+        title="Preview",
+        x_label="Time [s]",
+        y_label="Frequency [MHz]",
+    )
+    QApplication.processEvents()
+
+    before = widget.get_view()
+    viewport = widget._graphics.viewport()
+    start = viewport.rect().center()
+    end = start + QPoint(100, 60)
+
+    QTest.mousePress(viewport, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
+    QTest.mouseMove(viewport, end, delay=20)
+    QTest.mouseRelease(viewport, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, end)
+    QApplication.processEvents()
+
+    after = widget.get_view()
+    widget.close()
+    assert before and after
+    assert not widget._views_close(before, after)
 
 
 def test_accelerated_widget_gap_rows_render_with_gray_hatch_pattern():

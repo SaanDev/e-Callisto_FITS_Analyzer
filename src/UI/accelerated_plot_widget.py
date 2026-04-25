@@ -125,12 +125,27 @@ if pg is not None:
     class _LogFluxAxisItem(pg.AxisItem):
         def tickStrings(self, values, scale, spacing):
             return ["" for _ in values]
+
+
+    class _PassiveViewBox(pg.ViewBox):
+        def mouseDragEvent(self, ev, axis=None):
+            ev.ignore()
+
+        def mouseClickEvent(self, ev):
+            ev.ignore()
+
+        def wheelEvent(self, ev, axis=None):
+            ev.ignore()
 else:
     class _TimeAxisItem:
         pass
 
 
     class _LogFluxAxisItem:
+        pass
+
+
+    class _PassiveViewBox:
         pass
 
 
@@ -277,7 +292,7 @@ class AcceleratedPlotWidget(QWidget):
         try:
             self._goes_axis = _LogFluxAxisItem("right")
             self._plot.layout.addItem(self._goes_axis, 2, 3)
-            self._goes_view = pg.ViewBox(enableMenu=False)
+            self._goes_view = _PassiveViewBox(enableMenu=False)
             self._goes_view.setMouseEnabled(x=False, y=False)
             self._goes_view.setZValue(10)
             try:
