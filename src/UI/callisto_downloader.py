@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.3.0
+Version 2.4.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -74,7 +74,7 @@ def build_archive_session() -> requests.Session:
     )
     adapter = HTTPAdapter(max_retries=retry)
     session = requests.Session()
-    session.headers.update({"User-Agent": "e-CALLISTO FITS Analyzer/2.3.0"})
+    session.headers.update({"User-Agent": "e-CALLISTO FITS Analyzer/2.4.0"})
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     return session

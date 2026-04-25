@@ -1,4 +1,4 @@
-# e-CALLISTO FITS Analyzer (v2.3.0) 
+# e-CALLISTO FITS Analyzer (v2.4.0)
 A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data.
 
 ---
@@ -7,13 +7,15 @@ A desktop application for visualizing, processing, and analyzing e-CALLISTO sola
 
 ### Dynamic spectrum workflow
 - Load `.fit`, `.fits`, `.fit.gz`, and `.fits.gz` files, including combined time/frequency datasets.
+- Download and analyze e-CALLISTO and Learmonth Station radio data, including Learmonth chunk conversion to FIT format for the main Analyzer.
 - Use hardware-accelerated plotting with live cursor readouts, rectangular zoom, lock/unlock navigation, and **Edit → Reset to Raw** controls.
 - Adjust intensity thresholds live with high-resolution sliders, value readouts, optional signed-log scaling, dB or Digits/ADU display modes, and graph-property controls.
 - Inspect FITS headers from the **View** menu, customize titles and labels, and export publication-ready figures from the current analysis view.
 
 ### Processing and analysis
 - Apply deterministic RFI cleaning with preview/apply/reset controls for median smoothing, hot-channel masking, masked-channel repair, and percentile clipping.
-- Isolate radio bursts, extract maximum intensities, remove outliers manually or automatically, run best-fit / shock-parameter analysis, and perform Type II band-splitting analysis from noise-reduced data.
+- Isolate radio bursts, extract maximum intensities, remove outliers manually or automatically, run best-fit / shock-parameter analysis, and perform experimental Type II band-splitting analysis for magnetic-field estimates from noise-reduced data.
+- Combine frequency bands with improved gap-filling and overlap-handling options before importing the merged spectrum.
 - Keep polygon, line, and text annotations inside the accelerated view, with editable text styling and project persistence.
 - Save and reuse processing presets, reopen restored analysis sessions, and run batch processing for folder-based FIT/FITS exports.
 
@@ -33,7 +35,7 @@ A desktop application for visualizing, processing, and analyzing e-CALLISTO sola
 
 ## 📘 User Guide
 
-This guide explains how to use the main features of the **e-CALLISTO FITS Analyzer**, including dynamic spectrum visualization, live noise reduction, annotations, burst isolation, drift estimation, maximum intensity extraction, best-fit analysis, FITS export, the FITS downloader, and the built-in CME, GOES, SEP, Dst, Kp, and SunPy modules.
+This guide explains how to use the main features of the **e-CALLISTO FITS Analyzer**, including dynamic spectrum visualization, live noise reduction, annotations, burst isolation, drift estimation, maximum intensity extraction, best-fit analysis, Type II band-splitting analysis, FITS export, the e-CALLISTO and Learmonth radio downloaders, and the built-in CME, GOES, SEP, Dst, Kp, and SunPy modules.
 
 ---
 
@@ -256,6 +258,7 @@ Workflow:
 - Add arbitrary points along the upper band
 - Switch to the lower band and add points there
 - Fit both bands with power-law curves
+- Plot magnetic field versus shock height after successful calculation
 - Calculate:
   - Shock speed
   - Shock height
@@ -265,11 +268,21 @@ Workflow:
   - Alfven speed
   - Magnetic field
 
+Important validation note:
+
+- The Type II band-splitting magnetic-field workflow is still under development and should be treated as experimental.
+- Derived magnetic-field values may not be accurate for all events or assumptions.
+- Confirm results against already known or independently validated event data before using them for scientific conclusions.
+
 ---
 
-# 14. FITS Downloader
+# 14. Radio Data Downloaders
 
-Open via **Download → Launch FITS Downloader**.
+Open radio download tools via **Solar Events → Radio Bursts**.
+
+### e-CALLISTO Downloader
+
+Open via **Solar Events → Radio Bursts → e-CALLISTO**.
 
 Features:
 
@@ -286,14 +299,26 @@ Features:
 
 ![Downloader](assets/screenshots/callisto_downloader_preview.png)
 
+### Learmonth Station Downloader
+
+Open via **Solar Events → Radio Bursts → Learmonth**.
+
+Features:
+
+- Load or reuse cached Learmonth Station daily archive files for a selected date
+- Inspect available Learmonth data chunks and their time ranges
+- Download the raw Learmonth daily archive file when needed
+- Convert selected Learmonth chunks into FIT files
+- Import converted Learmonth FIT files directly into the Analyzer for the same noise reduction, visualization, and analysis workflow used by e-CALLISTO data
+
 ---
 
-# 14. Combine FITS Files
+# 15. Combine FITS Files
 
 Two combination modes are supported.
 
 ### **Combine Frequency**
-Merge frequency bands with matching time bases. When selected files contain a frequency gap or overlap, the app prompts for combine options before importing the combined result. Gaps can be filled with interpolated background, average edge background, zeros, or a gray-hatched blank region. Overlapping bands can be split at a connection frequency, kept from the low band, kept from the high band, or rejected.
+Merge frequency bands with matching time bases. Frequency combining now has improved gap filling and overlap handling before the combined result is imported. When selected files contain a frequency gap or overlap, the app prompts for combine options. Gaps can be filled with interpolated background, average edge background, zeros, or a gray-hatched blank region. Overlapping bands can be split at a connection frequency, kept from the low band, kept from the high band, or rejected. The selected gap/overlap handling is retained in the combined dataset metadata where applicable.
 
 ### **Combine Time**
 Merge consecutive time segments from the same station and date.
@@ -304,7 +329,7 @@ Combined data can be imported directly into the Analyzer.
 
 ---
 
-# 15. Save and Reopen Analysis Projects
+# 16. Save and Reopen Analysis Projects
 
 You can save the full analysis state to a project file and restore it later.
 
@@ -322,7 +347,7 @@ Saved state includes plot view, thresholds, units, colormap, graph properties, l
 
 ---
 
-# 16. Export Data as FITS
+# 17. Export Data as FITS
 
 You can now export processed data as a new FITS file with a modified header. This is useful for downstream analysis and **Machine Learning** workflows.
 
@@ -338,7 +363,7 @@ Path:
 
 ---
 
-# 17. Saving and Exporting Plots
+# 18. Saving and Exporting Plots
 
 All figures across the application can be exported in:
 
@@ -366,7 +391,7 @@ These reports are useful for lab notebooks, collaboration handoffs, and paper pr
 
 ---
 
-# 18. CME Catalog Viewer (SOHO/LASCO)
+# 19. CME Catalog Viewer (SOHO/LASCO)
 
 Features:
 
@@ -380,7 +405,7 @@ Features:
 
 ---
 
-# 19. GOES X-Ray Flux Viewer and Overlay
+# 20. GOES X-Ray Flux Viewer and Overlay
 
 Features:
 
@@ -396,7 +421,7 @@ Features:
 
 ---
 
-# 20. GOES SEP Proton Flux Viewer
+# 21. GOES SEP Proton Flux Viewer
 
 Path:
 
@@ -424,7 +449,7 @@ Features:
 
 ---
 
-# 21. SunPy Multi-Mission Explorer
+# 22. SunPy Multi-Mission Explorer
 
 Path:
 
@@ -453,7 +478,7 @@ Known limitations:
 
 ---
 
-# 22. Support and Research Tools
+# 23. Support and Research Tools
 
 ### Report a Bug
 

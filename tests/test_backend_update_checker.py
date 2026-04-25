@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.3.0
+Version 2.4.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -26,14 +26,14 @@ class FakeResponse:
 def test_normalize_version():
     assert update_checker.normalize_version("v2.2.1") == (2, 2, 1)
     assert update_checker.normalize_version("release-2.2.3") == (2, 2, 3)
-    assert update_checker.normalize_version("2.3.0") == (2, 3, 0)
+    assert update_checker.normalize_version("2.4.0") == (2, 4, 0)
     assert update_checker.normalize_version("invalid") == ()
 
 
 def test_is_newer_version():
     assert update_checker.is_newer_version("2.0", "2.2.1")
-    assert update_checker.is_newer_version("2.2.1", "2.3.0")
-    assert not update_checker.is_newer_version("2.3.0", "2.2.1")
+    assert update_checker.is_newer_version("2.2.1", "2.4.0")
+    assert not update_checker.is_newer_version("2.4.0", "2.2.1")
     assert not update_checker.is_newer_version("2.2.1", "2.2.1")
     assert not update_checker.is_newer_version("2.3", "2.2.1")
 
@@ -93,14 +93,14 @@ def test_check_for_updates_uses_platform_specific_release_tag(monkeypatch):
 def test_check_for_updates_ignores_newer_release_from_other_platform(monkeypatch):
     releases_payload = [
         {
-            "tag_name": "v2.3.0(Windows)",
-            "name": "Windows Release v2.3",
-            "html_url": "https://example.com/release/windows-v2.3",
+            "tag_name": "v2.4.0(Windows)",
+            "name": "Windows Release v2.4",
+            "html_url": "https://example.com/release/windows-v2.4",
             "published_at": "2026-02-03T12:00:00Z",
             "assets": [
                 {
-                    "name": "e-CALLISTO_FITS_Analyzer_v2.3_Setup.exe",
-                    "browser_download_url": "https://example.com/windows-v2.3.exe",
+                    "name": "e-CALLISTO_FITS_Analyzer_v2.4_Setup.exe",
+                    "browser_download_url": "https://example.com/windows-v2.4.exe",
                 }
             ],
         },
@@ -171,14 +171,14 @@ def test_check_for_updates_returns_error_when_platform_release_missing(monkeypat
 def test_check_for_updates_skips_prerelease_for_platform(monkeypatch):
     releases_payload = [
         {
-            "tag_name": "v2.3.0-beta(Linux)",
+            "tag_name": "v2.4.0-beta(Linux)",
             "name": "Linux beta",
             "prerelease": True,
             "draft": False,
             "assets": [
                 {
-                    "name": "e-callisto-fits-analyzer_2.3_beta_amd64.deb",
-                    "browser_download_url": "https://example.com/linux-v2.3-beta.deb",
+                    "name": "e-callisto-fits-analyzer_2.4_beta_amd64.deb",
+                    "browser_download_url": "https://example.com/linux-v2.4-beta.deb",
                 }
             ],
         },
