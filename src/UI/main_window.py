@@ -87,6 +87,7 @@ from src.Backend.annotations import (
 )
 from src.Backend.frequency_axis import (
     finite_data_limits,
+    frequency_gap_spans,
     invalid_row_mask,
     masked_display_data,
     matplotlib_extent,
@@ -3078,7 +3079,7 @@ class MainWindow(QMainWindow):
                     "   • Same timestamp (HHMMSS)\n"
                     "   • Distinct focus codes\n"
                     "   • Matching time bases\n"
-                    "   • Non-overlapping frequency bands (gaps allowed)\n\n"
+                    "   • Frequency bands with gaps or resolvable overlaps\n\n"
                     "2. Time Combine:\n"
                     "   • Same station\n"
                     "   • Same receiver ID\n"
@@ -3394,6 +3395,29 @@ class MainWindow(QMainWindow):
         except Exception:
             return None
         return mask if mask.shape[0] == len(self.freqs) else None
+
+    def _draw_frequency_gap_hatches(self, ax) -> None:
+        gap_mask = self._current_gap_row_mask()
+        if ax is None or gap_mask is None or self.freqs is None:
+            return
+
+        try:
+            default_step = float(self._frequency_step_mhz) if self._frequency_step_mhz else 1.0
+            spans = frequency_gap_spans(self.freqs, gap_mask, default_step=default_step)
+        except Exception:
+            return
+
+        for lo, hi in spans:
+            ax.axhspan(
+                lo,
+                hi,
+                facecolor="#b8b8b8",
+                edgecolor="#555555",
+                alpha=0.35,
+                hatch="///",
+                linewidth=0.0,
+                zorder=3,
+            )
 
     def _plot_cmap(self):
         if self.current_cmap_name == "Custom":
@@ -3737,6 +3761,7 @@ class MainWindow(QMainWindow):
         vmin, vmax = finite_data_limits(display_data)
         if vmin is not None and vmax is not None:
             im.set_clim(vmin, vmax)
+        self._draw_frequency_gap_hatches(self.canvas.ax)
 
         self.current_colorbar = self.canvas.figure.colorbar(im, cax=cax)
 
@@ -4294,6 +4319,7 @@ class MainWindow(QMainWindow):
             vmin=vmin,
             vmax=vmax,
         )
+        self._draw_frequency_gap_hatches(self.canvas.ax)
 
         self.current_display_data = display_burst
         self._current_plot_source_data = np.asarray(burst_isolated)
@@ -5995,7 +6021,7 @@ class MainWindow(QMainWindow):
                     self,
                     "Invalid Selection",
                     "Selected files cannot be time-combined or frequency-combined.\n"
-                    "Please ensure they are consecutive in time or use non-overlapping frequency bands (gaps allowed)."
+                    "Please ensure they are consecutive in time or use frequency bands with matching time bases."
                 )
                 return
 

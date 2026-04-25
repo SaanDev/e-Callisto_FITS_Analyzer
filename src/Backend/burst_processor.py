@@ -26,6 +26,14 @@ GRID_ALIGN_TOL_FRACTION = 0.25
 HEADER_FOCUS_KEYS = ("FOCUS", "FOCUSID", "RECEIVER", "RECEIVERID", "RCVR", "RCVRID")
 GAP_FILL_EDGE_ROWS = 4
 GAP_FILL_BACKGROUND_PERCENTILE = 25.0
+GAP_FILL_BACKGROUND = "background"
+GAP_FILL_HATCHED = "hatched"
+GAP_FILL_ZERO = "zero"
+GAP_FILL_AVERAGE = "average"
+OVERLAP_SPLIT = "split"
+OVERLAP_LOW = "low"
+OVERLAP_HIGH = "high"
+OVERLAP_REJECT = "reject"
 
 def load_fits(filepath):
     res = load_callisto_fits(filepath, memmap=False)
@@ -82,29 +90,54 @@ def _parse_observation_datetime(filepath):
     return station, observed_at, receiver_id
 
 
-def are_frequency_combinable(file_paths):
+def are_frequency_combinable(
+    file_paths,
+    *,
+    gap_fill: str = GAP_FILL_BACKGROUND,
+    overlap_policy: str = OVERLAP_SPLIT,
+    overlap_connection_mhz: float | None = None,
+):
     if len(file_paths) < 2:
         return False
 
     try:
-        _prepare_frequency_blocks(file_paths)
+        _prepare_frequency_blocks(
+            file_paths,
+            gap_fill=gap_fill,
+            overlap_policy=overlap_policy,
+            overlap_connection_mhz=overlap_connection_mhz,
+        )
     except Exception:
         return False
 
     return True
 
 
-def combine_frequency(file_paths):
+def combine_frequency(
+    file_paths,
+    *,
+    gap_fill: str = GAP_FILL_BACKGROUND,
+    overlap_policy: str = OVERLAP_SPLIT,
+    overlap_connection_mhz: float | None = None,
+):
     if len(file_paths) < 2:
         raise ValueError("Need at least 2 files to combine frequencies.")
 
-    prepared = _prepare_frequency_blocks(file_paths)
+    prepared = _prepare_frequency_blocks(
+        file_paths,
+        gap_fill=gap_fill,
+        overlap_policy=overlap_policy,
+        overlap_connection_mhz=overlap_connection_mhz,
+    )
     blocks = prepared["blocks"]
     combined_data = prepared["data"]
     combined_freqs = prepared["freqs"]
     time_ref = prepared["time"]
     gap_row_mask = prepared["gap_row_mask"]
     gap_row_count = int(prepared.get("gap_row_count", 0))
+    gap_fill_mode = prepared.get("gap_fill", GAP_FILL_BACKGROUND)
+    overlap_mode = prepared.get("overlap_policy", OVERLAP_SPLIT)
+    overlap_connection = prepared.get("overlap_connection_mhz", None)
     header0 = prepared["header0"]
     step_mhz = float(prepared["frequency_step_mhz"])
 
@@ -127,7 +160,10 @@ def combine_frequency(file_paths):
     combined_header["FREQMIN"] = (float(np.nanmin(combined_freqs)), "Min frequency (MHz)")
     combined_header["FREQMAX"] = (float(np.nanmax(combined_freqs)), "Max frequency (MHz)")
     combined_header["HISTORY"] = f"Regularized frequency grid step: {step_mhz:.6f} MHz"
-    combined_header["HISTORY"] = f"Inserted background-interpolated gap rows: {gap_row_count}"
+    combined_header["HISTORY"] = f"Frequency gap fill mode: {gap_fill_mode}; rows: {gap_row_count}"
+    combined_header["HISTORY"] = f"Frequency overlap policy: {overlap_mode}"
+    if overlap_connection is not None:
+        combined_header["HISTORY"] = f"Overlap connection frequency: {float(overlap_connection):.6f} MHz"
 
     return {
         "data": combined_data,
@@ -140,12 +176,25 @@ def combine_frequency(file_paths):
         "combine_type": "frequency",
         "gap_row_mask": gap_row_mask,
         "frequency_step_mhz": float(step_mhz),
+        "gap_fill": gap_fill_mode,
+        "overlap_policy": overlap_mode,
+        "overlap_connection_mhz": overlap_connection,
     }
 
 
-def _prepare_frequency_blocks(file_paths):
+def _prepare_frequency_blocks(
+    file_paths,
+    *,
+    gap_fill: str = GAP_FILL_BACKGROUND,
+    overlap_policy: str = OVERLAP_SPLIT,
+    overlap_connection_mhz: float | None = None,
+):
     if len(file_paths) < 2:
         raise ValueError("Need at least 2 files to combine frequencies.")
+
+    gap_fill_mode = _normalize_gap_fill(gap_fill)
+    overlap_mode = _normalize_overlap_policy(overlap_policy)
+    connection_mhz = _optional_float(overlap_connection_mhz)
 
     try:
         s_ref, d_ref, t_ref, _ = parse_filename(file_paths[0])
@@ -225,7 +274,8 @@ def _prepare_frequency_blocks(file_paths):
     overlap_tol = _range_tol(grid_step_ref, fraction=GRID_ALIGN_TOL_FRACTION)
     for block in previews:
         if prev_high is not None and float(block["freq_min"]) <= float(prev_high) + overlap_tol:
-            raise ValueError("Frequency bands overlap or interleave; only non-overlapping bands can be combined.")
+            if overlap_mode == OVERLAP_REJECT:
+                raise ValueError("Frequency bands overlap or interleave; selected overlap policy rejects overlap.")
         prev_high = float(block["freq_max"])
 
     overall_min = float(previews[0]["freq_min"])
@@ -263,42 +313,78 @@ def _prepare_frequency_blocks(file_paths):
         covered = (freq_grid_asc >= band_min - tol) & (freq_grid_asc <= band_max + tol)
         if not np.any(covered):
             raise ValueError(f"Frequency channels in {os.path.basename(preview['path'])} are outside the combined grid.")
-        if np.any(filled_row_mask_asc[covered]):
-            raise ValueError("Frequency bands overlap or interleave; only non-overlapping bands can be combined.")
-
         if freq_arr.size == 1:
             positions = np.zeros(int(np.count_nonzero(covered)), dtype=int)
         else:
             midpoints = 0.5 * (freq_arr[:-1] + freq_arr[1:])
             positions = np.searchsorted(midpoints, freq_grid_asc[covered], side="right")
 
-        combined_asc[covered, :] = data_arr[positions, :]
-        filled_row_mask_asc[covered] = True
+        target_rows = np.flatnonzero(covered)
+        write_rows = np.ones(target_rows.size, dtype=bool)
+        overlapped = filled_row_mask_asc[target_rows]
+        if np.any(overlapped):
+            if overlap_mode == OVERLAP_REJECT:
+                raise ValueError("Frequency bands overlap or interleave; selected overlap policy rejects overlap.")
+            overlap_freqs = freq_grid_asc[target_rows[overlapped]]
+            replace = _overlap_replace_mask(
+                overlap_freqs,
+                overlap_policy=overlap_mode,
+                overlap_min=max(float(preview["freq_min"]), float(np.nanmin(overlap_freqs))),
+                overlap_max=min(float(preview["freq_max"]), float(np.nanmax(overlap_freqs))),
+                connection_mhz=connection_mhz,
+            )
+            write_rows[overlapped] = replace
+
+        if np.any(write_rows):
+            write_targets = target_rows[write_rows]
+            combined_asc[write_targets, :] = data_arr[positions[write_rows], :]
+            filled_row_mask_asc[write_targets] = True
         loaded_block = dict(preview)
         loaded_block["data"] = data_arr
         blocks.append(loaded_block)
 
-    _fill_frequency_gap_background(
-        combined_asc,
-        filled_row_mask_asc,
-        freq_grid_asc,
-        edge_rows=GAP_FILL_EDGE_ROWS,
-        percentile=GAP_FILL_BACKGROUND_PERCENTILE,
-    )
+    gap_row_mask_asc = ~filled_row_mask_asc
+    gap_row_count = int(np.count_nonzero(gap_row_mask_asc))
+    if gap_row_count:
+        if gap_fill_mode == GAP_FILL_BACKGROUND:
+            _fill_frequency_gap_background(
+                combined_asc,
+                filled_row_mask_asc,
+                freq_grid_asc,
+                edge_rows=GAP_FILL_EDGE_ROWS,
+                percentile=GAP_FILL_BACKGROUND_PERCENTILE,
+                interpolate=True,
+            )
+        elif gap_fill_mode == GAP_FILL_AVERAGE:
+            _fill_frequency_gap_background(
+                combined_asc,
+                filled_row_mask_asc,
+                freq_grid_asc,
+                edge_rows=GAP_FILL_EDGE_ROWS,
+                percentile=GAP_FILL_BACKGROUND_PERCENTILE,
+                interpolate=False,
+            )
+        elif gap_fill_mode == GAP_FILL_HATCHED:
+            combined_asc[gap_row_mask_asc, :] = np.nan
+        elif gap_fill_mode == GAP_FILL_ZERO:
+            combined_asc[gap_row_mask_asc, :] = 0.0
 
     combined_data = combined_asc[::-1, :]
     combined_freqs = freq_grid_asc[::-1]
-    gap_row_count = int(np.count_nonzero(~filled_row_mask_asc))
+    gap_row_mask = gap_row_mask_asc[::-1] if gap_fill_mode == GAP_FILL_HATCHED and gap_row_count else None
 
     return {
         "blocks": blocks,
         "data": combined_data,
         "freqs": combined_freqs,
         "time": np.asarray(time_ref, dtype=float),
-        "gap_row_mask": None,
+        "gap_row_mask": gap_row_mask,
         "gap_row_count": gap_row_count,
         "header0": previews[0]["header0"],
         "frequency_step_mhz": grid_step,
+        "gap_fill": gap_fill_mode,
+        "overlap_policy": overlap_mode,
+        "overlap_connection_mhz": connection_mhz,
     }
 
 
@@ -322,6 +408,7 @@ def _fill_frequency_gap_background(
     *,
     edge_rows: int,
     percentile: float,
+    interpolate: bool,
 ) -> None:
     mask = np.asarray(filled_row_mask_asc, dtype=bool).ravel()
     if mask.size == 0 or np.all(mask):
@@ -352,7 +439,9 @@ def _fill_frequency_gap_background(
         if right_bg is None:
             right_bg = np.asarray(left_bg, dtype=float).copy()
 
-        if start > 0 and end < nrows:
+        if not bool(interpolate):
+            alphas = np.full(end - start, 0.5, dtype=float)
+        elif start > 0 and end < nrows:
             left_freq = float(freqs[start - 1])
             right_freq = float(freqs[end])
             span = float(right_freq - left_freq)
@@ -405,6 +494,92 @@ def _edge_background_trace(rows: np.ndarray | None, *, percentile: float) -> np.
     if arr.shape[0] == 1:
         return arr[0].astype(float, copy=True)
     return np.nanpercentile(arr, float(percentile), axis=0).astype(float, copy=False)
+
+
+def _normalize_gap_fill(value: str) -> str:
+    text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "background": GAP_FILL_BACKGROUND,
+        "interpolate": GAP_FILL_BACKGROUND,
+        "interpolated": GAP_FILL_BACKGROUND,
+        "synthetic": GAP_FILL_BACKGROUND,
+        "synthetic_background": GAP_FILL_BACKGROUND,
+        "hatched": GAP_FILL_HATCHED,
+        "hatch": GAP_FILL_HATCHED,
+        "blank": GAP_FILL_HATCHED,
+        "nan": GAP_FILL_HATCHED,
+        "grey_hatched": GAP_FILL_HATCHED,
+        "gray_hatched": GAP_FILL_HATCHED,
+        "zero": GAP_FILL_ZERO,
+        "zeros": GAP_FILL_ZERO,
+        "average": GAP_FILL_AVERAGE,
+        "mean": GAP_FILL_AVERAGE,
+        "edge_average": GAP_FILL_AVERAGE,
+    }
+    if text in aliases:
+        return aliases[text]
+    raise ValueError(f"Unsupported frequency gap fill mode: {value}")
+
+
+def _normalize_overlap_policy(value: str) -> str:
+    text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "split": OVERLAP_SPLIT,
+        "both": OVERLAP_SPLIT,
+        "connection": OVERLAP_SPLIT,
+        "connect": OVERLAP_SPLIT,
+        "midpoint": OVERLAP_SPLIT,
+        "low": OVERLAP_LOW,
+        "low_band": OVERLAP_LOW,
+        "prefer_low": OVERLAP_LOW,
+        "keep_low": OVERLAP_LOW,
+        "lower": OVERLAP_LOW,
+        "high": OVERLAP_HIGH,
+        "high_band": OVERLAP_HIGH,
+        "prefer_high": OVERLAP_HIGH,
+        "keep_high": OVERLAP_HIGH,
+        "upper": OVERLAP_HIGH,
+        "reject": OVERLAP_REJECT,
+        "none": OVERLAP_REJECT,
+    }
+    if text in aliases:
+        return aliases[text]
+    raise ValueError(f"Unsupported frequency overlap policy: {value}")
+
+
+def _optional_float(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        out = float(value)
+    except Exception:
+        return None
+    if not np.isfinite(out):
+        return None
+    return out
+
+
+def _overlap_replace_mask(
+    freqs: np.ndarray,
+    *,
+    overlap_policy: str,
+    overlap_min: float,
+    overlap_max: float,
+    connection_mhz: float | None,
+) -> np.ndarray:
+    arr = np.asarray(freqs, dtype=float).ravel()
+    if overlap_policy == OVERLAP_LOW:
+        return np.zeros(arr.size, dtype=bool)
+    if overlap_policy == OVERLAP_HIGH:
+        return np.ones(arr.size, dtype=bool)
+    if overlap_policy == OVERLAP_REJECT:
+        raise ValueError("Frequency bands overlap or interleave; selected overlap policy rejects overlap.")
+
+    lo = min(float(overlap_min), float(overlap_max))
+    hi = max(float(overlap_min), float(overlap_max))
+    connection = float(connection_mhz) if connection_mhz is not None else 0.5 * (lo + hi)
+    connection = min(max(connection, lo), hi)
+    return arr > connection
 
 
 def _normalize_focus_code(value) -> str:

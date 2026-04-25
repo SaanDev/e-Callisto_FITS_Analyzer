@@ -53,9 +53,31 @@ def _rgba_image_from_cmap(
     rgba = np.clip(rgba, 0.0, 1.0)
 
     alpha = np.isfinite(work)
-    row_mask = invalid_row_mask(work, gap_row_mask)
+
+    explicit_gap_rows = None
+    if gap_row_mask is not None:
+        try:
+            candidate = np.asarray(gap_row_mask, dtype=bool).ravel()
+            if candidate.shape[0] == work.shape[0]:
+                explicit_gap_rows = candidate
+        except Exception:
+            explicit_gap_rows = None
+
+    if explicit_gap_rows is not None and np.any(explicit_gap_rows):
+        yy, xx = np.indices(work.shape)
+        stripes = ((xx + yy) % 6) < 3
+        rgba[explicit_gap_rows, :, :] = np.array([0.70, 0.70, 0.70, 0.78], dtype=float)
+        stripe_mask = explicit_gap_rows[:, None] & stripes
+        rgba[stripe_mask, :] = np.array([0.42, 0.42, 0.42, 0.90], dtype=float)
+        alpha[explicit_gap_rows, :] = True
+
+    row_mask = invalid_row_mask(work, None)
     if row_mask.size == work.shape[0] and np.any(row_mask):
-        alpha[row_mask, :] = False
+        invalid_non_gap = row_mask.copy()
+        if explicit_gap_rows is not None and explicit_gap_rows.shape[0] == invalid_non_gap.shape[0]:
+            invalid_non_gap &= ~explicit_gap_rows
+        alpha[invalid_non_gap, :] = False
+
     rgba[..., 3] = np.where(alpha, rgba[..., 3], 0.0)
     return np.ascontiguousarray(np.rint(rgba * 255.0).astype(np.ubyte))
 

@@ -75,7 +75,7 @@ def test_accelerated_widget_update_image_no_crash():
     )
 
 
-def test_accelerated_widget_gap_rows_render_with_transparent_alpha():
+def test_accelerated_widget_gap_rows_render_with_gray_hatch_pattern():
     _app()
     widget = AcceleratedPlotWidget()
     if not widget.is_available:
@@ -112,7 +112,9 @@ def test_accelerated_widget_gap_rows_render_with_transparent_alpha():
     rendered = np.asarray(widget._image.image)
     assert rendered.ndim == 3
     assert rendered.shape[2] == 4
-    assert np.all(rendered[1, :, 3] == 0)
+    assert np.all(rendered[1, :, 3] > 0)
+    gap_colors = np.unique(rendered[1, :, :3].reshape(-1, 3), axis=0)
+    assert gap_colors.shape[0] >= 2
 
 
 def test_accelerated_widget_export_item_available():

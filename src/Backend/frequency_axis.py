@@ -82,6 +82,43 @@ def frequency_edges(freqs: np.ndarray, default_step: float = 1.0) -> np.ndarray:
     return axis_edges(freqs, default_step=default_step)
 
 
+def frequency_gap_spans(
+    freqs: np.ndarray,
+    gap_row_mask: np.ndarray | None,
+    *,
+    default_step: float = 1.0,
+) -> list[tuple[float, float]]:
+    freq_arr = np.asarray(freqs, dtype=float).ravel()
+    if gap_row_mask is None or freq_arr.size == 0:
+        return []
+
+    mask = np.asarray(gap_row_mask, dtype=bool).ravel()
+    if mask.shape[0] != freq_arr.size or not np.any(mask):
+        return []
+
+    edges = frequency_edges(freq_arr, default_step=default_step)
+    if edges.size != freq_arr.size + 1:
+        return []
+
+    spans: list[tuple[float, float]] = []
+    idx = 0
+    while idx < mask.size:
+        if not bool(mask[idx]):
+            idx += 1
+            continue
+
+        start = idx
+        while idx < mask.size and bool(mask[idx]):
+            idx += 1
+        end = idx
+
+        lo = min(float(edges[start]), float(edges[end]))
+        hi = max(float(edges[start]), float(edges[end]))
+        spans.append((lo, hi))
+
+    return spans
+
+
 def time_bounds(time: np.ndarray) -> tuple[float, float]:
     arr = np.asarray(time, dtype=float).ravel()
     if arr.size == 0:

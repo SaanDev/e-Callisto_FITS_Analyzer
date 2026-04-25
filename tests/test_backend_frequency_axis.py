@@ -10,6 +10,7 @@ from src.Backend.frequency_axis import (
     axis_edges,
     finite_data_limits,
     frequency_edges,
+    frequency_gap_spans,
     invalid_row_mask,
     masked_display_data,
     matplotlib_extent,
@@ -58,6 +59,15 @@ def test_invalid_row_mask_respects_explicit_gap_rows():
     out = invalid_row_mask(data, gap_row_mask)
 
     assert np.array_equal(out, np.array([False, True, True], dtype=bool))
+
+
+def test_frequency_gap_spans_groups_contiguous_gap_rows():
+    freqs = np.array([130.0, 120.0, 110.0, 100.0, 90.0], dtype=float)
+    gap_row_mask = np.array([False, True, True, False, True], dtype=bool)
+
+    spans = frequency_gap_spans(freqs, gap_row_mask, default_step=10.0)
+
+    assert spans == [(105.0, 125.0), (85.0, 95.0)]
 
 
 def test_masked_display_data_and_limits_ignore_gap_rows():

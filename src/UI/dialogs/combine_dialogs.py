@@ -18,8 +18,12 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QFileDialog,
+    QFormLayout,
+    QGroupBox,
     QLabel,
     QMessageBox,
     QProgressBar,
@@ -28,8 +32,14 @@ from PySide6.QtWidgets import (
 )
 
 from src.Backend.burst_processor import combine_frequency
-from src.Backend.frequency_axis import finite_data_limits, masked_display_data, matplotlib_extent, transparent_bad_cmap
-from src.Backend.fits_io import build_combined_header, extract_ut_start_sec, load_callisto_fits
+from src.Backend.frequency_axis import (
+    finite_data_limits,
+    frequency_gap_spans,
+    masked_display_data,
+    matplotlib_extent,
+    transparent_bad_cmap,
+)
+from src.Backend.fits_io import build_combined_header, extract_ut_start_sec, load_callisto_fits, preview_callisto_fits
 from src.UI.mpl_style import style_axes
 
 class CombineFrequencyDialog(QDialog):
@@ -52,6 +62,32 @@ class CombineFrequencyDialog(QDialog):
         self.import_button.clicked.connect(self.import_to_main)
         self.import_button.setEnabled(False)
 
+        self.gap_fill_combo = QComboBox()
+        self.gap_fill_combo.addItem("Interpolated background", "background")
+        self.gap_fill_combo.addItem("Gray hatched gap", "hatched")
+        self.gap_fill_combo.addItem("Average edge background", "average")
+        self.gap_fill_combo.addItem("Zero fill", "zero")
+
+        self.overlap_policy_combo = QComboBox()
+        self.overlap_policy_combo.addItem("Split at connection frequency", "split")
+        self.overlap_policy_combo.addItem("Keep low band in overlap", "low")
+        self.overlap_policy_combo.addItem("Keep high band in overlap", "high")
+        self.overlap_policy_combo.addItem("Reject overlap", "reject")
+        self.overlap_policy_combo.currentIndexChanged.connect(self._sync_connection_controls)
+
+        self.connection_spin = QDoubleSpinBox()
+        self.connection_spin.setDecimals(3)
+        self.connection_spin.setRange(0.0, 10000.0)
+        self.connection_spin.setSuffix(" MHz")
+        self.connection_spin.setEnabled(False)
+
+        options_group = QGroupBox("Frequency Combine Options")
+        options_layout = QFormLayout()
+        options_layout.addRow("Gap handling", self.gap_fill_combo)
+        options_layout.addRow("Overlap handling", self.overlap_policy_combo)
+        options_layout.addRow("Connection frequency", self.connection_spin)
+        options_group.setLayout(options_layout)
+
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(False)
@@ -61,6 +97,7 @@ class CombineFrequencyDialog(QDialog):
 
         layout = QVBoxLayout()
         layout.addWidget(self.load_button)
+        layout.addWidget(options_group)
         layout.addWidget(self.combine_button)
         layout.addWidget(self.import_button)
         layout.addWidget(self.image_label)
@@ -75,6 +112,7 @@ class CombineFrequencyDialog(QDialog):
         self.combined_header0 = None
         self.combined_gap_row_mask = None
         self.combined_frequency_step_mhz = None
+        self._overlap_range = None
 
     def load_files(self):
         files, _ = QFileDialog.getOpenFileNames(
@@ -92,11 +130,51 @@ class CombineFrequencyDialog(QDialog):
 
         if station1 != station2:
             QMessageBox.critical(self, "Error",
-                                 "You must select non-overlapping frequency data files from the same station!")
+                                 "You must select frequency data files from the same station!")
             return
 
         self.file_paths = files
+        self._refresh_overlap_controls()
         self.combine_button.setEnabled(True)
+
+    def _selected_gap_fill(self):
+        return str(self.gap_fill_combo.currentData() or "background")
+
+    def _selected_overlap_policy(self):
+        return str(self.overlap_policy_combo.currentData() or "split")
+
+    def _selected_connection_mhz(self):
+        if not self.connection_spin.isEnabled():
+            return None
+        return float(self.connection_spin.value())
+
+    def _sync_connection_controls(self):
+        has_overlap = self._overlap_range is not None
+        is_split = self._selected_overlap_policy() == "split"
+        self.connection_spin.setEnabled(bool(has_overlap and is_split))
+
+    def _refresh_overlap_controls(self):
+        self._overlap_range = None
+        self.connection_spin.setEnabled(False)
+        if len(self.file_paths) != 2:
+            return
+
+        try:
+            ranges = []
+            for path in self.file_paths:
+                preview = preview_callisto_fits(path, memmap=False)
+                freqs = np.asarray(preview.freqs, dtype=float).ravel()
+                ranges.append((float(np.nanmin(freqs)), float(np.nanmax(freqs))))
+            overlap_min = max(r[0] for r in ranges)
+            overlap_max = min(r[1] for r in ranges)
+            if overlap_min <= overlap_max:
+                self._overlap_range = (overlap_min, overlap_max)
+                self.connection_spin.setRange(overlap_min, overlap_max)
+                self.connection_spin.setValue(0.5 * (overlap_min + overlap_max))
+        except Exception:
+            self._overlap_range = None
+
+        self._sync_connection_controls()
 
     def combine_files(self):
         self.progress_bar.setVisible(True)
@@ -104,7 +182,12 @@ class CombineFrequencyDialog(QDialog):
         QApplication.processEvents()
 
         try:
-            combined = combine_frequency(self.file_paths)
+            combined = combine_frequency(
+                self.file_paths,
+                gap_fill=self._selected_gap_fill(),
+                overlap_policy=self._selected_overlap_policy(),
+                overlap_connection_mhz=self._selected_connection_mhz(),
+            )
             self.combined_data = np.asarray(combined["data"])
             self.combined_freqs = np.asarray(combined["freqs"], dtype=float)
             self.combined_time = np.asarray(combined["time"], dtype=float)
@@ -133,6 +216,21 @@ class CombineFrequencyDialog(QDialog):
             vmin, vmax = finite_data_limits(self.combined_data)
             if vmin is not None and vmax is not None:
                 im.set_clim(vmin, vmax)
+            for lo, hi in frequency_gap_spans(
+                self.combined_freqs,
+                self.combined_gap_row_mask,
+                default_step=self.combined_frequency_step_mhz or 1.0,
+            ):
+                ax.axhspan(
+                    lo,
+                    hi,
+                    facecolor="#b8b8b8",
+                    edgecolor="#555555",
+                    alpha=0.35,
+                    hatch="///",
+                    linewidth=0.0,
+                    zorder=3,
+                )
             ax.set_xlabel("Time [s]")
             ax.set_ylabel("Frequency [MHz]")
             # Extract base filenames (e.g., 'BIR_20240720_123000_123000_00.fit.gz')

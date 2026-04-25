@@ -303,7 +303,36 @@ def test_combine_frequency_regularizes_order_and_inserts_gap_rows(monkeypatch):
     assert float(result["frequency_step_mhz"]) == pytest.approx(10.0)
 
 
-def test_combine_frequency_rejects_overlapping_bands(monkeypatch):
+def test_combine_frequency_hatched_gap_keeps_explicit_invalid_rows(monkeypatch):
+    time = np.array([0.0, 1.0])
+    mapping = {
+        "STAT_20240101_120000_B.fit": {
+            "data": np.array([[30.0, 31.0], [40.0, 41.0]]),
+            "freqs": np.array([130.0, 120.0]),
+            "time": time,
+            "header0": _header(120.0, 130.0, step=10.0, focus="B"),
+        },
+        "STAT_20240101_120000_A.fit": {
+            "data": np.array([[10.0, 11.0], [20.0, 21.0]]),
+            "freqs": np.array([20.0, 10.0]),
+            "time": time,
+            "header0": _header(10.0, 20.0, step=10.0, focus="A"),
+        },
+    }
+    _install_preview_and_load(monkeypatch, mapping)
+
+    result = burst_processor.combine_frequency(list(mapping), gap_fill="hatched")
+
+    assert result["gap_fill"] == "hatched"
+    assert result["gap_row_mask"] is not None
+    assert np.array_equal(
+        result["gap_row_mask"],
+        np.array([False, False, True, True, True, True, True, True, True, True, True, False, False]),
+    )
+    assert np.all(np.isnan(result["data"][2:11]))
+
+
+def test_combine_frequency_rejects_overlapping_bands_when_requested(monkeypatch):
     time = np.array([0.0, 1.0])
     mapping = {
         "STAT_20240101_120000_A.fit": {
@@ -322,7 +351,62 @@ def test_combine_frequency_rejects_overlapping_bands(monkeypatch):
     _install_preview_and_load(monkeypatch, mapping)
 
     with pytest.raises(ValueError, match="overlap|interleave"):
-        burst_processor.combine_frequency(list(mapping))
+        burst_processor.combine_frequency(list(mapping), overlap_policy="reject")
+
+
+def test_combine_frequency_splits_overlapping_bands_at_connection(monkeypatch):
+    time = np.array([0.0])
+    mapping = {
+        "STAT_20240101_120000_A.fit": {
+            "data": np.array([[10.0], [20.0], [30.0], [40.0]]),
+            "freqs": np.array([10.0, 20.0, 30.0, 40.0]),
+            "time": time,
+            "header0": _header(10.0, 40.0, step=10.0, focus="A"),
+        },
+        "STAT_20240101_120000_B.fit": {
+            "data": np.array([[300.0], [400.0], [500.0], [600.0]]),
+            "freqs": np.array([30.0, 40.0, 50.0, 60.0]),
+            "time": time,
+            "header0": _header(30.0, 60.0, step=10.0, focus="B"),
+        },
+    }
+    _install_preview_and_load(monkeypatch, mapping)
+
+    result = burst_processor.combine_frequency(
+        list(mapping),
+        overlap_policy="split",
+        overlap_connection_mhz=35.0,
+    )
+
+    assert np.array_equal(result["freqs"], np.array([60.0, 50.0, 40.0, 30.0, 20.0, 10.0]))
+    assert np.array_equal(result["data"].ravel(), np.array([600.0, 500.0, 400.0, 30.0, 20.0, 10.0]))
+    assert result["overlap_policy"] == "split"
+    assert result["overlap_connection_mhz"] == pytest.approx(35.0)
+
+
+def test_combine_frequency_overlap_policy_keeps_low_or_high_band(monkeypatch):
+    time = np.array([0.0])
+    mapping = {
+        "STAT_20240101_120000_A.fit": {
+            "data": np.array([[10.0], [20.0], [30.0], [40.0]]),
+            "freqs": np.array([10.0, 20.0, 30.0, 40.0]),
+            "time": time,
+            "header0": _header(10.0, 40.0, step=10.0, focus="A"),
+        },
+        "STAT_20240101_120000_B.fit": {
+            "data": np.array([[300.0], [400.0], [500.0], [600.0]]),
+            "freqs": np.array([30.0, 40.0, 50.0, 60.0]),
+            "time": time,
+            "header0": _header(30.0, 60.0, step=10.0, focus="B"),
+        },
+    }
+    _install_preview_and_load(monkeypatch, mapping)
+
+    low = burst_processor.combine_frequency(list(mapping), overlap_policy="low")
+    high = burst_processor.combine_frequency(list(mapping), overlap_policy="high")
+
+    assert np.array_equal(low["data"].ravel(), np.array([600.0, 500.0, 40.0, 30.0, 20.0, 10.0]))
+    assert np.array_equal(high["data"].ravel(), np.array([600.0, 500.0, 400.0, 300.0, 20.0, 10.0]))
 
 
 def test_combine_frequency_rejects_duplicate_focus_codes(monkeypatch):
