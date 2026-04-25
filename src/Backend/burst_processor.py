@@ -182,6 +182,95 @@ def combine_frequency(
     }
 
 
+def describe_frequency_combination(file_paths) -> dict:
+    if len(file_paths) < 2:
+        return {
+            "has_gap": False,
+            "has_overlap": False,
+            "gaps": [],
+            "overlaps": [],
+            "blocks": [],
+        }
+
+    blocks = []
+    steps = []
+    for fp in file_paths:
+        try:
+            station, obs_date, obs_time, focus_code = parse_filename(fp)
+        except Exception:
+            station, obs_date, obs_time, focus_code = "", "", "", ""
+
+        preview = preview_callisto_fits(fp, memmap=False)
+        freq_arr = orient_frequency_axis(preview.freqs, direction=1)
+        if freq_arr.size == 0:
+            continue
+
+        step_mhz = _preview_frequency_step(preview.header0, freq_arr)
+        if np.isfinite(step_mhz) and step_mhz > 0.0:
+            steps.append(float(step_mhz))
+
+        range_min, range_max = _resolved_frequency_range(preview.header0, freq_arr)
+        blocks.append(
+            {
+                "path": fp,
+                "station": station,
+                "date": obs_date,
+                "time": obs_time,
+                "focus_code": _normalize_focus_code(focus_code),
+                "freq_min": float(range_min),
+                "freq_max": float(range_max),
+                "frequency_step_mhz": float(step_mhz) if np.isfinite(step_mhz) else None,
+            }
+        )
+
+    blocks.sort(key=lambda item: (item["freq_min"], item["freq_max"], str(item["path"])))
+    step_ref = float(min(steps)) if steps else 1.0
+    tol = _range_tol(step_ref, fraction=GRID_ALIGN_TOL_FRACTION)
+    gaps = []
+    overlaps = []
+
+    if blocks:
+        active = blocks[0]
+        active_high = float(active["freq_max"])
+        for block in blocks[1:]:
+            block_low = float(block["freq_min"])
+            block_high = float(block["freq_max"])
+
+            if block_low > active_high + tol:
+                gaps.append(
+                    {
+                        "low": float(active_high),
+                        "high": float(block_low),
+                        "lower_file": active["path"],
+                        "higher_file": block["path"],
+                    }
+                )
+            else:
+                overlap_low = max(float(active["freq_min"]), block_low)
+                overlap_high = min(active_high, block_high)
+                if overlap_high >= overlap_low - tol:
+                    overlaps.append(
+                        {
+                            "low": float(overlap_low),
+                            "high": float(overlap_high),
+                            "lower_file": active["path"],
+                            "higher_file": block["path"],
+                        }
+                    )
+
+            if block_high > active_high:
+                active = block
+                active_high = block_high
+
+    return {
+        "has_gap": bool(gaps),
+        "has_overlap": bool(overlaps),
+        "gaps": gaps,
+        "overlaps": overlaps,
+        "blocks": blocks,
+    }
+
+
 def _prepare_frequency_blocks(
     file_paths,
     *,

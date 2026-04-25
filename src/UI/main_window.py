@@ -129,7 +129,7 @@ from src.UI.dialogs.annotation_text_dialog import TextAnnotationDialog
 from src.UI.dialogs.batch_processing_dialog import BatchProcessingDialog
 from src.UI.dialogs.bug_report_dialog import BugReportDialog
 from src.UI.dialogs.citation_dialog import CitationDialog
-from src.UI.dialogs.combine_dialogs import CombineFrequencyDialog, CombineTimeDialog
+from src.UI.dialogs.combine_dialogs import CombineFrequencyDialog, CombineTimeDialog, FrequencyCombineOptionsDialog
 from src.UI.dialogs.max_intensity_dialog import MaxIntensityPlotDialog
 from src.UI.dialogs.rfi_control_dialog import RFIControlDialog
 from src.UI.dialogs.type_ii_band_splitting_dialog import TypeIIBandSplittingDialog
@@ -3068,7 +3068,10 @@ class MainWindow(QMainWindow):
             if are_time_combinable(file_paths):
                 combined = combine_time(file_paths)
             elif are_frequency_combinable(file_paths):
-                combined = combine_frequency(file_paths)
+                options = self._choose_frequency_combine_options(file_paths)
+                if options is None:
+                    return
+                combined = combine_frequency(file_paths, **options)
             else:
                 error_msg = (
                     "The selected FITS files cannot be combined.\n\n"
@@ -3098,6 +3101,17 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Combine Error", f"An error occurred while combining files:\n{e}")
             return
+
+    def _choose_frequency_combine_options(self, file_paths):
+        try:
+            return FrequencyCombineOptionsDialog.choose(self, file_paths)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Frequency Combine Options",
+                f"Could not inspect frequency ranges before combining:\n{exc}",
+            )
+            return None
 
     def _clamp_noise_threshold(self, value) -> float:
         try:
@@ -6012,6 +6026,28 @@ class MainWindow(QMainWindow):
                 if combined is None:
                     QMessageBox.critical(self, "Import Failed", "Combined FITS payload is missing.")
                     return
+                self.load_combined_into_main(combined)
+                self._emit_downloader_import_success()
+                return
+
+            if kind == "frequency_options_required":
+                file_paths = list(payload.get("files", []) if isinstance(payload, dict) else [])
+                if not file_paths:
+                    QMessageBox.critical(self, "Import Failed", "Frequency-combine file list is missing.")
+                    return
+
+                options = self._choose_frequency_combine_options(file_paths)
+                if options is None:
+                    return
+
+                from src.Backend.burst_processor import combine_frequency
+
+                try:
+                    QApplication.setOverrideCursor(Qt.WaitCursor)
+                    combined = combine_frequency(file_paths, **options)
+                finally:
+                    QApplication.restoreOverrideCursor()
+
                 self.load_combined_into_main(combined)
                 self._emit_downloader_import_success()
                 return

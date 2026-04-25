@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -31,7 +32,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from src.Backend.burst_processor import combine_frequency
+from src.Backend.burst_processor import combine_frequency, describe_frequency_combination
 from src.Backend.frequency_axis import (
     finite_data_limits,
     frequency_gap_spans,
@@ -41,6 +42,128 @@ from src.Backend.frequency_axis import (
 )
 from src.Backend.fits_io import build_combined_header, extract_ut_start_sec, load_callisto_fits, preview_callisto_fits
 from src.UI.mpl_style import style_axes
+
+
+class FrequencyCombineOptionsDialog(QDialog):
+    def __init__(self, file_paths, parent=None):
+        super().__init__(parent)
+        self.file_paths = list(file_paths or [])
+        self.relation = describe_frequency_combination(self.file_paths)
+        self.setWindowTitle("Frequency Combine Options")
+        self.setMinimumWidth(520)
+
+        self.gap_fill_combo = QComboBox()
+        self.gap_fill_combo.addItem("Interpolated background fill", "background")
+        self.gap_fill_combo.addItem("Gray-hatched blank gap", "hatched")
+        self.gap_fill_combo.addItem("Average edge background fill", "average")
+        self.gap_fill_combo.addItem("Zero fill", "zero")
+
+        self.overlap_policy_combo = QComboBox()
+        self.overlap_policy_combo.addItem("Split at connection frequency", "split")
+        self.overlap_policy_combo.addItem(self._low_overlap_label(), "low")
+        self.overlap_policy_combo.addItem(self._high_overlap_label(), "high")
+        self.overlap_policy_combo.addItem("Reject overlap", "reject")
+        self.overlap_policy_combo.currentIndexChanged.connect(self._sync_connection_controls)
+
+        self.connection_spin = QDoubleSpinBox()
+        self.connection_spin.setDecimals(3)
+        self.connection_spin.setRange(0.0, 10000.0)
+        self.connection_spin.setSuffix(" MHz")
+        self.connection_spin.setEnabled(False)
+        self._configure_connection_range()
+
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel(self._summary_text()))
+
+        if self.relation.get("has_gap", False):
+            gap_group = QGroupBox("Frequency Gap")
+            gap_layout = QFormLayout()
+            gap_layout.addRow("Gap handling", self.gap_fill_combo)
+            gap_group.setLayout(gap_layout)
+            layout.addWidget(gap_group)
+
+        if self.relation.get("has_overlap", False):
+            overlap_group = QGroupBox("Frequency Overlap")
+            overlap_layout = QFormLayout()
+            overlap_layout.addRow("Overlap handling", self.overlap_policy_combo)
+            overlap_layout.addRow("Connection frequency", self.connection_spin)
+            overlap_group.setLayout(overlap_layout)
+            layout.addWidget(overlap_group)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.setLayout(layout)
+        self._sync_connection_controls()
+
+    @classmethod
+    def choose(cls, parent, file_paths):
+        relation = describe_frequency_combination(file_paths)
+        if not relation.get("has_gap", False) and not relation.get("has_overlap", False):
+            return {
+                "gap_fill": "background",
+                "overlap_policy": "split",
+                "overlap_connection_mhz": None,
+            }
+
+        dialog = cls(file_paths, parent=parent)
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        return dialog.selected_options()
+
+    def selected_options(self) -> dict:
+        return {
+            "gap_fill": str(self.gap_fill_combo.currentData() or "background"),
+            "overlap_policy": str(self.overlap_policy_combo.currentData() or "split"),
+            "overlap_connection_mhz": self._selected_connection_mhz(),
+        }
+
+    def _selected_connection_mhz(self):
+        if not self.connection_spin.isEnabled():
+            return None
+        return float(self.connection_spin.value())
+
+    def _sync_connection_controls(self):
+        has_overlap = bool(self.relation.get("has_overlap", False))
+        is_split = str(self.overlap_policy_combo.currentData() or "split") == "split"
+        self.connection_spin.setEnabled(bool(has_overlap and is_split))
+
+    def _configure_connection_range(self):
+        overlaps = list(self.relation.get("overlaps") or [])
+        if not overlaps:
+            return
+        lo = min(float(item["low"]) for item in overlaps)
+        hi = max(float(item["high"]) for item in overlaps)
+        if hi < lo:
+            lo, hi = hi, lo
+        self.connection_spin.setRange(lo, hi)
+        self.connection_spin.setValue(0.5 * (lo + hi))
+
+    def _summary_text(self) -> str:
+        lines = ["The selected files can be frequency-combined, but require a merge choice."]
+        gaps = list(self.relation.get("gaps") or [])
+        overlaps = list(self.relation.get("overlaps") or [])
+        if gaps:
+            gap_text = ", ".join(f"{float(g['low']):.3f}-{float(g['high']):.3f} MHz" for g in gaps)
+            lines.append(f"Gap detected: {gap_text}.")
+        if overlaps:
+            overlap_text = ", ".join(f"{float(o['low']):.3f}-{float(o['high']):.3f} MHz" for o in overlaps)
+            lines.append(f"Overlap detected: {overlap_text}.")
+        return "\n".join(lines)
+
+    def _low_overlap_label(self) -> str:
+        overlaps = list(self.relation.get("overlaps") or [])
+        if len(overlaps) == 1:
+            return f"Use lower-frequency file ({os.path.basename(str(overlaps[0]['lower_file']))})"
+        return "Use lower-frequency file(s)"
+
+    def _high_overlap_label(self) -> str:
+        overlaps = list(self.relation.get("overlaps") or [])
+        if len(overlaps) == 1:
+            return f"Use higher-frequency file ({os.path.basename(str(overlaps[0]['higher_file']))})"
+        return "Use higher-frequency file(s)"
+
 
 class CombineFrequencyDialog(QDialog):
     def __init__(self, main_window, parent=None):
@@ -135,7 +258,30 @@ class CombineFrequencyDialog(QDialog):
 
         self.file_paths = files
         self._refresh_overlap_controls()
+        options = FrequencyCombineOptionsDialog.choose(self, self.file_paths)
+        if options is None:
+            self.file_paths = []
+            self.combine_button.setEnabled(False)
+            return
+        self._apply_selected_options(options)
         self.combine_button.setEnabled(True)
+
+    def _apply_selected_options(self, options: dict):
+        gap_idx = self.gap_fill_combo.findData(str(options.get("gap_fill", "background")))
+        if gap_idx >= 0:
+            self.gap_fill_combo.setCurrentIndex(gap_idx)
+
+        overlap_idx = self.overlap_policy_combo.findData(str(options.get("overlap_policy", "split")))
+        if overlap_idx >= 0:
+            self.overlap_policy_combo.setCurrentIndex(overlap_idx)
+
+        connection = options.get("overlap_connection_mhz", None)
+        if connection is not None:
+            try:
+                self.connection_spin.setValue(float(connection))
+            except Exception:
+                pass
+        self._sync_connection_controls()
 
     def _selected_gap_fill(self):
         return str(self.gap_fill_combo.currentData() or "background")

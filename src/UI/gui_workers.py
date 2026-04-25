@@ -115,6 +115,7 @@ class DownloaderImportWorker(QObject):
             are_frequency_combinable,
             combine_time,
             combine_frequency,
+            describe_frequency_combination,
         )
 
         try:
@@ -126,6 +127,17 @@ class DownloaderImportWorker(QObject):
                 return
 
             if are_frequency_combinable(local_files):
+                relation = describe_frequency_combination(local_files)
+                if relation.get("has_gap", False) or relation.get("has_overlap", False):
+                    self.finished.emit(
+                        {
+                            "kind": "frequency_options_required",
+                            "files": local_files,
+                            "relation": relation,
+                        }
+                    )
+                    return
+
                 self.progress_text.emit("Combining files (frequency mode)...")
                 combined = combine_frequency(local_files)
                 self.finished.emit({"kind": "combined", "combined": combined})

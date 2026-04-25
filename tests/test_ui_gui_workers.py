@@ -73,6 +73,34 @@ def test_downloader_import_worker_combines_local_fits_across_midnight(tmp_path):
     assert finished[0]["combined"]["data"].shape == (2, 4)
 
 
+def test_downloader_import_worker_requests_options_for_frequency_combine(tmp_path):
+    time = np.array([0.0, 3.0])
+    path1 = write_test_callisto_fit(
+        tmp_path / "LEARMONTH_20240401_000000_01.fit",
+        data=np.ones((2, 2), dtype=np.uint8),
+        freqs=np.array([20.0, 10.0]),
+        time=time,
+        date_obs="2024/04/01",
+        time_obs="00:00:00",
+    )
+    path2 = write_test_callisto_fit(
+        tmp_path / "LEARMONTH_20240401_000000_02.fit",
+        data=np.zeros((2, 2), dtype=np.uint8),
+        freqs=np.array([50.0, 40.0]),
+        time=time,
+        date_obs="2024/04/01",
+        time_obs="00:00:00",
+    )
+
+    finished, failed = _run_worker(DownloaderImportWorker([str(path1), str(path2)]))
+
+    assert failed == []
+    assert finished[0]["kind"] == "frequency_options_required"
+    assert finished[0]["files"] == [str(path1), str(path2)]
+    assert finished[0]["relation"]["has_gap"] is True
+    assert finished[0]["relation"]["has_overlap"] is False
+
+
 def test_downloader_import_worker_marks_non_consecutive_local_fits_invalid(tmp_path):
     freqs = np.array([25.0, 26.0])
     time = np.array([0.0, 3.0])
