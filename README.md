@@ -1,4 +1,4 @@
-# e-CALLISTO FITS Analyzer (v2.4.0)
+# e-CALLISTO FITS Analyzer (v2.4.1)
 A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data.
 
 ---
