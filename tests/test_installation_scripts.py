@@ -117,6 +117,21 @@ def test_specs_bundle_pyqtgraph_exporters():
         assert "pyqtgraph.exporters.SVGExporter" in text
 
 
+def test_specs_bundle_type_ii_band_splitting_icons():
+    spec_paths = [
+        ROOT / "src" / "Installation" / "FITS_Analyzer.spec",
+        ROOT / "src" / "Installation" / "FITS_Analyzer_linux.spec",
+        ROOT / "src" / "Installation" / "FITS_Analyzer_win.spec",
+    ]
+    for path in spec_paths:
+        text = path.read_text(encoding="utf-8")
+        assert "assets/band_splitting_icons" in text
+
+    py2app_setup = (ROOT / "src" / "Installation" / "setup.py").read_text(encoding="utf-8")
+    assert "assets/band_splitting_icons/light" in py2app_setup
+    assert "assets/band_splitting_icons/dark" in py2app_setup
+
+
 def test_runtime_requirements_include_sunpy_network_stack():
     text = (ROOT / "src" / "Installation" / "requirements-runtime.txt").read_text(encoding="utf-8")
     assert "sunpy[map,net,timeseries]" in text

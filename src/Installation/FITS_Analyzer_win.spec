@@ -32,6 +32,7 @@ a = Analysis(
         (str(ASSETS_DIR / "FITS_analyzer.png"), "assets"),
         (str(ASSETS_DIR / "icons"), "assets/icons"),
         (str(ASSETS_DIR / "icons_dark"), "assets/icons_dark"),
+        (str(ASSETS_DIR / "band_splitting_icons"), "assets/band_splitting_icons"),
 
         # Required backend files for exporting
         (backend_pdf.__file__, "matplotlib/backends"),

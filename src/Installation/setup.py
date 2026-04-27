@@ -86,6 +86,8 @@ DATA_FILES = [
     ]),
     ("assets/icons", SVG_FILES("icons")),
     ("assets/icons_dark", SVG_FILES("icons_dark")),
+    ("assets/band_splitting_icons/light", SVG_FILES(os.path.join("band_splitting_icons", "light"))),
+    ("assets/band_splitting_icons/dark", SVG_FILES(os.path.join("band_splitting_icons", "dark"))),
 ]
 
 OPTIONS = {
