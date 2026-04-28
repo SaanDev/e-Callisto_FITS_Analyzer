@@ -170,6 +170,7 @@ class _SceneEventFilter(QObject):
 
 class AcceleratedPlotWidget(QWidget):
     mousePositionChanged = Signal(float, float, bool)
+    plotClicked = Signal(float, float)
     lassoFinished = Signal(list)
     driftPointAdded = Signal(float, float)
     driftCaptureFinished = Signal(list)
@@ -229,6 +230,7 @@ class AcceleratedPlotWidget(QWidget):
         self._drift_points = []
         self._drift_scatter_item = None
         self._drift_line_item = None
+        self._light_curve_item = None
         self._annotation_items = []
         self._annotation_capture_points = []
         self._annotation_capture_line_item = None
@@ -784,6 +786,40 @@ class AcceleratedPlotWidget(QWidget):
                 pass
             self._drift_line_item = None
 
+    def clear_light_curve_overlay(self) -> None:
+        if not self.is_available:
+            return
+        if self._light_curve_item is not None:
+            try:
+                self._plot.removeItem(self._light_curve_item)
+            except Exception:
+                pass
+            self._light_curve_item = None
+
+    def set_light_curve_overlay(self, x_values, y_values, *, color: str = "#00e5ff") -> None:
+        if not self.is_available:
+            return
+        try:
+            xs = np.asarray(x_values, dtype=float).reshape(-1)
+            ys = np.asarray(y_values, dtype=float).reshape(-1)
+        except Exception:
+            self.clear_light_curve_overlay()
+            return
+        if xs.size == 0 or ys.size == 0 or xs.size != ys.size:
+            self.clear_light_curve_overlay()
+            return
+
+        if self._light_curve_item is None:
+            self._light_curve_item = pg.PlotDataItem(pen=pg.mkPen(color=color, width=2.0))
+            self._light_curve_item.setZValue(19)
+            self._plot.addItem(self._light_curve_item)
+        else:
+            try:
+                self._light_curve_item.setPen(pg.mkPen(color=color, width=2.0))
+            except Exception:
+                pass
+        self._light_curve_item.setData(xs, ys)
+
     def _annotation_capture_kind(self) -> str | None:
         mode = str(self._interaction_mode or "")
         if not mode.startswith("annotation:"):
@@ -933,6 +969,7 @@ class AcceleratedPlotWidget(QWidget):
         self._interaction_mode = None
         self._clear_lasso_overlay()
         self._clear_drift_overlay()
+        self.clear_light_curve_overlay()
         self._clear_annotation_capture_overlay()
         self._clear_annotation_overlay()
         self.clear_goes_overlay()
@@ -1371,6 +1408,10 @@ class AcceleratedPlotWidget(QWidget):
                     self._finish_drift()
             elif button == Qt.MouseButton.RightButton:
                 self._finish_drift()
+            return
+
+        if self._interaction_mode is None and button == Qt.MouseButton.LeftButton:
+            self.plotClicked.emit(float(x), float(y))
 
     def _on_range_changed(self, *_):
         if self._block_range_signals:

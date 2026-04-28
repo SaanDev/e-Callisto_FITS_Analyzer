@@ -344,3 +344,42 @@ def test_accelerated_widget_rect_zoom_hides_and_restores_goes_overlay():
     x_data, y_data = widget._goes_curve_items["xrsb"].getData()
     assert np.allclose(x_data, payload["series"]["xrsb"]["x_seconds"])
     assert np.allclose(y_data, np.log10(payload["series"]["xrsb"]["flux_wm2"]))
+
+
+def test_accelerated_widget_light_curve_overlay_lifecycle():
+    _app()
+    widget = AcceleratedPlotWidget()
+    if not widget.is_available:
+        pytest.skip("pyqtgraph not available in test environment")
+
+    class _DummyCmap:
+        def __call__(self, x):
+            arr = np.asarray(x, dtype=float)
+            rgba = np.zeros((arr.size, 4), dtype=float)
+            rgba[:, 0] = arr
+            rgba[:, 1] = 1.0 - arr
+            rgba[:, 2] = 0.5
+            rgba[:, 3] = 1.0
+            return rgba
+
+    widget.update_image(
+        np.random.rand(8, 16).astype(np.float32),
+        extent=[0.0, 10.0, 20.0, 80.0],
+        cmap=_DummyCmap(),
+        title="Preview",
+        x_label="Time [s]",
+        y_label="Frequency [MHz]",
+    )
+
+    widget.set_light_curve_overlay(
+        np.array([0.0, 1.0, 2.0], dtype=float),
+        np.array([50.0, 51.0, 50.5], dtype=float),
+    )
+    assert widget._light_curve_item is not None
+    xs, ys = widget._light_curve_item.getData()
+    assert len(xs) == 3
+    assert len(ys) == 3
+
+    widget.clear_light_curve_overlay()
+    assert widget._light_curve_item is None
+    widget.close()

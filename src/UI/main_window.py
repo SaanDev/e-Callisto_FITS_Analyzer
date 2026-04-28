@@ -130,6 +130,7 @@ from src.UI.dialogs.batch_processing_dialog import BatchProcessingDialog
 from src.UI.dialogs.bug_report_dialog import BugReportDialog
 from src.UI.dialogs.citation_dialog import CitationDialog
 from src.UI.dialogs.combine_dialogs import CombineFrequencyDialog, CombineTimeDialog, FrequencyCombineOptionsDialog
+from src.UI.dialogs.light_curve_frequency_dialog import LightCurveFrequencyDialog
 from src.UI.dialogs.max_intensity_dialog import MaxIntensityPlotDialog
 from src.UI.dialogs.rfi_control_dialog import RFIControlDialog
 from src.UI.dialogs.type_ii_band_splitting_dialog import TypeIIBandSplittingDialog
@@ -333,6 +334,10 @@ class MainWindow(QMainWindow):
         self._annotation_artists = []
         self._annotation_style_defaults = self._merge_annotation_style_defaults()
 
+        # Light-curve overlay state
+        self._light_curve_frequency_mhz = None
+        self._light_curve_mpl_artists = []
+
         # Autosave / crash-recovery state
         self._autosave_timer = QTimer(self)
         self._autosave_timer.setInterval(180000)
@@ -357,6 +362,7 @@ class MainWindow(QMainWindow):
             self.accel_canvas.driftCaptureFinished.connect(self._on_accel_drift_capture_finished)
             self.accel_canvas.annotationCaptureFinished.connect(self._on_accel_annotation_capture_finished)
             self.accel_canvas.annotationCaptureCancelled.connect(self._on_accel_annotation_capture_cancelled)
+            self.accel_canvas.plotClicked.connect(self._on_accel_plot_clicked)
 
         self.canvas.mpl_connect("scroll_event", self.on_scroll_zoom)
         self._cid_press = self.canvas.mpl_connect("button_press_event", self.on_mouse_press)
@@ -940,6 +946,16 @@ class MainWindow(QMainWindow):
         self.open_type_ii_band_splitting_action = QAction("Open Type II Band-splitting", self)
         self.open_type_ii_band_splitting_action.setEnabled(False)
         self.type_ii_band_splitting_menu.addAction(self.open_type_ii_band_splitting_action)
+        self.light_curves_menu = analysis_menu.addMenu("Plot Light Curves")
+        self.enter_light_curve_frequency_action = QAction("Enter frequency", self)
+        self.enter_light_curve_frequency_action.setEnabled(False)
+        self.light_curves_menu.addAction(self.enter_light_curve_frequency_action)
+        self.click_light_curve_frequency_action = QAction("Click on a frequency", self, checkable=True)
+        self.click_light_curve_frequency_action.setEnabled(False)
+        self.light_curves_menu.addAction(self.click_light_curve_frequency_action)
+        self.clear_light_curve_action = QAction("Clear light curve", self)
+        self.clear_light_curve_action.setEnabled(False)
+        self.light_curves_menu.addAction(self.clear_light_curve_action)
 
         processing_menu = menubar.addMenu("Processing")
         hw_menu = processing_menu.addMenu("Hardware Acceleration")
@@ -1089,6 +1105,9 @@ class MainWindow(QMainWindow):
         self.max_auto_clean_isolated_action.toggled.connect(self.set_max_auto_clean_isolated_enabled)
         self.open_maximum_intensities_action.triggered.connect(self.plot_max_intensities)
         self.open_type_ii_band_splitting_action.triggered.connect(self._open_or_focus_type_ii_dialog)
+        self.enter_light_curve_frequency_action.triggered.connect(self.open_light_curve_frequency_dialog)
+        self.click_light_curve_frequency_action.toggled.connect(self._on_light_curve_click_mode_toggled)
+        self.clear_light_curve_action.triggered.connect(self.clear_light_curve)
         self.open_restored_analysis_action.triggered.connect(self.open_restored_analysis_windows)
         self.open_batch_processing_action.triggered.connect(self.open_batch_processing_window)
 
@@ -1984,6 +2003,7 @@ class MainWindow(QMainWindow):
             )
         except Exception:
             pass
+        self._render_light_curve_accel_overlay()
         return True
 
     def _apply_mpl_theme(self):
@@ -2935,6 +2955,8 @@ class MainWindow(QMainWindow):
     def _reset_feature_state_for_new_data(self):
         self._clear_analysis_session_state(close_windows=True)
         self._reset_annotation_mode()
+        self._clear_light_curve_overlay(clear_frequency=True)
+        self._set_light_curve_click_mode_checked(False)
         self._cancel_goes_overlay_request()
         self._clear_goes_overlay_payload()
         self._goes_overlay_active_request = None
@@ -3441,6 +3463,335 @@ class MainWindow(QMainWindow):
             cmap = plt.get_cmap(self.current_cmap_name)
         return transparent_bad_cmap(cmap)
 
+    def _has_light_curve_dataset(self) -> bool:
+        if getattr(self, "raw_data", None) is None or self.freqs is None or self.time is None:
+            return False
+        try:
+            return len(self.freqs) > 0 and len(self.time) > 0
+        except Exception:
+            return False
+
+    def _light_curve_click_mode_checked(self) -> bool:
+        act = getattr(self, "click_light_curve_frequency_action", None)
+        return bool(act is not None and act.isChecked())
+
+    def _set_light_curve_click_mode_checked(self, checked: bool) -> None:
+        act = getattr(self, "click_light_curve_frequency_action", None)
+        if act is None:
+            return
+        blocked = act.blockSignals(True)
+        try:
+            act.setChecked(bool(checked))
+        finally:
+            act.blockSignals(blocked)
+
+    def _disable_light_curve_click_mode(self) -> None:
+        self._set_light_curve_click_mode_checked(False)
+
+    def _light_curve_frequency_limits(self) -> tuple[float, float] | None:
+        if self.freqs is None:
+            return None
+        try:
+            freqs = np.asarray(self.freqs, dtype=float).reshape(-1)
+        except Exception:
+            return None
+        finite = freqs[np.isfinite(freqs)]
+        if finite.size == 0:
+            return None
+        return float(np.nanmin(finite)), float(np.nanmax(finite))
+
+    def _current_light_curve_source_data(self):
+        if self.freqs is None or self.time is None:
+            return None
+        try:
+            expected_shape = (int(len(self.freqs)), int(len(self.time)))
+        except Exception:
+            return None
+
+        candidates = [
+            getattr(self, "_current_plot_source_data", None),
+            getattr(self, "noise_reduced_data", None),
+            getattr(self, "raw_data", None),
+        ]
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            try:
+                arr = np.asarray(candidate)
+            except Exception:
+                continue
+            if arr.ndim == 2 and arr.shape == expected_shape:
+                return arr
+        return None
+
+    def _nearest_light_curve_frequency(self, requested_mhz: float) -> tuple[int, float] | None:
+        if self.freqs is None:
+            return None
+        try:
+            requested = float(requested_mhz)
+            freqs = np.asarray(self.freqs, dtype=float).reshape(-1)
+        except Exception:
+            return None
+        if not math.isfinite(requested) or freqs.size == 0:
+            return None
+        finite_mask = np.isfinite(freqs)
+        if not np.any(finite_mask):
+            return None
+        finite_indices = np.flatnonzero(finite_mask)
+        nearest_local = int(np.argmin(np.abs(freqs[finite_mask] - requested)))
+        row_index = int(finite_indices[nearest_local])
+        return row_index, float(freqs[row_index])
+
+    def _light_curve_visual_scale(self) -> float:
+        limits = self._light_curve_frequency_limits()
+        if limits is None:
+            return 1.0
+        lo, hi = limits
+        span = abs(float(hi) - float(lo))
+        if not math.isfinite(span) or span <= 0.0:
+            span = 1.0
+
+        step = None
+        try:
+            freqs = np.asarray(self.freqs, dtype=float).reshape(-1)
+            finite = np.unique(freqs[np.isfinite(freqs)])
+            diffs = np.diff(np.sort(finite))
+            diffs = diffs[np.isfinite(diffs) & (diffs > 0.0)]
+            if diffs.size:
+                step = float(np.nanmedian(diffs))
+        except Exception:
+            step = None
+
+        scale = span * 0.08
+        if step is not None and math.isfinite(step) and step > 0.0:
+            scale = max(scale, min(step * 1.5, span * 0.2))
+        return float(scale if math.isfinite(scale) and scale > 0.0 else 1.0)
+
+    def _build_light_curve_overlay(self, requested_mhz: float):
+        source = self._current_light_curve_source_data()
+        if source is None:
+            return None, "Load a FITS file before plotting a light curve."
+        nearest = self._nearest_light_curve_frequency(requested_mhz)
+        if nearest is None:
+            return None, "No valid frequency axis is available."
+
+        row_index, actual_mhz = nearest
+        try:
+            display_data = np.asarray(self._intensity_for_display(source), dtype=float)
+        except Exception:
+            return None, "Could not prepare intensity data for the light curve."
+        if display_data.ndim != 2 or row_index < 0 or row_index >= display_data.shape[0]:
+            return None, "Light-curve data does not match the frequency axis."
+
+        try:
+            time_arr = np.asarray(self.time, dtype=float).reshape(-1)
+            series = np.asarray(display_data[row_index, :], dtype=float).reshape(-1)
+        except Exception:
+            return None, "Could not extract the selected frequency row."
+
+        n = min(time_arr.size, series.size)
+        if n == 0:
+            return None, "The current plot has no time samples."
+        time_arr = time_arr[:n]
+        series = series[:n]
+
+        finite_series = np.isfinite(series)
+        if not np.any(finite_series):
+            return None, f"No finite intensity values at {actual_mhz:.3f} MHz."
+
+        first_value = float(series[np.flatnonzero(finite_series)[0]])
+        delta = series - first_value
+        finite_delta = delta[np.isfinite(delta)]
+        if finite_delta.size == 0:
+            normalized = np.zeros_like(series, dtype=float)
+        else:
+            amplitude = float(np.nanpercentile(np.abs(finite_delta), 95.0))
+            if not math.isfinite(amplitude) or amplitude <= 1e-12:
+                amplitude = float(np.nanmax(np.abs(finite_delta)))
+            if not math.isfinite(amplitude) or amplitude <= 1e-12:
+                normalized = np.zeros_like(series, dtype=float)
+            else:
+                normalized = np.clip(delta / amplitude, -1.5, 1.5)
+
+        y_values = actual_mhz + normalized * self._light_curve_visual_scale()
+        invalid = (~np.isfinite(time_arr)) | (~np.isfinite(series))
+        if np.any(invalid):
+            y_values = np.asarray(y_values, dtype=float).copy()
+            y_values[invalid] = np.nan
+
+        return {
+            "frequency_mhz": actual_mhz,
+            "requested_mhz": float(requested_mhz),
+            "row_index": row_index,
+            "time": time_arr,
+            "y": np.asarray(y_values, dtype=float),
+        }, ""
+
+    def _clear_mpl_light_curve_overlay(self) -> None:
+        for artist in list(getattr(self, "_light_curve_mpl_artists", []) or []):
+            try:
+                artist.remove()
+            except Exception:
+                pass
+        self._light_curve_mpl_artists = []
+
+    def _clear_accel_light_curve_overlay(self) -> None:
+        accel = getattr(self, "accel_canvas", None)
+        if accel is None:
+            return
+        try:
+            accel.clear_light_curve_overlay()
+        except Exception:
+            pass
+
+    def _clear_light_curve_overlay(self, *, clear_frequency: bool = False) -> None:
+        self._clear_mpl_light_curve_overlay()
+        self._clear_accel_light_curve_overlay()
+        if clear_frequency:
+            self._light_curve_frequency_mhz = None
+        try:
+            self.canvas.draw_idle()
+        except Exception:
+            pass
+        self._sync_analysis_menu_actions()
+
+    def clear_light_curve(self) -> None:
+        had_curve = getattr(self, "_light_curve_frequency_mhz", None) is not None
+        self._clear_light_curve_overlay(clear_frequency=True)
+        if had_curve:
+            self.statusBar().showMessage("Light curve cleared.", 2500)
+        else:
+            self.statusBar().showMessage("No light curve to clear.", 2500)
+
+    def _draw_mpl_light_curve_overlay(self, overlay: dict) -> None:
+        self._clear_mpl_light_curve_overlay()
+        try:
+            line = self.canvas.ax.plot(
+                overlay["time"],
+                overlay["y"],
+                color="#00e5ff",
+                linewidth=1.8,
+                alpha=0.95,
+                zorder=8,
+            )[0]
+            self._light_curve_mpl_artists = [line]
+            self.canvas.draw_idle()
+        except Exception:
+            self._light_curve_mpl_artists = []
+
+    def _draw_accel_light_curve_overlay(self, overlay: dict) -> None:
+        accel = getattr(self, "accel_canvas", None)
+        if accel is None:
+            return
+        try:
+            accel.set_light_curve_overlay(overlay["time"], overlay["y"])
+        except Exception:
+            pass
+
+    def _render_light_curve_accel_overlay(self) -> bool:
+        frequency = getattr(self, "_light_curve_frequency_mhz", None)
+        if frequency is None:
+            self._clear_accel_light_curve_overlay()
+            return False
+        overlay, _reason = self._build_light_curve_overlay(frequency)
+        if overlay is None:
+            self._clear_accel_light_curve_overlay()
+            return False
+        self._light_curve_frequency_mhz = float(overlay["frequency_mhz"])
+        self._draw_accel_light_curve_overlay(overlay)
+        return True
+
+    def _render_light_curve_overlay(self) -> bool:
+        frequency = getattr(self, "_light_curve_frequency_mhz", None)
+        if frequency is None:
+            self._clear_light_curve_overlay(clear_frequency=False)
+            return False
+        overlay, _reason = self._build_light_curve_overlay(frequency)
+        if overlay is None:
+            self._clear_light_curve_overlay(clear_frequency=True)
+            return False
+        self._light_curve_frequency_mhz = float(overlay["frequency_mhz"])
+        self._draw_mpl_light_curve_overlay(overlay)
+        self._draw_accel_light_curve_overlay(overlay)
+        return True
+
+    def plot_light_curve_at_frequency(self, frequency_mhz: float, *, show_errors: bool = True) -> bool:
+        overlay, reason = self._build_light_curve_overlay(frequency_mhz)
+        if overlay is None:
+            if show_errors:
+                QMessageBox.information(self, "Plot Light Curve", reason or "Could not plot the light curve.")
+            else:
+                self.statusBar().showMessage(reason or "Could not plot the light curve.", 3000)
+            return False
+
+        self._light_curve_frequency_mhz = float(overlay["frequency_mhz"])
+        self._draw_mpl_light_curve_overlay(overlay)
+        self._draw_accel_light_curve_overlay(overlay)
+        self._sync_analysis_menu_actions()
+
+        requested = float(overlay["requested_mhz"])
+        actual = float(overlay["frequency_mhz"])
+        if abs(requested - actual) > 1e-6:
+            msg = f"Light curve plotted at nearest frequency: {actual:.3f} MHz."
+        else:
+            msg = f"Light curve plotted at {actual:.3f} MHz."
+        self.statusBar().showMessage(msg, 4000)
+        return True
+
+    def open_light_curve_frequency_dialog(self):
+        limits = self._light_curve_frequency_limits()
+        if limits is None or not self._has_light_curve_dataset():
+            QMessageBox.information(self, "Plot Light Curve", "Load a FITS file before plotting a light curve.")
+            return
+        initial = getattr(self, "_light_curve_frequency_mhz", None)
+        if initial is not None:
+            try:
+                initial = float(initial)
+                if not math.isfinite(initial):
+                    initial = None
+            except Exception:
+                initial = None
+        dlg = LightCurveFrequencyDialog(
+            limits[0],
+            limits[1],
+            initial_frequency_mhz=initial,
+            parent=self,
+        )
+        if dlg.exec() == QDialog.Accepted:
+            self.plot_light_curve_at_frequency(dlg.frequency_mhz())
+
+    def _on_light_curve_click_mode_toggled(self, checked: bool):
+        if checked and not self._has_light_curve_dataset():
+            self._set_light_curve_click_mode_checked(False)
+            QMessageBox.information(self, "Plot Light Curve", "Load a FITS file before selecting a frequency.")
+            return
+        if checked:
+            self.statusBar().showMessage("Click a frequency on the spectrogram to plot its light curve.", 5000)
+        else:
+            self.statusBar().showMessage("Light-curve click mode disabled.", 2500)
+
+    def _light_curve_click_blocked(self) -> bool:
+        return bool(
+            getattr(self, "lasso_active", False)
+            or getattr(self, "rect_zoom_active", False)
+            or getattr(self, "_annotation_mode", None)
+        )
+
+    def _handle_light_curve_click(self, x: float, y: float, *, inside: bool, button=None) -> bool:
+        if not self._light_curve_click_mode_checked():
+            return False
+        if button not in (None, 1):
+            return False
+        if not inside or x is None or y is None:
+            return False
+        if self._light_curve_click_blocked():
+            return False
+        self.plot_light_curve_at_frequency(float(y), show_errors=False)
+        return True
+
+    def _on_accel_plot_clicked(self, x: float, y: float):
+        self._handle_light_curve_click(float(x), float(y), inside=True, button=1)
+
     def _rowwise_baseline(self, data: np.ndarray, method: str = "mean") -> np.ndarray:
         return rowwise_baseline(
             data,
@@ -3814,6 +4165,7 @@ class MainWindow(QMainWindow):
             pass
         self._render_goes_overlay()
         self._render_annotations()
+        self._render_light_curve_overlay()
 
         self.current_plot_type = plot_type
         if self._hardware_mode_enabled():
@@ -4083,6 +4435,14 @@ class MainWindow(QMainWindow):
         if self._hardware_mode_enabled():
             return
 
+        if self._handle_light_curve_click(
+            event.xdata,
+            event.ydata,
+            inside=(event.inaxes == self.canvas.ax),
+            button=event.button,
+        ):
+            return
+
         if getattr(self, "nav_locked", False) or getattr(self, "rect_zoom_active", False):
             return
 
@@ -4163,6 +4523,7 @@ class MainWindow(QMainWindow):
 
 
     def activate_drift_tool(self):
+        self._disable_light_curve_click_mode()
         self.statusBar().showMessage("Click multiple points along the burst. Right-click or double-click to finish.",
                                      8000)
         self.drift_points = []
@@ -4227,6 +4588,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Error", "Please apply background substraction before isolating a burst.")
             return
 
+        self._disable_light_curve_click_mode()
         if self._hardware_mode_enabled():
             self.lasso_active = True
             self.accel_canvas.begin_lasso_capture()
@@ -5021,6 +5383,8 @@ class MainWindow(QMainWindow):
             self.accel_canvas.clear()
         except Exception:
             pass
+        self._clear_light_curve_overlay(clear_frequency=True)
+        self._set_light_curve_click_mode_checked(False)
 
         self._clear_current_colorbar_artists()
 
@@ -5132,6 +5496,8 @@ class MainWindow(QMainWindow):
             self.accel_canvas.clear_overlays()
         except Exception:
             pass
+        self._clear_light_curve_overlay(clear_frequency=True)
+        self._set_light_curve_click_mode_checked(False)
 
         # Ensure pan handlers are restored if lasso activation had disconnected them.
         try:
@@ -6247,6 +6613,8 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Finish the lasso tool first.", 3000)
             return
 
+        self._disable_light_curve_click_mode()
+
         # Stop any existing rectangle selector
         self._stop_rect_zoom()
 
@@ -6418,6 +6786,8 @@ class MainWindow(QMainWindow):
             "cmap": self.current_cmap_name,
             "frequency_step_mhz": self._frequency_step_mhz,
             "view": self._capture_view(),
+            "light_curve_frequency_mhz": getattr(self, "_light_curve_frequency_mhz", None),
+            "light_curve_click_mode": self._light_curve_click_mode_checked(),
         }
         return state
 
@@ -6529,6 +6899,8 @@ class MainWindow(QMainWindow):
         self.use_utc = state["use_utc"]
         self.current_cmap_name = state["cmap"]
         self._frequency_step_mhz = state.get("frequency_step_mhz", None)
+        self._light_curve_frequency_mhz = state.get("light_curve_frequency_mhz", None)
+        self._set_light_curve_click_mode_checked(bool(state.get("light_curve_click_mode", False)))
         self._update_frequency_axis_state()
         low, high, scale = self._noise_thresholds_from_mapping(
             state,
@@ -7071,6 +7443,7 @@ class MainWindow(QMainWindow):
         if self.raw_data is None:
             QMessageBox.information(self, "Annotations", "Load a FITS file first.")
             return
+        self._disable_light_curve_click_mode()
         self._reset_annotation_mode()
         self._annotation_mode = "polygon"
         if self._hardware_mode_enabled():
@@ -7097,6 +7470,7 @@ class MainWindow(QMainWindow):
         if self.raw_data is None:
             QMessageBox.information(self, "Annotations", "Load a FITS file first.")
             return
+        self._disable_light_curve_click_mode()
         self._reset_annotation_mode()
         self._annotation_mode = "line"
         self._annotation_click_points = []
@@ -7124,6 +7498,7 @@ class MainWindow(QMainWindow):
         )
         if not payload:
             return
+        self._disable_light_curve_click_mode()
         self._reset_annotation_mode()
         self._annotation_mode = "text"
         self._annotation_pending_text = str(payload.get("text") or "").strip()
@@ -8300,10 +8675,21 @@ class MainWindow(QMainWindow):
 
     def _sync_analysis_menu_actions(self):
         has_noise = getattr(self, "noise_reduced_data", None) is not None
+        has_light_curve_data = self._has_light_curve_dataset()
+        has_light_curve = getattr(self, "_light_curve_frequency_mhz", None) is not None
         for name in ("open_maximum_intensities_action", "open_type_ii_band_splitting_action"):
             act = getattr(self, name, None)
             if act is not None:
                 act.setEnabled(bool(has_noise))
+        for name in ("enter_light_curve_frequency_action", "click_light_curve_frequency_action"):
+            act = getattr(self, name, None)
+            if act is not None:
+                act.setEnabled(bool(has_light_curve_data))
+        act = getattr(self, "clear_light_curve_action", None)
+        if act is not None:
+            act.setEnabled(bool(has_light_curve_data and has_light_curve))
+        if not has_light_curve_data:
+            self._set_light_curve_click_mode_checked(False)
 
     def _maybe_prompt_save_dirty(self) -> bool:
         if not getattr(self, "_project_dirty", False):
@@ -8392,6 +8778,10 @@ class MainWindow(QMainWindow):
             "rfi": dict(getattr(self, "_rfi_config", {}) or {}),
             "annotations": normalize_annotations(getattr(self, "_annotations", [])),
             "annotation_style_defaults": dict(self._annotation_style_defaults or {}),
+            "light_curve": {
+                "frequency_mhz": getattr(self, "_light_curve_frequency_mhz", None),
+                "click_mode": self._light_curve_click_mode_checked(),
+            },
             "active_preset": dict(getattr(self, "_active_preset_snapshot", {}) or {}),
             "processing_log": list(getattr(self, "_processing_log", []) or []),
             "time_sync": dict(getattr(self, "_last_time_sync_context", {}) or {}),
@@ -8501,6 +8891,9 @@ class MainWindow(QMainWindow):
             self._annotation_style_defaults = self._merge_annotation_style_defaults(
                 meta.get("annotation_style_defaults") or self._annotation_style_defaults
             )
+            light_curve = dict(meta.get("light_curve") or {})
+            self._light_curve_frequency_mhz = light_curve.get("frequency_mhz", None)
+            self._set_light_curve_click_mode_checked(bool(light_curve.get("click_mode", False)))
             self._active_preset_snapshot = dict(meta.get("active_preset") or {})
             self._processing_log = list(meta.get("processing_log") or [])
             self._last_time_sync_context = dict(meta.get("time_sync") or {})

@@ -42,6 +42,12 @@ def _app():
     return QApplication.instance() or QApplication([])
 
 
+def _flush_events():
+    app = _app()
+    for _ in range(3):
+        app.processEvents()
+
+
 def _find_top_menu(window: MainWindow, text: str):
     for action in window.menuBar().actions():
         if action.text() == text:
@@ -349,6 +355,7 @@ def test_analysis_menu_contains_required_entries_and_moves_fits_header():
     analysis_submenus = {action.text(): action for action in analysis_menu.actions() if action.menu() is not None}
     assert "Maximum Intensities" in analysis_submenus
     assert "Type II Band-splitting" in analysis_submenus
+    assert "Plot Light Curves" in analysis_submenus
     assert any(
         action.text() == "Open Maximum Intensities"
         for action in analysis_submenus["Maximum Intensities"].menu().actions()
@@ -357,6 +364,14 @@ def test_analysis_menu_contains_required_entries_and_moves_fits_header():
         action.text() == "Open Type II Band-splitting"
         for action in analysis_submenus["Type II Band-splitting"].menu().actions()
     )
+    light_curve_actions = {
+        action.text(): action
+        for action in analysis_submenus["Plot Light Curves"].menu().actions()
+    }
+    assert "Enter frequency" in light_curve_actions
+    assert "Click on a frequency" in light_curve_actions
+    assert "Clear light curve" in light_curve_actions
+    assert light_curve_actions["Click on a frequency"].isCheckable() is True
 
     win.close()
 
@@ -366,6 +381,9 @@ def test_type_ii_action_requires_noise_reduced_data():
     win = MainWindow(theme=None)
 
     assert win.open_type_ii_band_splitting_action.isEnabled() is False
+    assert win.enter_light_curve_frequency_action.isEnabled() is False
+    assert win.click_light_curve_frequency_action.isEnabled() is False
+    assert win.clear_light_curve_action.isEnabled() is False
 
     win.filename = "demo.fit"
     win.freqs = np.array([100.0, 90.0, 80.0], dtype=float)
@@ -378,11 +396,126 @@ def test_type_ii_action_requires_noise_reduced_data():
         ],
         dtype=float,
     )
+    win._sync_toolbar_enabled_states()
+
+    assert win.open_type_ii_band_splitting_action.isEnabled() is False
+    assert win.enter_light_curve_frequency_action.isEnabled() is True
+    assert win.click_light_curve_frequency_action.isEnabled() is True
+    assert win.clear_light_curve_action.isEnabled() is False
+
     win.noise_reduced_data = win.raw_data.copy()
     win._sync_toolbar_enabled_states()
 
     assert win.open_type_ii_band_splitting_action.isEnabled() is True
     assert win.open_maximum_intensities_action.isEnabled() is True
+    win.close()
+
+
+def test_light_curve_no_data_fails_without_state():
+    _app()
+    win = MainWindow(theme=None)
+
+    assert win.plot_light_curve_at_frequency(100.0, show_errors=False) is False
+    assert win._light_curve_frequency_mhz is None
+
+    win.close()
+
+
+def test_light_curve_nearest_frequency_and_replacement_mpl():
+    _app()
+    win = MainWindow(theme=None)
+    win.set_hardware_live_preview_enabled(False)
+
+    win.filename = "demo.fit"
+    win.freqs = np.array([100.0, 95.0, 90.0], dtype=float)
+    win.time = np.array([0.0, 1.0, 2.0, 3.0], dtype=float)
+    win.raw_data = np.array(
+        [
+            [1.0, 2.0, 3.0, 4.0],
+            [4.0, 8.0, 6.0, 10.0],
+            [10.0, 9.0, 13.0, 12.0],
+        ],
+        dtype=np.float32,
+    )
+
+    win.plot_data(win.raw_data, title="Raw")
+    _flush_events()
+
+    assert win.plot_light_curve_at_frequency(96.0, show_errors=False) is True
+    assert win._light_curve_frequency_mhz == pytest.approx(95.0)
+    assert win.clear_light_curve_action.isEnabled() is True
+    assert len(win._light_curve_mpl_artists) == 1
+    first_artist = win._light_curve_mpl_artists[0]
+    first_y = np.asarray(first_artist.get_ydata(), dtype=float)
+    assert first_y.shape == win.time.shape
+    assert first_y[0] == pytest.approx(95.0)
+    assert not np.allclose(first_y, 95.0)
+
+    assert win.plot_light_curve_at_frequency(89.0, show_errors=False) is True
+    assert len(win._light_curve_mpl_artists) == 1
+    assert win._light_curve_mpl_artists[0] is not first_artist
+    second_y = np.asarray(win._light_curve_mpl_artists[0].get_ydata(), dtype=float)
+    assert win._light_curve_frequency_mhz == pytest.approx(90.0)
+    assert second_y[0] == pytest.approx(90.0)
+
+    win.close()
+
+
+def test_clear_light_curve_removes_overlay_and_disables_action():
+    _app()
+    win = MainWindow(theme=None)
+    win.set_hardware_live_preview_enabled(False)
+
+    win.filename = "demo.fit"
+    win.freqs = np.array([100.0, 95.0, 90.0], dtype=float)
+    win.time = np.array([0.0, 1.0, 2.0], dtype=float)
+    win.raw_data = np.array(
+        [
+            [1.0, 2.0, 3.0],
+            [4.0, 6.0, 5.0],
+            [7.0, 9.0, 8.0],
+        ],
+        dtype=np.float32,
+    )
+    win.plot_data(win.raw_data, title="Raw")
+    _flush_events()
+    assert win.plot_light_curve_at_frequency(95.0, show_errors=False) is True
+
+    win.clear_light_curve()
+
+    assert win._light_curve_frequency_mhz is None
+    assert win._light_curve_mpl_artists == []
+    assert win.clear_light_curve_action.isEnabled() is False
+
+    win.close()
+
+
+def test_light_curve_click_mode_uses_clicked_frequency_mpl():
+    _app()
+    win = MainWindow(theme=None)
+    win.set_hardware_live_preview_enabled(False)
+
+    win.filename = "demo.fit"
+    win.freqs = np.array([100.0, 95.0, 90.0], dtype=float)
+    win.time = np.array([0.0, 1.0, 2.0], dtype=float)
+    win.raw_data = np.array(
+        [
+            [1.0, 2.0, 3.0],
+            [4.0, 5.0, 8.0],
+            [7.0, 9.0, 10.0],
+        ],
+        dtype=np.float32,
+    )
+    win.plot_data(win.raw_data, title="Raw")
+    _flush_events()
+    win._sync_toolbar_enabled_states()
+
+    win.click_light_curve_frequency_action.setChecked(True)
+    handled = win._handle_light_curve_click(1.0, 94.0, inside=True, button=1)
+
+    assert handled is True
+    assert win._light_curve_frequency_mhz == pytest.approx(95.0)
+
     win.close()
 
 
