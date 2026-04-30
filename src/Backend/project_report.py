@@ -16,11 +16,6 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
-from matplotlib import colormaps
-from matplotlib.colors import LinearSegmentedColormap
-from matplotlib.figure import Figure
-
-from src.Backend.frequency_axis import finite_data_limits, masked_display_data, matplotlib_extent
 
 
 ProgressCallback = Callable[[int, str], None]
@@ -30,12 +25,40 @@ class ReportGenerationCancelled(RuntimeError):
     pass
 
 
-@dataclass
+@dataclass(init=False)
 class ProjectReportFigure:
     title: str
-    image_png: bytes | None = None
+    source_filename: str = ""
     caption: str = ""
+    png_bytes: bytes | None = None
     image_path: str = ""
+    availability_note: str = ""
+
+    def __init__(
+        self,
+        title: str,
+        *,
+        source_filename: str = "",
+        caption: str = "",
+        png_bytes: bytes | None = None,
+        image_png: bytes | None = None,
+        image_path: str = "",
+        availability_note: str = "",
+    ):
+        self.title = str(title or "Figure")
+        self.source_filename = str(source_filename or "")
+        self.caption = str(caption or "")
+        self.png_bytes = png_bytes if png_bytes is not None else image_png
+        self.image_path = str(image_path or "")
+        self.availability_note = str(availability_note or "")
+
+    @property
+    def image_png(self) -> bytes | None:
+        return self.png_bytes
+
+    @image_png.setter
+    def image_png(self, value: bytes | None) -> None:
+        self.png_bytes = value
 
 
 @dataclass
@@ -47,7 +70,6 @@ class ProjectReportInput:
     rfi: Mapping[str, Any] = field(default_factory=dict)
     annotations: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
     light_curve: Mapping[str, Any] = field(default_factory=dict)
-    operation_log: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
     analysis_session: Mapping[str, Any] | None = None
     analysis_row: Mapping[str, Any] = field(default_factory=dict)
     project_path: str = ""
@@ -78,31 +100,6 @@ def _emit(progress_cb: ProgressCallback | None, value: int, text: str) -> None:
 
 def _as_mapping(value: Any) -> dict[str, Any]:
     return dict(value or {}) if isinstance(value, Mapping) else {}
-
-
-def _as_float_array(value: Any) -> np.ndarray | None:
-    if value is None:
-        return None
-    try:
-        arr = np.asarray(value, dtype=float)
-    except Exception:
-        return None
-    if arr.ndim == 0:
-        return None
-    return arr.reshape(-1)
-
-
-def _finite_min_max(value: Any) -> tuple[float, float] | None:
-    try:
-        arr = np.asarray(value, dtype=float)
-    except Exception:
-        return None
-    if arr.size == 0:
-        return None
-    finite = arr[np.isfinite(arr)]
-    if finite.size == 0:
-        return None
-    return float(np.nanmin(finite)), float(np.nanmax(finite))
 
 
 def _fmt_number(value: Any, digits: int = 5) -> str:
@@ -151,277 +148,6 @@ def _fmt_value(value: Any) -> str:
             preview += f", ... ({len(values)} total)"
         return preview
     return str(value)
-
-
-def _style_axis(ax) -> None:
-    ax.grid(True, color="#d8dde6", linewidth=0.6, alpha=0.8)
-    ax.set_facecolor("#ffffff")
-    for spine in ax.spines.values():
-        spine.set_color("#2f3742")
-        spine.set_linewidth(0.8)
-    ax.tick_params(colors="#1f2933", labelsize=9)
-    ax.title.set_color("#111827")
-    ax.xaxis.label.set_color("#111827")
-    ax.yaxis.label.set_color("#111827")
-
-
-def figure_to_png_bytes(fig: Figure, *, dpi: int = 180) -> bytes:
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight", facecolor="white")
-    return buf.getvalue()
-
-
-def _resolve_cmap(cmap: Any):
-    if callable(cmap):
-        return cmap
-    name = str(cmap or "viridis").strip()
-    if not name or name.lower() == "custom":
-        return LinearSegmentedColormap.from_list(
-            "callisto_report_custom",
-            [(0.0, "blue"), (0.5, "red"), (1.0, "yellow")],
-        )
-    try:
-        return colormaps[name]
-    except Exception:
-        return colormaps["viridis"]
-
-
-def build_dynamic_spectrum_figure(
-    *,
-    data: Any,
-    freqs: Any,
-    time: Any,
-    title: str,
-    unit_label: str,
-    cmap: Any = "viridis",
-    frequency_step_mhz: float | None = None,
-) -> ProjectReportFigure | None:
-    try:
-        arr = np.asarray(data, dtype=float)
-    except Exception:
-        return None
-    freq_arr = _as_float_array(freqs)
-    time_arr = _as_float_array(time)
-    if arr.ndim != 2 or freq_arr is None or time_arr is None or len(freq_arr) == 0 or len(time_arr) == 0:
-        return None
-
-    fig = Figure(figsize=(7.2, 4.2), dpi=150)
-    ax = fig.add_subplot(111)
-    im = ax.imshow(
-        masked_display_data(arr),
-        aspect="auto",
-        extent=matplotlib_extent(freq_arr, time_arr, default_step=frequency_step_mhz),
-        cmap=_resolve_cmap(cmap),
-    )
-    vmin, vmax = finite_data_limits(arr)
-    if vmin is not None and vmax is not None:
-        im.set_clim(vmin, vmax)
-    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.035)
-    cbar.set_label(f"Intensity [{unit_label}]")
-    ax.set_title(str(title or "Dynamic Spectrum"))
-    ax.set_xlabel("Time [s]")
-    ax.set_ylabel("Frequency [MHz]")
-    _style_axis(ax)
-    fig.tight_layout()
-    return ProjectReportFigure(title=str(title or "Dynamic Spectrum"), image_png=figure_to_png_bytes(fig))
-
-
-def build_light_curve_figure(
-    *,
-    data: Any,
-    freqs: Any,
-    time: Any,
-    records: Sequence[Mapping[str, Any]] | None,
-    title: str = "Light Curves",
-    unit_label: str = "Digits",
-) -> ProjectReportFigure | None:
-    try:
-        arr = np.asarray(data, dtype=float)
-    except Exception:
-        return None
-    freq_arr = _as_float_array(freqs)
-    time_arr = _as_float_array(time)
-    if arr.ndim != 2 or freq_arr is None or time_arr is None or not records:
-        return None
-    if arr.shape[0] != len(freq_arr) or arr.shape[1] == 0:
-        return None
-
-    fig = Figure(figsize=(7.2, 3.7), dpi=150)
-    ax = fig.add_subplot(111)
-    plotted = 0
-    n = min(arr.shape[1], len(time_arr))
-    for record in records:
-        item = _as_mapping(record)
-        requested = item.get("requested_mhz", item.get("frequency_mhz"))
-        try:
-            requested_f = float(requested)
-        except Exception:
-            continue
-        finite = np.isfinite(freq_arr)
-        if not np.any(finite):
-            continue
-        finite_indices = np.flatnonzero(finite)
-        idx = int(finite_indices[int(np.argmin(np.abs(freq_arr[finite] - requested_f)))])
-        series = np.asarray(arr[idx, :n], dtype=float)
-        times = np.asarray(time_arr[:n], dtype=float)
-        mask = np.isfinite(times) & np.isfinite(series)
-        if not np.any(mask):
-            continue
-        ax.plot(times[mask], series[mask], linewidth=1.4, label=f"{freq_arr[idx]:.3f} MHz")
-        plotted += 1
-
-    if plotted == 0:
-        return None
-    ax.set_title(title)
-    ax.set_xlabel("Time [s]")
-    ax.set_ylabel(f"Intensity [{unit_label}]")
-    ax.legend(loc="best", fontsize=8)
-    _style_axis(ax)
-    fig.tight_layout()
-    return ProjectReportFigure(title=title, image_png=figure_to_png_bytes(fig))
-
-
-def build_max_intensity_figure(session: Mapping[str, Any] | None) -> ProjectReportFigure | None:
-    sess = _as_mapping(session)
-    max_block = _as_mapping(sess.get("max_intensity"))
-    times = _as_float_array(max_block.get("time_seconds"))
-    if times is None:
-        times = _as_float_array(max_block.get("time_channels"))
-    freqs = _as_float_array(max_block.get("freqs"))
-    if times is None or freqs is None:
-        return None
-    n = min(len(times), len(freqs))
-    if n == 0:
-        return None
-    times = times[:n]
-    freqs = freqs[:n]
-    mask = np.isfinite(times) & np.isfinite(freqs)
-    if not np.any(mask):
-        return None
-
-    fig = Figure(figsize=(6.8, 3.7), dpi=150)
-    ax = fig.add_subplot(111)
-    ax.scatter(times[mask], freqs[mask], s=12, color="#1d4ed8", alpha=0.9)
-    ax.set_title("Maximum Intensity Trace")
-    ax.set_xlabel("Time [s]")
-    ax.set_ylabel("Frequency [MHz]")
-    _style_axis(ax)
-    fig.tight_layout()
-    return ProjectReportFigure(
-        title="Maximum Intensity Trace",
-        image_png=figure_to_png_bytes(fig),
-        caption=f"{int(np.count_nonzero(mask))} valid points.",
-    )
-
-
-def build_analyzer_fit_figure(session: Mapping[str, Any] | None) -> ProjectReportFigure | None:
-    sess = _as_mapping(session)
-    max_block = _as_mapping(sess.get("max_intensity"))
-    analyzer = _as_mapping(sess.get("analyzer"))
-    fit = _as_mapping(analyzer.get("fit_params"))
-    if fit.get("a") is None or fit.get("b") is None:
-        return None
-    times = _as_float_array(max_block.get("time_seconds"))
-    if times is None:
-        times = _as_float_array(max_block.get("time_channels"))
-    freqs = _as_float_array(max_block.get("freqs"))
-    if times is None or freqs is None:
-        return None
-    n = min(len(times), len(freqs))
-    if n == 0:
-        return None
-    times = times[:n]
-    freqs = freqs[:n]
-    try:
-        a = float(fit.get("a"))
-        b = abs(float(fit.get("b")))
-    except Exception:
-        return None
-    mask = np.isfinite(times) & np.isfinite(freqs) & (times > 0.0) & (freqs > 0.0)
-    if np.count_nonzero(mask) < 2:
-        return None
-
-    x_fit = np.linspace(float(np.nanmin(times[mask])), float(np.nanmax(times[mask])), 300)
-    y_fit = a * np.power(x_fit, -b)
-    fig = Figure(figsize=(6.8, 3.7), dpi=150)
-    ax = fig.add_subplot(111)
-    ax.scatter(times, freqs, s=12, color="#1d4ed8", label="Maximum intensity")
-    ax.plot(x_fit, y_fit, color="#dc2626", linewidth=1.8, label=f"f = {a:.3g} * x^-{b:.3g}")
-    ax.set_title("Analyzer Best Fit")
-    ax.set_xlabel("Time [s]")
-    ax.set_ylabel("Frequency [MHz]")
-    ax.legend(loc="best", fontsize=8)
-    _style_axis(ax)
-    fig.tight_layout()
-    caption_parts = []
-    if fit.get("r2") is not None:
-        caption_parts.append(f"R2: {_fmt_number(fit.get('r2'), 4)}")
-    if fit.get("rmse") is not None:
-        caption_parts.append(f"RMSE: {_fmt_number(fit.get('rmse'), 4)}")
-    return ProjectReportFigure(
-        title="Analyzer Best Fit",
-        image_png=figure_to_png_bytes(fig),
-        caption=", ".join(caption_parts),
-    )
-
-
-def build_type_ii_figure(session: Mapping[str, Any] | None) -> ProjectReportFigure | None:
-    sess = _as_mapping(session)
-    type_ii = _as_mapping(sess.get("type_ii") if "type_ii" in sess else sess)
-    upper = _as_mapping(type_ii.get("upper"))
-    lower = _as_mapping(type_ii.get("lower"))
-    upper_t = _as_float_array(upper.get("time_seconds"))
-    upper_f = _as_float_array(upper.get("freqs"))
-    lower_t = _as_float_array(lower.get("time_seconds"))
-    lower_f = _as_float_array(lower.get("freqs"))
-    has_upper = upper_t is not None and upper_f is not None and min(len(upper_t), len(upper_f)) > 0
-    has_lower = lower_t is not None and lower_f is not None and min(len(lower_t), len(lower_f)) > 0
-    if not has_upper and not has_lower:
-        return None
-
-    fig = Figure(figsize=(6.8, 3.9), dpi=150)
-    ax = fig.add_subplot(111)
-
-    def _plot_band(times, freqs, fit, color, label):
-        n = min(len(times), len(freqs))
-        t = np.asarray(times[:n], dtype=float)
-        f = np.asarray(freqs[:n], dtype=float)
-        mask = np.isfinite(t) & np.isfinite(f)
-        if not np.any(mask):
-            return 0
-        ax.scatter(t[mask], f[mask], s=18, color=color, label=label)
-        fit_map = _as_mapping(fit)
-        if fit_map.get("a") is not None and fit_map.get("b") is not None and np.count_nonzero(mask) >= 2:
-            try:
-                a = float(fit_map["a"])
-                b = abs(float(fit_map["b"]))
-                x_min = max(float(np.nanmin(t[mask])), 1e-9)
-                x_max = float(np.nanmax(t[mask]))
-                if x_max > x_min:
-                    xs = np.linspace(x_min, x_max, 180)
-                    ax.plot(xs, a * np.power(xs, -b), color=color, linewidth=1.5, alpha=0.85)
-            except Exception:
-                pass
-        return int(np.count_nonzero(mask))
-
-    count = 0
-    if has_upper:
-        count += _plot_band(upper_t, upper_f, type_ii.get("upper_fit"), "#ea580c", "Upper band")
-    if has_lower:
-        count += _plot_band(lower_t, lower_f, type_ii.get("lower_fit"), "#0284c7", "Lower band")
-    if count == 0:
-        return None
-    ax.set_title("Type II Band Splitting")
-    ax.set_xlabel("Time [s]")
-    ax.set_ylabel("Frequency [MHz]")
-    ax.legend(loc="best", fontsize=8)
-    _style_axis(ax)
-    fig.tight_layout()
-    return ProjectReportFigure(
-        title="Type II Band Splitting",
-        image_png=figure_to_png_bytes(fig),
-        caption=f"{count} band points.",
-    )
 
 
 def _safe_para_text(value: Any) -> str:
@@ -622,14 +348,6 @@ def _type_ii_pairs(session: Mapping[str, Any] | None) -> list[tuple[str, Any]]:
     ]
 
 
-def _operation_rows(log: Sequence[Mapping[str, Any]], limit: int = 30) -> list[tuple[str, Any]]:
-    rows = []
-    for item in list(log or [])[-limit:]:
-        entry = _as_mapping(item)
-        rows.append((str(entry.get("ts") or ""), str(entry.get("msg") or "")))
-    return rows
-
-
 def _fit_image(rl, image_bytes: bytes, max_width: float, max_height: float):
     Image = rl["Image"]
     img = Image(io.BytesIO(image_bytes))
@@ -803,17 +521,17 @@ def generate_project_report_pdf(
     story.append(Spacer(1, 0.12 * inch))
 
     figures_written = 0
-    valid_figures = [fig for fig in list(report.figures or []) if fig and (fig.image_png or fig.image_path)]
-    if not valid_figures:
+    figure_items = [fig for fig in list(report.figures or []) if fig]
+    if not figure_items:
         _section(story, rl, styles, "Figures")
         story.append(Paragraph("Not available", styles["Normal"]))
-    for idx, figure in enumerate(valid_figures, start=1):
-        _emit(progress_cb, 40 + int(35 * idx / max(1, len(valid_figures))), f"Adding figure: {figure.title}")
+    for idx, figure in enumerate(figure_items, start=1):
+        _emit(progress_cb, 40 + int(35 * idx / max(1, len(figure_items))), f"Adding figure: {figure.title}")
         figure_block = []
         if idx == 1:
             figure_block.append(Paragraph("Figures", styles["Heading2"]))
         figure_block.append(Paragraph(escape(str(figure.title or f"Figure {idx}")), styles["Heading3"]))
-        image_bytes = figure.image_png
+        image_bytes = figure.png_bytes
         if image_bytes is None and figure.image_path:
             try:
                 image_bytes = Path(figure.image_path).read_bytes()
@@ -825,20 +543,18 @@ def generate_project_report_pdf(
                 figures_written += 1
             except Exception as exc:
                 figure_block.append(Paragraph(f"Figure could not be embedded: {escape(str(exc))}", styles["SmallText"]))
+        else:
+            note = str(figure.availability_note or "Not available")
+            figure_block.append(Paragraph(escape(note), styles["SmallText"]))
+        if figure.source_filename:
+            figure_block.append(Paragraph(f"Source: {escape(str(figure.source_filename))}", styles["Caption"]))
         if figure.caption:
             figure_block.append(Paragraph(escape(str(figure.caption)), styles["Caption"]))
         figure_block.append(Spacer(1, 0.1 * inch))
         story.append(KeepTogether(figure_block))
 
     story.append(PageBreak())
-    _emit(progress_cb, 80, "Adding logs and appendix...")
-    _section(story, rl, styles, "Operation Log")
-    op_pairs = _operation_rows(report.operation_log)
-    story.append(_pair_table(rl, styles, op_pairs, doc.width))
-    if len(list(report.operation_log or [])) > len(op_pairs):
-        story.append(Paragraph("Showing the most recent 30 operation log entries.", styles["Caption"]))
-    story.append(Spacer(1, 0.12 * inch))
-
+    _emit(progress_cb, 80, "Adding appendix...")
     _section(story, rl, styles, "Full FITS Header Appendix")
     header_text = str(report.full_header or "").strip()
     if header_text:

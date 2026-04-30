@@ -7,26 +7,31 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
 from __future__ import annotations
 
-import numpy as np
+import io
+import pytest
+from PIL import Image
 
 from src.Backend.project_report import (
+    ProjectReportFigure,
     ProjectReportInput,
-    build_analyzer_fit_figure,
-    build_dynamic_spectrum_figure,
-    build_light_curve_figure,
-    build_max_intensity_figure,
-    build_type_ii_figure,
     generate_project_report_pdf,
 )
+
+
+def _tiny_png() -> bytes:
+    buf = io.BytesIO()
+    image = Image.new("RGB", (12, 12), color=(31, 96, 196))
+    image.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def _sample_session() -> dict:
     return {
         "analysis_run_id": "run-1",
         "max_intensity": {
-            "time_channels": np.array([0.0, 1.0, 2.0, 3.0]),
-            "time_seconds": np.array([0.0, 2.0, 4.0, 6.0]),
-            "freqs": np.array([90.0, 78.0, 65.0, 55.0]),
+            "time_channels": [0.0, 1.0, 2.0, 3.0],
+            "time_seconds": [0.0, 2.0, 4.0, 6.0],
+            "freqs": [90.0, 78.0, 65.0, 55.0],
             "fundamental": True,
             "harmonic": False,
         },
@@ -42,12 +47,12 @@ def _sample_session() -> dict:
         },
         "type_ii": {
             "upper": {
-                "time_seconds": np.array([1.0, 2.0, 3.0]),
-                "freqs": np.array([95.0, 88.0, 80.0]),
+                "time_seconds": [1.0, 2.0, 3.0],
+                "freqs": [95.0, 88.0, 80.0],
             },
             "lower": {
-                "time_seconds": np.array([1.0, 2.0, 3.0]),
-                "freqs": np.array([75.0, 68.0, 60.0]),
+                "time_seconds": [1.0, 2.0, 3.0],
+                "freqs": [75.0, 68.0, 60.0],
             },
             "upper_fit": {"a": 98.0, "b": 0.2},
             "lower_fit": {"a": 76.0, "b": 0.22},
@@ -56,34 +61,23 @@ def _sample_session() -> dict:
     }
 
 
-def test_report_figure_builders_return_png_bytes_with_nan_data():
-    data = np.array(
-        [
-            [1.0, 2.0, np.nan, 4.0],
-            [2.0, 3.0, 4.0, 5.0],
-            [np.nan, np.nan, np.nan, np.nan],
-        ]
+def test_report_figure_accepts_pre_rendered_png_and_unavailable_note():
+    figure = ProjectReportFigure(
+        title="Raw Spectrum",
+        source_filename="demo.fit",
+        png_bytes=_tiny_png(),
+        caption="Captured from the UI.",
     )
-    freqs = np.array([90.0, 80.0, 70.0])
-    time = np.array([0.0, 1.0, 2.0, 3.0])
-    session = _sample_session()
+    unavailable = ProjectReportFigure(
+        title="Kp Index",
+        source_filename="demo.fit",
+        availability_note="Kp index data is not available.",
+    )
 
-    figures = [
-        build_dynamic_spectrum_figure(data=data, freqs=freqs, time=time, title="Raw", unit_label="Digits"),
-        build_light_curve_figure(
-            data=data,
-            freqs=freqs,
-            time=time,
-            records=[{"frequency_mhz": 80.0, "requested_mhz": 79.9}],
-            unit_label="Digits",
-        ),
-        build_max_intensity_figure(session),
-        build_analyzer_fit_figure(session),
-        build_type_ii_figure(session),
-    ]
-
-    assert all(fig is not None for fig in figures)
-    assert all(fig.image_png.startswith(b"\x89PNG") for fig in figures if fig is not None)
+    assert figure.png_bytes.startswith(b"\x89PNG")
+    assert figure.image_png == figure.png_bytes
+    assert unavailable.png_bytes is None
+    assert unavailable.availability_note == "Kp index data is not available."
 
 
 def test_generate_project_report_pdf_minimal(tmp_path):
@@ -105,18 +99,13 @@ def test_generate_project_report_pdf_minimal(tmp_path):
 
 
 def test_generate_project_report_pdf_with_optional_analysis_and_figures(tmp_path):
-    data = np.arange(12, dtype=float).reshape(3, 4)
-    freqs = np.array([90.0, 80.0, 70.0])
-    time = np.array([0.0, 1.0, 2.0, 3.0])
     session = _sample_session()
-    figure = build_dynamic_spectrum_figure(
-        data=data,
-        freqs=freqs,
-        time=time,
+    figure = ProjectReportFigure(
         title="Raw Spectrum",
-        unit_label="Digits",
+        source_filename="demo.fit",
+        png_bytes=_tiny_png(),
+        caption="Captured from the UI.",
     )
-    assert figure is not None
 
     out = tmp_path / "full_report.pdf"
     report = ProjectReportInput(
@@ -127,14 +116,24 @@ def test_generate_project_report_pdf_with_optional_analysis_and_figures(tmp_path
         rfi={"enabled": True, "applied": False},
         annotations=[{"kind": "text", "text": "burst", "visible": True}],
         light_curve={"records": [{"frequency_mhz": 80.0}], "settings": {"mode": "single"}},
-        operation_log=[{"ts": "2026-01-01T00:00:00+00:00", "msg": "loaded"}],
         analysis_session=session,
         selected_header={"DATE-OBS": "2026-01-01"},
         full_header="DATE-OBS= '2026-01-01'",
-        figures=[figure, build_max_intensity_figure(session), build_type_ii_figure(session)],
+        figures=[
+            figure,
+            ProjectReportFigure(title="Dst Index", availability_note="Not available"),
+        ],
     )
 
     result = generate_project_report_pdf(str(out), report)
 
     assert out.read_bytes().startswith(b"%PDF")
-    assert result.figures_written >= 2
+    assert result.figures_written == 1
+
+
+def test_project_report_input_does_not_accept_operation_log():
+    with pytest.raises(TypeError):
+        ProjectReportInput(
+            title="No Operation Log",
+            operation_log=[{"ts": "2026-01-01T00:00:00+00:00", "msg": "loaded"}],
+        )

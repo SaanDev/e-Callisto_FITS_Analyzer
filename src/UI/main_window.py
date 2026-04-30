@@ -118,11 +118,6 @@ from src.Backend.project_session import ProjectFormatError, read_project, write_
 from src.Backend.project_report import (
     ProjectReportFigure,
     ProjectReportInput,
-    build_analyzer_fit_figure,
-    build_dynamic_spectrum_figure,
-    build_light_curve_figure,
-    build_max_intensity_figure,
-    build_type_ii_figure,
 )
 from src.Backend.provenance import build_provenance_payload, write_provenance_files
 from src.Backend.recovery_manager import (
@@ -8974,30 +8969,157 @@ class MainWindow(QMainWindow):
         finally:
             buffer.close()
 
-    def _capture_current_project_report_figure(self) -> ProjectReportFigure | None:
+    def _qwidget_to_png_bytes(self, widget: QWidget | None) -> bytes:
+        if widget is None:
+            return b""
         try:
-            if self._hardware_mode_enabled():
-                image = self._capture_hardware_plot_qimage()
-                png = self._qimage_to_png_bytes(image)
-            else:
-                self.canvas.draw()
-                buf = io.BytesIO()
-                self.canvas.figure.savefig(
-                    buf,
-                    dpi=220,
-                    bbox_inches="tight",
-                    format="png",
-                    facecolor="white",
-                )
-                png = buf.getvalue()
+            QApplication.processEvents()
+            pixmap = widget.grab()
+            if pixmap is None or pixmap.isNull():
+                return b""
+            return self._qimage_to_png_bytes(pixmap.toImage())
         except Exception:
-            png = b""
-        if not png:
-            return None
+            return b""
+
+    def _project_report_source_paths(self) -> list[str]:
+        sources = [str(item) for item in list(getattr(self, "_combined_sources", []) or []) if str(item or "").strip()]
+        if not sources and getattr(self, "_fits_source_path", None):
+            sources = [str(self._fits_source_path)]
+        if not sources and getattr(self, "filename", ""):
+            sources = [str(self.filename)]
+        return sources
+
+    def _project_report_source_label(self) -> str:
+        names = [os.path.basename(path) for path in self._project_report_source_paths()]
+        return ", ".join(name for name in names if name) or str(getattr(self, "filename", "") or "")
+
+    def _project_report_default_stem(self) -> str:
+        sources = self._project_report_source_paths()
+        stems = [
+            os.path.splitext(os.path.basename(path))[0]
+            for path in sources
+            if os.path.splitext(os.path.basename(path))[0]
+        ]
+        if not stems and getattr(self, "_project_path", None):
+            stems = [os.path.splitext(os.path.basename(self._project_path))[0] or "project"]
+        if not stems:
+            stems = ["project"]
+
+        if len(stems) == 1:
+            stem = stems[0]
+        elif len(stems) <= 3:
+            stem = "_".join(stems)
+        else:
+            stem = f"{stems[0]}_to_{stems[-1]}_{len(stems)}files"
+        stem = self._sanitize_export_stem(stem) or "project"
+        if len(stem) > 120:
+            stem = stem[:120].rstrip("._-") or "project"
+        return stem
+
+    def _project_report_figure(
+        self,
+        title: str,
+        png: bytes | None,
+        *,
+        caption: str = "",
+        source_filename: str | None = None,
+        unavailable: str = "Not available",
+    ) -> ProjectReportFigure:
         return ProjectReportFigure(
+            title=title,
+            source_filename=source_filename if source_filename is not None else self._project_report_source_label(),
+            caption=caption,
+            png_bytes=png or None,
+            availability_note="" if png else unavailable,
+        )
+
+    def _capture_accel_project_report_png(self, data=None, title: str | None = None, view=None) -> bytes:
+        accel = getattr(self, "accel_canvas", None)
+        if accel is None or not bool(getattr(accel, "is_available", False)):
+            return b""
+
+        stack = getattr(self, "plot_stack", None)
+        previous_widget = None
+        previous_hw = bool(getattr(self, "use_hw_live_preview", False))
+        previous_display = getattr(self, "current_display_data", None)
+        previous_source = getattr(self, "_current_plot_source_data", None)
+        previous_plot_type = getattr(self, "current_plot_type", "Raw")
+        previous_noise_preview = bool(getattr(self, "_noise_preview_active", False))
+        try:
+            previous_view = accel.get_view()
+        except Exception:
+            previous_view = None
+        try:
+            previous_widget = stack.currentWidget() if stack is not None else None
+        except Exception:
+            previous_widget = None
+
+        try:
+            self.use_hw_live_preview = True
+            render_data = data if data is not None else previous_source
+            if render_data is None:
+                render_data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
+            if render_data is None:
+                return b""
+            ok = self._refresh_accel_plot(
+                data=render_data,
+                title=title if title is not None else previous_plot_type,
+                view=view,
+                preserve_view=False,
+            )
+            if not ok:
+                return b""
+            try:
+                self._render_annotations()
+            except Exception:
+                pass
+            if stack is not None:
+                stack.setCurrentWidget(accel)
+            QApplication.processEvents()
+            return self._qimage_to_png_bytes(self._capture_hardware_plot_qimage())
+        except Exception:
+            return b""
+        finally:
+            try:
+                restore_data = previous_source
+                if restore_data is None:
+                    restore_data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
+                if restore_data is not None:
+                    self.use_hw_live_preview = True
+                    self._refresh_accel_plot(
+                        data=restore_data,
+                        title=previous_plot_type,
+                        view=previous_view,
+                        preserve_view=False,
+                    )
+                    self._render_annotations()
+            except Exception:
+                pass
+            self.use_hw_live_preview = previous_hw
+            self.current_display_data = previous_display
+            self._current_plot_source_data = previous_source
+            self._noise_preview_active = previous_noise_preview
+            if stack is not None and previous_widget is not None:
+                try:
+                    stack.setCurrentWidget(previous_widget)
+                except Exception:
+                    pass
+
+    def _capture_current_project_report_figure(self) -> ProjectReportFigure | None:
+        widget = None
+        try:
+            stack = getattr(self, "plot_stack", None)
+            widget = stack.currentWidget() if stack is not None else None
+        except Exception:
+            widget = None
+        png = self._qwidget_to_png_bytes(widget)
+        if not png and self._hardware_mode_enabled():
+            png = self._qimage_to_png_bytes(self._capture_hardware_plot_qimage())
+        return self._project_report_figure(
             title="Current Main View",
-            image_png=png,
+            png=png,
             caption="Captured from the current project workspace view.",
+            unavailable="Current main view could not be captured.",
         )
 
     def _project_report_header_fields(self) -> tuple[dict, str]:
@@ -9045,15 +9167,10 @@ class MainWindow(QMainWindow):
         start_dir = ""
         if getattr(self, "_project_path", None):
             start_dir = os.path.dirname(self._project_path)
-            stem = os.path.splitext(os.path.basename(self._project_path))[0] or "project"
         elif getattr(self, "_fits_source_path", None):
             start_dir = os.path.dirname(self._fits_source_path)
-            stem = os.path.splitext(os.path.basename(self._fits_source_path))[0] or "project"
-        elif getattr(self, "filename", ""):
-            stem = os.path.splitext(os.path.basename(self.filename))[0] or "project"
-        else:
-            stem = "project"
-        filename = f"{self._sanitize_export_stem(stem)}_project_report.pdf"
+        stem = self._project_report_default_stem()
+        filename = f"{stem}_project_report.pdf"
         return os.path.join(start_dir, filename) if start_dir else filename
 
     def _pick_project_report_path(self) -> str:
@@ -9087,77 +9204,427 @@ class MainWindow(QMainWindow):
         except Exception:
             return True
 
+    def _capture_report_spectrum_figure(self, title: str, data, unavailable: str) -> ProjectReportFigure:
+        png = b""
+        if data is not None:
+            png = self._capture_accel_project_report_png(data=data, title=title, view=None)
+        return self._project_report_figure(
+            title=title,
+            png=png,
+            caption="Screen-equivalent capture from the project workspace.",
+            unavailable=unavailable,
+        )
+
+    def _capture_pyqtgraph_series_png(
+        self,
+        title: str,
+        series: list[dict],
+        *,
+        x_label: str = "Time [s]",
+        y_label: str = "Frequency [MHz]",
+        y_log: bool = False,
+    ) -> bytes:
+        try:
+            import pyqtgraph as pg
+            import pyqtgraph.exporters as pg_exporters
+        except Exception:
+            return b""
+
+        widget = None
+        try:
+            widget = pg.GraphicsLayoutWidget()
+            widget.resize(1400, 820)
+            widget.setBackground("#111111" if self._is_dark_ui() else "#ffffff")
+            plot = widget.addPlot()
+            plot.hideButtons()
+            plot.setMenuEnabled(False)
+            plot.showGrid(x=True, y=True, alpha=0.25)
+            plot.setTitle(str(title or "Report Figure"))
+            plot.setLabel("bottom", x_label)
+            plot.setLabel("left", y_label)
+            if y_log:
+                plot.setLogMode(y=True)
+            legend = plot.addLegend(offset=(12, 12))
+
+            plotted = 0
+            for item in list(series or []):
+                try:
+                    xs = np.asarray(item.get("x"), dtype=float).reshape(-1)
+                    ys = np.asarray(item.get("y"), dtype=float).reshape(-1)
+                except Exception:
+                    continue
+                n = min(xs.size, ys.size)
+                if n == 0:
+                    continue
+                xs = xs[:n]
+                ys = ys[:n]
+                mask = np.isfinite(xs) & np.isfinite(ys)
+                if y_log:
+                    mask &= ys > 0.0
+                if not np.any(mask):
+                    continue
+                color = str(item.get("color") or "#2563eb")
+                name = str(item.get("name") or f"Series {plotted + 1}")
+                if bool(item.get("scatter", False)):
+                    scatter = pg.ScatterPlotItem(
+                        size=float(item.get("size", 8.0)),
+                        pen=pg.mkPen(color, width=1.0),
+                        brush=pg.mkBrush(color),
+                    )
+                    scatter.setData(xs[mask], ys[mask])
+                    plot.addItem(scatter)
+                    try:
+                        legend.addItem(scatter, name)
+                    except Exception:
+                        pass
+                else:
+                    curve = plot.plot(
+                        xs[mask],
+                        ys[mask],
+                        pen=pg.mkPen(color, width=float(item.get("width", 2.0))),
+                        name=name,
+                    )
+                    try:
+                        legend.addItem(curve, name)
+                    except Exception:
+                        pass
+                plotted += 1
+
+            if plotted == 0:
+                return b""
+
+            plot.enableAutoRange()
+            QApplication.processEvents()
+            exporter = pg_exporters.ImageExporter(plot)
+            params = exporter.parameters()
+            params["width"] = 1800
+            image = exporter.export(toBytes=True)
+            return self._qimage_to_png_bytes(image)
+        except Exception:
+            return b""
+        finally:
+            if widget is not None:
+                try:
+                    widget.close()
+                    widget.deleteLater()
+                except Exception:
+                    pass
+
+    def _capture_max_intensity_fit_report_figure(self, session: dict | None) -> ProjectReportFigure:
+        sess = dict(session or {})
+        max_block = dict(sess.get("max_intensity") or {})
+        analyzer = dict(sess.get("analyzer") or {})
+        fit = dict(analyzer.get("fit_params") or {})
+        times = max_block.get("time_seconds")
+        x_label = "Time [s]"
+        if times is None:
+            times = max_block.get("time_channels")
+            x_label = "Time channel"
+        freqs = max_block.get("freqs")
+        try:
+            x = np.asarray(times, dtype=float).reshape(-1)
+            y = np.asarray(freqs, dtype=float).reshape(-1)
+        except Exception:
+            return self._project_report_figure(
+                "Maximum Intensity Fit",
+                None,
+                unavailable="Maximum-intensity analysis is not available.",
+            )
+        n = min(x.size, y.size)
+        if n == 0:
+            return self._project_report_figure(
+                "Maximum Intensity Fit",
+                None,
+                unavailable="Maximum-intensity analysis is not available.",
+            )
+        x = x[:n]
+        y = y[:n]
+        series = [{"x": x, "y": y, "name": "Maximum intensity", "color": "#2563eb", "scatter": True, "size": 7}]
+        caption_parts = []
+        try:
+            a = float(fit.get("a"))
+            b = abs(float(fit.get("b")))
+            mask = np.isfinite(x) & np.isfinite(y) & (x > 0.0) & (y > 0.0)
+            if np.count_nonzero(mask) >= 2:
+                x_fit = np.linspace(float(np.nanmin(x[mask])), float(np.nanmax(x[mask])), 400)
+                y_fit = a * np.power(x_fit, -b)
+                series.append({"x": x_fit, "y": y_fit, "name": f"Best fit: f = {a:.3g} * x^-{b:.3g}", "color": "#dc2626", "width": 3.0})
+                caption_parts.append(f"Fit: f = {a:.5g} * x^-{b:.5g}")
+        except Exception:
+            pass
+        if fit.get("r2") is not None:
+            caption_parts.append(f"R2: {float(fit.get('r2')):.4g}")
+        if fit.get("rmse") is not None:
+            caption_parts.append(f"RMSE: {float(fit.get('rmse')):.4g}")
+
+        png = self._capture_pyqtgraph_series_png(
+            "Maximum Intensity Fit",
+            series,
+            x_label=x_label,
+            y_label="Frequency [MHz]",
+        )
+        return self._project_report_figure(
+            "Maximum Intensity Fit",
+            png,
+            caption=", ".join(caption_parts) if caption_parts else "Maximum-intensity trace.",
+            unavailable="Maximum-intensity fit could not be captured.",
+        )
+
+    def _capture_type_ii_report_figure(self, session: dict | None) -> ProjectReportFigure:
+        sess = dict(session or {})
+        type_ii = dict(sess.get("type_ii") or {})
+        upper = dict(type_ii.get("upper") or {})
+        lower = dict(type_ii.get("lower") or {})
+        def _has_band_points(block: dict) -> bool:
+            try:
+                times = np.asarray(block.get("time_seconds"), dtype=float).reshape(-1)
+                freqs = np.asarray(block.get("freqs"), dtype=float).reshape(-1)
+            except Exception:
+                return False
+            return bool(min(times.size, freqs.size) > 0)
+
+        has_points = _has_band_points(upper) or _has_band_points(lower)
+        if not has_points:
+            return self._project_report_figure(
+                "Type II Band Splitting",
+                None,
+                unavailable="Type II band-splitting analysis is not available.",
+            )
+
+        dialog = getattr(self, "_type_ii_dialog", None) if self._dialog_alive(getattr(self, "_type_ii_dialog", None)) else None
+        created_dialog = False
+        if dialog is None:
+            spectrum = (
+                self.noise_reduced_original
+                if getattr(self, "noise_reduced_original", None) is not None
+                else (self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data)
+            )
+            if spectrum is None or self.freqs is None or self.time is None:
+                return self._project_report_figure(
+                    "Type II Band Splitting",
+                    None,
+                    unavailable="Type II band-splitting plot data is not available.",
+                )
+            try:
+                dialog = TypeIIBandSplittingDialog(
+                    spectrum,
+                    self.freqs,
+                    self.time,
+                    self._project_report_source_label() or self.filename,
+                    parent=self,
+                    session=sess,
+                    display_data=self._intensity_for_display(spectrum),
+                    display_unit="dB" if self.use_db else "Digits",
+                    cmap=self.get_current_cmap(),
+                    frequency_step_mhz=self._frequency_step_mhz,
+                )
+                created_dialog = True
+            except Exception:
+                dialog = None
+        png = b""
+        if dialog is not None:
+            try:
+                image = dialog._render_export_image(min_width=2400)
+                png = self._qimage_to_png_bytes(image)
+            except Exception:
+                png = b""
+            finally:
+                if created_dialog:
+                    try:
+                        dialog.close()
+                        dialog.deleteLater()
+                    except Exception:
+                        pass
+        return self._project_report_figure(
+            "Type II Band Splitting",
+            png,
+            caption="Captured from the Type II band-splitting view.",
+            unavailable="Type II band-splitting plot could not be captured.",
+        )
+
+    def _capture_goes_overlay_report_figure(self) -> ProjectReportFigure:
+        selected = self._selected_goes_overlay_channels()
+        if not (getattr(self, "_goes_overlay_enabled", False) and getattr(self, "_goes_overlay_payload", None) is not None and selected):
+            return self._project_report_figure(
+                "GOES X-Ray Overlay",
+                None,
+                unavailable="GOES X-Ray overlay is not available in the current project state.",
+            )
+        png = self._capture_current_project_report_figure().png_bytes
+        return self._project_report_figure(
+            "GOES X-Ray Overlay",
+            png,
+            caption="Captured with the currently active GOES X-Ray overlay.",
+            unavailable="GOES X-Ray overlay could not be captured.",
+        )
+
+    def _capture_goes_payload_report_figure(self) -> ProjectReportFigure:
+        payload = getattr(self, "_goes_overlay_payload", None)
+        selected = self._selected_goes_overlay_channels()
+        visible = self._goes_overlay_visible_series(payload, selected_channels=selected)
+        series = []
+        for key, item in visible:
+            try:
+                xs = np.asarray(self._goes_payload_field(item, "x_seconds", []), dtype=float)
+                flux = np.asarray(self._goes_payload_field(item, "flux_wm2", []), dtype=float)
+            except Exception:
+                continue
+            series.append(
+                {
+                    "x": xs,
+                    "y": flux,
+                    "name": self._goes_payload_field(item, "display_label", GOES_OVERLAY_CHANNEL_LABELS.get(key, key.upper())),
+                    "color": GOES_OVERLAY_CHANNEL_COLORS.get(key, "#ffffff" if self._is_dark_ui() else "#111827"),
+                    "width": 2.5,
+                }
+            )
+        png = self._capture_pyqtgraph_series_png(
+            "GOES X-Ray Data",
+            series,
+            x_label="Time [s]",
+            y_label="Flux [W/m^2]",
+            y_log=True,
+        )
+        return self._project_report_figure(
+            "GOES X-Ray Data",
+            png,
+            caption="Generated from already loaded GOES overlay data.",
+            unavailable="Separate GOES X-Ray data is not available.",
+        )
+
+    def _solar_window_has_plot(self, window, kind: str) -> bool:
+        if not self._dialog_alive(window):
+            return False
+        canvas = getattr(window, "canvas", None)
+        if canvas is None:
+            return False
+        try:
+            if kind in {"goes", "sgps"}:
+                times = getattr(canvas, "_times", None)
+                return times is not None and len(times) > 0
+            if kind == "dst":
+                values = getattr(canvas, "_values", None)
+                return values is not None and len(values) > 0
+            if kind == "kp":
+                values = getattr(canvas, "_values", None)
+                return values is not None and len(values) > 0
+        except Exception:
+            return False
+        return False
+
+    def _capture_solar_window_report_figure(self, attr_name: str, title: str, kind: str, unavailable: str) -> ProjectReportFigure:
+        window = getattr(self, attr_name, None)
+        if not self._solar_window_has_plot(window, kind):
+            return self._project_report_figure(title, None, unavailable=unavailable)
+        canvas = getattr(window, "canvas", None)
+        png = self._qwidget_to_png_bytes(canvas)
+        return self._project_report_figure(
+            title,
+            png,
+            caption="Captured from the already loaded Solar Events window.",
+            unavailable=f"{title} window was loaded, but its plot could not be captured.",
+        )
+
     def _build_project_report_figures(self, session: dict | None) -> list[ProjectReportFigure]:
         figures: list[ProjectReportFigure] = []
-        current = self._capture_current_project_report_figure()
-        if current is not None:
-            figures.append(current)
+        figures.append(self._capture_current_project_report_figure())
+        figures.append(
+            self._capture_report_spectrum_figure(
+                "Raw Spectrum",
+                getattr(self, "raw_data", None),
+                "Raw spectrum data is not available.",
+            )
+        )
 
-        unit_label = "dB" if self.use_db else "Digits"
-        cmap = self._plot_cmap()
-        if getattr(self, "raw_data", None) is not None and self.freqs is not None and self.time is not None:
-            try:
-                raw_display = self._intensity_for_display(self.raw_data)
-                fig = build_dynamic_spectrum_figure(
-                    data=raw_display,
-                    freqs=self.freqs,
-                    time=self.time,
-                    title="Raw Spectrum",
-                    unit_label=unit_label,
-                    cmap=cmap,
-                    frequency_step_mhz=self._frequency_step_mhz,
-                )
-                if fig is not None:
-                    figures.append(fig)
-            except Exception:
-                pass
+        background_data = None
+        if getattr(self, "noise_reduced_original", None) is not None and self._normalize_plot_type(self.current_plot_type) == "Isolated Burst":
+            background_data = self.noise_reduced_original
+        elif getattr(self, "noise_reduced_data", None) is not None:
+            background_data = self.noise_reduced_data
+        figures.append(
+            self._capture_report_spectrum_figure(
+                "Background-Subtracted Spectrum",
+                background_data,
+                "Background-subtracted spectrum is not available.",
+            )
+        )
 
+        isolated_data = None
         if (
-            getattr(self, "noise_reduced_data", None) is not None
-            and self.freqs is not None
-            and self.time is not None
-            and self._arrays_distinct_for_report(self.raw_data, self.noise_reduced_data)
+            getattr(self, "noise_reduced_original", None) is not None
+            and getattr(self, "noise_reduced_data", None) is not None
+            and self._arrays_distinct_for_report(self.noise_reduced_original, self.noise_reduced_data)
         ):
-            try:
-                processed_display = self._intensity_for_display(self.noise_reduced_data)
-                fig = build_dynamic_spectrum_figure(
-                    data=processed_display,
-                    freqs=self.freqs,
-                    time=self.time,
-                    title=f"{self._normalize_plot_type(self.current_plot_type)} Spectrum",
-                    unit_label=unit_label,
-                    cmap=cmap,
-                    frequency_step_mhz=self._frequency_step_mhz,
-                )
-                if fig is not None:
-                    figures.append(fig)
-            except Exception:
-                pass
+            isolated_data = self.noise_reduced_data
+        figures.append(
+            self._capture_report_spectrum_figure(
+                "Isolated Burst",
+                isolated_data,
+                "Isolated-burst spectrum is not available.",
+            )
+        )
 
         records = self._light_curve_records_payload()
         if records:
-            try:
-                source = self._current_light_curve_source_data()
-                if source is not None:
-                    fig = build_light_curve_figure(
-                        data=self._intensity_for_display(source),
-                        freqs=self.freqs,
-                        time=self.time,
-                        records=records,
-                        unit_label=unit_label,
-                    )
-                    if fig is not None:
-                        figures.append(fig)
-            except Exception:
-                pass
+            source = self._current_light_curve_source_data()
+            view = self._capture_view()
+            png = self._capture_accel_project_report_png(data=source, title=self.current_plot_type, view=view)
+            figures.append(
+                self._project_report_figure(
+                    "Light Curve View",
+                    png,
+                    caption="Captured from the current light-curve overlay view.",
+                    unavailable="Light-curve view could not be captured.",
+                )
+            )
+        else:
+            figures.append(
+                self._project_report_figure(
+                    "Light Curve View",
+                    None,
+                    unavailable="Light-curve graph is not available.",
+                )
+            )
 
-        for builder in (build_max_intensity_figure, build_analyzer_fit_figure, build_type_ii_figure):
-            try:
-                fig = builder(session)
-                if fig is not None:
-                    figures.append(fig)
-            except Exception:
-                pass
+        figures.append(self._capture_max_intensity_fit_report_figure(session))
+        figures.append(self._capture_type_ii_report_figure(session))
+        figures.append(self._capture_goes_overlay_report_figure())
+
+        goes_window_fig = self._capture_solar_window_report_figure(
+            "_goes_window",
+            "GOES X-Ray Data",
+            "goes",
+            "GOES X-Ray data is not available in the loaded app state.",
+        )
+        if goes_window_fig.png_bytes:
+            figures.append(goes_window_fig)
+        else:
+            figures.append(self._capture_goes_payload_report_figure())
+
+        figures.append(
+            self._capture_solar_window_report_figure(
+                "_sep_window",
+                "GOES SGPS Proton Flux",
+                "sgps",
+                "GOES SGPS proton flux data is not available in the loaded app state.",
+            )
+        )
+        figures.append(
+            self._capture_solar_window_report_figure(
+                "_dst_window",
+                "DST Index",
+                "dst",
+                "DST index data is not available in the loaded app state.",
+            )
+        )
+        figures.append(
+            self._capture_solar_window_report_figure(
+                "_kp_window",
+                "Kp Index",
+                "kp",
+                "Kp index data is not available in the loaded app state.",
+            )
+        )
 
         return figures
 
@@ -9172,6 +9639,10 @@ class MainWindow(QMainWindow):
         if not fits_sources and getattr(self, "_fits_source_path", None):
             fits_sources = [self._fits_source_path]
         fits_primary = getattr(self, "_fits_source_path", None) or getattr(self, "filename", "")
+        source_label = self._project_report_source_label()
+        if source_label:
+            data_source["filename"] = source_label
+        data_source["sources"] = self._project_report_source_paths()
 
         analysis_row = build_log_row(
             project_path=getattr(self, "_project_path", None),
@@ -9183,7 +9654,7 @@ class MainWindow(QMainWindow):
             session=session,
         )
 
-        base_title = os.path.splitext(os.path.basename(str(getattr(self, "filename", "") or "project")))[0] or "Project"
+        base_title = self._project_report_default_stem()
         title = f"{base_title} Project Report"
 
         return ProjectReportInput(
@@ -9197,7 +9668,6 @@ class MainWindow(QMainWindow):
                 "records": self._light_curve_records_payload(),
                 "settings": self._light_curve_settings_payload(),
             },
-            operation_log=list(getattr(self, "_processing_log", []) or []),
             analysis_session=session,
             analysis_row=analysis_row,
             project_path=str(getattr(self, "_project_path", "") or ""),

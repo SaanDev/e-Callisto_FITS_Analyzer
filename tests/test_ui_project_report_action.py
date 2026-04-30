@@ -79,3 +79,20 @@ def test_pick_project_report_path_appends_pdf_extension(monkeypatch, tmp_path):
 
     assert win._pick_project_report_path() == f"{target}.pdf"
     win.close()
+
+
+def test_project_report_default_filename_uses_original_sources(tmp_path):
+    _app()
+    win = MainWindow(theme=None)
+    win.filename = "Graph Title That Should Not Be Used"
+    win._project_path = str(tmp_path / "saved_project.efaproj")
+    win._combined_sources = [
+        str(tmp_path / "CALLISTO_A_20260101.fit"),
+        str(tmp_path / "CALLISTO_B_20260101.fit"),
+    ]
+
+    default_path = win._project_report_default_path()
+
+    assert default_path.startswith(str(tmp_path))
+    assert default_path.endswith("CALLISTO_A_20260101_CALLISTO_B_20260101_project_report.pdf")
+    win.close()
