@@ -44,6 +44,13 @@ a = Analysis(
         # Qt + Matplotlib
         "PySide6",
         "matplotlib",
+        "reportlab",
+        "reportlab.lib",
+        "reportlab.pdfbase",
+        "reportlab.pdfgen",
+        "reportlab.platypus",
+        "PIL",
+        "PIL.Image",
         "pyqtgraph",
         "pyqtgraph.exporters",
         "pyqtgraph.exporters.ImageExporter",

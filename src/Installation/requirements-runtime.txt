@@ -3,6 +3,7 @@ PySide6==6.10.1
 PySide6-Addons==6.10.1
 PySide6-Essentials==6.10.1
 matplotlib==3.10.7
+reportlab==4.5.0
 pyqtgraph==0.14.0
 numpy==2.3.5
 pandas==2.3.3

@@ -14,6 +14,7 @@ import sys
 import tempfile
 import math
 import json
+import io
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import unquote, urlparse
 
@@ -26,7 +27,7 @@ from matplotlib.path import Path
 from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter, ScalarFormatter
 from matplotlib.widgets import LassoSelector, RectangleSelector
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from PySide6.QtCore import QSettings, QSize, QStandardPaths, Qt, QThread, QTimer, QUrl, Slot
+from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QSettings, QSize, QStandardPaths, Qt, QThread, QTimer, QUrl, Slot
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -114,6 +115,15 @@ from src.Backend.presets import (
     upsert_preset,
 )
 from src.Backend.project_session import ProjectFormatError, read_project, write_project
+from src.Backend.project_report import (
+    ProjectReportFigure,
+    ProjectReportInput,
+    build_analyzer_fit_figure,
+    build_dynamic_spectrum_figure,
+    build_light_curve_figure,
+    build_max_intensity_figure,
+    build_type_ii_figure,
+)
 from src.Backend.provenance import build_provenance_payload, write_provenance_files
 from src.Backend.recovery_manager import (
     DEFAULT_MAX_SNAPSHOTS,
@@ -154,6 +164,7 @@ from src.UI.gui_shared import (
 from src.UI.gui_workers import (
     DownloaderImportWorker,
     GoesOverlayLoadWorker,
+    ProjectReportWorker,
     UpdateCheckWorker,
     UpdateDownloadWorker,
 )
@@ -320,6 +331,9 @@ class MainWindow(QMainWindow):
         self._update_download_thread = None
         self._update_download_worker = None
         self._update_download_progress_dialog = None
+        self._project_report_thread = None
+        self._project_report_worker = None
+        self._project_report_progress_dialog = None
         self._update_check_interactive = True
         self._import_progress_dialog = None
         self._batch_processing_dialog = None
@@ -820,6 +834,9 @@ class MainWindow(QMainWindow):
         self.recover_last_session_action = QAction("Recover Last Session...", self)
         file_menu.addAction(self.recover_last_session_action)
 
+        self.generate_project_report_action = QAction("Generate Project Report...", self)
+        file_menu.addAction(self.generate_project_report_action)
+
         file_menu.addSeparator()
 
         # --- Save As (disabled for main window) ---
@@ -1096,6 +1113,7 @@ class MainWindow(QMainWindow):
         self.save_project_action.triggered.connect(self.save_project)
         self.save_project_as_action.triggered.connect(self.save_project_as)
         self.recover_last_session_action.triggered.connect(self.recover_last_session)
+        self.generate_project_report_action.triggered.connect(self.generate_project_report)
         self.units_digits_radio.toggled.connect(
             lambda checked: checked and self.set_units_mode(False)
         )
@@ -8941,6 +8959,361 @@ class MainWindow(QMainWindow):
             )
         self._log_operation("Exported analysis log (CSV + TXT).")
 
+    @staticmethod
+    def _qimage_to_png_bytes(image: QImage) -> bytes:
+        if image is None or image.isNull():
+            return b""
+        payload = QByteArray()
+        buffer = QBuffer(payload)
+        if not buffer.open(QIODevice.OpenModeFlag.WriteOnly):
+            return b""
+        try:
+            if not image.save(buffer, "PNG"):
+                return b""
+            return bytes(payload)
+        finally:
+            buffer.close()
+
+    def _capture_current_project_report_figure(self) -> ProjectReportFigure | None:
+        try:
+            if self._hardware_mode_enabled():
+                image = self._capture_hardware_plot_qimage()
+                png = self._qimage_to_png_bytes(image)
+            else:
+                self.canvas.draw()
+                buf = io.BytesIO()
+                self.canvas.figure.savefig(
+                    buf,
+                    dpi=220,
+                    bbox_inches="tight",
+                    format="png",
+                    facecolor="white",
+                )
+                png = buf.getvalue()
+        except Exception:
+            png = b""
+        if not png:
+            return None
+        return ProjectReportFigure(
+            title="Current Main View",
+            image_png=png,
+            caption="Captured from the current project workspace view.",
+        )
+
+    def _project_report_header_fields(self) -> tuple[dict, str]:
+        hdr = getattr(self, "_fits_header0", None)
+        if hdr is None:
+            return {}, ""
+
+        keys = (
+            "SIMPLE",
+            "BITPIX",
+            "NAXIS",
+            "DATE-OBS",
+            "TIME-OBS",
+            "DATE",
+            "INSTRUME",
+            "TELESCOP",
+            "OBSERVAT",
+            "OBJECT",
+            "ORIGIN",
+            "CONTENT",
+            "BZERO",
+            "BSCALE",
+            "DATAMIN",
+            "DATAMAX",
+        )
+        selected = {}
+        for key in keys:
+            try:
+                if key in hdr:
+                    selected[key] = hdr.get(key)
+            except Exception:
+                pass
+
+        full_header = ""
+        try:
+            full_header = hdr.tostring(sep="\n", endcard=True, padding=False)
+        except Exception:
+            try:
+                full_header = str(hdr)
+            except Exception:
+                full_header = ""
+        return selected, full_header
+
+    def _project_report_default_path(self) -> str:
+        start_dir = ""
+        if getattr(self, "_project_path", None):
+            start_dir = os.path.dirname(self._project_path)
+            stem = os.path.splitext(os.path.basename(self._project_path))[0] or "project"
+        elif getattr(self, "_fits_source_path", None):
+            start_dir = os.path.dirname(self._fits_source_path)
+            stem = os.path.splitext(os.path.basename(self._fits_source_path))[0] or "project"
+        elif getattr(self, "filename", ""):
+            stem = os.path.splitext(os.path.basename(self.filename))[0] or "project"
+        else:
+            stem = "project"
+        filename = f"{self._sanitize_export_stem(stem)}_project_report.pdf"
+        return os.path.join(start_dir, filename) if start_dir else filename
+
+    def _pick_project_report_path(self) -> str:
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Generate Project Report",
+            self._project_report_default_path(),
+            "PDF (*.pdf)",
+        )
+        if not path:
+            return ""
+        root, ext = os.path.splitext(path)
+        if not ext:
+            return f"{path}.pdf"
+        if ext.lower() != ".pdf":
+            return f"{root}.pdf"
+        return path
+
+    def _project_report_analysis_session(self) -> dict | None:
+        return self._best_available_analysis_session()
+
+    def _arrays_distinct_for_report(self, first, second) -> bool:
+        if first is None or second is None:
+            return False
+        try:
+            a = np.asarray(first)
+            b = np.asarray(second)
+            if a.shape != b.shape:
+                return True
+            return not bool(np.array_equal(a, b, equal_nan=True))
+        except Exception:
+            return True
+
+    def _build_project_report_figures(self, session: dict | None) -> list[ProjectReportFigure]:
+        figures: list[ProjectReportFigure] = []
+        current = self._capture_current_project_report_figure()
+        if current is not None:
+            figures.append(current)
+
+        unit_label = "dB" if self.use_db else "Digits"
+        cmap = self._plot_cmap()
+        if getattr(self, "raw_data", None) is not None and self.freqs is not None and self.time is not None:
+            try:
+                raw_display = self._intensity_for_display(self.raw_data)
+                fig = build_dynamic_spectrum_figure(
+                    data=raw_display,
+                    freqs=self.freqs,
+                    time=self.time,
+                    title="Raw Spectrum",
+                    unit_label=unit_label,
+                    cmap=cmap,
+                    frequency_step_mhz=self._frequency_step_mhz,
+                )
+                if fig is not None:
+                    figures.append(fig)
+            except Exception:
+                pass
+
+        if (
+            getattr(self, "noise_reduced_data", None) is not None
+            and self.freqs is not None
+            and self.time is not None
+            and self._arrays_distinct_for_report(self.raw_data, self.noise_reduced_data)
+        ):
+            try:
+                processed_display = self._intensity_for_display(self.noise_reduced_data)
+                fig = build_dynamic_spectrum_figure(
+                    data=processed_display,
+                    freqs=self.freqs,
+                    time=self.time,
+                    title=f"{self._normalize_plot_type(self.current_plot_type)} Spectrum",
+                    unit_label=unit_label,
+                    cmap=cmap,
+                    frequency_step_mhz=self._frequency_step_mhz,
+                )
+                if fig is not None:
+                    figures.append(fig)
+            except Exception:
+                pass
+
+        records = self._light_curve_records_payload()
+        if records:
+            try:
+                source = self._current_light_curve_source_data()
+                if source is not None:
+                    fig = build_light_curve_figure(
+                        data=self._intensity_for_display(source),
+                        freqs=self.freqs,
+                        time=self.time,
+                        records=records,
+                        unit_label=unit_label,
+                    )
+                    if fig is not None:
+                        figures.append(fig)
+            except Exception:
+                pass
+
+        for builder in (build_max_intensity_figure, build_analyzer_fit_figure, build_type_ii_figure):
+            try:
+                fig = builder(session)
+                if fig is not None:
+                    figures.append(fig)
+            except Exception:
+                pass
+
+        return figures
+
+    def _build_project_report_input(self) -> ProjectReportInput:
+        context = self._build_provenance_context()
+        data_source = dict(context.get("data_source") or {})
+        processing = dict(context.get("processing") or {})
+        selected_header, full_header = self._project_report_header_fields()
+        session = self._project_report_analysis_session()
+
+        fits_sources = list(getattr(self, "_combined_sources", []) or [])
+        if not fits_sources and getattr(self, "_fits_source_path", None):
+            fits_sources = [self._fits_source_path]
+        fits_primary = getattr(self, "_fits_source_path", None) or getattr(self, "filename", "")
+
+        analysis_row = build_log_row(
+            project_path=getattr(self, "_project_path", None),
+            fits_primary=fits_primary,
+            fits_sources=fits_sources,
+            combined_mode=getattr(self, "_combined_mode", None),
+            station=self._analysis_station_name(),
+            date_obs=self._analysis_date_obs(),
+            session=session,
+        )
+
+        base_title = os.path.splitext(os.path.basename(str(getattr(self, "filename", "") or "project")))[0] or "Project"
+        title = f"{base_title} Project Report"
+
+        return ProjectReportInput(
+            title=title,
+            app=dict(context.get("app") or {}),
+            data_source=data_source,
+            processing=processing,
+            rfi=dict(context.get("rfi") or {}),
+            annotations=list(context.get("annotations") or []),
+            light_curve={
+                "records": self._light_curve_records_payload(),
+                "settings": self._light_curve_settings_payload(),
+            },
+            operation_log=list(getattr(self, "_processing_log", []) or []),
+            analysis_session=session,
+            analysis_row=analysis_row,
+            project_path=str(getattr(self, "_project_path", "") or ""),
+            fits_primary=str(fits_primary or ""),
+            station=self._analysis_station_name(),
+            date_obs=self._analysis_date_obs(),
+            selected_header=selected_header,
+            full_header=full_header,
+            figures=self._build_project_report_figures(session),
+        )
+
+    def _show_project_report_progress_dialog(self):
+        self._close_project_report_progress_dialog()
+        dlg = QProgressDialog("Generating project report...", "Cancel", 0, 100, self)
+        dlg.setWindowTitle("Generate Project Report")
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        dlg.setValue(0)
+        dlg.canceled.connect(self._cancel_project_report_generation)
+        self._project_report_progress_dialog = dlg
+        dlg.show()
+
+    def _close_project_report_progress_dialog(self):
+        dlg = getattr(self, "_project_report_progress_dialog", None)
+        self._project_report_progress_dialog = None
+        if dlg is not None:
+            try:
+                dlg.close()
+                dlg.deleteLater()
+            except Exception:
+                pass
+
+    def _cancel_project_report_generation(self):
+        worker = getattr(self, "_project_report_worker", None)
+        if worker is not None:
+            worker.request_cancel()
+            self.statusBar().showMessage("Cancelling project report generation...", 3000)
+
+    def _on_project_report_progress(self, value: int, text: str):
+        dlg = getattr(self, "_project_report_progress_dialog", None)
+        if dlg is not None:
+            try:
+                dlg.setValue(max(0, min(100, int(value))))
+                if text:
+                    dlg.setLabelText(str(text))
+            except Exception:
+                pass
+        if text:
+            self.statusBar().showMessage(str(text), 2500)
+
+    def _on_project_report_finished(self, result):
+        self._close_project_report_progress_dialog()
+        path = str(getattr(result, "path", "") or "")
+        self.statusBar().showMessage(f"Project report generated: {os.path.basename(path)}", 5000)
+        self._log_operation(f"Generated project report: {os.path.basename(path)}")
+        QMessageBox.information(self, "Project Report Complete", f"Report saved:\n{path}")
+
+    def _on_project_report_failed(self, message: str):
+        self._close_project_report_progress_dialog()
+        QMessageBox.critical(self, "Generate Project Report Failed", str(message or "Unknown error."))
+
+    def _on_project_report_cancelled(self):
+        self._close_project_report_progress_dialog()
+        self.statusBar().showMessage("Project report generation cancelled.", 4000)
+
+    def _cleanup_project_report_worker(self):
+        self._project_report_worker = None
+        self._project_report_thread = None
+        self._sync_project_actions()
+
+    def generate_project_report(self):
+        if getattr(self, "raw_data", None) is None:
+            QMessageBox.information(self, "Generate Project Report", "Load a FITS file first.")
+            return
+        if getattr(self, "_project_report_worker", None) is not None:
+            QMessageBox.information(self, "Generate Project Report", "A project report is already being generated.")
+            return
+
+        path = self._pick_project_report_path()
+        if not path:
+            return
+        if sys.platform.startswith("win") and path.lower().startswith("c:\\program files"):
+            QMessageBox.warning(
+                self,
+                "Permission Denied",
+                "Windows does not allow saving files inside Program Files.\n"
+                "Please choose another folder such as Documents or Desktop."
+            )
+            return
+
+        try:
+            report_input = self._build_project_report_input()
+        except Exception as e:
+            QMessageBox.critical(self, "Generate Project Report Failed", f"Could not prepare report data:\n{e}")
+            return
+
+        self._show_project_report_progress_dialog()
+        self._project_report_thread = QThread(self)
+        self._project_report_worker = ProjectReportWorker(path, report_input)
+        self._project_report_worker.moveToThread(self._project_report_thread)
+
+        self._project_report_thread.started.connect(self._project_report_worker.run)
+        self._project_report_worker.progress.connect(self._on_project_report_progress)
+        self._project_report_worker.finished.connect(self._on_project_report_finished)
+        self._project_report_worker.failed.connect(self._on_project_report_failed)
+        self._project_report_worker.cancelled.connect(self._on_project_report_cancelled)
+        self._project_report_worker.finished.connect(self._project_report_thread.quit)
+        self._project_report_worker.failed.connect(self._project_report_thread.quit)
+        self._project_report_worker.cancelled.connect(self._project_report_thread.quit)
+        self._project_report_thread.finished.connect(self._project_report_worker.deleteLater)
+        self._project_report_thread.finished.connect(self._cleanup_project_report_worker)
+        self._sync_project_actions()
+        self._project_report_thread.start()
+
     def _mark_project_dirty(self):
         if getattr(self, "_loading_project", False):
             return
@@ -8962,6 +9335,7 @@ class MainWindow(QMainWindow):
         for name, enabled in (
             ("save_project_action", has_data),
             ("save_project_as_action", has_data),
+            ("generate_project_report_action", has_data and getattr(self, "_project_report_worker", None) is None),
         ):
             act = getattr(self, name, None)
             if act is not None:
@@ -9532,6 +9906,18 @@ class MainWindow(QMainWindow):
                     self._update_download_worker.request_cancel()
                 self._update_download_thread.quit()
                 self._update_download_thread.wait(800)
+        except Exception:
+            pass
+        try:
+            if self._project_report_thread is not None:
+                if self._project_report_worker is not None:
+                    self._project_report_worker.request_cancel()
+                self._project_report_thread.quit()
+                self._project_report_thread.wait(800)
+        except Exception:
+            pass
+        try:
+            self._close_project_report_progress_dialog()
         except Exception:
             pass
         try:

@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_install_requirements_packages_list():
     assert "PySide6" in install_requirements.packages
     assert "matplotlib" in install_requirements.packages
+    assert "reportlab" in install_requirements.packages
     assert "setuptools" in install_requirements.build_packages
 
 
@@ -117,6 +118,20 @@ def test_specs_bundle_pyqtgraph_exporters():
         assert "pyqtgraph.exporters.SVGExporter" in text
 
 
+def test_specs_bundle_reportlab_project_reports():
+    spec_paths = [
+        ROOT / "src" / "Installation" / "FITS_Analyzer.spec",
+        ROOT / "src" / "Installation" / "FITS_Analyzer_linux.spec",
+        ROOT / "src" / "Installation" / "FITS_Analyzer_win.spec",
+        ROOT / "src" / "Installation" / "setup.py",
+    ]
+    for path in spec_paths:
+        text = path.read_text(encoding="utf-8")
+        assert "reportlab" in text
+        assert "reportlab.platypus" in text
+        assert "PIL.Image" in text
+
+
 def test_specs_bundle_type_ii_band_splitting_icons():
     spec_paths = [
         ROOT / "src" / "Installation" / "FITS_Analyzer.spec",
@@ -134,6 +149,7 @@ def test_specs_bundle_type_ii_band_splitting_icons():
 
 def test_runtime_requirements_include_sunpy_network_stack():
     text = (ROOT / "src" / "Installation" / "requirements-runtime.txt").read_text(encoding="utf-8")
+    assert "reportlab==" in text
     assert "sunpy[map,net,timeseries]" in text
     assert "lxml==" in text
     assert "drms==" in text

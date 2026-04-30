@@ -97,6 +97,8 @@ OPTIONS = {
         "src",
         "netCDF4",
         "cftime",
+        "reportlab",
+        "PIL",
     ],
 
     "includes": [
@@ -130,6 +132,13 @@ OPTIONS = {
 
         # Matplotlib core
         "matplotlib",
+        "reportlab",
+        "reportlab.lib",
+        "reportlab.pdfbase",
+        "reportlab.pdfgen",
+        "reportlab.platypus",
+        "PIL",
+        "PIL.Image",
         "matplotlib.figure",
         "matplotlib.ticker",
         "matplotlib.colors",

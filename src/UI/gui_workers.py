@@ -28,6 +28,7 @@ from src.Backend.batch_processing import (
 )
 from src.Backend.fits_io import extract_ut_start_sec, load_callisto_fits
 from src.Backend.goes_overlay import goes_overlay_payload_from_dict
+from src.Backend.project_report import ReportGenerationCancelled, generate_project_report_pdf
 from src.Backend.update_checker import check_for_updates
 
 
@@ -250,6 +251,50 @@ class UpdateDownloadWorker(QObject):
             except Exception:
                 pass
             self.failed.emit(str(e))
+
+
+class ProjectReportWorker(QObject):
+    progress = Signal(int, str)
+    finished = Signal(object)
+    failed = Signal(str)
+    cancelled = Signal()
+
+    def __init__(self, output_path: str, report_input):
+        super().__init__()
+        self.output_path = str(output_path or "")
+        self.report_input = report_input
+        self._cancel_requested = False
+
+    @Slot()
+    def request_cancel(self):
+        self._cancel_requested = True
+
+    def _progress(self, value: int, text: str) -> None:
+        if self._cancel_requested:
+            raise ReportGenerationCancelled("Project report generation was cancelled.")
+        self.progress.emit(int(value), str(text or ""))
+
+    @Slot()
+    def run(self):
+        if self._cancel_requested:
+            self.cancelled.emit()
+            return
+        try:
+            result = generate_project_report_pdf(
+                self.output_path,
+                self.report_input,
+                progress_cb=self._progress,
+            )
+        except ReportGenerationCancelled:
+            self.cancelled.emit()
+            return
+        except Exception as e:
+            self.failed.emit(str(e))
+            return
+        if self._cancel_requested:
+            self.cancelled.emit()
+            return
+        self.finished.emit(result)
 
 
 class GoesOverlayLoadWorker(QObject):
