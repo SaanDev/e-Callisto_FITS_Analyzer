@@ -27,7 +27,7 @@ from matplotlib.path import Path
 from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter, ScalarFormatter
 from matplotlib.widgets import LassoSelector, RectangleSelector
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QSettings, QSize, QStandardPaths, Qt, QThread, QTimer, QUrl, Slot
+from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QRectF, QSettings, QSize, QStandardPaths, Qt, QThread, QTimer, QUrl, Slot
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -129,7 +129,12 @@ from src.Backend.recovery_manager import (
 from src.Backend.noise_reduction import rowwise_baseline, subtract_background_rows
 from src.Backend.rfi_filters import clean_rfi, config_dict as rfi_config_dict
 from src.Backend.update_checker import GITHUB_REPO
-from src.UI.accelerated_plot_widget import AcceleratedPlotWidget
+from src.UI.accelerated_plot_widget import (
+    AcceleratedPlotWidget,
+    _TimeAxisItem,
+    _mpl_cmap_to_lookup,
+    _rgba_image_from_cmap,
+)
 from src.UI.callisto_downloader import CallistoDownloaderApp
 from src.UI.dialogs.analyze_dialog import AnalyzeDialog
 from src.UI.dialogs.annotation_text_dialog import TextAnnotationDialog
@@ -5054,8 +5059,10 @@ class MainWindow(QMainWindow):
         width = image.width()
         height = image.height()
         ptr = image.bits()
-        ptr.setsize(image.sizeInBytes())
-        arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, image.bytesPerLine()))
+        size = int(image.sizeInBytes())
+        if hasattr(ptr, "setsize"):
+            ptr.setsize(size)
+        arr = np.frombuffer(ptr, dtype=np.uint8, count=size).reshape((height, image.bytesPerLine()))
         return arr[:, : width * 4].reshape((height, width, 4)).copy()
 
     def _qt_image_format_for_ext(self, ext: str) -> str:
@@ -9033,94 +9040,197 @@ class MainWindow(QMainWindow):
             availability_note="" if png else unavailable,
         )
 
-    def _capture_accel_project_report_png(self, data=None, title: str | None = None, view=None) -> bytes:
-        accel = getattr(self, "accel_canvas", None)
-        if accel is None or not bool(getattr(accel, "is_available", False)):
+    def _png_is_blank_or_black(self, png: bytes | None) -> bool:
+        if not png:
+            return True
+        image = QImage()
+        if not image.loadFromData(png, "PNG") or image.isNull():
+            return True
+        try:
+            rgba = self._qimage_to_rgba_array(image.convertToFormat(QImage.Format_RGBA8888))
+            if rgba.size == 0:
+                return True
+            alpha = rgba[..., 3]
+            visible = alpha > 4
+            if not np.any(visible):
+                return True
+            rgb = rgba[..., :3][visible]
+            if rgb.size == 0:
+                return True
+            mean = float(np.mean(rgb))
+            spread = float(np.std(rgb))
+            max_value = int(np.max(rgb))
+            if max_value <= 12:
+                return True
+            if spread < 1.0 and (mean <= 12.0 or mean >= 243.0):
+                return True
+        except Exception:
+            return True
+        return False
+
+    def _report_light_curve_pen(self, pg, curve: dict):
+        color = QColor(str(curve.get("color") or "#00e5ff"))
+        if not color.isValid():
+            color = QColor("#00e5ff")
+        try:
+            color.setAlphaF(min(max(float(curve.get("opacity", 0.95)), 0.0), 1.0))
+        except Exception:
+            color.setAlphaF(0.95)
+        style = Qt.PenStyle.SolidLine
+        style_text = str(curve.get("line_style") or "solid").lower()
+        if style_text == "dashed":
+            style = Qt.PenStyle.DashLine
+        elif style_text == "dotted":
+            style = Qt.PenStyle.DotLine
+        return pg.mkPen(color=color, width=max(0.5, float(curve.get("line_width", 2.0))), style=style)
+
+    def _render_dynamic_spectrum_report_png(
+        self,
+        data,
+        *,
+        title: str,
+        overlays: list[dict] | None = None,
+    ) -> bytes:
+        if data is None or self.freqs is None or self.time is None:
+            return b""
+        try:
+            arr = np.asarray(data)
+            freqs = np.asarray(self.freqs, dtype=float).reshape(-1)
+            time = np.asarray(self.time, dtype=float).reshape(-1)
+        except Exception:
+            return b""
+        if arr.ndim != 2 or freqs.size == 0 or time.size == 0:
             return b""
 
-        stack = getattr(self, "plot_stack", None)
-        previous_widget = None
-        previous_hw = bool(getattr(self, "use_hw_live_preview", False))
-        previous_display = getattr(self, "current_display_data", None)
-        previous_source = getattr(self, "_current_plot_source_data", None)
-        previous_plot_type = getattr(self, "current_plot_type", "Raw")
-        previous_noise_preview = bool(getattr(self, "_noise_preview_active", False))
         try:
-            previous_view = accel.get_view()
+            import pyqtgraph as pg
+            import pyqtgraph.exporters as pg_exporters
         except Exception:
-            previous_view = None
-        try:
-            previous_widget = stack.currentWidget() if stack is not None else None
-        except Exception:
-            previous_widget = None
+            return b""
 
-        try:
-            self.use_hw_live_preview = True
-            render_data = data if data is not None else previous_source
-            if render_data is None:
-                render_data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
-            if render_data is None:
-                return b""
-            ok = self._refresh_accel_plot(
-                data=render_data,
-                title=title if title is not None else previous_plot_type,
-                view=view,
-                preserve_view=False,
-            )
-            if not ok:
-                return b""
+        widget = None
+        previous_options = {}
+        for key in ("useOpenGL", "antialias", "imageAxisOrder"):
             try:
-                self._render_annotations()
+                previous_options[key] = pg.getConfigOption(key)
             except Exception:
                 pass
-            if stack is not None:
-                stack.setCurrentWidget(accel)
+
+        try:
+            pg.setConfigOptions(useOpenGL=False, antialias=True, imageAxisOrder="row-major")
+            widget = pg.GraphicsLayoutWidget()
+            widget.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+            widget.resize(1600, 940)
+            widget.setBackground("#ffffff")
+
+            bottom_axis = _TimeAxisItem(orientation="bottom")
+            try:
+                bottom_axis.set_time_mode(bool(self.use_utc), self.ut_start_sec)
+            except Exception:
+                pass
+            plot = widget.addPlot(axisItems={"bottom": bottom_axis})
+            plot.hideButtons()
+            plot.setMenuEnabled(False)
+            plot.showGrid(x=True, y=True, alpha=0.22)
+            plot.setTitle(str(title or "Dynamic Spectrum"), color="#111827", size="18px")
+            plot.setLabel("bottom", "Time [UT]" if (self.use_utc and self.ut_start_sec is not None) else "Time [s]")
+            plot.setLabel("left", "Frequency [MHz]")
+            plot.invertY(False)
+
+            image_item = pg.ImageItem(axisOrder="row-major")
+            plot.addItem(image_item)
+
+            display_data = np.asarray(self._intensity_for_display(arr), dtype=np.float32)
+            extent = pyqtgraph_extent(freqs, time, default_step=self._frequency_step_mhz)
+            x0, x1, y0, y1 = (float(extent[0]), float(extent[1]), float(extent[2]), float(extent[3]))
+            image_item.setRect(QRectF(x0, y0, x1 - x0, y1 - y0))
+
+            vmin, vmax = finite_data_limits(display_data)
+            if vmin is None or vmax is None:
+                return b""
+
+            cmap = self.get_current_cmap()
+            row_mask = invalid_row_mask(display_data, self._current_gap_row_mask())
+            has_invalid = bool(np.any(row_mask) or np.any(~np.isfinite(display_data)))
+            if has_invalid:
+                rgba = _rgba_image_from_cmap(display_data, cmap, vmin=vmin, vmax=vmax, gap_row_mask=self._current_gap_row_mask())
+                image_item.setImage(rgba, autoLevels=False)
+            else:
+                image_item.setImage(display_data, autoLevels=False)
+                image_item.setLevels((vmin, vmax))
+
+            color_map, lut = _mpl_cmap_to_lookup(cmap)
+            if lut is not None and not has_invalid:
+                image_item.setLookupTable(lut, update=False)
+            if color_map is None:
+                color_map = pg.colormap.get("viridis")
+            cbar = pg.ColorBarItem(values=(vmin, vmax), colorMap=color_map, interactive=False)
+            cbar.setImageItem(image_item, insert_in=plot)
+            try:
+                cbar.axis.setLabel("Intensity [dB]" if self.use_db else "Intensity [Digits]")
+            except Exception:
+                pass
+
+            for curve in list(overlays or []):
+                try:
+                    xs = np.asarray(curve.get("time"), dtype=float).reshape(-1)
+                    ys = np.asarray(curve.get("y"), dtype=float).reshape(-1)
+                except Exception:
+                    continue
+                n = min(xs.size, ys.size)
+                if n == 0:
+                    continue
+                item = pg.PlotDataItem(pen=self._report_light_curve_pen(pg, curve))
+                item.setData(xs[:n], ys[:n])
+                item.setZValue(20)
+                plot.addItem(item)
+                if bool(curve.get("show_label", False)):
+                    label = str(curve.get("label") or "").strip()
+                    if label:
+                        text_item = pg.TextItem(text=label, color=str(curve.get("color") or "#00e5ff"), anchor=(0.0, 1.0))
+                        text_item.setPos(float(curve.get("label_x", xs[0])), float(curve.get("label_y", ys[0])))
+                        text_item.setZValue(21)
+                        plot.addItem(text_item)
+
+            plot.setRange(xRange=(min(x0, x1), max(x0, x1)), yRange=(min(y0, y1), max(y0, y1)), padding=0.0)
+            widget.show()
             QApplication.processEvents()
-            return self._qimage_to_png_bytes(self._capture_hardware_plot_qimage())
+            exporter = pg_exporters.ImageExporter(plot)
+            params = exporter.parameters()
+            params["width"] = 2200
+            image = exporter.export(toBytes=True)
+            png = self._qimage_to_png_bytes(image)
+            return b"" if self._png_is_blank_or_black(png) else png
         except Exception:
             return b""
         finally:
-            try:
-                restore_data = previous_source
-                if restore_data is None:
-                    restore_data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
-                if restore_data is not None:
-                    self.use_hw_live_preview = True
-                    self._refresh_accel_plot(
-                        data=restore_data,
-                        title=previous_plot_type,
-                        view=previous_view,
-                        preserve_view=False,
-                    )
-                    self._render_annotations()
-            except Exception:
-                pass
-            self.use_hw_live_preview = previous_hw
-            self.current_display_data = previous_display
-            self._current_plot_source_data = previous_source
-            self._noise_preview_active = previous_noise_preview
-            if stack is not None and previous_widget is not None:
+            if widget is not None:
                 try:
-                    stack.setCurrentWidget(previous_widget)
+                    widget.close()
+                    widget.deleteLater()
                 except Exception:
                     pass
+            try:
+                restore = {key: value for key, value in previous_options.items() if value is not None}
+                if restore:
+                    pg.setConfigOptions(**restore)
+            except Exception:
+                pass
 
-    def _capture_current_project_report_figure(self) -> ProjectReportFigure | None:
-        widget = None
+    @staticmethod
+    def _matplotlib_figure_to_png(fig: Figure, *, dpi: int = 180) -> bytes:
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight", facecolor="white")
+        return buf.getvalue()
+
+    def _matplotlib_canvas_to_png_bytes(self, canvas) -> bytes:
+        fig = getattr(canvas, "fig", None) or getattr(canvas, "figure", None)
+        if fig is None:
+            return b""
         try:
-            stack = getattr(self, "plot_stack", None)
-            widget = stack.currentWidget() if stack is not None else None
+            return self._matplotlib_figure_to_png(fig)
         except Exception:
-            widget = None
-        png = self._qwidget_to_png_bytes(widget)
-        if not png and self._hardware_mode_enabled():
-            png = self._qimage_to_png_bytes(self._capture_hardware_plot_qimage())
-        return self._project_report_figure(
-            title="Current Main View",
-            png=png,
-            caption="Captured from the current project workspace view.",
-            unavailable="Current main view could not be captured.",
-        )
+            return self._qwidget_to_png_bytes(canvas)
 
     def _project_report_header_fields(self) -> tuple[dict, str]:
         hdr = getattr(self, "_fits_header0", None)
@@ -9204,111 +9314,23 @@ class MainWindow(QMainWindow):
         except Exception:
             return True
 
-    def _capture_report_spectrum_figure(self, title: str, data, unavailable: str) -> ProjectReportFigure:
+    def _capture_report_spectrum_figure(
+        self,
+        title: str,
+        data,
+        unavailable: str,
+        *,
+        overlays: list[dict] | None = None,
+    ) -> ProjectReportFigure:
         png = b""
         if data is not None:
-            png = self._capture_accel_project_report_png(data=data, title=title, view=None)
+            png = self._render_dynamic_spectrum_report_png(data, title=title, overlays=overlays)
         return self._project_report_figure(
             title=title,
             png=png,
-            caption="Screen-equivalent capture from the project workspace.",
+            caption="Rendered with the report PyQtGraph dynamic-spectrum exporter.",
             unavailable=unavailable,
         )
-
-    def _capture_pyqtgraph_series_png(
-        self,
-        title: str,
-        series: list[dict],
-        *,
-        x_label: str = "Time [s]",
-        y_label: str = "Frequency [MHz]",
-        y_log: bool = False,
-    ) -> bytes:
-        try:
-            import pyqtgraph as pg
-            import pyqtgraph.exporters as pg_exporters
-        except Exception:
-            return b""
-
-        widget = None
-        try:
-            widget = pg.GraphicsLayoutWidget()
-            widget.resize(1400, 820)
-            widget.setBackground("#111111" if self._is_dark_ui() else "#ffffff")
-            plot = widget.addPlot()
-            plot.hideButtons()
-            plot.setMenuEnabled(False)
-            plot.showGrid(x=True, y=True, alpha=0.25)
-            plot.setTitle(str(title or "Report Figure"))
-            plot.setLabel("bottom", x_label)
-            plot.setLabel("left", y_label)
-            if y_log:
-                plot.setLogMode(y=True)
-            legend = plot.addLegend(offset=(12, 12))
-
-            plotted = 0
-            for item in list(series or []):
-                try:
-                    xs = np.asarray(item.get("x"), dtype=float).reshape(-1)
-                    ys = np.asarray(item.get("y"), dtype=float).reshape(-1)
-                except Exception:
-                    continue
-                n = min(xs.size, ys.size)
-                if n == 0:
-                    continue
-                xs = xs[:n]
-                ys = ys[:n]
-                mask = np.isfinite(xs) & np.isfinite(ys)
-                if y_log:
-                    mask &= ys > 0.0
-                if not np.any(mask):
-                    continue
-                color = str(item.get("color") or "#2563eb")
-                name = str(item.get("name") or f"Series {plotted + 1}")
-                if bool(item.get("scatter", False)):
-                    scatter = pg.ScatterPlotItem(
-                        size=float(item.get("size", 8.0)),
-                        pen=pg.mkPen(color, width=1.0),
-                        brush=pg.mkBrush(color),
-                    )
-                    scatter.setData(xs[mask], ys[mask])
-                    plot.addItem(scatter)
-                    try:
-                        legend.addItem(scatter, name)
-                    except Exception:
-                        pass
-                else:
-                    curve = plot.plot(
-                        xs[mask],
-                        ys[mask],
-                        pen=pg.mkPen(color, width=float(item.get("width", 2.0))),
-                        name=name,
-                    )
-                    try:
-                        legend.addItem(curve, name)
-                    except Exception:
-                        pass
-                plotted += 1
-
-            if plotted == 0:
-                return b""
-
-            plot.enableAutoRange()
-            QApplication.processEvents()
-            exporter = pg_exporters.ImageExporter(plot)
-            params = exporter.parameters()
-            params["width"] = 1800
-            image = exporter.export(toBytes=True)
-            return self._qimage_to_png_bytes(image)
-        except Exception:
-            return b""
-        finally:
-            if widget is not None:
-                try:
-                    widget.close()
-                    widget.deleteLater()
-                except Exception:
-                    pass
 
     def _capture_max_intensity_fit_report_figure(self, session: dict | None) -> ProjectReportFigure:
         sess = dict(session or {})
@@ -9339,35 +9361,45 @@ class MainWindow(QMainWindow):
             )
         x = x[:n]
         y = y[:n]
-        series = [{"x": x, "y": y, "name": "Maximum intensity", "color": "#2563eb", "scatter": True, "size": 7}]
         caption_parts = []
+        png = b""
         try:
-            a = float(fit.get("a"))
-            b = abs(float(fit.get("b")))
-            mask = np.isfinite(x) & np.isfinite(y) & (x > 0.0) & (y > 0.0)
-            if np.count_nonzero(mask) >= 2:
-                x_fit = np.linspace(float(np.nanmin(x[mask])), float(np.nanmax(x[mask])), 400)
-                y_fit = a * np.power(x_fit, -b)
-                series.append({"x": x_fit, "y": y_fit, "name": f"Best fit: f = {a:.3g} * x^-{b:.3g}", "color": "#dc2626", "width": 3.0})
-                caption_parts.append(f"Fit: f = {a:.5g} * x^-{b:.5g}")
+            fig = Figure(figsize=(7.2, 4.1), dpi=150)
+            ax = fig.add_subplot(111)
+            style_axes(ax)
+            finite_points = np.isfinite(x) & np.isfinite(y)
+            if np.any(finite_points):
+                ax.scatter(x[finite_points], y[finite_points], s=14, color="#2563eb", label="Maximum intensity")
+            try:
+                a = float(fit.get("a"))
+                b = abs(float(fit.get("b")))
+                mask = np.isfinite(x) & np.isfinite(y) & (x > 0.0) & (y > 0.0)
+                if np.count_nonzero(mask) >= 2:
+                    x_fit = np.linspace(float(np.nanmin(x[mask])), float(np.nanmax(x[mask])), 400)
+                    y_fit = a * np.power(x_fit, -b)
+                    ax.plot(x_fit, y_fit, color="#dc2626", linewidth=2.0, label=f"Best fit: f = {a:.3g} * x^-{b:.3g}")
+                    caption_parts.append(f"Fit: f = {a:.5g} * x^-{b:.5g}")
+            except Exception:
+                pass
+            ax.set_title("Maximum Intensity Fit")
+            ax.set_xlabel(x_label)
+            ax.set_ylabel("Frequency [MHz]")
+            if len(ax.get_legend_handles_labels()[0]) > 0:
+                ax.legend(loc="best", fontsize=8)
+            fig.tight_layout()
+            png = self._matplotlib_figure_to_png(fig)
         except Exception:
-            pass
+            png = b""
         if fit.get("r2") is not None:
             caption_parts.append(f"R2: {float(fit.get('r2')):.4g}")
         if fit.get("rmse") is not None:
             caption_parts.append(f"RMSE: {float(fit.get('rmse')):.4g}")
 
-        png = self._capture_pyqtgraph_series_png(
-            "Maximum Intensity Fit",
-            series,
-            x_label=x_label,
-            y_label="Frequency [MHz]",
-        )
         return self._project_report_figure(
             "Maximum Intensity Fit",
             png,
             caption=", ".join(caption_parts) if caption_parts else "Maximum-intensity trace.",
-            unavailable="Maximum-intensity fit could not be captured.",
+            unavailable="Maximum-intensity fit could not be rendered.",
         )
 
     def _capture_type_ii_report_figure(self, session: dict | None) -> ProjectReportFigure:
@@ -9426,6 +9458,8 @@ class MainWindow(QMainWindow):
             try:
                 image = dialog._render_export_image(min_width=2400)
                 png = self._qimage_to_png_bytes(image)
+                if self._png_is_blank_or_black(png):
+                    png = b""
             except Exception:
                 png = b""
             finally:
@@ -9442,53 +9476,55 @@ class MainWindow(QMainWindow):
             unavailable="Type II band-splitting plot could not be captured.",
         )
 
-    def _capture_goes_overlay_report_figure(self) -> ProjectReportFigure:
-        selected = self._selected_goes_overlay_channels()
-        if not (getattr(self, "_goes_overlay_enabled", False) and getattr(self, "_goes_overlay_payload", None) is not None and selected):
-            return self._project_report_figure(
-                "GOES X-Ray Overlay",
-                None,
-                unavailable="GOES X-Ray overlay is not available in the current project state.",
-            )
-        png = self._capture_current_project_report_figure().png_bytes
-        return self._project_report_figure(
-            "GOES X-Ray Overlay",
-            png,
-            caption="Captured with the currently active GOES X-Ray overlay.",
-            unavailable="GOES X-Ray overlay could not be captured.",
-        )
-
     def _capture_goes_payload_report_figure(self) -> ProjectReportFigure:
         payload = getattr(self, "_goes_overlay_payload", None)
         selected = self._selected_goes_overlay_channels()
         visible = self._goes_overlay_visible_series(payload, selected_channels=selected)
-        series = []
-        for key, item in visible:
-            try:
-                xs = np.asarray(self._goes_payload_field(item, "x_seconds", []), dtype=float)
-                flux = np.asarray(self._goes_payload_field(item, "flux_wm2", []), dtype=float)
-            except Exception:
-                continue
-            series.append(
-                {
-                    "x": xs,
-                    "y": flux,
-                    "name": self._goes_payload_field(item, "display_label", GOES_OVERLAY_CHANNEL_LABELS.get(key, key.upper())),
-                    "color": GOES_OVERLAY_CHANNEL_COLORS.get(key, "#ffffff" if self._is_dark_ui() else "#111827"),
-                    "width": 2.5,
-                }
+        if not visible:
+            return self._project_report_figure(
+                "GOES X-Ray Data",
+                None,
+                unavailable="Separate GOES X-Ray data is not available.",
             )
-        png = self._capture_pyqtgraph_series_png(
-            "GOES X-Ray Data",
-            series,
-            x_label="Time [s]",
-            y_label="Flux [W/m^2]",
-            y_log=True,
-        )
+
+        png = b""
+        try:
+            fig = Figure(figsize=(7.2, 4.1), dpi=150)
+            ax = fig.add_subplot(111)
+            style_axes(ax)
+            plotted = 0
+            for key, item in visible:
+                try:
+                    xs = np.asarray(self._goes_payload_field(item, "x_seconds", []), dtype=float).reshape(-1)
+                    flux = np.asarray(self._goes_payload_field(item, "flux_wm2", []), dtype=float).reshape(-1)
+                except Exception:
+                    continue
+                n = min(xs.size, flux.size)
+                if n == 0:
+                    continue
+                xs = xs[:n]
+                flux = flux[:n]
+                mask = np.isfinite(xs) & np.isfinite(flux) & (flux > 0.0)
+                if not np.any(mask):
+                    continue
+                label = self._goes_payload_field(item, "display_label", GOES_OVERLAY_CHANNEL_LABELS.get(key, key.upper()))
+                color = "#0891b2" if key == "xrsa" else "#111827"
+                ax.plot(xs[mask], flux[mask], color=color, linewidth=2.0, label=str(label))
+                plotted += 1
+            if plotted:
+                ax.set_title("GOES X-Ray Data")
+                ax.set_xlabel("Time [s]")
+                ax.set_ylabel("Flux [W/m^2]")
+                ax.set_yscale("log")
+                ax.legend(loc="best", fontsize=8)
+                fig.tight_layout()
+                png = self._matplotlib_figure_to_png(fig)
+        except Exception:
+            png = b""
         return self._project_report_figure(
             "GOES X-Ray Data",
             png,
-            caption="Generated from already loaded GOES overlay data.",
+            caption="Rendered from already loaded GOES overlay data with Matplotlib.",
             unavailable="Separate GOES X-Ray data is not available.",
         )
 
@@ -9517,22 +9553,21 @@ class MainWindow(QMainWindow):
         if not self._solar_window_has_plot(window, kind):
             return self._project_report_figure(title, None, unavailable=unavailable)
         canvas = getattr(window, "canvas", None)
-        png = self._qwidget_to_png_bytes(canvas)
+        png = self._matplotlib_canvas_to_png_bytes(canvas)
         return self._project_report_figure(
             title,
             png,
-            caption="Captured from the already loaded Solar Events window.",
+            caption="Rendered from the already loaded Matplotlib Solar Events window.",
             unavailable=f"{title} window was loaded, but its plot could not be captured.",
         )
 
     def _build_project_report_figures(self, session: dict | None) -> list[ProjectReportFigure]:
         figures: list[ProjectReportFigure] = []
-        figures.append(self._capture_current_project_report_figure())
         figures.append(
             self._capture_report_spectrum_figure(
-                "Raw Spectrum",
+                "Raw Dynamic Spectrum",
                 getattr(self, "raw_data", None),
-                "Raw spectrum data is not available.",
+                "Raw dynamic spectrum data is not available.",
             )
         )
 
@@ -9543,9 +9578,9 @@ class MainWindow(QMainWindow):
             background_data = self.noise_reduced_data
         figures.append(
             self._capture_report_spectrum_figure(
-                "Background-Subtracted Spectrum",
+                "Background Subtracted Dynamic Spectrum",
                 background_data,
-                "Background-subtracted spectrum is not available.",
+                "Background-subtracted dynamic spectrum is not available.",
             )
         )
 
@@ -9558,29 +9593,28 @@ class MainWindow(QMainWindow):
             isolated_data = self.noise_reduced_data
         figures.append(
             self._capture_report_spectrum_figure(
-                "Isolated Burst",
+                "Burst Isolated Dynamic Spectrum",
                 isolated_data,
-                "Isolated-burst spectrum is not available.",
+                "Burst-isolated dynamic spectrum is not available.",
             )
         )
 
         records = self._light_curve_records_payload()
         if records:
             source = self._current_light_curve_source_data()
-            view = self._capture_view()
-            png = self._capture_accel_project_report_png(data=source, title=self.current_plot_type, view=view)
+            overlays, _valid_records, _reason = self._build_active_light_curve_overlays()
             figures.append(
-                self._project_report_figure(
-                    "Light Curve View",
-                    png,
-                    caption="Captured from the current light-curve overlay view.",
-                    unavailable="Light-curve view could not be captured.",
+                self._capture_report_spectrum_figure(
+                    "Light Curves With Dynamic Spectrum",
+                    source if overlays else None,
+                    "Light-curve graph is not available.",
+                    overlays=overlays,
                 )
             )
         else:
             figures.append(
                 self._project_report_figure(
-                    "Light Curve View",
+                    "Light Curves With Dynamic Spectrum",
                     None,
                     unavailable="Light-curve graph is not available.",
                 )
@@ -9588,7 +9622,6 @@ class MainWindow(QMainWindow):
 
         figures.append(self._capture_max_intensity_fit_report_figure(session))
         figures.append(self._capture_type_ii_report_figure(session))
-        figures.append(self._capture_goes_overlay_report_figure())
 
         goes_window_fig = self._capture_solar_window_report_figure(
             "_goes_window",

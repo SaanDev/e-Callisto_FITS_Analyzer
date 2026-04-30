@@ -63,7 +63,7 @@ def _sample_session() -> dict:
 
 def test_report_figure_accepts_pre_rendered_png_and_unavailable_note():
     figure = ProjectReportFigure(
-        title="Raw Spectrum",
+        title="Raw Dynamic Spectrum",
         source_filename="demo.fit",
         png_bytes=_tiny_png(),
         caption="Captured from the UI.",
@@ -101,7 +101,7 @@ def test_generate_project_report_pdf_minimal(tmp_path):
 def test_generate_project_report_pdf_with_optional_analysis_and_figures(tmp_path):
     session = _sample_session()
     figure = ProjectReportFigure(
-        title="Raw Spectrum",
+        title="Raw Dynamic Spectrum",
         source_filename="demo.fit",
         png_bytes=_tiny_png(),
         caption="Captured from the UI.",
