@@ -231,6 +231,8 @@ class AcceleratedPlotWidget(QWidget):
         self._drift_scatter_item = None
         self._drift_line_item = None
         self._light_curve_item = None
+        self._light_curve_items = []
+        self._light_curve_label_items = []
         self._annotation_items = []
         self._annotation_capture_points = []
         self._annotation_capture_line_item = None
@@ -789,36 +791,108 @@ class AcceleratedPlotWidget(QWidget):
     def clear_light_curve_overlay(self) -> None:
         if not self.is_available:
             return
-        if self._light_curve_item is not None:
+        for item in list(getattr(self, "_light_curve_items", []) or []):
             try:
-                self._plot.removeItem(self._light_curve_item)
+                self._plot.removeItem(item)
             except Exception:
                 pass
-            self._light_curve_item = None
+        for item in list(getattr(self, "_light_curve_label_items", []) or []):
+            try:
+                self._plot.removeItem(item)
+            except Exception:
+                pass
+        self._light_curve_items = []
+        self._light_curve_label_items = []
+        self._light_curve_item = None
+
+    def _light_curve_pen(self, color: str, width: float, opacity: float, line_style: str):
+        qcolor = QColor(str(color or "#00e5ff"))
+        if not qcolor.isValid():
+            qcolor = QColor("#00e5ff")
+        try:
+            qcolor.setAlphaF(min(max(float(opacity), 0.0), 1.0))
+        except Exception:
+            qcolor.setAlphaF(0.95)
+
+        style = Qt.PenStyle.SolidLine
+        style_text = str(line_style or "solid").lower()
+        if style_text == "dashed":
+            style = Qt.PenStyle.DashLine
+        elif style_text == "dotted":
+            style = Qt.PenStyle.DotLine
+        try:
+            return pg.mkPen(color=qcolor, width=max(0.5, float(width)), style=style)
+        except Exception:
+            return pg.mkPen(color=qcolor, width=2.0)
 
     def set_light_curve_overlay(self, x_values, y_values, *, color: str = "#00e5ff") -> None:
+        self.set_light_curve_overlays(
+            [
+                {
+                    "time": x_values,
+                    "y": y_values,
+                    "color": color,
+                    "line_width": 2.0,
+                    "opacity": 0.95,
+                    "line_style": "solid",
+                    "show_label": False,
+                }
+            ]
+        )
+
+    def set_light_curve_overlays(self, curves) -> None:
         if not self.is_available:
             return
-        try:
-            xs = np.asarray(x_values, dtype=float).reshape(-1)
-            ys = np.asarray(y_values, dtype=float).reshape(-1)
-        except Exception:
-            self.clear_light_curve_overlay()
-            return
-        if xs.size == 0 or ys.size == 0 or xs.size != ys.size:
+
+        curve_payloads = list(curves or [])
+        if not curve_payloads:
             self.clear_light_curve_overlay()
             return
 
-        if self._light_curve_item is None:
-            self._light_curve_item = pg.PlotDataItem(pen=pg.mkPen(color=color, width=2.0))
-            self._light_curve_item.setZValue(19)
-            self._plot.addItem(self._light_curve_item)
-        else:
+        self.clear_light_curve_overlay()
+        for curve in curve_payloads:
+            if not isinstance(curve, dict):
+                continue
             try:
-                self._light_curve_item.setPen(pg.mkPen(color=color, width=2.0))
+                xs = np.asarray(curve.get("time"), dtype=float).reshape(-1)
+                ys = np.asarray(curve.get("y"), dtype=float).reshape(-1)
             except Exception:
-                pass
-        self._light_curve_item.setData(xs, ys)
+                continue
+            if xs.size == 0 or ys.size == 0 or xs.size != ys.size:
+                continue
+
+            item = pg.PlotDataItem(
+                pen=self._light_curve_pen(
+                    str(curve.get("color") or "#00e5ff"),
+                    float(curve.get("line_width", 2.0)),
+                    float(curve.get("opacity", 0.95)),
+                    str(curve.get("line_style") or "solid"),
+                )
+            )
+            item.setZValue(19)
+            item.setData(xs, ys)
+            self._plot.addItem(item)
+            self._light_curve_items.append(item)
+
+            if bool(curve.get("show_label", False)):
+                label = str(curve.get("label") or "").strip()
+                if label:
+                    try:
+                        text_item = pg.TextItem(
+                            text=label,
+                            color=str(curve.get("color") or "#00e5ff"),
+                            anchor=(0.0, 1.0),
+                        )
+                        text_item.setZValue(20)
+                        text_item.setPos(float(curve.get("label_x", xs[0])), float(curve.get("label_y", ys[0])))
+                        self._plot.addItem(text_item)
+                        self._light_curve_label_items.append(text_item)
+                    except Exception:
+                        pass
+
+        self._light_curve_item = self._light_curve_items[0] if self._light_curve_items else None
+        if not self._light_curve_items:
+            self.clear_light_curve_overlay()
 
     def _annotation_capture_kind(self) -> str | None:
         mode = str(self._interaction_mode or "")

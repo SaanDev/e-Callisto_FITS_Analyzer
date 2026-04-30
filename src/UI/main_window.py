@@ -13,6 +13,7 @@ import re
 import sys
 import tempfile
 import math
+import json
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import unquote, urlparse
 
@@ -31,6 +32,7 @@ from PySide6.QtGui import (
     QActionGroup,
     QDesktopServices,
     QFontDatabase,
+    QColor,
     QIcon,
     QImage,
     QPainter,
@@ -131,6 +133,7 @@ from src.UI.dialogs.bug_report_dialog import BugReportDialog
 from src.UI.dialogs.citation_dialog import CitationDialog
 from src.UI.dialogs.combine_dialogs import CombineFrequencyDialog, CombineTimeDialog, FrequencyCombineOptionsDialog
 from src.UI.dialogs.light_curve_frequency_dialog import LightCurveFrequencyDialog
+from src.UI.dialogs.light_curve_settings_dialog import LightCurveSettingsDialog
 from src.UI.dialogs.max_intensity_dialog import MaxIntensityPlotDialog
 from src.UI.dialogs.rfi_control_dialog import RFIControlDialog
 from src.UI.dialogs.type_ii_band_splitting_dialog import TypeIIBandSplittingDialog
@@ -178,6 +181,26 @@ class MainWindow(QMainWindow):
     HW_DEFAULT_TICK_FONT_PX = 14
     HW_DEFAULT_AXIS_FONT_PX = 16
     HW_DEFAULT_TITLE_FONT_PX = 22
+    LIGHT_CURVE_SETTINGS_KEY = "analysis/light_curve_settings_json"
+    LIGHT_CURVE_SETTINGS_DEFAULTS = {
+        "mode": "single",
+        "line_color": "#00e5ff",
+        "line_width": 2.0,
+        "show_frequency_label": True,
+        "vertical_scale": 1.0,
+        "opacity": 0.95,
+        "line_style": "solid",
+    }
+    LIGHT_CURVE_COLOR_PALETTE = (
+        "#00e5ff",
+        "#ffb000",
+        "#7bd88f",
+        "#ff66c4",
+        "#ffffff",
+        "#c6a4ff",
+        "#f95d6a",
+        "#00d084",
+    )
 
     def __init__(self, theme=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -336,7 +359,10 @@ class MainWindow(QMainWindow):
 
         # Light-curve overlay state
         self._light_curve_frequency_mhz = None
+        self._light_curve_records = []
         self._light_curve_mpl_artists = []
+        self._light_curve_settings = self._load_light_curve_settings()
+        self._light_curve_settings_dialog = None
 
         # Autosave / crash-recovery state
         self._autosave_timer = QTimer(self)
@@ -953,7 +979,10 @@ class MainWindow(QMainWindow):
         self.click_light_curve_frequency_action = QAction("Click on a frequency", self, checkable=True)
         self.click_light_curve_frequency_action.setEnabled(False)
         self.light_curves_menu.addAction(self.click_light_curve_frequency_action)
-        self.clear_light_curve_action = QAction("Clear light curve", self)
+        self.light_curve_settings_action = QAction("Settings...", self)
+        self.light_curves_menu.addAction(self.light_curve_settings_action)
+        self.light_curves_menu.addSeparator()
+        self.clear_light_curve_action = QAction("Clear light curve(s)", self)
         self.clear_light_curve_action.setEnabled(False)
         self.light_curves_menu.addAction(self.clear_light_curve_action)
 
@@ -1107,6 +1136,7 @@ class MainWindow(QMainWindow):
         self.open_type_ii_band_splitting_action.triggered.connect(self._open_or_focus_type_ii_dialog)
         self.enter_light_curve_frequency_action.triggered.connect(self.open_light_curve_frequency_dialog)
         self.click_light_curve_frequency_action.toggled.connect(self._on_light_curve_click_mode_toggled)
+        self.light_curve_settings_action.triggered.connect(self._open_or_focus_light_curve_settings_dialog)
         self.clear_light_curve_action.triggered.connect(self.clear_light_curve)
         self.open_restored_analysis_action.triggered.connect(self.open_restored_analysis_windows)
         self.open_batch_processing_action.triggered.connect(self.open_batch_processing_window)
@@ -3488,6 +3518,176 @@ class MainWindow(QMainWindow):
     def _disable_light_curve_click_mode(self) -> None:
         self._set_light_curve_click_mode_checked(False)
 
+    def _default_light_curve_settings(self) -> dict:
+        return dict(self.LIGHT_CURVE_SETTINGS_DEFAULTS)
+
+    def _normalize_light_curve_settings(self, settings: dict | None) -> dict:
+        normalized = self._default_light_curve_settings()
+        if isinstance(settings, dict):
+            normalized.update(settings)
+
+        normalized["mode"] = "multiple" if str(normalized.get("mode", "")).lower() == "multiple" else "single"
+
+        color = QColor(str(normalized.get("line_color") or ""))
+        normalized["line_color"] = color.name().lower() if color.isValid() else "#00e5ff"
+
+        try:
+            normalized["line_width"] = min(max(float(normalized.get("line_width", 2.0)), 0.5), 12.0)
+        except Exception:
+            normalized["line_width"] = 2.0
+
+        try:
+            normalized["vertical_scale"] = min(max(float(normalized.get("vertical_scale", 1.0)), 0.1), 5.0)
+        except Exception:
+            normalized["vertical_scale"] = 1.0
+
+        try:
+            normalized["opacity"] = min(max(float(normalized.get("opacity", 0.95)), 0.1), 1.0)
+        except Exception:
+            normalized["opacity"] = 0.95
+
+        style = str(normalized.get("line_style") or "solid").lower()
+        normalized["line_style"] = style if style in {"solid", "dashed", "dotted"} else "solid"
+        normalized["show_frequency_label"] = bool(normalized.get("show_frequency_label", True))
+        return normalized
+
+    def _load_light_curve_settings(self) -> dict:
+        payload = None
+        try:
+            text = self._ui_settings.value(self.LIGHT_CURVE_SETTINGS_KEY, "", type=str)
+            if text:
+                payload = json.loads(text)
+        except Exception:
+            payload = None
+        return self._normalize_light_curve_settings(payload if isinstance(payload, dict) else None)
+
+    def _save_light_curve_settings(self) -> None:
+        try:
+            self._ui_settings.setValue(
+                self.LIGHT_CURVE_SETTINGS_KEY,
+                json.dumps(self._normalize_light_curve_settings(getattr(self, "_light_curve_settings", None))),
+            )
+        except Exception:
+            pass
+
+    def _light_curve_settings_payload(self) -> dict:
+        return self._normalize_light_curve_settings(getattr(self, "_light_curve_settings", None))
+
+    def _normalize_light_curve_record(self, record) -> dict | None:
+        if isinstance(record, dict):
+            frequency = record.get("frequency_mhz", record.get("frequency", None))
+            requested = record.get("requested_mhz", frequency)
+        else:
+            frequency = record
+            requested = record
+        try:
+            frequency = float(frequency)
+            requested = float(requested)
+        except Exception:
+            return None
+        if not math.isfinite(frequency):
+            return None
+        if not math.isfinite(requested):
+            requested = frequency
+        return {"frequency_mhz": frequency, "requested_mhz": requested}
+
+    def _normalize_light_curve_records(self, records=None, *, legacy_frequency=None) -> list[dict]:
+        normalized = []
+        if isinstance(records, dict):
+            records = [records]
+        if isinstance(records, (list, tuple)):
+            for record in records:
+                item = self._normalize_light_curve_record(record)
+                if item is not None:
+                    normalized.append(item)
+        if not normalized and legacy_frequency is not None:
+            item = self._normalize_light_curve_record(legacy_frequency)
+            if item is not None:
+                normalized.append(item)
+        if self._light_curve_settings_payload().get("mode") != "multiple" and len(normalized) > 1:
+            normalized = normalized[-1:]
+        return normalized
+
+    def _store_light_curve_records(self, records: list[dict]) -> None:
+        normalized = self._normalize_light_curve_records(records)
+        self._light_curve_records = normalized
+        self._light_curve_frequency_mhz = normalized[-1]["frequency_mhz"] if normalized else None
+
+    def _light_curve_records_payload(self) -> list[dict]:
+        return [dict(record) for record in self._normalize_light_curve_records(
+            getattr(self, "_light_curve_records", []),
+            legacy_frequency=getattr(self, "_light_curve_frequency_mhz", None),
+        )]
+
+    def _set_light_curve_records(self, records=None, *, legacy_frequency=None, render: bool = False) -> None:
+        self._store_light_curve_records(self._normalize_light_curve_records(records, legacy_frequency=legacy_frequency))
+        if render:
+            self._render_light_curve_overlay()
+        else:
+            self._sync_analysis_menu_actions()
+
+    def _light_curve_color_for_index(self, index: int) -> str:
+        settings = self._light_curve_settings_payload()
+        selected = settings.get("line_color", "#00e5ff")
+        palette = [selected]
+        palette.extend(color for color in self.LIGHT_CURVE_COLOR_PALETTE if color.lower() != selected.lower())
+        if not palette:
+            return "#00e5ff"
+        try:
+            return palette[int(index) % len(palette)]
+        except Exception:
+            return selected
+
+    def _set_light_curve_settings(
+        self,
+        settings: dict | None,
+        *,
+        persist: bool = True,
+        sync_dialog: bool = False,
+        render: bool = True,
+    ) -> None:
+        previous_mode = self._light_curve_settings_payload().get("mode")
+        self._light_curve_settings = self._normalize_light_curve_settings(settings)
+        if previous_mode != "single" and self._light_curve_settings["mode"] == "single":
+            records = self._light_curve_records_payload()
+            if len(records) > 1:
+                self._store_light_curve_records(records[-1:])
+        if persist:
+            self._save_light_curve_settings()
+        if sync_dialog and self._dialog_alive(getattr(self, "_light_curve_settings_dialog", None)):
+            try:
+                self._light_curve_settings_dialog.load_settings(self._light_curve_settings)
+            except Exception:
+                pass
+        if render and self._light_curve_records_payload():
+            self._render_light_curve_overlay()
+        else:
+            self._sync_analysis_menu_actions()
+
+    def _on_light_curve_settings_changed(self, settings: dict) -> None:
+        self._set_light_curve_settings(settings, persist=True, sync_dialog=False, render=True)
+
+    def _open_or_focus_light_curve_settings_dialog(self):
+        if not self._dialog_alive(getattr(self, "_light_curve_settings_dialog", None)):
+            dialog = LightCurveSettingsDialog(
+                initial_settings=self._light_curve_settings_payload(),
+                defaults=self._default_light_curve_settings(),
+                parent=self,
+            )
+            dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            dialog.settingsChanged.connect(self._on_light_curve_settings_changed)
+            dialog.destroyed.connect(lambda *_args: setattr(self, "_light_curve_settings_dialog", None))
+            self._light_curve_settings_dialog = dialog
+        else:
+            try:
+                self._light_curve_settings_dialog.load_settings(self._light_curve_settings_payload())
+            except Exception:
+                pass
+        self._light_curve_settings_dialog.show()
+        self._light_curve_settings_dialog.raise_()
+        self._light_curve_settings_dialog.activateWindow()
+        return self._light_curve_settings_dialog
+
     def _light_curve_frequency_limits(self) -> tuple[float, float] | None:
         if self.freqs is None:
             return None
@@ -3567,7 +3767,7 @@ class MainWindow(QMainWindow):
             scale = max(scale, min(step * 1.5, span * 0.2))
         return float(scale if math.isfinite(scale) and scale > 0.0 else 1.0)
 
-    def _build_light_curve_overlay(self, requested_mhz: float):
+    def _build_light_curve_overlay(self, requested_mhz: float, *, curve_index: int = 0):
         source = self._current_light_curve_source_data()
         if source is None:
             return None, "Load a FITS file before plotting a light curve."
@@ -3613,11 +3813,21 @@ class MainWindow(QMainWindow):
             else:
                 normalized = np.clip(delta / amplitude, -1.5, 1.5)
 
-        y_values = actual_mhz + normalized * self._light_curve_visual_scale()
+        settings = self._light_curve_settings_payload()
+        try:
+            vertical_scale = float(settings.get("vertical_scale", 1.0))
+        except Exception:
+            vertical_scale = 1.0
+        base_scale = self._light_curve_visual_scale()
+        y_values = actual_mhz + normalized * base_scale * vertical_scale
         invalid = (~np.isfinite(time_arr)) | (~np.isfinite(series))
         if np.any(invalid):
             y_values = np.asarray(y_values, dtype=float).copy()
             y_values[invalid] = np.nan
+
+        finite_plot = np.isfinite(time_arr) & np.isfinite(y_values)
+        first_plot_index = int(np.flatnonzero(finite_plot)[0]) if np.any(finite_plot) else 0
+        label_offset = max(base_scale * 0.14, 0.05)
 
         return {
             "frequency_mhz": actual_mhz,
@@ -3625,6 +3835,14 @@ class MainWindow(QMainWindow):
             "row_index": row_index,
             "time": time_arr,
             "y": np.asarray(y_values, dtype=float),
+            "color": self._light_curve_color_for_index(curve_index),
+            "line_width": float(settings.get("line_width", 2.0)),
+            "opacity": float(settings.get("opacity", 0.95)),
+            "line_style": str(settings.get("line_style", "solid")),
+            "show_label": bool(settings.get("show_frequency_label", True)),
+            "label": f"{actual_mhz:.3f} MHz",
+            "label_x": float(time_arr[first_plot_index]) if time_arr.size else 0.0,
+            "label_y": float(y_values[first_plot_index] + label_offset) if y_values.size else float(actual_mhz),
         }, ""
 
     def _clear_mpl_light_curve_overlay(self) -> None:
@@ -3648,6 +3866,7 @@ class MainWindow(QMainWindow):
         self._clear_mpl_light_curve_overlay()
         self._clear_accel_light_curve_overlay()
         if clear_frequency:
+            self._light_curve_records = []
             self._light_curve_frequency_mhz = None
         try:
             self.canvas.draw_idle()
@@ -3656,67 +3875,130 @@ class MainWindow(QMainWindow):
         self._sync_analysis_menu_actions()
 
     def clear_light_curve(self) -> None:
-        had_curve = getattr(self, "_light_curve_frequency_mhz", None) is not None
+        had_curve = bool(self._light_curve_records_payload())
         self._clear_light_curve_overlay(clear_frequency=True)
         if had_curve:
-            self.statusBar().showMessage("Light curve cleared.", 2500)
+            self.statusBar().showMessage("Light curve(s) cleared.", 2500)
         else:
             self.statusBar().showMessage("No light curve to clear.", 2500)
 
+    def _mpl_light_curve_linestyle(self, line_style: str) -> str:
+        style = str(line_style or "solid").lower()
+        if style == "dashed":
+            return "--"
+        if style == "dotted":
+            return ":"
+        return "-"
+
     def _draw_mpl_light_curve_overlay(self, overlay: dict) -> None:
+        self._draw_mpl_light_curve_overlays([overlay])
+
+    def _draw_mpl_light_curve_overlays(self, overlays: list[dict]) -> None:
         self._clear_mpl_light_curve_overlay()
+        artists = []
         try:
-            line = self.canvas.ax.plot(
-                overlay["time"],
-                overlay["y"],
-                color="#00e5ff",
-                linewidth=1.8,
-                alpha=0.95,
-                zorder=8,
-            )[0]
-            self._light_curve_mpl_artists = [line]
+            for overlay in list(overlays or []):
+                line = self.canvas.ax.plot(
+                    overlay["time"],
+                    overlay["y"],
+                    color=str(overlay.get("color") or "#00e5ff"),
+                    linewidth=float(overlay.get("line_width", 2.0)),
+                    alpha=float(overlay.get("opacity", 0.95)),
+                    linestyle=self._mpl_light_curve_linestyle(overlay.get("line_style", "solid")),
+                    zorder=8,
+                )[0]
+                artists.append(line)
+                if bool(overlay.get("show_label", False)):
+                    label = str(overlay.get("label") or "").strip()
+                    if label:
+                        text = self.canvas.ax.text(
+                            float(overlay.get("label_x", 0.0)),
+                            float(overlay.get("label_y", overlay.get("frequency_mhz", 0.0))),
+                            label,
+                            color=str(overlay.get("color") or "#00e5ff"),
+                            fontsize=9,
+                            ha="left",
+                            va="bottom",
+                            zorder=9,
+                        )
+                        artists.append(text)
+            self._light_curve_mpl_artists = artists
             self.canvas.draw_idle()
         except Exception:
             self._light_curve_mpl_artists = []
 
     def _draw_accel_light_curve_overlay(self, overlay: dict) -> None:
+        self._draw_accel_light_curve_overlays([overlay])
+
+    def _draw_accel_light_curve_overlays(self, overlays: list[dict]) -> None:
         accel = getattr(self, "accel_canvas", None)
         if accel is None:
             return
         try:
-            accel.set_light_curve_overlay(overlay["time"], overlay["y"])
+            if hasattr(accel, "set_light_curve_overlays"):
+                accel.set_light_curve_overlays(overlays)
+            elif overlays:
+                overlay = overlays[0]
+                accel.set_light_curve_overlay(overlay["time"], overlay["y"], color=overlay.get("color", "#00e5ff"))
+            else:
+                accel.clear_light_curve_overlay()
         except Exception:
             pass
 
+    def _build_active_light_curve_overlays(self) -> tuple[list[dict], list[dict], str]:
+        overlays = []
+        valid_records = []
+        first_reason = ""
+        for index, record in enumerate(self._light_curve_records_payload()):
+            requested = record.get("requested_mhz", record.get("frequency_mhz"))
+            overlay, reason = self._build_light_curve_overlay(requested, curve_index=index)
+            if overlay is None:
+                if not first_reason:
+                    first_reason = reason or ""
+                continue
+            overlays.append(overlay)
+            valid_records.append(
+                {
+                    "frequency_mhz": float(overlay["frequency_mhz"]),
+                    "requested_mhz": float(record.get("requested_mhz", overlay["requested_mhz"])),
+                }
+            )
+        return overlays, valid_records, first_reason
+
     def _render_light_curve_accel_overlay(self) -> bool:
-        frequency = getattr(self, "_light_curve_frequency_mhz", None)
-        if frequency is None:
+        if not self._light_curve_records_payload():
             self._clear_accel_light_curve_overlay()
             return False
-        overlay, _reason = self._build_light_curve_overlay(frequency)
-        if overlay is None:
+        overlays, valid_records, _reason = self._build_active_light_curve_overlays()
+        if not overlays:
+            self._store_light_curve_records([])
             self._clear_accel_light_curve_overlay()
             return False
-        self._light_curve_frequency_mhz = float(overlay["frequency_mhz"])
-        self._draw_accel_light_curve_overlay(overlay)
+        self._store_light_curve_records(valid_records)
+        self._draw_accel_light_curve_overlays(overlays)
+        self._sync_analysis_menu_actions()
         return True
 
     def _render_light_curve_overlay(self) -> bool:
-        frequency = getattr(self, "_light_curve_frequency_mhz", None)
-        if frequency is None:
+        if not self._light_curve_records_payload():
             self._clear_light_curve_overlay(clear_frequency=False)
             return False
-        overlay, _reason = self._build_light_curve_overlay(frequency)
-        if overlay is None:
+        overlays, valid_records, _reason = self._build_active_light_curve_overlays()
+        if not overlays:
+            self._store_light_curve_records([])
             self._clear_light_curve_overlay(clear_frequency=True)
             return False
-        self._light_curve_frequency_mhz = float(overlay["frequency_mhz"])
-        self._draw_mpl_light_curve_overlay(overlay)
-        self._draw_accel_light_curve_overlay(overlay)
+        self._store_light_curve_records(valid_records)
+        self._draw_mpl_light_curve_overlays(overlays)
+        self._draw_accel_light_curve_overlays(overlays)
+        self._sync_analysis_menu_actions()
         return True
 
     def plot_light_curve_at_frequency(self, frequency_mhz: float, *, show_errors: bool = True) -> bool:
-        overlay, reason = self._build_light_curve_overlay(frequency_mhz)
+        existing_records = self._light_curve_records_payload()
+        multiple = self._light_curve_settings_payload().get("mode") == "multiple"
+        curve_index = len(existing_records) if multiple else 0
+        overlay, reason = self._build_light_curve_overlay(frequency_mhz, curve_index=curve_index)
         if overlay is None:
             if show_errors:
                 QMessageBox.information(self, "Plot Light Curve", reason or "Could not plot the light curve.")
@@ -3724,10 +4006,16 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(reason or "Could not plot the light curve.", 3000)
             return False
 
-        self._light_curve_frequency_mhz = float(overlay["frequency_mhz"])
-        self._draw_mpl_light_curve_overlay(overlay)
-        self._draw_accel_light_curve_overlay(overlay)
-        self._sync_analysis_menu_actions()
+        record = {
+            "frequency_mhz": float(overlay["frequency_mhz"]),
+            "requested_mhz": float(overlay["requested_mhz"]),
+        }
+        if multiple:
+            existing_records.append(record)
+            self._store_light_curve_records(existing_records)
+        else:
+            self._store_light_curve_records([record])
+        self._render_light_curve_overlay()
 
         requested = float(overlay["requested_mhz"])
         actual = float(overlay["frequency_mhz"])
@@ -6787,6 +7075,8 @@ class MainWindow(QMainWindow):
             "frequency_step_mhz": self._frequency_step_mhz,
             "view": self._capture_view(),
             "light_curve_frequency_mhz": getattr(self, "_light_curve_frequency_mhz", None),
+            "light_curve_records": self._light_curve_records_payload(),
+            "light_curve_settings": self._light_curve_settings_payload(),
             "light_curve_click_mode": self._light_curve_click_mode_checked(),
         }
         return state
@@ -6899,7 +7189,17 @@ class MainWindow(QMainWindow):
         self.use_utc = state["use_utc"]
         self.current_cmap_name = state["cmap"]
         self._frequency_step_mhz = state.get("frequency_step_mhz", None)
-        self._light_curve_frequency_mhz = state.get("light_curve_frequency_mhz", None)
+        self._set_light_curve_settings(
+            state.get("light_curve_settings", self._light_curve_settings_payload()),
+            persist=False,
+            sync_dialog=True,
+            render=False,
+        )
+        self._set_light_curve_records(
+            state.get("light_curve_records", None),
+            legacy_frequency=state.get("light_curve_frequency_mhz", None),
+            render=False,
+        )
         self._set_light_curve_click_mode_checked(bool(state.get("light_curve_click_mode", False)))
         self._update_frequency_axis_state()
         low, high, scale = self._noise_thresholds_from_mapping(
@@ -8676,7 +8976,7 @@ class MainWindow(QMainWindow):
     def _sync_analysis_menu_actions(self):
         has_noise = getattr(self, "noise_reduced_data", None) is not None
         has_light_curve_data = self._has_light_curve_dataset()
-        has_light_curve = getattr(self, "_light_curve_frequency_mhz", None) is not None
+        has_light_curve = bool(self._light_curve_records_payload())
         for name in ("open_maximum_intensities_action", "open_type_ii_band_splitting_action"):
             act = getattr(self, name, None)
             if act is not None:
@@ -8688,10 +8988,17 @@ class MainWindow(QMainWindow):
         act = getattr(self, "clear_light_curve_action", None)
         if act is not None:
             act.setEnabled(bool(has_light_curve_data and has_light_curve))
+        act = getattr(self, "light_curve_settings_action", None)
+        if act is not None:
+            act.setEnabled(True)
         if not has_light_curve_data:
             self._set_light_curve_click_mode_checked(False)
 
     def _maybe_prompt_save_dirty(self) -> bool:
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            return True
+        if os.environ.get("E_CALLISTO_DISABLE_SAVE_PROMPT", "").strip() == "1":
+            return True
         if not getattr(self, "_project_dirty", False):
             return True
 
@@ -8780,6 +9087,8 @@ class MainWindow(QMainWindow):
             "annotation_style_defaults": dict(self._annotation_style_defaults or {}),
             "light_curve": {
                 "frequency_mhz": getattr(self, "_light_curve_frequency_mhz", None),
+                "records": self._light_curve_records_payload(),
+                "settings": self._light_curve_settings_payload(),
                 "click_mode": self._light_curve_click_mode_checked(),
             },
             "active_preset": dict(getattr(self, "_active_preset_snapshot", {}) or {}),
@@ -8892,7 +9201,17 @@ class MainWindow(QMainWindow):
                 meta.get("annotation_style_defaults") or self._annotation_style_defaults
             )
             light_curve = dict(meta.get("light_curve") or {})
-            self._light_curve_frequency_mhz = light_curve.get("frequency_mhz", None)
+            self._set_light_curve_settings(
+                light_curve.get("settings", self._light_curve_settings_payload()),
+                persist=False,
+                sync_dialog=True,
+                render=False,
+            )
+            self._set_light_curve_records(
+                light_curve.get("records", None),
+                legacy_frequency=light_curve.get("frequency_mhz", None),
+                render=False,
+            )
             self._set_light_curve_click_mode_checked(bool(light_curve.get("click_mode", False)))
             self._active_preset_snapshot = dict(meta.get("active_preset") or {})
             self._processing_log = list(meta.get("processing_log") or [])

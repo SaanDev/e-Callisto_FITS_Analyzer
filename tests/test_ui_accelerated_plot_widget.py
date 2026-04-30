@@ -376,10 +376,77 @@ def test_accelerated_widget_light_curve_overlay_lifecycle():
         np.array([50.0, 51.0, 50.5], dtype=float),
     )
     assert widget._light_curve_item is not None
+    assert len(widget._light_curve_items) == 1
     xs, ys = widget._light_curve_item.getData()
     assert len(xs) == 3
     assert len(ys) == 3
 
     widget.clear_light_curve_overlay()
     assert widget._light_curve_item is None
+    assert widget._light_curve_items == []
+    widget.close()
+
+
+def test_accelerated_widget_multiple_light_curve_overlay_lifecycle():
+    _app()
+    widget = AcceleratedPlotWidget()
+    if not widget.is_available:
+        pytest.skip("pyqtgraph not available in test environment")
+
+    class _DummyCmap:
+        def __call__(self, x):
+            arr = np.asarray(x, dtype=float)
+            rgba = np.zeros((arr.size, 4), dtype=float)
+            rgba[:, 0] = arr
+            rgba[:, 1] = 1.0 - arr
+            rgba[:, 2] = 0.5
+            rgba[:, 3] = 1.0
+            return rgba
+
+    widget.update_image(
+        np.random.rand(8, 16).astype(np.float32),
+        extent=[0.0, 10.0, 20.0, 80.0],
+        cmap=_DummyCmap(),
+        title="Preview",
+        x_label="Time [s]",
+        y_label="Frequency [MHz]",
+    )
+
+    widget.set_light_curve_overlays(
+        [
+            {
+                "time": np.array([0.0, 1.0, 2.0], dtype=float),
+                "y": np.array([50.0, 51.0, 50.5], dtype=float),
+                "color": "#00e5ff",
+                "line_width": 3.0,
+                "opacity": 0.8,
+                "line_style": "dashed",
+                "show_label": True,
+                "label": "50.000 MHz",
+                "label_x": 0.0,
+                "label_y": 50.2,
+            },
+            {
+                "time": np.array([0.0, 1.0, 2.0], dtype=float),
+                "y": np.array([60.0, 59.0, 60.5], dtype=float),
+                "color": "#ffb000",
+                "line_width": 2.0,
+                "opacity": 1.0,
+                "line_style": "dotted",
+                "show_label": False,
+            },
+        ]
+    )
+
+    assert widget._light_curve_item is widget._light_curve_items[0]
+    assert len(widget._light_curve_items) == 2
+    assert len(widget._light_curve_label_items) == 1
+    xs, ys = widget._light_curve_items[1].getData()
+    assert np.allclose(xs, [0.0, 1.0, 2.0])
+    assert np.allclose(ys, [60.0, 59.0, 60.5])
+
+    widget.clear_light_curve_overlay()
+    assert widget._light_curve_item is None
+    assert widget._light_curve_items == []
+    assert widget._light_curve_label_items == []
     widget.close()

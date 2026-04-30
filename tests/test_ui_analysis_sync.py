@@ -14,6 +14,7 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import QApplication
 
+from src.UI.dialogs.light_curve_settings_dialog import LightCurveSettingsDialog
 from src.UI.gui_main import AnalyzeDialog, MainWindow, MaxIntensityPlotDialog, TypeIIBandSplittingDialog
 
 
@@ -53,6 +54,22 @@ def _find_top_menu(window: MainWindow, text: str):
         if action.text() == text:
             return action
     return None
+
+
+def _mpl_light_curve_lines(window: MainWindow):
+    return [
+        artist
+        for artist in getattr(window, "_light_curve_mpl_artists", []) or []
+        if hasattr(artist, "get_ydata")
+    ]
+
+
+def _mpl_light_curve_labels(window: MainWindow):
+    return [
+        artist
+        for artist in getattr(window, "_light_curve_mpl_artists", []) or []
+        if hasattr(artist, "get_text")
+    ]
 
 
 def _type_ii_analyzer_session():
@@ -370,7 +387,8 @@ def test_analysis_menu_contains_required_entries_and_moves_fits_header():
     }
     assert "Enter frequency" in light_curve_actions
     assert "Click on a frequency" in light_curve_actions
-    assert "Clear light curve" in light_curve_actions
+    assert "Settings..." in light_curve_actions
+    assert "Clear light curve(s)" in light_curve_actions
     assert light_curve_actions["Click on a frequency"].isCheckable() is True
 
     win.close()
@@ -383,6 +401,7 @@ def test_type_ii_action_requires_noise_reduced_data():
     assert win.open_type_ii_band_splitting_action.isEnabled() is False
     assert win.enter_light_curve_frequency_action.isEnabled() is False
     assert win.click_light_curve_frequency_action.isEnabled() is False
+    assert win.light_curve_settings_action.isEnabled() is True
     assert win.clear_light_curve_action.isEnabled() is False
 
     win.filename = "demo.fit"
@@ -425,6 +444,9 @@ def test_light_curve_nearest_frequency_and_replacement_mpl():
     _app()
     win = MainWindow(theme=None)
     win.set_hardware_live_preview_enabled(False)
+    settings = win._default_light_curve_settings()
+    settings["show_frequency_label"] = False
+    win._set_light_curve_settings(settings, persist=False, render=False)
 
     win.filename = "demo.fit"
     win.freqs = np.array([100.0, 95.0, 90.0], dtype=float)
@@ -444,17 +466,17 @@ def test_light_curve_nearest_frequency_and_replacement_mpl():
     assert win.plot_light_curve_at_frequency(96.0, show_errors=False) is True
     assert win._light_curve_frequency_mhz == pytest.approx(95.0)
     assert win.clear_light_curve_action.isEnabled() is True
-    assert len(win._light_curve_mpl_artists) == 1
-    first_artist = win._light_curve_mpl_artists[0]
+    assert len(_mpl_light_curve_lines(win)) == 1
+    first_artist = _mpl_light_curve_lines(win)[0]
     first_y = np.asarray(first_artist.get_ydata(), dtype=float)
     assert first_y.shape == win.time.shape
     assert first_y[0] == pytest.approx(95.0)
     assert not np.allclose(first_y, 95.0)
 
     assert win.plot_light_curve_at_frequency(89.0, show_errors=False) is True
-    assert len(win._light_curve_mpl_artists) == 1
-    assert win._light_curve_mpl_artists[0] is not first_artist
-    second_y = np.asarray(win._light_curve_mpl_artists[0].get_ydata(), dtype=float)
+    assert len(_mpl_light_curve_lines(win)) == 1
+    assert _mpl_light_curve_lines(win)[0] is not first_artist
+    second_y = np.asarray(_mpl_light_curve_lines(win)[0].get_ydata(), dtype=float)
     assert win._light_curve_frequency_mhz == pytest.approx(90.0)
     assert second_y[0] == pytest.approx(90.0)
 
@@ -465,6 +487,9 @@ def test_clear_light_curve_removes_overlay_and_disables_action():
     _app()
     win = MainWindow(theme=None)
     win.set_hardware_live_preview_enabled(False)
+    settings = win._default_light_curve_settings()
+    settings["show_frequency_label"] = False
+    win._set_light_curve_settings(settings, persist=False, render=False)
 
     win.filename = "demo.fit"
     win.freqs = np.array([100.0, 95.0, 90.0], dtype=float)
@@ -484,6 +509,7 @@ def test_clear_light_curve_removes_overlay_and_disables_action():
     win.clear_light_curve()
 
     assert win._light_curve_frequency_mhz is None
+    assert win._light_curve_records == []
     assert win._light_curve_mpl_artists == []
     assert win.clear_light_curve_action.isEnabled() is False
 
@@ -494,6 +520,9 @@ def test_light_curve_click_mode_uses_clicked_frequency_mpl():
     _app()
     win = MainWindow(theme=None)
     win.set_hardware_live_preview_enabled(False)
+    settings = win._default_light_curve_settings()
+    settings["show_frequency_label"] = False
+    win._set_light_curve_settings(settings, persist=False, render=False)
 
     win.filename = "demo.fit"
     win.freqs = np.array([100.0, 95.0, 90.0], dtype=float)
@@ -515,6 +544,144 @@ def test_light_curve_click_mode_uses_clicked_frequency_mpl():
 
     assert handled is True
     assert win._light_curve_frequency_mhz == pytest.approx(95.0)
+
+    win.close()
+
+
+def test_light_curve_settings_dialog_defaults_payload_and_reset():
+    _app()
+    defaults = dict(MainWindow.LIGHT_CURVE_SETTINGS_DEFAULTS)
+    dlg = LightCurveSettingsDialog(
+        initial_settings={
+            "mode": "multiple",
+            "line_color": "#ff0000",
+            "line_width": 4.5,
+            "show_frequency_label": False,
+            "vertical_scale": 2.0,
+            "opacity": 0.5,
+            "line_style": "dashed",
+        },
+        defaults=defaults,
+    )
+
+    assert dlg.multi_curve_chk.isChecked() is True
+    assert dlg.single_curve_chk.isChecked() is False
+    payload = dlg.settings()
+    assert payload["mode"] == "multiple"
+    assert payload["line_color"] == "#ff0000"
+    assert payload["line_width"] == pytest.approx(4.5)
+    assert payload["show_frequency_label"] is False
+    assert payload["vertical_scale"] == pytest.approx(2.0)
+    assert payload["opacity"] == pytest.approx(0.5)
+    assert payload["line_style"] == "dashed"
+
+    dlg.single_curve_chk.setChecked(True)
+    _flush_events()
+    assert dlg.single_curve_chk.isChecked() is True
+    assert dlg.multi_curve_chk.isChecked() is False
+    assert dlg.settings()["mode"] == "single"
+
+    dlg.reset_button.click()
+    _flush_events()
+    reset_payload = dlg.settings()
+    assert reset_payload["mode"] == "single"
+    assert reset_payload["line_color"] == defaults["line_color"]
+    assert reset_payload["line_width"] == pytest.approx(defaults["line_width"])
+    assert reset_payload["show_frequency_label"] is True
+    assert reset_payload["vertical_scale"] == pytest.approx(defaults["vertical_scale"])
+    assert reset_payload["opacity"] == pytest.approx(defaults["opacity"])
+    assert reset_payload["line_style"] == defaults["line_style"]
+
+    dlg.close()
+
+
+def test_light_curve_multiple_mode_accumulates_and_clear_all_mpl():
+    _app()
+    win = MainWindow(theme=None)
+    win.set_hardware_live_preview_enabled(False)
+    settings = win._default_light_curve_settings()
+    settings.update({"mode": "multiple", "show_frequency_label": False, "line_color": "#00e5ff"})
+    win._set_light_curve_settings(settings, persist=False, render=False)
+
+    win.filename = "demo.fit"
+    win.freqs = np.array([100.0, 95.0, 90.0], dtype=float)
+    win.time = np.array([0.0, 1.0, 2.0], dtype=float)
+    win.raw_data = np.array(
+        [
+            [1.0, 2.0, 3.0],
+            [4.0, 6.0, 5.0],
+            [7.0, 9.0, 8.0],
+        ],
+        dtype=np.float32,
+    )
+    win.plot_data(win.raw_data, title="Raw")
+    _flush_events()
+
+    assert win.plot_light_curve_at_frequency(95.0, show_errors=False) is True
+    assert win.plot_light_curve_at_frequency(90.0, show_errors=False) is True
+
+    assert len(win._light_curve_records) == 2
+    assert [record["frequency_mhz"] for record in win._light_curve_records] == pytest.approx([95.0, 90.0])
+    lines = _mpl_light_curve_lines(win)
+    assert len(lines) == 2
+    assert np.asarray(lines[0].get_ydata(), dtype=float)[0] == pytest.approx(95.0)
+    assert np.asarray(lines[1].get_ydata(), dtype=float)[0] == pytest.approx(90.0)
+
+    win.clear_light_curve()
+    assert win._light_curve_records == []
+    assert _mpl_light_curve_lines(win) == []
+    assert win.clear_light_curve_action.isEnabled() is False
+    win.close()
+
+
+def test_light_curve_style_and_frequency_label_apply_mpl():
+    _app()
+    win = MainWindow(theme=None)
+    win.set_hardware_live_preview_enabled(False)
+    settings = win._default_light_curve_settings()
+    settings.update(
+        {
+            "line_color": "#ff0000",
+            "line_width": 4.0,
+            "show_frequency_label": True,
+            "vertical_scale": 1.5,
+            "opacity": 0.55,
+            "line_style": "dashed",
+        }
+    )
+    win._set_light_curve_settings(settings, persist=False, render=False)
+
+    win.filename = "demo.fit"
+    win.freqs = np.array([100.0, 95.0, 90.0], dtype=float)
+    win.time = np.array([0.0, 1.0, 2.0], dtype=float)
+    win.raw_data = np.array(
+        [
+            [1.0, 2.0, 3.0],
+            [4.0, 8.0, 5.0],
+            [7.0, 9.0, 8.0],
+        ],
+        dtype=np.float32,
+    )
+    win.plot_data(win.raw_data, title="Raw")
+    _flush_events()
+
+    assert win.plot_light_curve_at_frequency(95.0, show_errors=False) is True
+    lines = _mpl_light_curve_lines(win)
+    labels = _mpl_light_curve_labels(win)
+    assert len(lines) == 1
+    assert len(labels) == 1
+    line = lines[0]
+    assert line.get_color() == "#ff0000"
+    assert line.get_linewidth() == pytest.approx(4.0)
+    assert line.get_alpha() == pytest.approx(0.55)
+    assert line.get_linestyle() == "--"
+    assert labels[0].get_text() == "95.000 MHz"
+    assert labels[0].get_color() == "#ff0000"
+    assert labels[0].get_position()[1] > np.asarray(line.get_ydata(), dtype=float)[0]
+
+    settings["show_frequency_label"] = False
+    win._set_light_curve_settings(settings, persist=False, render=True)
+    assert _mpl_light_curve_labels(win) == []
 
     win.close()
 
