@@ -27,7 +27,7 @@ from matplotlib.path import Path
 from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter, ScalarFormatter
 from matplotlib.widgets import LassoSelector, RectangleSelector
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QRectF, QSettings, QSize, QStandardPaths, Qt, QThread, QTimer, QUrl, Slot
+from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QSettings, QSize, QStandardPaths, Qt, QThread, QTimer, QUrl, Slot
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -131,9 +131,6 @@ from src.Backend.rfi_filters import clean_rfi, config_dict as rfi_config_dict
 from src.Backend.update_checker import GITHUB_REPO
 from src.UI.accelerated_plot_widget import (
     AcceleratedPlotWidget,
-    _TimeAxisItem,
-    _mpl_cmap_to_lookup,
-    _rgba_image_from_cmap,
 )
 from src.UI.callisto_downloader import CallistoDownloaderApp
 from src.UI.dialogs.analyze_dialog import AnalyzeDialog
@@ -9068,28 +9065,112 @@ class MainWindow(QMainWindow):
             return True
         return False
 
-    def _report_light_curve_pen(self, pg, curve: dict):
-        color = QColor(str(curve.get("color") or "#00e5ff"))
-        if not color.isValid():
-            color = QColor("#00e5ff")
+    def _report_lasso_mask(self, shape=None) -> np.ndarray | None:
+        mask = getattr(self, "lasso_mask", None)
+        if mask is None:
+            return None
         try:
-            color.setAlphaF(min(max(float(curve.get("opacity", 0.95)), 0.0), 1.0))
+            arr = np.asarray(mask, dtype=bool)
         except Exception:
-            color.setAlphaF(0.95)
-        style = Qt.PenStyle.SolidLine
-        style_text = str(curve.get("line_style") or "solid").lower()
-        if style_text == "dashed":
-            style = Qt.PenStyle.DashLine
-        elif style_text == "dotted":
-            style = Qt.PenStyle.DotLine
-        return pg.mkPen(color=color, width=max(0.5, float(curve.get("line_width", 2.0))), style=style)
+            return None
+        if shape is not None and tuple(arr.shape) != tuple(shape):
+            return None
+        return arr if np.any(arr) else None
 
-    def _render_dynamic_spectrum_report_png(
+    def _background_subtracted_report_data(self):
+        original = getattr(self, "noise_reduced_original", None)
+        if original is not None:
+            return original
+        return getattr(self, "noise_reduced_data", None)
+
+    def _burst_isolated_report_data(self):
+        data = getattr(self, "noise_reduced_data", None)
+        original = getattr(self, "noise_reduced_original", None)
+        if data is None and original is None:
+            return None
+
+        base = original if original is not None else data
+        try:
+            base_arr = np.asarray(base, dtype=np.float32)
+        except Exception:
+            return data
+
+        mask = self._report_lasso_mask(base_arr.shape)
+        if mask is not None:
+            isolated = np.zeros_like(base_arr, dtype=np.float32)
+            isolated[mask] = base_arr[mask]
+            gap_rows = invalid_row_mask(base_arr, self._current_gap_row_mask())
+            if np.any(gap_rows):
+                isolated[gap_rows, :] = np.nan
+            return isolated
+
+        if original is not None and data is not None and self._arrays_distinct_for_report(original, data):
+            return data
+        return None
+
+    def _dynamic_report_title_to_plot_type(self, title: str | None) -> str:
+        lowered = str(title or "").strip().lower()
+        mapping = {
+            "raw dynamic spectrum": "Raw",
+            "background subtracted dynamic spectrum": "Background Subtracted",
+            "background-subtracted dynamic spectrum": "Background Subtracted",
+            "burst isolated dynamic spectrum": "Isolated Burst",
+            "isolated burst dynamic spectrum": "Isolated Burst",
+        }
+        if lowered == "light curves with dynamic spectrum":
+            return self._normalize_plot_type(getattr(self, "current_plot_type", "Raw"))
+        return mapping.get(lowered, self._normalize_plot_type(title))
+
+    def _report_spectrum_export_geometry(self) -> tuple[int, int, int]:
+        widget_width = 1142
+        widget_height = 666
+        pixel_ratio = 2.0
+        accel = getattr(self, "accel_canvas", None)
+        if accel is not None:
+            try:
+                width = int(accel.width())
+                height = int(accel.height())
+                if width >= 400 and height >= 250:
+                    widget_width = width
+                    widget_height = height
+            except Exception:
+                pass
+            try:
+                ratio = float(accel.devicePixelRatioF())
+                if math.isfinite(ratio) and ratio > 0.0:
+                    pixel_ratio = ratio
+            except Exception:
+                pass
+        export_width = max(1800, int(round(widget_width * max(pixel_ratio, 1.0))))
+        return widget_width, widget_height, export_width
+
+    def _dynamic_spectrum_view_for_extent(self, view, extent):
+        if not view:
+            return None
+        try:
+            vx0, vx1 = view.get("xlim")
+            vy0, vy1 = view.get("ylim")
+            xlim = (float(vx0), float(vx1))
+            ylim = (float(vy0), float(vy1))
+            full_x = (min(float(extent[0]), float(extent[1])), max(float(extent[0]), float(extent[1])))
+            full_y = (min(float(extent[2]), float(extent[3])), max(float(extent[2]), float(extent[3])))
+            view_x = (min(xlim), max(xlim))
+            view_y = (min(ylim), max(ylim))
+            x_overlap = min(view_x[1], full_x[1]) - max(view_x[0], full_x[0])
+            y_overlap = min(view_y[1], full_y[1]) - max(view_y[0], full_y[0])
+            if x_overlap > 0.0 and y_overlap > 0.0:
+                return {"xlim": xlim, "ylim": ylim}
+        except Exception:
+            pass
+        return None
+
+    def _render_original_dynamic_spectrum_export_png(
         self,
         data,
         *,
-        title: str,
+        plot_type: str | None = None,
         overlays: list[dict] | None = None,
+        view=None,
     ) -> bytes:
         if data is None or self.freqs is None or self.time is None:
             return b""
@@ -9115,89 +9196,84 @@ class MainWindow(QMainWindow):
                 previous_options[key] = pg.getConfigOption(key)
             except Exception:
                 pass
-
         try:
-            pg.setConfigOptions(useOpenGL=False, antialias=True, imageAxisOrder="row-major")
-            widget = pg.GraphicsLayoutWidget()
+            widget = AcceleratedPlotWidget()
+            if not bool(getattr(widget, "is_available", False)):
+                return b""
+
             widget.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
-            widget.resize(1600, 940)
-            widget.setBackground("#ffffff")
-
-            bottom_axis = _TimeAxisItem(orientation="bottom")
-            try:
-                bottom_axis.set_time_mode(bool(self.use_utc), self.ut_start_sec)
-            except Exception:
-                pass
-            plot = widget.addPlot(axisItems={"bottom": bottom_axis})
-            plot.hideButtons()
-            plot.setMenuEnabled(False)
-            plot.showGrid(x=True, y=True, alpha=0.22)
-            plot.setTitle(str(title or "Dynamic Spectrum"), color="#111827", size="18px")
-            plot.setLabel("bottom", "Time [UT]" if (self.use_utc and self.ut_start_sec is not None) else "Time [s]")
-            plot.setLabel("left", "Frequency [MHz]")
-            plot.invertY(False)
-
-            image_item = pg.ImageItem(axisOrder="row-major")
-            plot.addItem(image_item)
+            width, height, export_width = self._report_spectrum_export_geometry()
+            widget.resize(width, height)
+            widget.set_dark(self._is_dark_ui())
+            widget.set_time_mode(self.use_utc, self.ut_start_sec)
+            widget.set_navigation_locked(bool(getattr(self, "nav_locked", False)))
 
             display_data = np.asarray(self._intensity_for_display(arr), dtype=np.float32)
             extent = pyqtgraph_extent(freqs, time, default_step=self._frequency_step_mhz)
-            x0, x1, y0, y1 = (float(extent[0]), float(extent[1]), float(extent[2]), float(extent[3]))
-            image_item.setRect(QRectF(x0, y0, x1 - x0, y1 - y0))
-
-            vmin, vmax = finite_data_limits(display_data)
-            if vmin is None or vmax is None:
-                return b""
-
-            cmap = self.get_current_cmap()
-            row_mask = invalid_row_mask(display_data, self._current_gap_row_mask())
-            has_invalid = bool(np.any(row_mask) or np.any(~np.isfinite(display_data)))
-            if has_invalid:
-                rgba = _rgba_image_from_cmap(display_data, cmap, vmin=vmin, vmax=vmax, gap_row_mask=self._current_gap_row_mask())
-                image_item.setImage(rgba, autoLevels=False)
+            export_view = self._dynamic_spectrum_view_for_extent(view, extent)
+            normalized_plot_type = self._normalize_plot_type(plot_type)
+            if self.remove_titles:
+                plot_title = ""
+                x_label = ""
+                y_label = ""
+                cbar_label = ""
             else:
-                image_item.setImage(display_data, autoLevels=False)
-                image_item.setLevels((vmin, vmax))
+                plot_title = self.graph_title_override or self._default_graph_title(normalized_plot_type)
+                x_label = "Time [UT]" if (self.use_utc and self.ut_start_sec is not None) else "Time [s]"
+                y_label = "Frequency [MHz]"
+                cbar_label = "Intensity [Digits]" if not self.use_db else "Intensity [dB]"
 
-            color_map, lut = _mpl_cmap_to_lookup(cmap)
-            if lut is not None and not has_invalid:
-                image_item.setLookupTable(lut, update=False)
-            if color_map is None:
-                color_map = pg.colormap.get("viridis")
-            cbar = pg.ColorBarItem(values=(vmin, vmax), colorMap=color_map, interactive=False)
-            cbar.setImageItem(image_item, insert_in=plot)
-            try:
-                cbar.axis.setLabel("Intensity [dB]" if self.use_db else "Intensity [Digits]")
-            except Exception:
-                pass
-
-            for curve in list(overlays or []):
-                try:
-                    xs = np.asarray(curve.get("time"), dtype=float).reshape(-1)
-                    ys = np.asarray(curve.get("y"), dtype=float).reshape(-1)
-                except Exception:
-                    continue
-                n = min(xs.size, ys.size)
-                if n == 0:
-                    continue
-                item = pg.PlotDataItem(pen=self._report_light_curve_pen(pg, curve))
-                item.setData(xs[:n], ys[:n])
-                item.setZValue(20)
-                plot.addItem(item)
-                if bool(curve.get("show_label", False)):
-                    label = str(curve.get("label") or "").strip()
-                    if label:
-                        text_item = pg.TextItem(text=label, color=str(curve.get("color") or "#00e5ff"), anchor=(0.0, 1.0))
-                        text_item.setPos(float(curve.get("label_x", xs[0])), float(curve.get("label_y", ys[0])))
-                        text_item.setZValue(21)
-                        plot.addItem(text_item)
-
-            plot.setRange(xRange=(min(x0, x1), max(x0, x1)), yRange=(min(y0, y1), max(y0, y1)), padding=0.0)
+            tick_font_px = self.tick_font_px
+            axis_label_font_px = self.axis_label_font_px
+            title_font_px = self.title_font_px
+            if getattr(self, "_hw_default_font_sizes_active", False):
+                tick_font_px = self.HW_DEFAULT_TICK_FONT_PX
+                axis_label_font_px = self.HW_DEFAULT_AXIS_FONT_PX
+                title_font_px = self.HW_DEFAULT_TITLE_FONT_PX
+            widget.set_text_style(
+                font_family=self.graph_font_family,
+                tick_font_px=tick_font_px,
+                axis_label_font_px=axis_label_font_px,
+                title_font_px=title_font_px,
+                title_bold=self.title_bold,
+                title_italic=self.title_italic,
+                axis_bold=self.axis_bold,
+                axis_italic=self.axis_italic,
+                ticks_bold=self.ticks_bold,
+                ticks_italic=self.ticks_italic,
+            )
             widget.show()
             QApplication.processEvents()
-            exporter = pg_exporters.ImageExporter(plot)
+            widget.update_image(
+                display_data,
+                extent=extent,
+                cmap=self.get_current_cmap(),
+                gap_row_mask=self._current_gap_row_mask(),
+                title=plot_title,
+                x_label=x_label,
+                y_label=y_label,
+                colorbar_label=cbar_label,
+                view=export_view,
+            )
+            try:
+                widget.set_goes_overlay(
+                    self._goes_overlay_payload if self._goes_overlay_enabled else None,
+                    visible_channels=self._selected_goes_overlay_channels(),
+                )
+            except Exception:
+                pass
+            if overlays:
+                try:
+                    widget.set_light_curve_overlays(overlays)
+                except Exception:
+                    pass
+            QApplication.processEvents()
+            plot_item = widget.export_plot_item()
+            if plot_item is None:
+                return b""
+            exporter = pg_exporters.ImageExporter(plot_item)
             params = exporter.parameters()
-            params["width"] = 2200
+            params["width"] = export_width
             image = exporter.export(toBytes=True)
             png = self._qimage_to_png_bytes(image)
             return b"" if self._png_is_blank_or_black(png) else png
@@ -9208,6 +9284,7 @@ class MainWindow(QMainWindow):
                 try:
                     widget.close()
                     widget.deleteLater()
+                    QApplication.processEvents()
                 except Exception:
                     pass
             try:
@@ -9320,15 +9397,22 @@ class MainWindow(QMainWindow):
         data,
         unavailable: str,
         *,
+        plot_type: str | None = None,
         overlays: list[dict] | None = None,
+        view=None,
     ) -> ProjectReportFigure:
         png = b""
         if data is not None:
-            png = self._render_dynamic_spectrum_report_png(data, title=title, overlays=overlays)
+            png = self._render_original_dynamic_spectrum_export_png(
+                data,
+                plot_type=plot_type or self._dynamic_report_title_to_plot_type(title),
+                overlays=overlays,
+                view=view,
+            )
         return self._project_report_figure(
             title=title,
             png=png,
-            caption="Rendered with the report PyQtGraph dynamic-spectrum exporter.",
+            caption="",
             unavailable=unavailable,
         )
 
@@ -9563,39 +9647,37 @@ class MainWindow(QMainWindow):
 
     def _build_project_report_figures(self, session: dict | None) -> list[ProjectReportFigure]:
         figures: list[ProjectReportFigure] = []
+        report_view = self._capture_view()
+        raw_data = getattr(self, "raw_data", None)
         figures.append(
             self._capture_report_spectrum_figure(
                 "Raw Dynamic Spectrum",
-                getattr(self, "raw_data", None),
+                raw_data,
                 "Raw dynamic spectrum data is not available.",
+                plot_type="Raw",
+                view=report_view,
             )
         )
 
-        background_data = None
-        if getattr(self, "noise_reduced_original", None) is not None and self._normalize_plot_type(self.current_plot_type) == "Isolated Burst":
-            background_data = self.noise_reduced_original
-        elif getattr(self, "noise_reduced_data", None) is not None:
-            background_data = self.noise_reduced_data
+        background_data = self._background_subtracted_report_data()
         figures.append(
             self._capture_report_spectrum_figure(
                 "Background Subtracted Dynamic Spectrum",
                 background_data,
                 "Background-subtracted dynamic spectrum is not available.",
+                plot_type="Background Subtracted",
+                view=report_view,
             )
         )
 
-        isolated_data = None
-        if (
-            getattr(self, "noise_reduced_original", None) is not None
-            and getattr(self, "noise_reduced_data", None) is not None
-            and self._arrays_distinct_for_report(self.noise_reduced_original, self.noise_reduced_data)
-        ):
-            isolated_data = self.noise_reduced_data
+        isolated_data = self._burst_isolated_report_data()
         figures.append(
             self._capture_report_spectrum_figure(
                 "Burst Isolated Dynamic Spectrum",
                 isolated_data,
                 "Burst-isolated dynamic spectrum is not available.",
+                plot_type="Isolated Burst",
+                view=report_view,
             )
         )
 
@@ -9608,7 +9690,9 @@ class MainWindow(QMainWindow):
                     "Light Curves With Dynamic Spectrum",
                     source if overlays else None,
                     "Light-curve graph is not available.",
+                    plot_type=self.current_plot_type,
                     overlays=overlays,
+                    view=report_view,
                 )
             )
         else:

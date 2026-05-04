@@ -121,11 +121,11 @@ def test_project_report_figures_use_explicit_dynamic_spectrum_titles(monkeypatch
 
     render_calls = []
 
-    def fake_dynamic_renderer(data, *, title, overlays=None):
-        render_calls.append((title, overlays))
+    def fake_dynamic_renderer(data, *, plot_type=None, overlays=None, view=None):
+        render_calls.append((plot_type, data, overlays, view))
         return _solid_png()
 
-    monkeypatch.setattr(win, "_render_dynamic_spectrum_report_png", fake_dynamic_renderer)
+    monkeypatch.setattr(win, "_render_original_dynamic_spectrum_export_png", fake_dynamic_renderer)
     monkeypatch.setattr(
         win,
         "_capture_max_intensity_fit_report_figure",
@@ -148,12 +148,71 @@ def test_project_report_figures_use_explicit_dynamic_spectrum_titles(monkeypatch
     ]
     assert "Current Main View" not in titles
     assert "GOES X-Ray Overlay" not in titles
-    assert [call[0] for call in render_calls] == titles[:4]
-    assert render_calls[-1][1]
+    assert [call[0] for call in render_calls] == ["Raw", "Background Subtracted", "Isolated Burst", "Isolated Burst"]
+    assert np.array_equal(render_calls[1][1], win.noise_reduced_original)
+    assert np.array_equal(render_calls[2][1], win.noise_reduced_data)
+    assert render_calls[-1][2]
     win.close()
 
 
-def test_dynamic_spectrum_report_renderer_produces_nonblack_png():
+def test_project_report_reconstructs_lasso_isolated_burst_when_title_changed(monkeypatch):
+    _app()
+    win = MainWindow(theme=None)
+    base = np.arange(24, dtype=float).reshape(4, 6)
+    mask = np.zeros_like(base, dtype=bool)
+    mask[1:3, 2:5] = True
+    win.raw_data = base + 100.0
+    win.noise_reduced_original = base + 10.0
+    win.noise_reduced_data = base + 25.0
+    win.lasso_mask = mask
+    win.current_plot_type = "Background Subtracted"
+    win.freqs = np.array([90.0, 84.0, 78.0, 72.0], dtype=float)
+    win.time = np.arange(6, dtype=float)
+    win.filename = "demo.fit"
+
+    render_calls = {}
+
+    def fake_dynamic_renderer(data, *, plot_type=None, overlays=None, view=None):
+        render_calls[plot_type] = np.asarray(data)
+        return _solid_png()
+
+    monkeypatch.setattr(win, "_render_original_dynamic_spectrum_export_png", fake_dynamic_renderer)
+    monkeypatch.setattr(
+        win,
+        "_capture_max_intensity_fit_report_figure",
+        lambda _session: ProjectReportFigure(title="Maximum Intensity Fit", availability_note="Not available"),
+    )
+    monkeypatch.setattr(
+        win,
+        "_capture_type_ii_report_figure",
+        lambda _session: ProjectReportFigure(title="Type II Band Splitting", availability_note="Not available"),
+    )
+
+    figures = win._build_project_report_figures({})
+    isolated = next(figure for figure in figures if figure.title == "Burst Isolated Dynamic Spectrum")
+    isolated_data = render_calls["Isolated Burst"]
+
+    assert isolated.png_bytes.startswith(b"\x89PNG")
+    assert np.array_equal(render_calls["Background Subtracted"], win.noise_reduced_original)
+    assert np.array_equal(isolated_data[mask], win.noise_reduced_original[mask])
+    assert np.all(isolated_data[~mask] == 0.0)
+    win.close()
+
+
+def test_original_dynamic_spectrum_export_ignores_stale_default_view():
+    _app()
+    win = MainWindow(theme=None)
+    extent = (0.0, 1800.0, 15.0, 87.0)
+
+    stale = win._dynamic_spectrum_view_for_extent({"xlim": (0.0, 1.0), "ylim": (0.0, 1.0)}, extent)
+    valid = win._dynamic_spectrum_view_for_extent({"xlim": (100.0, 200.0), "ylim": (20.0, 60.0)}, extent)
+
+    assert stale is None
+    assert valid == {"xlim": (100.0, 200.0), "ylim": (20.0, 60.0)}
+    win.close()
+
+
+def test_original_dynamic_spectrum_export_renderer_produces_nonblack_png():
     pytest.importorskip("pyqtgraph")
     _app()
     win = MainWindow(theme=None)
@@ -170,12 +229,105 @@ def test_dynamic_spectrum_report_renderer_produces_nonblack_png():
         dtype=float,
     )
 
-    png = win._render_dynamic_spectrum_report_png(data, title="Raw Dynamic Spectrum")
+    png = win._render_original_dynamic_spectrum_export_png(data, plot_type="Raw")
     black_png = _solid_png("#000000")
 
     assert png.startswith(b"\x89PNG")
     assert win._png_is_blank_or_black(png) is False
     assert win._png_is_blank_or_black(black_png) is True
+    win.close()
+
+
+def test_original_dynamic_spectrum_export_renderer_uses_app_export_widget(monkeypatch):
+    pytest.importorskip("pyqtgraph")
+    import pyqtgraph.exporters as pg_exporters
+
+    _app()
+    win = MainWindow(theme=None)
+    win.filename = "demo.fit"
+    win.freqs = np.linspace(82.0, 45.0, 24)
+    win.time = np.linspace(0.0, 900.0, 36)
+    data = np.zeros((24, 36), dtype=float)
+    data[8:16, 12:24] = 10.0
+    monkeypatch.setattr(win, "_is_dark_ui", lambda: True)
+    monkeypatch.setattr(win, "_report_spectrum_export_geometry", lambda: (640, 360, 1800))
+
+    class FakeWidget:
+        is_available = True
+
+        def __init__(self):
+            self.dark = None
+            self.updated = None
+            self.overlays = None
+
+        def setAttribute(self, *_args):
+            pass
+
+        def resize(self, *_args):
+            pass
+
+        def set_dark(self, value):
+            self.dark = value
+
+        def set_time_mode(self, *_args):
+            pass
+
+        def set_navigation_locked(self, *_args):
+            pass
+
+        def set_text_style(self, **_kwargs):
+            pass
+
+        def update_image(self, data, **kwargs):
+            self.updated = {"data": np.asarray(data), **kwargs}
+
+        def set_goes_overlay(self, *_args, **_kwargs):
+            pass
+
+        def set_light_curve_overlays(self, overlays):
+            self.overlays = overlays
+
+        def show(self):
+            pass
+
+        def export_plot_item(self):
+            return object()
+
+        def close(self):
+            pass
+
+        def deleteLater(self):
+            pass
+
+    fake_widget = FakeWidget()
+
+    class FakeExporter:
+        def __init__(self, plot_item):
+            self.plot_item = plot_item
+            self.params = {}
+
+        def parameters(self):
+            return self.params
+
+        def export(self, *, toBytes=False):
+            assert toBytes is True
+            assert self.params["width"] == 1800
+            image = QImage(16, 16, QImage.Format_RGB32)
+            image.fill(QColor("#1f60c4"))
+            return image
+
+    monkeypatch.setattr(main_window_module, "AcceleratedPlotWidget", lambda: fake_widget)
+    monkeypatch.setattr(pg_exporters, "ImageExporter", FakeExporter)
+
+    png = win._render_original_dynamic_spectrum_export_png(data, plot_type="Raw")
+
+    assert png.startswith(b"\x89PNG")
+    assert fake_widget.dark is True
+    assert fake_widget.updated["title"] == "demo.fit-Raw"
+    assert fake_widget.updated["x_label"] == "Time [s]"
+    assert fake_widget.updated["y_label"] == "Frequency [MHz]"
+    assert fake_widget.updated["colorbar_label"] == "Intensity [Digits]"
+    assert np.array_equal(fake_widget.updated["data"], data.astype(np.float32))
     win.close()
 
 
