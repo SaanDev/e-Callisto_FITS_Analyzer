@@ -238,6 +238,27 @@ def test_original_dynamic_spectrum_export_renderer_produces_nonblack_png():
     win.close()
 
 
+def test_original_dynamic_spectrum_export_renderer_preserves_mid_spectrum_content():
+    pytest.importorskip("pyqtgraph")
+    _app()
+    win = MainWindow(theme=None)
+    win.freqs = np.linspace(90.0, 20.0, 64)
+    win.time = np.linspace(0.0, 1800.0, 240)
+    data = np.zeros((64, 240), dtype=float)
+    data[18:46, 110:175] = np.linspace(5.0, 60.0, 65)[None, :]
+
+    png = win._render_original_dynamic_spectrum_export_png(data, plot_type="Raw")
+
+    image = QImage()
+    assert image.loadFromData(png, "PNG")
+    rgba = win._qimage_to_rgba_array(image.convertToFormat(QImage.Format_RGBA8888))
+    h, w = rgba.shape[:2]
+    center = rgba[int(h * 0.25):int(h * 0.75), int(w * 0.25):int(w * 0.75), :3]
+    assert float(np.std(center)) > 10.0
+    assert int(np.max(center)) - int(np.min(center)) > 50
+    win.close()
+
+
 def test_original_dynamic_spectrum_export_renderer_uses_app_export_widget(monkeypatch):
     pytest.importorskip("pyqtgraph")
     import pyqtgraph.exporters as pg_exporters
@@ -316,7 +337,7 @@ def test_original_dynamic_spectrum_export_renderer_uses_app_export_widget(monkey
             image.fill(QColor("#1f60c4"))
             return image
 
-    monkeypatch.setattr(main_window_module, "AcceleratedPlotWidget", lambda: fake_widget)
+    monkeypatch.setattr(main_window_module, "AcceleratedPlotWidget", lambda **_kwargs: fake_widget)
     monkeypatch.setattr(pg_exporters, "ImageExporter", FakeExporter)
 
     png = win._render_original_dynamic_spectrum_export_png(data, plot_type="Raw")
@@ -327,7 +348,23 @@ def test_original_dynamic_spectrum_export_renderer_uses_app_export_widget(monkey
     assert fake_widget.updated["x_label"] == "Time [s]"
     assert fake_widget.updated["y_label"] == "Frequency [MHz]"
     assert fake_widget.updated["colorbar_label"] == "Intensity [Digits]"
+    assert fake_widget.updated["levels"] == (0.0, 10.0)
     assert np.array_equal(fake_widget.updated["data"], data.astype(np.float32))
+    win.close()
+
+
+def test_report_dynamic_spectrum_levels_clip_display_outliers():
+    _app()
+    win = MainWindow(theme=None)
+    data = np.full((20, 50), 100.0, dtype=float)
+    data[6:14, 16:34] = 140.0
+    data[0, 0] = 1000.0
+
+    levels = win._report_levels_for_spectrum_data(data, data)
+
+    assert levels is not None
+    assert levels[0] <= 100.0
+    assert 120.0 <= levels[1] < 1000.0
     win.close()
 
 

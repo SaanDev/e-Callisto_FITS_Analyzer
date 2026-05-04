@@ -179,7 +179,7 @@ class AcceleratedPlotWidget(QWidget):
     viewInteractionFinished = Signal(dict, dict)
     rectZoomFinished = Signal(dict, dict)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, use_opengl: bool = True):
         super().__init__(parent)
         self._available = pg is not None
 
@@ -256,7 +256,7 @@ class AcceleratedPlotWidget(QWidget):
             return
 
         try:
-            pg.setConfigOptions(useOpenGL=True, antialias=False, imageAxisOrder="row-major")
+            pg.setConfigOptions(useOpenGL=bool(use_opengl), antialias=False, imageAxisOrder="row-major")
         except Exception:
             pass
 
@@ -1059,6 +1059,7 @@ class AcceleratedPlotWidget(QWidget):
         extent,
         cmap,
         gap_row_mask: np.ndarray | None = None,
+        levels: tuple[float, float] | None = None,
         title: str = "",
         x_label: str = "Time [s]",
         y_label: str = "Frequency [MHz]",
@@ -1075,15 +1076,24 @@ class AcceleratedPlotWidget(QWidget):
         arr = np.ascontiguousarray(arr, dtype=np.float32)
 
         x0, x1, y0, y1 = (float(extent[0]), float(extent[1]), float(extent[2]), float(extent[3]))
-        self._image.setRect(QRectF(x0, y0, x1 - x0, y1 - y0))
+        image_rect = QRectF(x0, y0, x1 - x0, y1 - y0)
+        self._image.setRect(image_rect)
         self._full_view = {
             "xlim": (min(x0, x1), max(x0, x1)),
             "ylim": (min(y0, y1), max(y0, y1)),
         }
 
         vmin, vmax = finite_data_limits(arr)
+        if levels is not None:
+            try:
+                level_min, level_max = float(levels[0]), float(levels[1])
+                if np.isfinite(level_min) and np.isfinite(level_max) and level_max > level_min:
+                    vmin, vmax = level_min, level_max
+            except Exception:
+                pass
         row_mask = invalid_row_mask(arr, gap_row_mask)
         has_invalid = bool(np.any(row_mask) or np.any(~np.isfinite(arr)))
+        color_map, lut = _mpl_cmap_to_lookup(cmap)
 
         if vmin is None or vmax is None:
             self._image.clear()
@@ -1095,8 +1105,20 @@ class AcceleratedPlotWidget(QWidget):
                 pass
             self._image.setImage(rgba, autoLevels=False)
         else:
-            self._image.setImage(arr, autoLevels=False)
-            self._image.setLevels((vmin, vmax))
+            if lut is not None:
+                self._image.setLookupTable(lut, update=False)
+            try:
+                self._image.setImage(arr, autoLevels=False, levels=(vmin, vmax))
+            except TypeError:
+                self._image.setImage(arr, autoLevels=False)
+                self._image.setLevels((vmin, vmax))
+            else:
+                self._image.setLevels((vmin, vmax))
+
+        try:
+            self._image.setRect(image_rect)
+        except Exception:
+            pass
 
         if vmin is not None and vmax is not None and self._color_bar is not None:
             try:
@@ -1104,10 +1126,7 @@ class AcceleratedPlotWidget(QWidget):
             except Exception:
                 pass
 
-        color_map, lut = _mpl_cmap_to_lookup(cmap)
-        if lut is not None and not has_invalid:
-            self._image.setLookupTable(lut, update=False)
-        elif has_invalid:
+        if has_invalid:
             try:
                 self._image.setLookupTable(None, update=False)
             except Exception:

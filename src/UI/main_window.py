@@ -9164,6 +9164,125 @@ class MainWindow(QMainWindow):
             pass
         return None
 
+    @staticmethod
+    def _valid_report_display_levels(levels, display_data=None) -> tuple[float, float] | None:
+        if levels is None:
+            return None
+        try:
+            low, high = float(levels[0]), float(levels[1])
+        except Exception:
+            return None
+        if not (math.isfinite(low) and math.isfinite(high)) or high <= low:
+            return None
+        if display_data is None:
+            return low, high
+
+        try:
+            data_min, data_max = finite_data_limits(np.asarray(display_data, dtype=float))
+        except Exception:
+            return low, high
+        if data_min is None or data_max is None:
+            return low, high
+        try:
+            data_min = float(data_min)
+            data_max = float(data_max)
+        except Exception:
+            return low, high
+        if not (math.isfinite(data_min) and math.isfinite(data_max)) or data_max <= data_min:
+            return low, high
+
+        overlap = min(high, data_max) - max(low, data_min)
+        if overlap <= 0.0:
+            return None
+        data_span = data_max - data_min
+        if (high - low) < max(data_span * 0.005, 1e-9):
+            return None
+        return low, high
+
+    @staticmethod
+    def _robust_report_display_levels(display_data) -> tuple[float, float] | None:
+        try:
+            arr = np.asarray(display_data, dtype=float)
+            finite = arr[np.isfinite(arr)]
+        except Exception:
+            return None
+        if finite.size == 0:
+            return None
+
+        data_min = float(np.nanmin(finite))
+        data_max = float(np.nanmax(finite))
+        if not (math.isfinite(data_min) and math.isfinite(data_max)) or data_max <= data_min:
+            return None
+
+        full_span = data_max - data_min
+        for low_pct, high_pct in ((2.0, 99.5), (1.0, 99.9), (0.0, 100.0)):
+            try:
+                low, high = np.nanpercentile(finite, [low_pct, high_pct])
+                low = float(low)
+                high = float(high)
+            except Exception:
+                continue
+            if not (math.isfinite(low) and math.isfinite(high)) or high <= low:
+                continue
+            if (high - low) < max(full_span * 0.002, 1e-9) and high_pct < 100.0:
+                continue
+            return low, high
+        return data_min, data_max
+
+    @staticmethod
+    def _report_arrays_match(first, second) -> bool:
+        if first is None or second is None:
+            return False
+        try:
+            a = np.asarray(first)
+            b = np.asarray(second)
+        except Exception:
+            return False
+        if a.shape != b.shape:
+            return False
+        try:
+            return bool(np.array_equal(a, b, equal_nan=True))
+        except TypeError:
+            try:
+                return bool(np.array_equal(a, b))
+            except Exception:
+                return False
+
+    def _current_dynamic_spectrum_levels(self) -> tuple[float, float] | None:
+        accel = getattr(self, "accel_canvas", None)
+        if accel is not None and bool(getattr(accel, "is_available", False)):
+            image_item = getattr(accel, "_image", None)
+            if image_item is not None:
+                for getter in ("getLevels",):
+                    try:
+                        levels = getattr(image_item, getter)()
+                        valid = self._valid_report_display_levels(levels)
+                        if valid is not None:
+                            return valid
+                    except Exception:
+                        pass
+
+        ax = getattr(getattr(self, "canvas", None), "ax", None)
+        try:
+            images = list(getattr(ax, "images", []) or [])
+            if images:
+                return self._valid_report_display_levels(images[-1].get_clim())
+        except Exception:
+            pass
+        return None
+
+    def _current_levels_for_report_data(self, data, display_data) -> tuple[float, float] | None:
+        source = self._current_dynamic_spectrum_source_data()
+        if not self._report_arrays_match(source, data):
+            return None
+        return self._valid_report_display_levels(self._current_dynamic_spectrum_levels(), display_data)
+
+    def _report_levels_for_spectrum_data(self, data, display_data) -> tuple[float, float] | None:
+        current_levels = self._current_levels_for_report_data(data, display_data)
+        if current_levels is not None:
+            return current_levels
+        return self._robust_report_display_levels(display_data)
+
     def _render_original_dynamic_spectrum_export_png(
         self,
         data,
@@ -9197,7 +9316,11 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         try:
-            widget = AcceleratedPlotWidget()
+            try:
+                pg.setConfigOptions(useOpenGL=False, antialias=False, imageAxisOrder="row-major")
+            except Exception:
+                pass
+            widget = AcceleratedPlotWidget(use_opengl=False)
             if not bool(getattr(widget, "is_available", False)):
                 return b""
 
@@ -9209,6 +9332,7 @@ class MainWindow(QMainWindow):
             widget.set_navigation_locked(bool(getattr(self, "nav_locked", False)))
 
             display_data = np.asarray(self._intensity_for_display(arr), dtype=np.float32)
+            display_levels = self._report_levels_for_spectrum_data(arr, display_data)
             extent = pyqtgraph_extent(freqs, time, default_step=self._frequency_step_mhz)
             export_view = self._dynamic_spectrum_view_for_extent(view, extent)
             normalized_plot_type = self._normalize_plot_type(plot_type)
@@ -9249,6 +9373,7 @@ class MainWindow(QMainWindow):
                 extent=extent,
                 cmap=self.get_current_cmap(),
                 gap_row_mask=self._current_gap_row_mask(),
+                levels=display_levels,
                 title=plot_title,
                 x_label=x_label,
                 y_label=y_label,

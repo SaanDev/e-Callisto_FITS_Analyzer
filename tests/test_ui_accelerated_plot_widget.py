@@ -77,6 +77,62 @@ def test_accelerated_widget_update_image_no_crash():
     )
 
 
+def test_accelerated_widget_update_image_accepts_explicit_levels():
+    _app()
+    widget = AcceleratedPlotWidget()
+    if not widget.is_available:
+        pytest.skip("pyqtgraph not available in test environment")
+
+    class _DummyCmap:
+        def __call__(self, x):
+            arr = np.asarray(x, dtype=float)
+            rgba = np.zeros((arr.size, 4), dtype=float)
+            rgba[:, 0] = arr
+            rgba[:, 1] = 1.0 - arr
+            rgba[:, 2] = 0.5
+            rgba[:, 3] = 1.0
+            return rgba
+
+    widget.update_image(
+        np.array([[0.0, 10.0], [20.0, 1000.0]], dtype=np.float32),
+        extent=[0.0, 10.0, 20.0, 80.0],
+        cmap=_DummyCmap(),
+        levels=(0.0, 20.0),
+    )
+
+    assert tuple(float(v) for v in widget._image.getLevels()) == (0.0, 20.0)
+    widget.close()
+
+
+def test_accelerated_widget_update_image_keeps_extent_after_set_image():
+    _app()
+    widget = AcceleratedPlotWidget()
+    if not widget.is_available:
+        pytest.skip("pyqtgraph not available in test environment")
+
+    class _DummyCmap:
+        def __call__(self, x):
+            arr = np.asarray(x, dtype=float)
+            rgba = np.zeros((arr.size, 4), dtype=float)
+            rgba[:, 0] = arr
+            rgba[:, 1] = 1.0 - arr
+            rgba[:, 2] = 0.5
+            rgba[:, 3] = 1.0
+            return rgba
+
+    widget.update_image(
+        np.zeros((200, 7200), dtype=np.float32),
+        extent=[0.0, 1800.0, 15.0, 87.0],
+        cmap=_DummyCmap(),
+        levels=(0.0, 1.0),
+    )
+
+    mapped = widget._image.mapRectToParent(widget._image.boundingRect())
+    assert mapped.width() == pytest.approx(1800.0)
+    assert mapped.height() == pytest.approx(72.0)
+    widget.close()
+
+
 def test_accelerated_widget_left_drag_pans_plot():
     _app()
     widget = AcceleratedPlotWidget()
