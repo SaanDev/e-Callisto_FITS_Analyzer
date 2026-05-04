@@ -9083,11 +9083,35 @@ class MainWindow(QMainWindow):
             return original
         return getattr(self, "noise_reduced_data", None)
 
+    @staticmethod
+    def _data_matches_lasso_isolated_state(data, mask) -> bool:
+        if data is None or mask is None:
+            return False
+        try:
+            arr = np.asarray(data)
+            mask_arr = np.asarray(mask, dtype=bool)
+        except Exception:
+            return False
+        if arr.ndim != 2 or mask_arr.shape != arr.shape or not np.any(mask_arr):
+            return False
+
+        outside = np.asarray(arr[~mask_arr], dtype=float)
+        if outside.size == 0:
+            return False
+        finite_outside = outside[np.isfinite(outside)]
+        return bool(finite_outside.size == 0 or np.allclose(finite_outside, 0.0, atol=1e-7))
+
     def _burst_isolated_report_data(self):
         data = getattr(self, "noise_reduced_data", None)
         original = getattr(self, "noise_reduced_original", None)
         if data is None and original is None:
             return None
+
+        mask = self._report_lasso_mask(getattr(data, "shape", None) if data is not None else None)
+        if data is not None:
+            current_plot_type = self._normalize_plot_type(getattr(self, "current_plot_type", ""))
+            if current_plot_type == "Isolated Burst" or self._data_matches_lasso_isolated_state(data, mask):
+                return data
 
         base = original if original is not None else data
         try:
@@ -9277,7 +9301,21 @@ class MainWindow(QMainWindow):
             return None
         return self._valid_report_display_levels(self._current_dynamic_spectrum_levels(), display_data)
 
-    def _report_levels_for_spectrum_data(self, data, display_data) -> tuple[float, float] | None:
+    def _report_levels_for_spectrum_data(
+        self,
+        data,
+        display_data,
+        *,
+        plot_type: str | None = None,
+    ) -> tuple[float, float] | None:
+        if self._normalize_plot_type(plot_type) == "Isolated Burst":
+            try:
+                workflow_levels = finite_data_limits(np.asarray(display_data, dtype=float))
+            except Exception:
+                workflow_levels = None
+            valid = self._valid_report_display_levels(workflow_levels, display_data)
+            if valid is not None:
+                return valid
         current_levels = self._current_levels_for_report_data(data, display_data)
         if current_levels is not None:
             return current_levels
@@ -9332,10 +9370,14 @@ class MainWindow(QMainWindow):
             widget.set_navigation_locked(bool(getattr(self, "nav_locked", False)))
 
             display_data = np.asarray(self._intensity_for_display(arr), dtype=np.float32)
-            display_levels = self._report_levels_for_spectrum_data(arr, display_data)
             extent = pyqtgraph_extent(freqs, time, default_step=self._frequency_step_mhz)
             export_view = self._dynamic_spectrum_view_for_extent(view, extent)
             normalized_plot_type = self._normalize_plot_type(plot_type)
+            display_levels = self._report_levels_for_spectrum_data(
+                arr,
+                display_data,
+                plot_type=normalized_plot_type,
+            )
             if self.remove_titles:
                 plot_title = ""
                 x_label = ""

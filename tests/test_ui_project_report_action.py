@@ -199,6 +199,49 @@ def test_project_report_reconstructs_lasso_isolated_burst_when_title_changed(mon
     win.close()
 
 
+def test_project_report_uses_stored_isolated_burst_workflow_state(monkeypatch):
+    _app()
+    win = MainWindow(theme=None)
+    base = np.arange(24, dtype=float).reshape(4, 6)
+    mask = np.zeros_like(base, dtype=bool)
+    mask[1:3, 2:5] = True
+    stored_isolated = np.zeros_like(base, dtype=float)
+    stored_isolated[mask] = base[mask] + 25.0
+
+    win.raw_data = base + 100.0
+    win.noise_reduced_original = base + 10.0
+    win.noise_reduced_data = stored_isolated
+    win.lasso_mask = mask
+    win.current_plot_type = "Isolated Burst"
+    win.freqs = np.array([90.0, 84.0, 78.0, 72.0], dtype=float)
+    win.time = np.arange(6, dtype=float)
+    win.filename = "demo.fit"
+
+    render_calls = {}
+
+    def fake_dynamic_renderer(data, *, plot_type=None, overlays=None, view=None):
+        render_calls[plot_type] = np.asarray(data)
+        return _solid_png()
+
+    monkeypatch.setattr(win, "_render_original_dynamic_spectrum_export_png", fake_dynamic_renderer)
+    monkeypatch.setattr(
+        win,
+        "_capture_max_intensity_fit_report_figure",
+        lambda _session: ProjectReportFigure(title="Maximum Intensity Fit", availability_note="Not available"),
+    )
+    monkeypatch.setattr(
+        win,
+        "_capture_type_ii_report_figure",
+        lambda _session: ProjectReportFigure(title="Type II Band Splitting", availability_note="Not available"),
+    )
+
+    win._build_project_report_figures({})
+
+    assert np.array_equal(render_calls["Isolated Burst"], stored_isolated)
+    assert not np.array_equal(render_calls["Isolated Burst"][mask], win.noise_reduced_original[mask])
+    win.close()
+
+
 def test_original_dynamic_spectrum_export_ignores_stale_default_view():
     _app()
     win = MainWindow(theme=None)
@@ -365,6 +408,20 @@ def test_report_dynamic_spectrum_levels_clip_display_outliers():
     assert levels is not None
     assert levels[0] <= 100.0
     assert 120.0 <= levels[1] < 1000.0
+    win.close()
+
+
+def test_report_isolated_burst_levels_use_stored_isolated_data_limits():
+    _app()
+    win = MainWindow(theme=None)
+    win.noise_vmin = 0.0
+    win.noise_vmax = 64.0
+    data = np.zeros((20, 50), dtype=float)
+    data[6:14, 16:34] = 50.0
+
+    levels = win._report_levels_for_spectrum_data(data, data, plot_type="Isolated Burst")
+
+    assert levels == (0.0, 50.0)
     win.close()
 
 
