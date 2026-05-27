@@ -172,6 +172,28 @@ def finite_data_limits(data: np.ndarray) -> tuple[float, float] | tuple[None, No
     return vmin, vmax
 
 
+def percentile_data_limits(
+    data: np.ndarray,
+    lower_percentile: float = 5.0,
+    upper_percentile: float = 98.0,
+) -> tuple[float, float] | tuple[None, None]:
+    arr = np.asarray(data, dtype=float)
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return None, None
+
+    lo_pct = float(np.clip(lower_percentile, 0.0, 100.0))
+    hi_pct = float(np.clip(upper_percentile, 0.0, 100.0))
+    if lo_pct > hi_pct:
+        lo_pct, hi_pct = hi_pct, lo_pct
+
+    vmin = float(np.percentile(finite, lo_pct))
+    vmax = float(np.percentile(finite, hi_pct))
+    if vmax < vmin:
+        vmin, vmax = vmax, vmin
+    return vmin, vmax
+
+
 def masked_display_data(data: np.ndarray) -> np.ma.MaskedArray:
     return np.ma.masked_invalid(np.asarray(data, dtype=float))
 

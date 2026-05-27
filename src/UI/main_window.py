@@ -94,6 +94,7 @@ from src.Backend.frequency_axis import (
     invalid_row_mask,
     masked_display_data,
     matplotlib_extent,
+    percentile_data_limits,
     pyqtgraph_extent,
     transparent_bad_cmap,
 )
@@ -186,6 +187,9 @@ class MainWindow(QMainWindow):
     NOISE_SLIDER_MID = NOISE_SLIDER_MAX // 2
     NOISE_CLIP_SCALE_LINEAR = "linear"
     NOISE_CLIP_SCALE_SIGNED_LOG = "signed_log"
+    RAW_FITS_PRESET_NAME = "Raw FITS Percentile (5-98%)"
+    RAW_FITS_VMIN_PERCENTILE = 5.0
+    RAW_FITS_VMAX_PERCENTILE = 98.0
     HW_DEFAULT_TICK_FONT_PX = 14
     HW_DEFAULT_AXIS_FONT_PX = 16
     HW_DEFAULT_TITLE_FONT_PX = 22
@@ -283,6 +287,8 @@ class MainWindow(QMainWindow):
         self.noise_clip_low = 0.0
         self.noise_clip_high = 0.0
         self.noise_clip_scale = self.NOISE_CLIP_SCALE_LINEAR
+        self.noise_clip_min = self.NOISE_CLIP_MIN
+        self.noise_clip_max = self.NOISE_CLIP_MAX
         self.noise_vmin = None
         self.noise_vmax = None
 
@@ -1035,9 +1041,13 @@ class MainWindow(QMainWindow):
         ann_menu.addAction(self.ann_clear_action)
 
         presets_menu = processing_menu.addMenu("Presets")
+        self.preset_raw_fits_percentile_action = QAction(self.RAW_FITS_PRESET_NAME, self)
+        self.preset_raw_fits_percentile_action.setEnabled(False)
         self.preset_save_action = QAction("Save Current as Preset...", self)
         self.preset_apply_action = QAction("Apply Preset...", self)
         self.preset_delete_action = QAction("Delete Preset...", self)
+        presets_menu.addAction(self.preset_raw_fits_percentile_action)
+        presets_menu.addSeparator()
         presets_menu.addAction(self.preset_save_action)
         presets_menu.addAction(self.preset_apply_action)
         presets_menu.addAction(self.preset_delete_action)
@@ -1144,6 +1154,7 @@ class MainWindow(QMainWindow):
         self.ann_clear_action.triggered.connect(self.clear_annotations)
 
         self.preset_save_action.triggered.connect(self.save_current_preset)
+        self.preset_raw_fits_percentile_action.triggered.connect(self.apply_raw_fits_percentile_preset)
         self.preset_apply_action.triggered.connect(self.apply_saved_preset)
         self.preset_delete_action.triggered.connect(self.delete_saved_preset)
         self.max_auto_clean_isolated_action.toggled.connect(self.set_max_auto_clean_isolated_enabled)
@@ -1862,6 +1873,9 @@ class MainWindow(QMainWindow):
         if act is not None:
             act.setEnabled(has_redo)
         act = getattr(self, "reset_to_raw_action", None)
+        if act is not None:
+            act.setEnabled(has_file)
+        act = getattr(self, "preset_raw_fits_percentile_action", None)
         if act is not None:
             act.setEnabled(has_file)
 
@@ -3080,6 +3094,7 @@ class MainWindow(QMainWindow):
         self.ut_start_sec = ut_start_sec
 
         self._reset_runtime_state_for_loaded_data()
+        self._apply_raw_fits_percentile_preset(data=self.raw_data, reset_bounds=True)
         self.plot_data(self.raw_data, title=plot_title)
         if self._selected_goes_overlay_channels():
             QTimer.singleShot(0, lambda: self._ensure_goes_overlay_for_current_data(force=True))
@@ -3180,12 +3195,50 @@ class MainWindow(QMainWindow):
             )
             return None
 
+    def _noise_clip_bounds(self) -> tuple[float, float]:
+        try:
+            low = float(getattr(self, "noise_clip_min", self.NOISE_CLIP_MIN))
+            high = float(getattr(self, "noise_clip_max", self.NOISE_CLIP_MAX))
+        except Exception:
+            return float(self.NOISE_CLIP_MIN), float(self.NOISE_CLIP_MAX)
+        if not np.isfinite(low) or not np.isfinite(high) or high <= low:
+            return float(self.NOISE_CLIP_MIN), float(self.NOISE_CLIP_MAX)
+        return low, high
+
+    def _reset_noise_clip_bounds(self) -> None:
+        self.noise_clip_min = float(self.NOISE_CLIP_MIN)
+        self.noise_clip_max = float(self.NOISE_CLIP_MAX)
+
+    def _expand_noise_clip_bounds_for_values(self, *values) -> None:
+        finite_values = []
+        for value in values:
+            if value is None:
+                continue
+            try:
+                val = float(value)
+            except Exception:
+                continue
+            if np.isfinite(val):
+                finite_values.append(val)
+        if not finite_values:
+            return
+
+        cur_min, cur_max = self._noise_clip_bounds()
+        cur_abs = max(abs(cur_min), abs(cur_max), 1.0)
+        required_abs = max(abs(v) for v in finite_values)
+        if required_abs <= cur_abs:
+            return
+        max_abs = max(required_abs * 1.05, cur_abs)
+        self.noise_clip_min = -float(max_abs)
+        self.noise_clip_max = float(max_abs)
+
     def _clamp_noise_threshold(self, value) -> float:
         try:
             out = float(value)
         except Exception:
             out = 0.0
-        return float(max(self.NOISE_CLIP_MIN, min(self.NOISE_CLIP_MAX, out)))
+        clip_min, clip_max = self._noise_clip_bounds()
+        return float(max(clip_min, min(clip_max, out)))
 
     def _normalize_noise_clip_scale(self, scale) -> str:
         return (
@@ -3199,8 +3252,9 @@ class MainWindow(QMainWindow):
 
     def _noise_threshold_to_slider(self, value, scale: str | None = None) -> int:
         val = self._clamp_noise_threshold(value)
+        clip_min, clip_max = self._noise_clip_bounds()
         if self._noise_clip_scale_is_log(scale):
-            max_abs = max(abs(self.NOISE_CLIP_MIN), abs(self.NOISE_CLIP_MAX))
+            max_abs = max(abs(clip_min), abs(clip_max))
             if abs(val) <= 1e-12:
                 u = 0.0
             else:
@@ -3209,7 +3263,7 @@ class MainWindow(QMainWindow):
             pos = self.NOISE_SLIDER_MID + int(round(u * self.NOISE_SLIDER_MID))
             return int(max(self.NOISE_SLIDER_MIN, min(self.NOISE_SLIDER_MAX, pos)))
 
-        fraction = (val - self.NOISE_CLIP_MIN) / (self.NOISE_CLIP_MAX - self.NOISE_CLIP_MIN)
+        fraction = (val - clip_min) / (clip_max - clip_min)
         pos = self.NOISE_SLIDER_MIN + int(round(fraction * (self.NOISE_SLIDER_MAX - self.NOISE_SLIDER_MIN)))
         return int(max(self.NOISE_SLIDER_MIN, min(self.NOISE_SLIDER_MAX, pos)))
 
@@ -3220,15 +3274,17 @@ class MainWindow(QMainWindow):
             raw = self.NOISE_SLIDER_MID
         raw = int(max(self.NOISE_SLIDER_MIN, min(self.NOISE_SLIDER_MAX, raw)))
 
+        clip_min, clip_max = self._noise_clip_bounds()
+
         if self._noise_clip_scale_is_log(scale):
             u = (raw - self.NOISE_SLIDER_MID) / float(self.NOISE_SLIDER_MID)
             u = max(-1.0, min(1.0, float(u)))
-            max_abs = max(abs(self.NOISE_CLIP_MIN), abs(self.NOISE_CLIP_MAX))
+            max_abs = max(abs(clip_min), abs(clip_max))
             magnitude = (10.0 ** (abs(u) * math.log10(1.0 + float(max_abs)))) - 1.0
             return self._clamp_noise_threshold(math.copysign(magnitude, u))
 
         fraction = (raw - self.NOISE_SLIDER_MIN) / float(self.NOISE_SLIDER_MAX - self.NOISE_SLIDER_MIN)
-        value = self.NOISE_CLIP_MIN + (fraction * (self.NOISE_CLIP_MAX - self.NOISE_CLIP_MIN))
+        value = clip_min + (fraction * (clip_max - clip_min))
         return self._clamp_noise_threshold(value)
 
     def _legacy_noise_threshold_value(self, value) -> int:
@@ -3238,6 +3294,7 @@ class MainWindow(QMainWindow):
         return abs(float(self.noise_clip_low)) > 1e-9 or abs(float(self.noise_clip_high)) > 1e-9
 
     def _reset_noise_controls_to_defaults(self) -> None:
+        self._reset_noise_clip_bounds()
         self._set_noise_clip_state(0.0, 0.0, scale=self.NOISE_CLIP_SCALE_LINEAR, sync_widgets=True)
 
     def _set_noise_scale_checkbox(self, scale: str | None = None) -> None:
@@ -3270,6 +3327,7 @@ class MainWindow(QMainWindow):
         scale: str | None = None,
         sync_widgets: bool = True,
     ) -> None:
+        self._expand_noise_clip_bounds_for_values(low, high)
         low_val = self.noise_clip_low if low is None else self._clamp_noise_threshold(low)
         high_val = self.noise_clip_high if high is None else self._clamp_noise_threshold(high)
         if low_val > high_val:
@@ -3290,11 +3348,81 @@ class MainWindow(QMainWindow):
         low = source.get("noise_clip_low", source.get("lower_slider", default_low))
         high = source.get("noise_clip_high", source.get("upper_slider", default_high))
         scale = source.get("noise_clip_scale", default_scale if default_scale is not None else self.noise_clip_scale)
+        self._expand_noise_clip_bounds_for_values(low, high)
         low_val = self._clamp_noise_threshold(low)
         high_val = self._clamp_noise_threshold(high)
         if low_val > high_val:
             low_val, high_val = high_val, low_val
         return float(low_val), float(high_val), self._normalize_noise_clip_scale(scale)
+
+    def _raw_fits_percentile_thresholds(self, data=None) -> tuple[float, float] | tuple[None, None]:
+        source = self.raw_data if data is None else data
+        if source is None:
+            return None, None
+        return percentile_data_limits(
+            source,
+            self.RAW_FITS_VMIN_PERCENTILE,
+            self.RAW_FITS_VMAX_PERCENTILE,
+        )
+
+    def _apply_raw_fits_percentile_preset(
+        self,
+        *,
+        data=None,
+        announce: bool = False,
+        push_undo: bool = False,
+        mark_dirty: bool = False,
+        replot: bool = False,
+        reset_bounds: bool = False,
+    ) -> bool:
+        low, high = self._raw_fits_percentile_thresholds(data)
+        if low is None or high is None:
+            if announce:
+                QMessageBox.warning(
+                    self,
+                    "Raw FITS Percentile Preset",
+                    "The loaded raw FITS data do not contain finite intensity values.",
+                )
+            return False
+
+        if push_undo and self.raw_data is not None:
+            self._push_undo_state()
+
+        if reset_bounds:
+            self._reset_noise_clip_bounds()
+        self._set_noise_clip_state(low, high, scale=self.noise_clip_scale, sync_widgets=True)
+        try:
+            self._active_preset_snapshot = build_preset(self.RAW_FITS_PRESET_NAME, self._preset_settings_payload())
+        except Exception:
+            self._active_preset_snapshot = None
+
+        if replot and self.raw_data is not None:
+            plot_data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
+            self.plot_data(plot_data, title=self.current_plot_type, keep_view=True)
+
+        if mark_dirty:
+            self._mark_project_dirty()
+        if announce:
+            self.statusBar().showMessage(
+                (
+                    f"Applied {self.RAW_FITS_PRESET_NAME}: "
+                    f"{low:.2f} to {high:.2f} Digits."
+                ),
+                4000,
+            )
+        return True
+
+    def apply_raw_fits_percentile_preset(self):
+        if self.raw_data is None:
+            QMessageBox.information(self, "Raw FITS Percentile Preset", "Load a FITS file first.")
+            return
+        self._apply_raw_fits_percentile_preset(
+            announce=True,
+            push_undo=True,
+            mark_dirty=True,
+            replot=True,
+            reset_bounds=True,
+        )
 
     def _noise_clip_display_values(self) -> tuple[float, float, str]:
         low = float(self.noise_clip_low)

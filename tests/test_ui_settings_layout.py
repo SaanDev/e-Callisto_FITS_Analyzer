@@ -124,6 +124,35 @@ def test_sidebar_colormap_dropdown_includes_bone_r():
     win.close()
 
 
+def test_loaded_raw_fits_initializes_percentile_preset():
+    _app()
+    win = MainWindow(theme=None)
+    data = np.arange(200, dtype=float).reshape(10, 20)
+
+    win._apply_loaded_dataset(
+        data=data,
+        freqs=np.linspace(300.0, 210.0, data.shape[0]),
+        time=np.arange(data.shape[1], dtype=float),
+        filename="raw.fit",
+        header0=None,
+        source_path=None,
+        ut_start_sec=0.0,
+        plot_title="Raw",
+    )
+    QApplication.processEvents()
+
+    expected_low = float(np.percentile(data, MainWindow.RAW_FITS_VMIN_PERCENTILE))
+    expected_high = float(np.percentile(data, MainWindow.RAW_FITS_VMAX_PERCENTILE))
+    assert win.noise_clip_low == pytest.approx(expected_low)
+    assert win.noise_clip_high == pytest.approx(expected_high)
+    assert win.lower_slider.value() == win._noise_threshold_to_slider(expected_low)
+    assert win.upper_slider.value() == win._noise_threshold_to_slider(expected_high)
+    assert win.preset_raw_fits_percentile_action.isEnabled() is True
+    assert win._active_preset_snapshot["name"] == MainWindow.RAW_FITS_PRESET_NAME
+
+    win.close()
+
+
 def test_apply_preset_updates_restored_sidebar_controls():
     _app()
     win = MainWindow(theme=None)

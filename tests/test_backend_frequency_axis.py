@@ -14,6 +14,7 @@ from src.Backend.frequency_axis import (
     invalid_row_mask,
     masked_display_data,
     matplotlib_extent,
+    percentile_data_limits,
     pyqtgraph_extent,
 )
 
@@ -87,3 +88,19 @@ def test_masked_display_data_and_limits_ignore_gap_rows():
     assert masked.mask[1, 1]
     assert vmin == 10.0
     assert vmax == 21.0
+
+
+def test_percentile_data_limits_ignore_non_finite_values():
+    data = np.array(
+        [
+            [0.0, 10.0, np.nan],
+            [20.0, np.inf, 30.0],
+        ],
+        dtype=float,
+    )
+
+    vmin, vmax = percentile_data_limits(data, 5.0, 98.0)
+
+    finite = np.array([0.0, 10.0, 20.0, 30.0], dtype=float)
+    assert vmin == np.percentile(finite, 5.0)
+    assert vmax == np.percentile(finite, 98.0)

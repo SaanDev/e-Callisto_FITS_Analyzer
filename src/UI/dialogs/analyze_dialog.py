@@ -529,6 +529,7 @@ class AnalyzeDialog(QDialog):
         start_freq = np.percentile(freq_values, percentile)
         if self.harmonic:
             start_freq = start_freq / 2
+            drift_vals = drift_vals / 2
 
         idx = np.abs(freq_values - start_freq).argmin()
         f0 = freq_values[idx]

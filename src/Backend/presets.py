@@ -13,6 +13,8 @@ from typing import Any, Iterable
 
 
 PRESET_SCHEMA_VERSION = 1
+PRESET_NOISE_CLIP_MIN = -1_000_000.0
+PRESET_NOISE_CLIP_MAX = 1_000_000.0
 
 
 def _now_iso() -> str:
@@ -43,7 +45,7 @@ def _normalize_noise_clip_scale(value: Any) -> str:
 
 def _clamp_noise_threshold(value: Any, default: float = 0.0) -> float:
     out = _safe_float(value, default)
-    return float(max(-100.0, min(100.0, out)))
+    return float(max(PRESET_NOISE_CLIP_MIN, min(PRESET_NOISE_CLIP_MAX, out)))
 
 
 def normalize_preset(raw: dict[str, Any]) -> dict[str, Any]:
