@@ -40,6 +40,14 @@ def test_normalize_session_valid_payload():
                     "observed_avg_drift_mhz_s": -0.28,
                     "observed_start_freq_mhz": 170.0,
                 },
+                "start_selection": {
+                    "rect": [710.0, 735.0, 98.0, 103.0],
+                    "start_freq_mhz": 50.0,
+                    "observed_start_freq_mhz": 100.0,
+                    "start_freq_err_mhz": 0.25,
+                    "point_count": 9,
+                    "source": "points",
+                },
             },
             "ui": {"restore_max_window": True, "restore_analyzer_window": True},
         }
@@ -60,6 +68,13 @@ def test_normalize_session_valid_payload():
     assert shock["observed_avg_freq_mhz"] == 150.0
     assert shock["observed_avg_drift_mhz_s"] == -0.28
     assert shock["observed_start_freq_mhz"] == 170.0
+    start_selection = session["analyzer"]["start_selection"]
+    assert start_selection["rect"] == [710.0, 735.0, 98.0, 103.0]
+    assert start_selection["start_freq_mhz"] == 50.0
+    assert start_selection["observed_start_freq_mhz"] == 100.0
+    assert start_selection["start_freq_err_mhz"] == 0.25
+    assert start_selection["point_count"] == 9
+    assert start_selection["source"] == "points"
 
 
 def test_from_legacy_max_intensity_migrates_payload():

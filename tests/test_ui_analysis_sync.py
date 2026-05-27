@@ -128,8 +128,9 @@ def test_analyze_dialog_harmonic_mode_uses_plasma_frequency_for_shock_parameters
     dlg.plot_fit()
 
     shock = dict(dlg.session_state()["analyzer"]["shock_summary"])
-    plasma_freqs = observed_harmonic_freqs / 2.0
-    plasma_drifts = -50.0 * np.power(time_s, -1.5)
+    calc_time = np.linspace(float(time_s.min()), float(time_s.max()), 400)
+    plasma_freqs = 100.0 * np.power(calc_time, -0.5)
+    plasma_drifts = -50.0 * np.power(calc_time, -1.5)
     denom = 3.385
     expected_speed = (13853221.38 * np.abs(plasma_drifts)) / (
         plasma_freqs * (np.log(plasma_freqs ** 2 / denom) ** 2)
@@ -141,7 +142,7 @@ def test_analyze_dialog_harmonic_mode_uses_plasma_frequency_for_shock_parameters
     assert shock["harmonic"] is True
     assert shock["fundamental"] is False
     assert shock["harmonic_number"] == 2
-    assert shock["avg_freq_mhz"] == pytest.approx(float(np.mean(plasma_freqs)), rel=1e-5)
+    assert shock["avg_freq_mhz"] == pytest.approx(float(np.mean(observed_harmonic_freqs / 2.0)), rel=1e-5)
     assert shock["avg_drift_mhz_s"] == pytest.approx(float(np.mean(plasma_drifts)), rel=1e-5)
     assert shock["start_freq_mhz"] == pytest.approx(start_freq, rel=1e-5)
     assert shock["initial_shock_speed_km_s"] == pytest.approx(float(expected_speed[start_idx]), rel=1e-5)
@@ -149,6 +150,73 @@ def test_analyze_dialog_harmonic_mode_uses_plasma_frequency_for_shock_parameters
     assert shock["avg_shock_speed_km_s"] == pytest.approx(float(np.mean(expected_speed)), rel=1e-5)
     assert shock["avg_shock_height_rs"] == pytest.approx(float(np.mean(expected_height)), rel=1e-5)
     assert shock["observed_avg_freq_mhz"] == pytest.approx(float(np.mean(observed_harmonic_freqs)), rel=1e-5)
+
+    dlg.close()
+
+
+def test_analyze_dialog_manual_start_rectangle_overrides_auto_start_frequency():
+    _app()
+    time_s = np.arange(1.0, 8.0, dtype=float)
+    observed_harmonic_freqs = 200.0 * np.power(time_s, -0.5)
+
+    dlg = AnalyzeDialog(
+        time_s,
+        observed_harmonic_freqs,
+        "demo.fit",
+        fundamental=False,
+        harmonic=True,
+        time_seconds=time_s,
+    )
+    dlg.plot_fit()
+    auto_start = dict(dlg.session_state()["analyzer"]["shock_summary"])["start_freq_mhz"]
+
+    selection = dlg._start_selection_from_rect(0.8, 1.2, 190.0, 210.0)
+    assert selection is not None
+    assert selection["observed_start_freq_mhz"] == pytest.approx(200.0)
+    assert selection["start_freq_mhz"] == pytest.approx(100.0)
+
+    dlg._manual_start_selection = selection
+    dlg._update_shock_parameters(dlg._selected_fold())
+
+    state = dlg.session_state()
+    shock = dict(state["analyzer"]["shock_summary"])
+    saved_selection = dict(state["analyzer"]["start_selection"])
+
+    assert shock["start_freq_mhz"] == pytest.approx(100.0)
+    assert shock["start_freq_mhz"] != pytest.approx(auto_start)
+    assert saved_selection["start_freq_mhz"] == pytest.approx(100.0)
+    assert "manual rectangle" in dlg.start_freq_source_display.text()
+
+    dlg.close()
+
+
+def test_analyze_dialog_average_frequency_uses_points_while_shock_uses_fitted_backbone():
+    _app()
+    time_s = np.arange(1.0, 6.0, dtype=float)
+    scattered_freqs = np.array([100.0, 92.0, 20.0, 65.0, 110.0], dtype=float)
+
+    dlg = AnalyzeDialog(
+        time_s,
+        scattered_freqs,
+        "demo.fit",
+        fundamental=True,
+        harmonic=False,
+        time_seconds=time_s,
+    )
+    dlg.plot_fit(params=(100.0, 0.5), std_errs=np.array([0.0, 0.0], dtype=float))
+
+    shock = dict(dlg.session_state()["analyzer"]["shock_summary"])
+    calc_time = np.linspace(float(time_s.min()), float(time_s.max()), 400)
+    fitted_freqs = 100.0 * np.power(calc_time, -0.5)
+    fitted_drifts = -50.0 * np.power(calc_time, -1.5)
+    denom = 3.385
+    expected_speed = (13853221.38 * np.abs(fitted_drifts)) / (
+        fitted_freqs * (np.log(fitted_freqs ** 2 / denom) ** 2)
+    )
+
+    assert shock["avg_freq_mhz"] == pytest.approx(float(np.mean(scattered_freqs)))
+    assert shock["avg_freq_mhz"] != pytest.approx(float(np.mean(fitted_freqs)))
+    assert shock["avg_shock_speed_km_s"] == pytest.approx(float(np.mean(expected_speed)))
 
     dlg.close()
 

@@ -12,6 +12,8 @@ import re
 import sys
 
 import numpy as np
+from matplotlib.patches import Rectangle
+from matplotlib.widgets import RectangleSelector
 from openpyxl import Workbook, load_workbook
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -67,6 +69,9 @@ class AnalyzeDialog(QDialog):
         self._type_ii_state = None
         self._suppress_emit = False
         self._fit_mask = np.isfinite(self.time) & np.isfinite(self.freq)
+        self._manual_start_selection = None
+        self._start_selector = None
+        self._start_selection_patch = None
 
         # Canvas
         self.canvas = MplCanvas(self, width=8, height=5)
@@ -117,6 +122,20 @@ class AnalyzeDialog(QDialog):
         self.fold_calc_button.setEnabled(False)  # enable only after Best Fit
         self.fold_calc_button.clicked.connect(self.recalculate_shock_parameters)
 
+        self.start_select_button = QPushButton("Select Start Frequency")
+        self.start_select_button.setEnabled(False)
+        self.start_select_button.clicked.connect(self.begin_start_frequency_selection)
+
+        self.start_auto_button = QPushButton("Auto Start")
+        self.start_auto_button.setEnabled(False)
+        self.start_auto_button.clicked.connect(self.clear_start_frequency_selection)
+
+        self.start_row_widget = QWidget()
+        start_row_layout = QHBoxLayout(self.start_row_widget)
+        start_row_layout.setContentsMargins(0, 0, 0, 0)
+        start_row_layout.addWidget(self.start_select_button)
+        start_row_layout.addWidget(self.start_auto_button)
+
         # Put fold controls into a widget so it can live inside self.labels
         self.fold_row_widget = QWidget()
         fold_row_layout = QHBoxLayout(self.fold_row_widget)
@@ -143,17 +162,18 @@ class AnalyzeDialog(QDialog):
         self.avg_freq_display = QLabel("")
         self.drift_display = QLabel("")
         self.start_freq_display = QLabel("")
+        self.start_freq_source_display = QLabel("")
         self.initial_shock_speed_display = QLabel("")
         self.initial_shock_height_display = QLabel("")
         self.avg_shock_speed_display = QLabel("")
         self.avg_shock_height_display = QLabel("")
 
         self.labels = [
-            self.fold_row_widget,
+            self.fold_row_widget, self.start_row_widget,
             self.equation_label, self.equation_display,
             self.stats_header, self.r2_display, self.rmse_display,
             self.shock_header,
-            self.avg_freq_display, self.drift_display, self.start_freq_display,
+            self.avg_freq_display, self.drift_display, self.start_freq_display, self.start_freq_source_display,
             self.initial_shock_speed_display, self.initial_shock_height_display,
             self.avg_shock_speed_display, self.avg_shock_height_display,
             self.save_plot_button, self.save_data_button, self.existing_excel_checkbox,
@@ -269,6 +289,12 @@ class AnalyzeDialog(QDialog):
         self.start_freq_display.setText(
             f"Starting Frequency: <b>{_f(summary.get('start_freq_mhz'), 2)} ± {_f(summary.get('start_freq_err_mhz'), 2)}</b> MHz"
         )
+        source_text = ""
+        if isinstance(self._manual_start_selection, dict):
+            source_text = "Start source: manual rectangle"
+        elif summary:
+            source_text = "Start source: automatic"
+        self.start_freq_source_display.setText(source_text)
         self.initial_shock_speed_display.setText(
             f"Initial Shock Speed: <b>{_f(summary.get('initial_shock_speed_km_s'), 2)} ± {_f(summary.get('initial_shock_speed_err_km_s'), 2)}</b> km/s"
         )
@@ -290,8 +316,12 @@ class AnalyzeDialog(QDialog):
         self.canvas.ax.set_ylabel("Frequency (MHz)")
         self.canvas.ax.grid(True)
         self.canvas.draw()
+        self.current_plot_title = f"{self.filename}_Maximum_Intensity"
         self.equation_display.setText("")
         self.fold_calc_button.setEnabled(False)
+        self.start_select_button.setEnabled(False)
+        self.start_auto_button.setEnabled(bool(self._manual_start_selection))
+        self._deactivate_start_selector()
         self.status.showMessage("Max intensities plotted successfully!", 3000)
 
     def plot_fit(self, _checked=False, params=None, std_errs=None):
@@ -353,6 +383,7 @@ class AnalyzeDialog(QDialog):
         self.canvas.ax.grid(True)
         self.canvas.draw()
         self.current_plot_title = f"{self.filename}_Best_Fit"
+        self._draw_start_selection_patch()
 
         predicted = model_func(fit_time, a, b)
         r2 = r2_score(fit_freq, predicted)
@@ -375,20 +406,32 @@ class AnalyzeDialog(QDialog):
             self._fit_params = None
 
         drift_vals = drift_rate(fit_time, a, b)
+        shock_calc_time = time_fit
+        shock_calc_freq = freq_fit
+        shock_calc_drift_vals = drift_rate(shock_calc_time, a, b)
         residuals = fit_freq - predicted
         freq_err = np.std(residuals)
         b_err_denom = max(abs(float(b)), 1e-9)
         drift_errs = np.abs(drift_vals) * np.sqrt((std_errs[0] / a) ** 2 + (std_errs[1] / b_err_denom) ** 2)
+        shock_calc_drift_errs = np.abs(shock_calc_drift_vals) * np.sqrt(
+            (std_errs[0] / a) ** 2 + (std_errs[1] / b_err_denom) ** 2
+        )
 
         # Cache results so we can recompute shock params for different folds
         self._fit_time = fit_time
         self._fit_freq = fit_freq
         self._drift_vals = drift_vals
         self._drift_errs = drift_errs
+        self._shock_calc_time = shock_calc_time
+        self._shock_calc_freq = shock_calc_freq
+        self._shock_calc_drift_vals = shock_calc_drift_vals
+        self._shock_calc_drift_errs = shock_calc_drift_errs
         self.freq_err = freq_err
 
         # Enable fold recalculation now that Best Fit exists
         self.fold_calc_button.setEnabled(True)
+        self.start_select_button.setEnabled(True)
+        self.start_auto_button.setEnabled(True)
 
         # Compute and display shock parameters using selected fold-number
         self._update_shock_parameters(self._selected_fold())
@@ -418,6 +461,7 @@ class AnalyzeDialog(QDialog):
                 "fit_params": fit,
                 "fold": fold,
                 "shock_summary": shock,
+                "start_selection": dict(self._manual_start_selection or {}),
             },
             "type_ii": dict(self._type_ii_state or {}),
             "ui": {
@@ -435,6 +479,7 @@ class AnalyzeDialog(QDialog):
             type_ii = dict(state.get("type_ii") or {}) if isinstance(state, dict) else {}
             fit = analyzer.get("fit_params", None)
             shock = analyzer.get("shock_summary", None)
+            self._manual_start_selection = self._coerce_start_selection(analyzer.get("start_selection"))
 
             if max_block.get("time_channels") is not None and max_block.get("freqs") is not None:
                 try:
@@ -510,11 +555,213 @@ class AnalyzeDialog(QDialog):
         self.status.showMessage(f"Updated using Newkirk {n}-fold model.", 3000)
         self._emit_session_changed()
 
+    @staticmethod
+    def _coerce_start_selection(raw):
+        if not isinstance(raw, dict):
+            return None
+        try:
+            start_freq = float(raw.get("start_freq_mhz"))
+        except Exception:
+            return None
+        if not np.isfinite(start_freq) or start_freq <= 0.0:
+            return None
+        rect = raw.get("rect")
+        rect_values = []
+        if isinstance(rect, (list, tuple)) and len(rect) >= 4:
+            try:
+                rect_values = [float(v) for v in rect[:4]]
+            except Exception:
+                rect_values = []
+        observed_start_raw = raw.get("observed_start_freq_mhz")
+        try:
+            observed_start_freq = start_freq if observed_start_raw is None else float(observed_start_raw)
+        except Exception:
+            observed_start_freq = start_freq
+        out = {
+            "start_freq_mhz": start_freq,
+            "observed_start_freq_mhz": observed_start_freq,
+            "start_freq_err_mhz": float(raw.get("start_freq_err_mhz", 0.0) or 0.0),
+            "point_count": int(raw.get("point_count", 0) or 0),
+            "source": str(raw.get("source") or "manual_rectangle"),
+        }
+        if len(rect_values) == 4 and all(np.isfinite(rect_values)):
+            out["rect"] = rect_values
+        return out
+
+    def begin_start_frequency_selection(self):
+        if not hasattr(self, "_shock_calc_freq") or not hasattr(self, "_shock_calc_time"):
+            QMessageBox.information(self, "Analyzer", "Please click 'Best Fit' before selecting a start frequency.")
+            return
+        if not self._ensure_best_fit_plot():
+            QMessageBox.information(self, "Analyzer", "Please click 'Best Fit' before selecting a start frequency.")
+            return
+        self._deactivate_start_selector()
+        selector_kwargs = {
+            "useblit": True,
+            "button": [1],
+            "minspanx": 0,
+            "minspany": 0,
+            "spancoords": "data",
+            "interactive": True,
+        }
+        try:
+            self._start_selector = RectangleSelector(
+                self.canvas.ax,
+                self._on_start_frequency_rectangle,
+                props={"facecolor": "none", "edgecolor": "lime", "linewidth": 1.4, "linestyle": "--"},
+                **selector_kwargs,
+            )
+        except TypeError:
+            self._start_selector = RectangleSelector(
+                self.canvas.ax,
+                self._on_start_frequency_rectangle,
+                rectprops={"facecolor": "none", "edgecolor": "lime", "linewidth": 1.4, "linestyle": "--"},
+                **selector_kwargs,
+            )
+        self.status.showMessage("Draw a rectangle around the start-frequency region.", 0)
+
+    def _deactivate_start_selector(self):
+        selector = getattr(self, "_start_selector", None)
+        if selector is not None:
+            try:
+                selector.set_active(False)
+            except Exception:
+                pass
+            try:
+                selector.disconnect_events()
+            except Exception:
+                pass
+        self._start_selector = None
+
+    def _ensure_best_fit_plot(self):
+        expected_title = f"{self.filename}_Best_Fit"
+        if getattr(self, "current_plot_title", "") == expected_title:
+            return True
+        fit = dict(getattr(self, "_fit_params", None) or {})
+        if "a" not in fit or "b" not in fit:
+            return False
+        std_errs = fit.get("std_errs", [np.nan, np.nan])
+        try:
+            std_errs_arr = np.array([float(std_errs[0]), float(std_errs[1])], dtype=float)
+        except Exception:
+            std_errs_arr = np.array([np.nan, np.nan], dtype=float)
+        self.plot_fit(params=(float(fit["a"]), float(fit["b"])), std_errs=std_errs_arr)
+        return True
+
+    def clear_start_frequency_selection(self):
+        self._manual_start_selection = None
+        self._remove_start_selection_patch()
+        if hasattr(self, "_drift_vals") and hasattr(self, "_drift_errs"):
+            self._update_shock_parameters(self._selected_fold())
+            self.status.showMessage("Starting frequency returned to automatic selection.", 3000)
+            self._emit_session_changed()
+        else:
+            self.start_freq_source_display.setText("")
+            self.status.showMessage("Starting frequency selection cleared.", 3000)
+
+    def _on_start_frequency_rectangle(self, eclick, erelease):
+        if eclick.xdata is None or eclick.ydata is None or erelease.xdata is None or erelease.ydata is None:
+            self.status.showMessage("Start-frequency selection must stay inside the plot.", 3500)
+            return
+        selection = self._start_selection_from_rect(eclick.xdata, erelease.xdata, eclick.ydata, erelease.ydata)
+        if selection is None:
+            self.status.showMessage("No start-frequency samples found inside the rectangle.", 3500)
+            return
+        self._manual_start_selection = selection
+        self._deactivate_start_selector()
+        self._draw_start_selection_patch()
+        self._update_shock_parameters(self._selected_fold())
+        self.status.showMessage(f"Manual starting frequency set to {selection['start_freq_mhz']:.3f} MHz.", 4000)
+        self._emit_session_changed()
+
+    def _start_selection_from_rect(self, x0, x1, y0, y1):
+        x_low, x_high = sorted((float(x0), float(x1)))
+        y_low, y_high = sorted((float(y0), float(y1)))
+        if not all(np.isfinite(v) for v in (x_low, x_high, y_low, y_high)):
+            return None
+        if abs(x_high - x_low) < 1e-12 or abs(y_high - y_low) < 1e-12:
+            return None
+
+        harmonic_number = 2.0 if self.harmonic else 1.0
+        raw_time = np.asarray(self.time, dtype=float).reshape(-1)
+        raw_freq = np.asarray(self.freq, dtype=float).reshape(-1)
+        raw_mask = (
+            np.isfinite(raw_time) & np.isfinite(raw_freq)
+            & (raw_time >= x_low) & (raw_time <= x_high)
+            & (raw_freq >= y_low) & (raw_freq <= y_high)
+        )
+        selected_observed = raw_freq[raw_mask]
+        source = "points"
+
+        if selected_observed.size == 0:
+            fit_time = np.asarray(getattr(self, "_shock_calc_time", []), dtype=float).reshape(-1)
+            fit_freq = np.asarray(getattr(self, "_shock_calc_freq", []), dtype=float).reshape(-1)
+            fit_mask = (
+                np.isfinite(fit_time) & np.isfinite(fit_freq)
+                & (fit_time >= x_low) & (fit_time <= x_high)
+                & (fit_freq >= y_low) & (fit_freq <= y_high)
+            )
+            selected_observed = fit_freq[fit_mask]
+            source = "fit_curve"
+
+        if selected_observed.size == 0:
+            return None
+
+        selected_plasma = selected_observed / harmonic_number
+        start_freq = float(np.percentile(selected_plasma, 90))
+        observed_start_freq = float(start_freq * harmonic_number)
+        if selected_plasma.size > 1:
+            start_err = float(np.std(selected_plasma) / np.sqrt(selected_plasma.size))
+        else:
+            start_err = float(self.freq_err) / harmonic_number if hasattr(self, "freq_err") else 0.0
+
+        return {
+            "rect": [x_low, x_high, y_low, y_high],
+            "start_freq_mhz": start_freq,
+            "observed_start_freq_mhz": observed_start_freq,
+            "start_freq_err_mhz": start_err,
+            "point_count": int(selected_plasma.size),
+            "source": source,
+        }
+
+    def _remove_start_selection_patch(self):
+        patch = getattr(self, "_start_selection_patch", None)
+        if patch is not None:
+            try:
+                patch.remove()
+            except Exception:
+                pass
+        self._start_selection_patch = None
+
+    def _draw_start_selection_patch(self):
+        self._remove_start_selection_patch()
+        selection = self._coerce_start_selection(self._manual_start_selection)
+        if not selection or "rect" not in selection:
+            return
+        x_low, x_high, y_low, y_high = selection["rect"]
+        self._start_selection_patch = Rectangle(
+            (x_low, y_low),
+            x_high - x_low,
+            y_high - y_low,
+            fill=False,
+            edgecolor="lime",
+            linewidth=1.4,
+            linestyle="--",
+        )
+        self.canvas.ax.add_patch(self._start_selection_patch)
+        self.canvas.draw()
+
     def _update_shock_parameters(self, n):
         denom = n * 3.385
-        freq_values = np.asarray(getattr(self, "_fit_freq", self.freq), dtype=float).reshape(-1)
-        drift_vals = np.asarray(self._drift_vals, dtype=float).reshape(-1)
-        drift_errs = np.asarray(self._drift_errs, dtype=float).reshape(-1)
+        observed_freq_values = np.asarray(getattr(self, "_fit_freq", self.freq), dtype=float).reshape(-1)
+        observed_drift_vals = np.asarray(self._drift_vals, dtype=float).reshape(-1)
+        max_intensity_freq_values = np.asarray(self.freq, dtype=float).reshape(-1)
+        max_intensity_freq_values = max_intensity_freq_values[
+            np.isfinite(max_intensity_freq_values) & (max_intensity_freq_values > 0.0)
+        ]
+        freq_values = np.asarray(getattr(self, "_shock_calc_freq", observed_freq_values), dtype=float).reshape(-1)
+        drift_vals = np.asarray(getattr(self, "_shock_calc_drift_vals", observed_drift_vals), dtype=float).reshape(-1)
+        drift_errs = np.asarray(getattr(self, "_shock_calc_drift_errs", self._drift_errs), dtype=float).reshape(-1)
         if freq_values.size == 0 or drift_vals.size == 0 or freq_values.size != drift_vals.size:
             return
 
@@ -528,9 +775,17 @@ class AnalyzeDialog(QDialog):
                 shock_freq_values * (np.log(shock_freq_values ** 2 / denom) ** 2)
         )
         R_p = 4.32 * np.log(10) / np.log(shock_freq_values ** 2 / denom)
+        avg_freq_values = max_intensity_freq_values / harmonic_number if max_intensity_freq_values.size else shock_freq_values
 
         percentile = 90
-        start_freq = np.percentile(shock_freq_values, percentile)
+        manual_selection = self._coerce_start_selection(self._manual_start_selection)
+        manual_start_freq = None
+        manual_start_err = None
+        if manual_selection is not None:
+            manual_start_freq = float(manual_selection["start_freq_mhz"])
+            manual_start_err = float(manual_selection.get("start_freq_err_mhz", shock_freq_err) or shock_freq_err)
+
+        start_freq = manual_start_freq if manual_start_freq is not None else np.percentile(shock_freq_values, percentile)
 
         idx = np.abs(shock_freq_values - start_freq).argmin()
         f0 = shock_freq_values[idx]
@@ -548,9 +803,9 @@ class AnalyzeDialog(QDialog):
         dRp_df = 8.64 * np.log(10) / (f0 * (g0 ** 2))
         Rp_err = np.abs(dRp_df * shock_freq_err)
 
-        # Averages are reported for the plasma-frequency lane used by the shock calculation.
-        avg_freq = np.mean(shock_freq_values)
-        avg_freq_err = np.std(shock_freq_values) / np.sqrt(len(shock_freq_values))
+        # Average frequency is reported from the selected maximum-intensity points.
+        avg_freq = np.mean(avg_freq_values)
+        avg_freq_err = np.std(avg_freq_values) / np.sqrt(len(avg_freq_values))
         avg_drift = np.mean(shock_drift_vals)
         avg_drift_err = np.std(shock_drift_vals) / np.sqrt(len(shock_drift_vals))
 
@@ -573,7 +828,7 @@ class AnalyzeDialog(QDialog):
             "avg_drift_mhz_s": float(avg_drift),
             "avg_drift_err_mhz_s": float(avg_drift_err),
             "start_freq_mhz": float(start_freq),
-            "start_freq_err_mhz": float(shock_freq_err),
+            "start_freq_err_mhz": float(manual_start_err if manual_start_err is not None else shock_freq_err),
             "initial_shock_speed_km_s": float(start_shock_speed),
             "initial_shock_speed_err_km_s": float(shock_speed_err),
             "initial_shock_height_rs": float(start_height),
@@ -586,9 +841,9 @@ class AnalyzeDialog(QDialog):
             "fundamental": bool(self.fundamental),
             "harmonic": bool(self.harmonic),
             "harmonic_number": int(harmonic_number),
-            "observed_avg_freq_mhz": float(np.mean(freq_values)),
-            "observed_avg_drift_mhz_s": float(np.mean(drift_vals)),
-            "observed_start_freq_mhz": float(np.percentile(freq_values, percentile)),
+            "observed_avg_freq_mhz": float(np.mean(max_intensity_freq_values)) if max_intensity_freq_values.size else float(np.mean(observed_freq_values)),
+            "observed_avg_drift_mhz_s": float(np.mean(observed_drift_vals)),
+            "observed_start_freq_mhz": float(np.percentile(observed_freq_values, percentile)),
         }
 
         self._set_summary_labels_from_dict(self._shock_summary)

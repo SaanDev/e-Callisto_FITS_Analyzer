@@ -254,6 +254,34 @@ def _normalize_shock_summary(raw: Mapping[str, Any] | None, *, fold: int, fundam
     return out
 
 
+def _normalize_start_selection(raw: Mapping[str, Any] | None) -> dict[str, Any]:
+    src = dict(raw or {})
+    start_freq = _safe_float(src.get("start_freq_mhz"))
+    if start_freq is None or start_freq <= 0.0:
+        return {}
+    rect_raw = src.get("rect")
+    rect = None
+    if isinstance(rect_raw, Sequence) and not isinstance(rect_raw, (str, bytes)) and len(rect_raw) >= 4:
+        rect_values = [_safe_float(v) for v in list(rect_raw)[:4]]
+        if all(v is not None for v in rect_values):
+            rect = [float(v) for v in rect_values]
+
+    out = {
+        "start_freq_mhz": float(start_freq),
+        "observed_start_freq_mhz": _safe_float(src.get("observed_start_freq_mhz")),
+        "start_freq_err_mhz": _safe_float(src.get("start_freq_err_mhz")),
+        "point_count": max(0, _safe_int(src.get("point_count", 0), 0)),
+        "source": str(src.get("source") or "manual_rectangle"),
+    }
+    if out["observed_start_freq_mhz"] is None:
+        out["observed_start_freq_mhz"] = float(start_freq)
+    if out["start_freq_err_mhz"] is None:
+        out["start_freq_err_mhz"] = 0.0
+    if rect is not None:
+        out["rect"] = rect
+    return out
+
+
 def _normalize_type_ii_points(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     src = dict(raw or {})
     time_seconds = _to_1d_float_array(src.get("time_seconds"))
@@ -395,6 +423,7 @@ def normalize_session(session: Mapping[str, Any] | None) -> dict[str, Any] | Non
         fundamental=fundamental,
         harmonic=harmonic,
     )
+    start_selection = _normalize_start_selection(analyzer_raw.get("start_selection"))
 
     type_ii_raw = dict(session.get("type_ii") or {})
     type_ii_fold = max(1, min(4, _safe_int(type_ii_raw.get("fold", 1), 1)))
@@ -417,8 +446,8 @@ def normalize_session(session: Mapping[str, Any] | None) -> dict[str, Any] | Non
 
     has_max = time_channels is not None and freqs is not None and len(time_channels) == len(freqs) and len(time_channels) > 0
     has_analyzer = fit_params is not None or any(
-        v is not None for k, v in shock_summary.items() if k not in {"fold", "fundamental", "harmonic"}
-    )
+        v is not None for k, v in shock_summary.items() if k not in {"fold", "fundamental", "harmonic", "harmonic_number"}
+    ) or bool(start_selection)
     has_type_ii = _has_type_ii_payload(type_ii)
     if not has_max and not has_analyzer and not has_type_ii:
         return None
@@ -444,6 +473,7 @@ def normalize_session(session: Mapping[str, Any] | None) -> dict[str, Any] | Non
             "fit_params": fit_params,
             "fold": fold,
             "shock_summary": shock_summary,
+            "start_selection": start_selection,
         },
         "type_ii": type_ii,
         "ui": {
@@ -558,6 +588,7 @@ def from_legacy_max_intensity(meta: Mapping[str, Any], arrays: Mapping[str, Any]
                 fundamental=fundamental,
                 harmonic=harmonic,
             ),
+            "start_selection": _normalize_start_selection(analyzer_legacy.get("start_selection")),
         },
         "ui": {
             "restore_max_window": True,
