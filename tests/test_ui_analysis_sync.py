@@ -112,6 +112,47 @@ def test_analyze_dialog_session_state_contains_canonical_shock_summary():
     dlg.close()
 
 
+def test_analyze_dialog_harmonic_mode_uses_plasma_frequency_for_shock_parameters():
+    _app()
+    time_s = np.arange(1.0, 8.0, dtype=float)
+    observed_harmonic_freqs = 200.0 * np.power(time_s, -0.5)
+
+    dlg = AnalyzeDialog(
+        time_s,
+        observed_harmonic_freqs,
+        "demo.fit",
+        fundamental=False,
+        harmonic=True,
+        time_seconds=time_s,
+    )
+    dlg.plot_fit()
+
+    shock = dict(dlg.session_state()["analyzer"]["shock_summary"])
+    plasma_freqs = observed_harmonic_freqs / 2.0
+    plasma_drifts = -50.0 * np.power(time_s, -1.5)
+    denom = 3.385
+    expected_speed = (13853221.38 * np.abs(plasma_drifts)) / (
+        plasma_freqs * (np.log(plasma_freqs ** 2 / denom) ** 2)
+    )
+    expected_height = 4.32 * np.log(10.0) / np.log(plasma_freqs ** 2 / denom)
+    start_freq = float(np.percentile(plasma_freqs, 90))
+    start_idx = int(np.abs(plasma_freqs - start_freq).argmin())
+
+    assert shock["harmonic"] is True
+    assert shock["fundamental"] is False
+    assert shock["harmonic_number"] == 2
+    assert shock["avg_freq_mhz"] == pytest.approx(float(np.mean(plasma_freqs)), rel=1e-5)
+    assert shock["avg_drift_mhz_s"] == pytest.approx(float(np.mean(plasma_drifts)), rel=1e-5)
+    assert shock["start_freq_mhz"] == pytest.approx(start_freq, rel=1e-5)
+    assert shock["initial_shock_speed_km_s"] == pytest.approx(float(expected_speed[start_idx]), rel=1e-5)
+    assert shock["initial_shock_height_rs"] == pytest.approx(float(expected_height[start_idx]), rel=1e-5)
+    assert shock["avg_shock_speed_km_s"] == pytest.approx(float(np.mean(expected_speed)), rel=1e-5)
+    assert shock["avg_shock_height_rs"] == pytest.approx(float(np.mean(expected_height)), rel=1e-5)
+    assert shock["observed_avg_freq_mhz"] == pytest.approx(float(np.mean(observed_harmonic_freqs)), rel=1e-5)
+
+    dlg.close()
+
+
 def test_analyze_dialog_fold_combo_reserves_space_for_visible_value():
     _app()
     dlg = AnalyzeDialog(

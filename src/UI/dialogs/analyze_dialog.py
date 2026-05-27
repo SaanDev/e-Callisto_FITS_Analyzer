@@ -511,7 +511,6 @@ class AnalyzeDialog(QDialog):
         self._emit_session_changed()
 
     def _update_shock_parameters(self, n):
-        # Your updated n-fold formulas
         denom = n * 3.385
         freq_values = np.asarray(getattr(self, "_fit_freq", self.freq), dtype=float).reshape(-1)
         drift_vals = np.asarray(self._drift_vals, dtype=float).reshape(-1)
@@ -519,21 +518,23 @@ class AnalyzeDialog(QDialog):
         if freq_values.size == 0 or drift_vals.size == 0 or freq_values.size != drift_vals.size:
             return
 
-        shock_speed = (13853221.38 * np.abs(drift_vals)) / (
-                freq_values * (np.log(freq_values ** 2 / denom) ** 2)
+        harmonic_number = 2.0 if self.harmonic else 1.0
+        shock_freq_values = freq_values / harmonic_number
+        shock_drift_vals = drift_vals / harmonic_number
+        shock_drift_errs = drift_errs / harmonic_number
+        shock_freq_err = float(self.freq_err) / harmonic_number
+
+        shock_speed = (13853221.38 * np.abs(shock_drift_vals)) / (
+                shock_freq_values * (np.log(shock_freq_values ** 2 / denom) ** 2)
         )
-        R_p = 4.32 * np.log(10) / np.log(freq_values ** 2 / denom)
+        R_p = 4.32 * np.log(10) / np.log(shock_freq_values ** 2 / denom)
 
-        # Starting frequency (same logic you already use)
         percentile = 90
-        start_freq = np.percentile(freq_values, percentile)
-        if self.harmonic:
-            start_freq = start_freq / 2
-            drift_vals = drift_vals / 2
+        start_freq = np.percentile(shock_freq_values, percentile)
 
-        idx = np.abs(freq_values - start_freq).argmin()
-        f0 = freq_values[idx]
-        drift_err0 = drift_errs[idx]
+        idx = np.abs(shock_freq_values - start_freq).argmin()
+        f0 = shock_freq_values[idx]
+        drift_err0 = shock_drift_errs[idx]
 
         start_shock_speed = shock_speed[idx]
         start_height = R_p[idx]
@@ -545,13 +546,13 @@ class AnalyzeDialog(QDialog):
         # Error propagation for R_p based on your n-fold expression
         g0 = np.log(f0 ** 2 / denom)
         dRp_df = 8.64 * np.log(10) / (f0 * (g0 ** 2))
-        Rp_err = np.abs(dRp_df * self.freq_err)
+        Rp_err = np.abs(dRp_df * shock_freq_err)
 
-        # Averages (drift and freq do not depend on n, speeds/heights do)
-        avg_freq = np.mean(freq_values)
-        avg_freq_err = np.std(freq_values) / np.sqrt(len(freq_values))
-        avg_drift = np.mean(drift_vals)
-        avg_drift_err = np.std(drift_vals) / np.sqrt(len(drift_vals))
+        # Averages are reported for the plasma-frequency lane used by the shock calculation.
+        avg_freq = np.mean(shock_freq_values)
+        avg_freq_err = np.std(shock_freq_values) / np.sqrt(len(shock_freq_values))
+        avg_drift = np.mean(shock_drift_vals)
+        avg_drift_err = np.std(shock_drift_vals) / np.sqrt(len(shock_drift_vals))
 
         avg_speed = np.mean(shock_speed)
         avg_speed_err = np.std(shock_speed) / np.sqrt(len(shock_speed))
@@ -561,6 +562,8 @@ class AnalyzeDialog(QDialog):
         # Store arrays for extra plots
         self.shock_speed = shock_speed
         self.R_p = R_p
+        self._shock_freq_values = shock_freq_values
+        self._shock_drift_vals = shock_drift_vals
         self.start_freq = start_freq
         self.start_height = start_height
 
@@ -570,7 +573,7 @@ class AnalyzeDialog(QDialog):
             "avg_drift_mhz_s": float(avg_drift),
             "avg_drift_err_mhz_s": float(avg_drift_err),
             "start_freq_mhz": float(start_freq),
-            "start_freq_err_mhz": float(self.freq_err),
+            "start_freq_err_mhz": float(shock_freq_err),
             "initial_shock_speed_km_s": float(start_shock_speed),
             "initial_shock_speed_err_km_s": float(shock_speed_err),
             "initial_shock_height_rs": float(start_height),
@@ -582,6 +585,10 @@ class AnalyzeDialog(QDialog):
             "fold": int(n),
             "fundamental": bool(self.fundamental),
             "harmonic": bool(self.harmonic),
+            "harmonic_number": int(harmonic_number),
+            "observed_avg_freq_mhz": float(np.mean(freq_values)),
+            "observed_avg_drift_mhz_s": float(np.mean(drift_vals)),
+            "observed_start_freq_mhz": float(np.percentile(freq_values, percentile)),
         }
 
         self._set_summary_labels_from_dict(self._shock_summary)
@@ -754,6 +761,7 @@ class AnalyzeDialog(QDialog):
 
     def plot_extra(self):
         choice = self.extra_plot_combo.currentText()
+        freq_axis = np.asarray(getattr(self, "_shock_freq_values", getattr(self, "_fit_freq", self.freq)), dtype=float).reshape(-1)
         self.canvas.ax.clear()
         if choice == "Shock Speed vs Shock Height":
             self.canvas.ax.scatter(self.R_p, self.shock_speed, color='green', s=10)
@@ -764,7 +772,7 @@ class AnalyzeDialog(QDialog):
             self.status.showMessage("Shock Speed vs Shock Height plotted successfully!", 3000)
 
         elif choice == "Shock Speed vs Frequency":
-            self.canvas.ax.scatter(self.freq, self.shock_speed, color='purple', s=10)
+            self.canvas.ax.scatter(freq_axis, self.shock_speed, color='purple', s=10)
             self.canvas.ax.set_xlabel("Frequency (MHz)")
             self.canvas.ax.set_ylabel("Shock Speed (km/s)")
             self.canvas.ax.set_title(f"{self.filename}_Shock_Speed_vs_Frequency")
@@ -772,7 +780,7 @@ class AnalyzeDialog(QDialog):
             self.status.showMessage("Shock Speed vs Frequency plotted successfully!", 3000)
 
         elif choice == "Shock Height vs Frequency":
-            self.canvas.ax.scatter(self.R_p, self.freq, color='red', s=10)
+            self.canvas.ax.scatter(self.R_p, freq_axis, color='red', s=10)
             self.canvas.ax.set_xlabel("Shock Height (Rₛ)")
             self.canvas.ax.set_ylabel("Frequency (MHz)")
             self.canvas.ax.set_title(f"{self.filename}_Rs_vs_Freq")

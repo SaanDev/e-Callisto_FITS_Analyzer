@@ -34,6 +34,10 @@ SHOCK_SUMMARY_FIELDS = (
     "fold",
     "fundamental",
     "harmonic",
+    "harmonic_number",
+    "observed_avg_freq_mhz",
+    "observed_avg_drift_mhz_s",
+    "observed_start_freq_mhz",
 )
 
 TYPE_II_POINT_FIELDS = ("time_seconds", "freqs")
@@ -239,12 +243,14 @@ def _normalize_shock_summary(raw: Mapping[str, Any] | None, *, fold: int, fundam
     src = dict(raw or {})
     out: dict[str, Any] = {}
     for key in SHOCK_SUMMARY_FIELDS:
-        if key in ("fold", "fundamental", "harmonic"):
+        if key in ("fold", "fundamental", "harmonic", "harmonic_number"):
             continue
         out[key] = _safe_float(src.get(key))
     out["fold"] = int(_safe_int(src.get("fold", fold), fold))
     out["fundamental"] = _safe_bool(src.get("fundamental", fundamental), fundamental)
     out["harmonic"] = _safe_bool(src.get("harmonic", harmonic), harmonic)
+    harmonic_default = 2 if out["harmonic"] else 1
+    out["harmonic_number"] = int(_safe_int(src.get("harmonic_number", harmonic_default), harmonic_default))
     return out
 
 

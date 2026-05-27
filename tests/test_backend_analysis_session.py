@@ -26,13 +26,20 @@ def test_normalize_session_valid_payload():
                 "time_channels": [0, 1, 2, 3, 4],
                 "time_seconds": [0, 3, 6, 9, 12],
                 "freqs": [80, 79, 78, 77, 76],
-                "fundamental": True,
-                "harmonic": False,
+                "fundamental": False,
+                "harmonic": True,
             },
             "analyzer": {
                 "fit_params": {"a": 20.0, "b": -0.4, "std_errs": [0.1, 0.01], "r2": 0.9, "rmse": 0.5},
                 "fold": 2,
-                "shock_summary": {"avg_freq_mhz": 75.0},
+                "shock_summary": {
+                    "avg_freq_mhz": 75.0,
+                    "harmonic": True,
+                    "harmonic_number": 2,
+                    "observed_avg_freq_mhz": 150.0,
+                    "observed_avg_drift_mhz_s": -0.28,
+                    "observed_start_freq_mhz": 170.0,
+                },
             },
             "ui": {"restore_max_window": True, "restore_analyzer_window": True},
         }
@@ -47,6 +54,12 @@ def test_normalize_session_valid_payload():
     assert session["analyzer"]["fit_params"]["a"] == 20.0
     assert session["analyzer"]["fit_params"]["b"] == 0.4
     assert session["analyzer"]["fold"] == 2
+    shock = session["analyzer"]["shock_summary"]
+    assert shock["harmonic"] is True
+    assert shock["harmonic_number"] == 2
+    assert shock["observed_avg_freq_mhz"] == 150.0
+    assert shock["observed_avg_drift_mhz_s"] == -0.28
+    assert shock["observed_start_freq_mhz"] == 170.0
 
 
 def test_from_legacy_max_intensity_migrates_payload():
