@@ -4977,6 +4977,36 @@ class MainWindow(QMainWindow):
         self.canvas.ax.plot(event.xdata, event.ydata, 'w*')
         self.canvas.draw()
 
+    @staticmethod
+    def _drift_summary(points):
+        arr = np.asarray(points, dtype=float)
+        if arr.ndim != 2 or arr.shape[1] != 2:
+            return None
+        finite = np.isfinite(arr[:, 0]) & np.isfinite(arr[:, 1])
+        arr = arr[finite]
+        if arr.shape[0] < 2:
+            return None
+
+        order = np.argsort(arr[:, 0], kind="mergesort")
+        arr = arr[order]
+        dx = np.diff(arr[:, 0])
+        dy = np.diff(arr[:, 1])
+        valid = np.abs(dx) >= 1e-12
+        if not np.any(valid):
+            return None
+
+        drift_rates = dy[valid] / dx[valid]
+        segment_indices = np.flatnonzero(valid)
+        start_idx = int(segment_indices[0])
+        end_idx = int(segment_indices[-1] + 1)
+        return {
+            "points": arr,
+            "avg_drift_mhz_s": float(np.mean(drift_rates)),
+            "start_frequency_mhz": float(arr[start_idx, 1]),
+            "end_frequency_mhz": float(arr[end_idx, 1]),
+            "duration_s": float(arr[end_idx, 0] - arr[start_idx, 0]),
+        }
+
     def finish_drift_estimation(self):
         if self._hardware_mode_enabled():
             self.accel_canvas.stop_interaction_capture()
@@ -4987,31 +5017,33 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Need at least two points to estimate drift.", 4000)
             return
 
-        drift_rates = []
-        for i in range(len(self.drift_points) - 1):
-            x1, y1 = self.drift_points[i]
-            x2, y2 = self.drift_points[i + 1]
+        summary = self._drift_summary(self.drift_points)
+        if summary is None:
+            self.statusBar().showMessage("Need points with different time values to estimate drift.", 4000)
+            return
+
+        points = np.asarray(summary["points"], dtype=float)
+        for i in range(len(points) - 1):
+            x1, y1 = points[i]
+            x2, y2 = points[i + 1]
             if abs(x2 - x1) < 1e-12:
                 continue
-            drift = (y2 - y1) / (x2 - x1)
-            drift_rates.append(drift)
             # Draw line between points
             if not self._hardware_mode_enabled():
                 self.canvas.ax.plot([x1, x2], [y1, y2], linestyle='--', color='lime')
 
-        if not drift_rates:
-            self.statusBar().showMessage("Need points with different time values to estimate drift.", 4000)
-            return
-
-        avg_drift = np.mean(drift_rates)
         if self._hardware_mode_enabled():
-            self.accel_canvas.show_drift_points(self.drift_points, with_segments=True)
+            self.accel_canvas.show_drift_points(points.tolist(), with_segments=True)
         else:
             self.canvas.ax.legend(["Drift Segments"])
             self.canvas.draw()
 
         self.statusBar().showMessage(
-            f"Average Drift Rate: {avg_drift:.4f} MHz/s, Start Frequency: {y1: .3f}, End Frequency: {y2: .3f}, Duration: {x2 - x1: .3f} s",
+            "Average Drift Rate: "
+            f"{summary['avg_drift_mhz_s']:.4f} MHz/s, "
+            f"Start Frequency: {summary['start_frequency_mhz']:.3f}, "
+            f"End Frequency: {summary['end_frequency_mhz']:.3f}, "
+            f"Duration: {summary['duration_s']:.3f} s",
             0)
 
     def activate_lasso(self):

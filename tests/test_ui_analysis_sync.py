@@ -153,6 +153,18 @@ def test_analyze_dialog_harmonic_mode_uses_plasma_frequency_for_shock_parameters
     dlg.close()
 
 
+def test_main_window_drift_summary_uses_full_valid_time_span():
+    points = [(30.0, 50.0), (10.0, 90.0), (20.0, 70.0)]
+
+    summary = MainWindow._drift_summary(points)
+
+    assert summary is not None
+    assert summary["avg_drift_mhz_s"] == pytest.approx(-2.0)
+    assert summary["start_frequency_mhz"] == pytest.approx(90.0)
+    assert summary["end_frequency_mhz"] == pytest.approx(50.0)
+    assert summary["duration_s"] == pytest.approx(20.0)
+
+
 def test_analyze_dialog_fold_combo_reserves_space_for_visible_value():
     _app()
     dlg = AnalyzeDialog(
