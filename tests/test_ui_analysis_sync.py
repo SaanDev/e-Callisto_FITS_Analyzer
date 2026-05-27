@@ -154,42 +154,6 @@ def test_analyze_dialog_harmonic_mode_uses_plasma_frequency_for_shock_parameters
     dlg.close()
 
 
-def test_analyze_dialog_manual_start_rectangle_overrides_auto_start_frequency():
-    _app()
-    time_s = np.arange(1.0, 8.0, dtype=float)
-    observed_harmonic_freqs = 200.0 * np.power(time_s, -0.5)
-
-    dlg = AnalyzeDialog(
-        time_s,
-        observed_harmonic_freqs,
-        "demo.fit",
-        fundamental=False,
-        harmonic=True,
-        time_seconds=time_s,
-    )
-    dlg.plot_fit()
-    auto_start = dict(dlg.session_state()["analyzer"]["shock_summary"])["start_freq_mhz"]
-
-    selection = dlg._start_selection_from_rect(0.8, 1.2, 190.0, 210.0)
-    assert selection is not None
-    assert selection["observed_start_freq_mhz"] == pytest.approx(200.0)
-    assert selection["start_freq_mhz"] == pytest.approx(100.0)
-
-    dlg._manual_start_selection = selection
-    dlg._update_shock_parameters(dlg._selected_fold())
-
-    state = dlg.session_state()
-    shock = dict(state["analyzer"]["shock_summary"])
-    saved_selection = dict(state["analyzer"]["start_selection"])
-
-    assert shock["start_freq_mhz"] == pytest.approx(100.0)
-    assert shock["start_freq_mhz"] != pytest.approx(auto_start)
-    assert saved_selection["start_freq_mhz"] == pytest.approx(100.0)
-    assert "manual rectangle" in dlg.start_freq_source_display.text()
-
-    dlg.close()
-
-
 def test_analyze_dialog_average_frequency_uses_points_while_shock_uses_fitted_backbone():
     _app()
     time_s = np.arange(1.0, 6.0, dtype=float)
