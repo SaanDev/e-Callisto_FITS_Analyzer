@@ -140,22 +140,22 @@ def test_project_report_figures_use_explicit_dynamic_spectrum_titles(monkeypatch
     figures = win._build_project_report_figures({})
     titles = [figure.title for figure in figures]
 
-    assert titles[:4] == [
+    assert titles[:3] == [
         "Raw Dynamic Spectrum",
         "Background Subtracted Dynamic Spectrum",
-        "Burst Isolated Dynamic Spectrum",
         "Light Curves With Dynamic Spectrum",
     ]
+    assert "Burst Isolated Dynamic Spectrum" not in titles
     assert "Current Main View" not in titles
     assert "GOES X-Ray Overlay" not in titles
-    assert [call[0] for call in render_calls] == ["Raw", "Background Subtracted", "Isolated Burst", "Isolated Burst"]
+    assert [call[0] for call in render_calls] == ["Raw", "Background Subtracted", "Isolated Burst"]
     assert np.array_equal(render_calls[1][1], win.noise_reduced_original)
     assert np.array_equal(render_calls[2][1], win.noise_reduced_data)
     assert render_calls[-1][2]
     win.close()
 
 
-def test_project_report_reconstructs_lasso_isolated_burst_when_title_changed(monkeypatch):
+def test_project_report_omits_burst_isolated_dynamic_spectrum(monkeypatch):
     _app()
     win = MainWindow(theme=None)
     base = np.arange(24, dtype=float).reshape(4, 6)
@@ -165,15 +165,15 @@ def test_project_report_reconstructs_lasso_isolated_burst_when_title_changed(mon
     win.noise_reduced_original = base + 10.0
     win.noise_reduced_data = base + 25.0
     win.lasso_mask = mask
-    win.current_plot_type = "Background Subtracted"
+    win.current_plot_type = "Isolated Burst"
     win.freqs = np.array([90.0, 84.0, 78.0, 72.0], dtype=float)
     win.time = np.arange(6, dtype=float)
     win.filename = "demo.fit"
 
-    render_calls = {}
+    render_calls = []
 
     def fake_dynamic_renderer(data, *, plot_type=None, overlays=None, view=None):
-        render_calls[plot_type] = np.asarray(data)
+        render_calls.append((plot_type, np.asarray(data)))
         return _solid_png()
 
     monkeypatch.setattr(win, "_render_original_dynamic_spectrum_export_png", fake_dynamic_renderer)
@@ -189,56 +189,12 @@ def test_project_report_reconstructs_lasso_isolated_burst_when_title_changed(mon
     )
 
     figures = win._build_project_report_figures({})
-    isolated = next(figure for figure in figures if figure.title == "Burst Isolated Dynamic Spectrum")
-    isolated_data = render_calls["Isolated Burst"]
+    titles = [figure.title for figure in figures]
+    rendered_plot_types = [plot_type for plot_type, _data in render_calls]
 
-    assert isolated.png_bytes.startswith(b"\x89PNG")
-    assert np.array_equal(render_calls["Background Subtracted"], win.noise_reduced_original)
-    assert np.array_equal(isolated_data[mask], win.noise_reduced_original[mask])
-    assert np.all(isolated_data[~mask] == 0.0)
-    win.close()
-
-
-def test_project_report_uses_stored_isolated_burst_workflow_state(monkeypatch):
-    _app()
-    win = MainWindow(theme=None)
-    base = np.arange(24, dtype=float).reshape(4, 6)
-    mask = np.zeros_like(base, dtype=bool)
-    mask[1:3, 2:5] = True
-    stored_isolated = np.zeros_like(base, dtype=float)
-    stored_isolated[mask] = base[mask] + 25.0
-
-    win.raw_data = base + 100.0
-    win.noise_reduced_original = base + 10.0
-    win.noise_reduced_data = stored_isolated
-    win.lasso_mask = mask
-    win.current_plot_type = "Isolated Burst"
-    win.freqs = np.array([90.0, 84.0, 78.0, 72.0], dtype=float)
-    win.time = np.arange(6, dtype=float)
-    win.filename = "demo.fit"
-
-    render_calls = {}
-
-    def fake_dynamic_renderer(data, *, plot_type=None, overlays=None, view=None):
-        render_calls[plot_type] = np.asarray(data)
-        return _solid_png()
-
-    monkeypatch.setattr(win, "_render_original_dynamic_spectrum_export_png", fake_dynamic_renderer)
-    monkeypatch.setattr(
-        win,
-        "_capture_max_intensity_fit_report_figure",
-        lambda _session: ProjectReportFigure(title="Maximum Intensity Fit", availability_note="Not available"),
-    )
-    monkeypatch.setattr(
-        win,
-        "_capture_type_ii_report_figure",
-        lambda _session: ProjectReportFigure(title="Type II Band Splitting", availability_note="Not available"),
-    )
-
-    win._build_project_report_figures({})
-
-    assert np.array_equal(render_calls["Isolated Burst"], stored_isolated)
-    assert not np.array_equal(render_calls["Isolated Burst"][mask], win.noise_reduced_original[mask])
+    assert "Burst Isolated Dynamic Spectrum" not in titles
+    assert "Isolated Burst" not in rendered_plot_types
+    assert rendered_plot_types == ["Raw", "Background Subtracted"]
     win.close()
 
 

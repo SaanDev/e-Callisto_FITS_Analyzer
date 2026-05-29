@@ -10017,17 +10017,6 @@ class MainWindow(QMainWindow):
             )
         )
 
-        isolated_data = self._burst_isolated_report_data()
-        figures.append(
-            self._capture_report_spectrum_figure(
-                "Burst Isolated Dynamic Spectrum",
-                isolated_data,
-                "Burst-isolated dynamic spectrum is not available.",
-                plot_type="Isolated Burst",
-                view=report_view,
-            )
-        )
-
         records = self._light_curve_records_payload()
         if records:
             source = self._current_light_curve_source_data()
