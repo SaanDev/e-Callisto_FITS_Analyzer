@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.4.1
+Version 2.5.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -10,5 +10,5 @@ Central application metadata used by runtime UI and tooling.
 """
 
 APP_NAME = "e-CALLISTO FITS Analyzer"
-APP_VERSION = "2.4.1"
+APP_VERSION = "2.5.0"
 APP_ORG = "SaanDev"

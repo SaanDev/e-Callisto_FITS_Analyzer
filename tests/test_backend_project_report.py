@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.4.1
+Version 2.5.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -84,7 +84,7 @@ def test_generate_project_report_pdf_minimal(tmp_path):
     out = tmp_path / "minimal_report.pdf"
     report = ProjectReportInput(
         title="Minimal Project Report",
-        app={"name": "e-CALLISTO FITS Analyzer", "version": "2.4.1"},
+        app={"name": "e-CALLISTO FITS Analyzer", "version": "2.5.0"},
         data_source={"filename": "demo.fit", "shape": [3, 4]},
         processing={"plot_type": "Raw", "use_db": False, "use_utc": False, "cmap": "Custom"},
         selected_header={"DATE-OBS": "2026-01-01"},
@@ -110,7 +110,7 @@ def test_generate_project_report_pdf_with_optional_analysis_and_figures(tmp_path
     out = tmp_path / "full_report.pdf"
     report = ProjectReportInput(
         title="Full Project Report",
-        app={"name": "e-CALLISTO FITS Analyzer", "version": "2.4.1"},
+        app={"name": "e-CALLISTO FITS Analyzer", "version": "2.5.0"},
         data_source={"filename": "demo.fit", "shape": [3, 4], "freq_range_mhz": [70.0, 90.0]},
         processing={"plot_type": "Background Subtracted", "use_db": False, "use_utc": True, "cmap": "viridis"},
         rfi={"enabled": True, "applied": False},
