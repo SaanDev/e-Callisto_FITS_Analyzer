@@ -10,14 +10,17 @@ A desktop application for visualizing, processing, and analyzing e-CALLISTO sola
 - Download and analyze e-CALLISTO and Learmonth Station radio data, including Learmonth chunk conversion to FIT format for the main Analyzer.
 - Use hardware-accelerated plotting with live cursor readouts, rectangular zoom, lock/unlock navigation, and **Edit → Reset to Raw** controls.
 - Adjust intensity thresholds live with high-resolution sliders, value readouts, optional signed-log scaling, dB or Digits/ADU display modes, and graph-property controls.
+- Apply the new **Raw FITS Percentile (5-98%)** noise-clipping preset from **Processing → Presets** for a fast starting display range on raw FITS files.
 - Inspect FITS headers from the **View** menu, customize titles and labels, and export publication-ready figures from the current analysis view.
+- Generate project report PDFs that summarize the loaded dataset, processing state, analysis outputs, solar-context plots, and report-ready figures.
 
 ### Processing and analysis
 - Apply deterministic RFI cleaning with preview/apply/reset controls for median smoothing, hot-channel masking, masked-channel repair, and percentile clipping.
-- Isolate radio bursts, extract maximum intensities, remove outliers manually or automatically, run best-fit / shock-parameter analysis, and perform experimental Type II band-splitting analysis for magnetic-field estimates from noise-reduced data.
+- Isolate radio bursts with lasso masking aligned to the rendered spectrum path, extract maximum intensities, remove outliers manually or automatically, run best-fit / shock-parameter analysis, and perform experimental Type II band-splitting analysis for magnetic-field estimates from noise-reduced data.
+- Plot one or more light curves on top of the dynamic spectrum by entering a frequency or clicking directly on the plot, with configurable color, width, opacity, labels, and line style.
 - Combine frequency bands with improved gap-filling and overlap-handling options before importing the merged spectrum.
 - Keep polygon, line, and text annotations inside the accelerated view, with editable text styling and project persistence.
-- Save and reuse processing presets, reopen restored analysis sessions, and run batch processing for folder-based FIT/FITS exports.
+- Save and reuse processing presets, optionally choose a default preset for future FITS loads, reopen restored analysis sessions, and run batch processing for folder-based FIT/FITS exports.
 
 ### Solar-event context tools
 - Open standalone viewers for GOES X-ray flux, GOES SEP proton flux, SOHO/LASCO CME catalog data, Kyoto Dst, and GFZ Kp.
@@ -30,6 +33,25 @@ A desktop application for visualizing, processing, and analyzing e-CALLISTO sola
 - Export processed FITS files, provenance reports (Markdown + JSON), and analysis logs (CSV + TXT).
 - Generate diagnostics ZIP bundles for bug reports and open a prefilled GitHub issue draft from inside the app.
 - Use the built-in citation dialog to copy the recommended citation or BibTeX entry, and check for newer GitHub releases from the app.
+
+---
+
+## What's New in v2.5.0
+
+### Main features
+- **Project report PDF generation:** create a consolidated report from **File → Generate Project Report...** with raw/background-subtracted spectra, light-curve overlays, maximum-intensity analysis, Type II band-splitting output, and available GOES/SGPS/Dst/Kp context figures.
+- **Light-curve overlays:** add light curves by typed frequency or plot click, switch between single-curve and multi-curve modes, and customize line color, thickness, opacity, style, vertical scale, and labels.
+- **Raw FITS percentile noise-clipping preset:** use **Processing → Presets → Raw FITS Percentile (5-98%)** to quickly set clipping limits from the data distribution. Saved presets can also be applied manually or selected as the default preset for future FITS loads.
+- **Rendered-path lasso burst isolation:** lasso masking now follows the displayed image pixel centers, so the isolated burst region matches the path drawn on the spectrum more accurately.
+- **Corrected harmonic shock calculations:** harmonic Type II shock-parameter calculations now use the converted fundamental frequency/drift values internally while preserving observed values in saved summaries.
+- **Corrected drift summaries:** drift estimation now ignores invalid/zero-duration segments and reports start frequency, end frequency, duration, and average drift from the valid time-ordered path.
+
+### Bug fixes and improvements
+- Removed the obsolete **Burst Isolated Dynamic Spectrum** section from generated project reports.
+- Improved project-report spectrum rendering for raw, background-subtracted, light-curve, maximum-intensity, Type II, and solar-context figures.
+- Fixed FITS-load default preset behavior so configured defaults apply cleanly without unintended intermediate replots.
+- Improved report/export packaging by bundling ReportLab/Pillow dependencies and band-splitting icon assets in packaged builds.
+- Expanded regression coverage for lasso isolation, project reports, analysis-session shock fields, preset loading, and light-curve overlays.
 
 ---
 
@@ -74,6 +96,8 @@ Features:
 - Live threshold readouts next to each slider for quick feedback while dragging
 - Optional **Logarithmic Threshold Scale** checkbox for finer control near zero
 - Robust per-channel background subtraction for both single-band and frequency-combined plots
+- **Processing → Presets → Raw FITS Percentile (5-98%)** sets noise-clipping limits from the current raw data distribution
+- Saved processing presets can be applied manually or selected as the default preset for future FITS loads
 - Dynamic spectrum refreshes automatically
 - No data are lost when switching x-axis units (seconds ↔ UT)
 
@@ -187,10 +211,26 @@ This enables quick quantitative inspection without additional clicks.
 
 ---
 
+### Light-Curve Overlays
+
+Use **Analysis → Plot Light Curves** to overlay intensity-time curves on the dynamic spectrum.
+
+Options:
+
+- Enter a frequency manually
+- Click directly on the spectrum to choose a frequency
+- Use single-curve or multi-curve mode
+- Customize curve color, thickness, opacity, vertical scale, line style, and frequency labels
+- Clear all active light curves without resetting the loaded dataset
+
+Light-curve overlays are preserved in project state and can be included in generated project reports.
+
+---
+
 # 9. Burst Isolation (Lasso Tool)
 
 Click **Isolate Burst** and draw around the emission region.  
-Only the selected region is retained for further analysis.
+Only the selected region is retained for further analysis. In v2.5.0, the lasso mask is calculated against the rendered image pixel centers, so the isolated region follows the drawn path more accurately on the displayed spectrum.
 
 ### Example: Isolated Burst
 ![Isolated Burst](assets/screenshots/burst_isolation.png)
@@ -226,6 +266,12 @@ The Analyzer window performs:
 - Shock speed
 - Shock height
 - R² and RMSE
+
+Calculation updates in v2.5.0:
+
+- Harmonic Type II shock calculations convert observed harmonic frequency/drift values to their fundamental equivalents before computing shock parameters
+- Saved analysis summaries retain both the converted calculation values and observed-frequency reference fields
+- Drift summaries are computed from valid, time-ordered segments and ignore zero-duration point pairs
 
 Newkirk model option:
 
@@ -388,6 +434,21 @@ For reproducibility and audit trails, the app can export two structured report t
 - **Export Analysis Log...** writes CSV and plain-text summaries of analyzer fit parameters and derived shock metrics.
 
 These reports are useful for lab notebooks, collaboration handoffs, and paper preparation.
+
+### Project Report PDF
+
+Use **File → Generate Project Report...** to create a consolidated PDF for the current project or loaded dataset.
+
+The report can include:
+
+- Raw dynamic spectrum
+- Background-subtracted dynamic spectrum
+- Light curves with the dynamic spectrum
+- Maximum-intensity fit
+- Type II band-splitting output
+- Available GOES X-ray, GOES SGPS proton flux, Dst, and Kp context plots
+
+The obsolete **Burst Isolated Dynamic Spectrum** report section has been removed in v2.5.0.
 
 ---
 
