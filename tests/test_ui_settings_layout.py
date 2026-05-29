@@ -124,9 +124,10 @@ def test_sidebar_colormap_dropdown_includes_bone_r():
     win.close()
 
 
-def test_loaded_raw_fits_initializes_percentile_preset():
+def test_loaded_raw_fits_uses_previous_noise_clipping_defaults(monkeypatch):
     _app()
     win = MainWindow(theme=None)
+    monkeypatch.setattr(win, "_default_preset_name", lambda: "")
     data = np.arange(200, dtype=float).reshape(10, 20)
 
     win._apply_loaded_dataset(
@@ -141,13 +142,80 @@ def test_loaded_raw_fits_initializes_percentile_preset():
     )
     QApplication.processEvents()
 
+    assert win.noise_clip_low == pytest.approx(0.0)
+    assert win.noise_clip_high == pytest.approx(0.0)
+    assert win.lower_slider.value() == win._noise_threshold_to_slider(0.0)
+    assert win.upper_slider.value() == win._noise_threshold_to_slider(0.0)
+    assert win.preset_raw_fits_percentile_action.isEnabled() is True
+    assert win._active_preset_snapshot is None
+
+    win.close()
+
+
+def test_loaded_raw_fits_applies_configured_default_preset(monkeypatch):
+    _app()
+    win = MainWindow(theme=None)
+    data = np.arange(200, dtype=float).reshape(10, 20)
+    preset = build_preset(
+        "Default Background",
+        {
+            "noise_clip_low": 12.5,
+            "noise_clip_high": 175.0,
+            "cmap": "inferno",
+        },
+    )
+    monkeypatch.setattr(win, "_load_global_presets", lambda: [preset])
+    monkeypatch.setattr(win, "_default_preset_name", lambda: "Default Background")
+
+    win._apply_loaded_dataset(
+        data=data,
+        freqs=np.linspace(300.0, 210.0, data.shape[0]),
+        time=np.arange(data.shape[1], dtype=float),
+        filename="raw.fit",
+        header0=None,
+        source_path=None,
+        ut_start_sec=0.0,
+        plot_title="Raw",
+    )
+    QApplication.processEvents()
+
+    assert win.noise_clip_low == pytest.approx(12.5)
+    assert win.noise_clip_high == pytest.approx(175.0)
+    assert win.upper_slider.value() == win._noise_threshold_to_slider(175.0)
+    assert win.current_cmap_name == "inferno"
+    assert win._active_preset_snapshot["name"] == "Default Background"
+    assert win.noise_reduced_data is not None
+    assert win.current_plot_type == "Background Subtracted"
+    assert win._current_plot_source_data is not None
+    assert np.array_equal(win._current_plot_source_data, win.noise_reduced_data)
+
+    win.close()
+
+
+def test_raw_fits_percentile_preset_remains_available_manually(monkeypatch):
+    _app()
+    win = MainWindow(theme=None)
+    monkeypatch.setattr(win, "_default_preset_name", lambda: "")
+    data = np.arange(200, dtype=float).reshape(10, 20)
+    win._apply_loaded_dataset(
+        data=data,
+        freqs=np.linspace(300.0, 210.0, data.shape[0]),
+        time=np.arange(data.shape[1], dtype=float),
+        filename="raw.fit",
+        header0=None,
+        source_path=None,
+        ut_start_sec=0.0,
+        plot_title="Raw",
+    )
+    QApplication.processEvents()
+
+    win.apply_raw_fits_percentile_preset()
+    QApplication.processEvents()
+
     expected_low = float(np.percentile(data, MainWindow.RAW_FITS_VMIN_PERCENTILE))
     expected_high = float(np.percentile(data, MainWindow.RAW_FITS_VMAX_PERCENTILE))
     assert win.noise_clip_low == pytest.approx(expected_low)
     assert win.noise_clip_high == pytest.approx(expected_high)
-    assert win.lower_slider.value() == win._noise_threshold_to_slider(expected_low)
-    assert win.upper_slider.value() == win._noise_threshold_to_slider(expected_high)
-    assert win.preset_raw_fits_percentile_action.isEnabled() is True
     assert win._active_preset_snapshot["name"] == MainWindow.RAW_FITS_PRESET_NAME
 
     win.close()
@@ -199,6 +267,10 @@ def test_apply_preset_updates_restored_sidebar_controls():
     assert win.title_edit.text() == "Preset Title"
     assert win.tick_font_spin.value() == 15
     assert win.canvas.ax.get_title() == "Preset Title"
+    assert win.noise_reduced_data is not None
+    assert win.current_plot_type == "Background Subtracted"
+    assert win._current_plot_source_data is not None
+    assert np.array_equal(win._current_plot_source_data, win.noise_reduced_data)
     low_disp, high_disp, unit = win._noise_clip_display_values()
     assert win.lower_value_label.text() == win._format_noise_clip_threshold_digits(win.noise_clip_low)
     assert win.upper_value_label.text() == win._format_noise_clip_threshold_digits(win.noise_clip_high)

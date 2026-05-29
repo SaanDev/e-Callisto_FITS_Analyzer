@@ -190,6 +190,7 @@ class MainWindow(QMainWindow):
     RAW_FITS_PRESET_NAME = "Raw FITS Percentile (5-98%)"
     RAW_FITS_VMIN_PERCENTILE = 5.0
     RAW_FITS_VMAX_PERCENTILE = 98.0
+    DEFAULT_PRESET_SETTINGS_KEY = "processing/default_preset_name"
     HW_DEFAULT_TICK_FONT_PX = 14
     HW_DEFAULT_AXIS_FONT_PX = 16
     HW_DEFAULT_TITLE_FONT_PX = 22
@@ -1045,11 +1046,15 @@ class MainWindow(QMainWindow):
         self.preset_raw_fits_percentile_action.setEnabled(False)
         self.preset_save_action = QAction("Save Current as Preset...", self)
         self.preset_apply_action = QAction("Apply Preset...", self)
+        self.preset_set_default_action = QAction("Set Default Preset...", self)
+        self.preset_clear_default_action = QAction("Clear Default Preset", self)
         self.preset_delete_action = QAction("Delete Preset...", self)
         presets_menu.addAction(self.preset_raw_fits_percentile_action)
         presets_menu.addSeparator()
         presets_menu.addAction(self.preset_save_action)
         presets_menu.addAction(self.preset_apply_action)
+        presets_menu.addAction(self.preset_set_default_action)
+        presets_menu.addAction(self.preset_clear_default_action)
         presets_menu.addAction(self.preset_delete_action)
 
         max_menu = processing_menu.addMenu("Maximum Intensity")
@@ -1156,6 +1161,8 @@ class MainWindow(QMainWindow):
         self.preset_save_action.triggered.connect(self.save_current_preset)
         self.preset_raw_fits_percentile_action.triggered.connect(self.apply_raw_fits_percentile_preset)
         self.preset_apply_action.triggered.connect(self.apply_saved_preset)
+        self.preset_set_default_action.triggered.connect(self.set_default_preset)
+        self.preset_clear_default_action.triggered.connect(self.clear_default_preset)
         self.preset_delete_action.triggered.connect(self.delete_saved_preset)
         self.max_auto_clean_isolated_action.toggled.connect(self.set_max_auto_clean_isolated_enabled)
         self.open_maximum_intensities_action.triggered.connect(self.plot_max_intensities)
@@ -3094,8 +3101,14 @@ class MainWindow(QMainWindow):
         self.ut_start_sec = ut_start_sec
 
         self._reset_runtime_state_for_loaded_data()
-        self._apply_raw_fits_percentile_preset(data=self.raw_data, reset_bounds=True)
-        self.plot_data(self.raw_data, title=plot_title)
+        self._reset_noise_controls_to_defaults()
+        default_preset_applied = self._apply_default_preset_for_loaded_data()
+        plot_source = self.raw_data
+        effective_plot_title = plot_title
+        if default_preset_applied and self._apply_noise_clip_to_current_data():
+            plot_source = self.noise_reduced_data
+            effective_plot_title = "Background Subtracted"
+        self.plot_data(plot_source, title=effective_plot_title)
         if self._selected_goes_overlay_channels():
             QTimer.singleShot(0, lambda: self._ensure_goes_overlay_for_current_data(force=True))
 
@@ -4241,11 +4254,14 @@ class MainWindow(QMainWindow):
     def update_units(self):
         self.set_units_mode(bool(self.units_db_radio.isChecked()))
 
-    def set_units_mode(self, use_db: bool):
+    def _set_units_mode_state(self, use_db: bool):
         self.use_db = bool(use_db)
         self._set_checked_if_exists("units_db_radio", self.use_db)
         self._set_checked_if_exists("units_digits_radio", not self.use_db)
         self._update_noise_clip_value_labels()
+
+    def set_units_mode(self, use_db: bool):
+        self._set_units_mode_state(use_db)
 
         if self.raw_data is None:
             return
@@ -4397,6 +4413,21 @@ class MainWindow(QMainWindow):
         if base is None:
             return None
         return np.clip(base, low, high).astype(np.float32, copy=False)
+
+    def _apply_noise_clip_to_current_data(self) -> bool:
+        if self.raw_data is None or not self._noise_clip_thresholds_active():
+            return False
+
+        data = self._compute_noise_reduced(float(self.noise_clip_low), float(self.noise_clip_high))
+        if data is None:
+            return False
+
+        self.noise_reduced_data = data
+        self.noise_reduced_original = data.copy()
+        self.noise_reduced_original_plot_type = "Background Subtracted"
+        self.noise_vmin, self.noise_vmax = finite_data_limits(data)
+        self.current_plot_type = "Background Subtracted"
+        return True
 
     def _update_live_preview_canvas(self, data):
         if not self._hardware_mode_enabled():
@@ -6677,18 +6708,18 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+    def _set_time_axis_state(self, use_utc: bool):
+        self.use_utc = bool(use_utc)
+
+        self._set_checked_if_exists("xaxis_sec_action", not self.use_utc)
+        self._set_checked_if_exists("xaxis_ut_action", self.use_utc)
+        self._set_checked_if_exists("xaxis_sec_radio", not self.use_utc)
+        self._set_checked_if_exists("xaxis_ut_radio", self.use_utc)
+        self._set_checked_if_exists("time_sec_radio", not self.use_utc)
+        self._set_checked_if_exists("time_ut_radio", self.use_utc)
+
     def set_axis_to_seconds(self):
-        self.use_utc = False
-
-        # Old Graph-menu actions (may not exist anymore)
-        self._set_checked_if_exists("xaxis_sec_action", True)
-        self._set_checked_if_exists("xaxis_ut_action", False)
-
-        # If you are using radio buttons, store them as these names (optional)
-        self._set_checked_if_exists("xaxis_sec_radio", True)
-        self._set_checked_if_exists("xaxis_ut_radio", False)
-        self._set_checked_if_exists("time_sec_radio", True)
-        self._set_checked_if_exists("time_ut_radio", False)
+        self._set_time_axis_state(False)
 
         if self.raw_data is not None:
             self._mark_project_dirty()
@@ -6696,17 +6727,7 @@ class MainWindow(QMainWindow):
             self.plot_data(data, title=self.current_plot_type, keep_view=True)
 
     def set_axis_to_utc(self):
-        self.use_utc = True
-
-        # Old Graph-menu actions (may not exist anymore)
-        self._set_checked_if_exists("xaxis_sec_action", False)
-        self._set_checked_if_exists("xaxis_ut_action", True)
-
-        # If you are using radio buttons, store them as these names (optional)
-        self._set_checked_if_exists("xaxis_sec_radio", False)
-        self._set_checked_if_exists("xaxis_ut_radio", True)
-        self._set_checked_if_exists("time_sec_radio", False)
-        self._set_checked_if_exists("time_ut_radio", True)
+        self._set_time_axis_state(True)
 
         if self.raw_data is not None:
             self._mark_project_dirty()
@@ -8176,6 +8197,54 @@ class MainWindow(QMainWindow):
     def _save_global_presets(self, presets: list[dict]):
         self._ui_settings.setValue("processing/presets_json", dump_presets_json(presets))
 
+    def _preset_name_key(self, name) -> str:
+        return " ".join(str(name or "").split()).casefold()
+
+    def _default_preset_name(self) -> str:
+        return " ".join(
+            str(self._ui_settings.value(self.DEFAULT_PRESET_SETTINGS_KEY, "", type=str) or "").split()
+        ).strip()
+
+    def _set_default_preset_name(self, name: str | None):
+        normalized = " ".join(str(name or "").split()).strip()
+        if normalized:
+            self._ui_settings.setValue(self.DEFAULT_PRESET_SETTINGS_KEY, normalized)
+        else:
+            self._ui_settings.remove(self.DEFAULT_PRESET_SETTINGS_KEY)
+
+    def _find_preset_by_name(self, name: str, presets: list[dict] | None = None) -> dict | None:
+        key = self._preset_name_key(name)
+        if not key:
+            return None
+        for preset in presets if presets is not None else self._load_global_presets():
+            try:
+                if self._preset_name_key(preset.get("name", "")) == key:
+                    return preset
+            except Exception:
+                continue
+        return None
+
+    def _default_preset_payload(self) -> dict | None:
+        default_name = self._default_preset_name()
+        if not default_name:
+            return None
+        preset = self._find_preset_by_name(default_name)
+        if preset is None:
+            self._set_default_preset_name(None)
+        return preset
+
+    def _apply_default_preset_for_loaded_data(self) -> bool:
+        preset = self._default_preset_payload()
+        if preset is None:
+            return False
+        return self._apply_preset_payload(
+            preset,
+            replot=False,
+            mark_dirty=False,
+            log_operation=False,
+            block_live_updates=True,
+        )
+
     def save_current_preset(self):
         name, ok = QInputDialog.getText(self, "Save Preset", "Preset name:")
         if not ok or not str(name).strip():
@@ -8189,7 +8258,15 @@ class MainWindow(QMainWindow):
         verb = "Updated" if replaced else "Saved"
         self.statusBar().showMessage(f"{verb} preset '{preset['name']}'.", 3000)
 
-    def _apply_preset_payload(self, preset: dict) -> bool:
+    def _apply_preset_payload(
+        self,
+        preset: dict,
+        *,
+        replot: bool = True,
+        mark_dirty: bool = True,
+        log_operation: bool = True,
+        block_live_updates: bool = False,
+    ) -> bool:
         try:
             version = int((preset or {}).get("version", PRESET_SCHEMA_VERSION))
         except Exception:
@@ -8212,15 +8289,17 @@ class MainWindow(QMainWindow):
         )
         self._set_noise_clip_state(low, high, scale=scale, sync_widgets=True)
 
-        self.set_units_mode(bool(settings.get("use_db", False)))
-        if bool(settings.get("use_utc", False)):
-            self.set_axis_to_utc()
-        else:
-            self.set_axis_to_seconds()
+        self._set_units_mode_state(bool(settings.get("use_db", False)))
+        self._set_time_axis_state(bool(settings.get("use_utc", False)))
 
         cmap = str(settings.get("cmap") or "Custom")
         self.current_cmap_name = cmap
-        self.cmap_combo.setCurrentText(cmap)
+        blocked = self.cmap_combo.blockSignals(True) if block_live_updates else None
+        try:
+            self.cmap_combo.setCurrentText(cmap)
+        finally:
+            if block_live_updates:
+                self.cmap_combo.blockSignals(blocked)
 
         self._rfi_config = dict(settings.get("rfi") or self._rfi_config)
         self._annotation_style_defaults = self._merge_annotation_style_defaults(
@@ -8228,26 +8307,55 @@ class MainWindow(QMainWindow):
         )
 
         graph = dict(settings.get("graph") or {})
-        self.remove_titles_chk.setChecked(bool(graph.get("remove_titles", self.remove_titles_chk.isChecked())))
-        self.title_bold_chk.setChecked(bool(graph.get("title_bold", self.title_bold_chk.isChecked())))
-        self.title_italic_chk.setChecked(bool(graph.get("title_italic", self.title_italic_chk.isChecked())))
-        self.axis_bold_chk.setChecked(bool(graph.get("axis_bold", self.axis_bold_chk.isChecked())))
-        self.axis_italic_chk.setChecked(bool(graph.get("axis_italic", self.axis_italic_chk.isChecked())))
-        self.ticks_bold_chk.setChecked(bool(graph.get("ticks_bold", self.ticks_bold_chk.isChecked())))
-        self.ticks_italic_chk.setChecked(bool(graph.get("ticks_italic", self.ticks_italic_chk.isChecked())))
-        self.title_edit.setText(str(graph.get("title_override", self.title_edit.text())))
-        restored_font = normalize_font_family(str(graph.get("font_family", "")))
-        self.font_combo.setCurrentText(restored_font if restored_font else "Default")
-        self.tick_font_spin.setValue(int(graph.get("tick_font_px", self.tick_font_spin.value())))
-        self.axis_font_spin.setValue(int(graph.get("axis_label_font_px", self.axis_font_spin.value())))
-        self.title_font_spin.setValue(int(graph.get("title_font_px", self.title_font_spin.value())))
+        graph_widgets = (
+            self.remove_titles_chk,
+            self.title_bold_chk,
+            self.title_italic_chk,
+            self.axis_bold_chk,
+            self.axis_italic_chk,
+            self.ticks_bold_chk,
+            self.ticks_italic_chk,
+            self.title_edit,
+            self.font_combo,
+            self.tick_font_spin,
+            self.axis_font_spin,
+            self.title_font_spin,
+        )
+        graph_blocks = []
+        if block_live_updates:
+            for widget in graph_widgets:
+                graph_blocks.append((widget, widget.blockSignals(True)))
+        try:
+            self.remove_titles_chk.setChecked(bool(graph.get("remove_titles", self.remove_titles_chk.isChecked())))
+            self.title_bold_chk.setChecked(bool(graph.get("title_bold", self.title_bold_chk.isChecked())))
+            self.title_italic_chk.setChecked(bool(graph.get("title_italic", self.title_italic_chk.isChecked())))
+            self.axis_bold_chk.setChecked(bool(graph.get("axis_bold", self.axis_bold_chk.isChecked())))
+            self.axis_italic_chk.setChecked(bool(graph.get("axis_italic", self.axis_italic_chk.isChecked())))
+            self.ticks_bold_chk.setChecked(bool(graph.get("ticks_bold", self.ticks_bold_chk.isChecked())))
+            self.ticks_italic_chk.setChecked(bool(graph.get("ticks_italic", self.ticks_italic_chk.isChecked())))
+            self.title_edit.setText(str(graph.get("title_override", self.title_edit.text())))
+            restored_font = normalize_font_family(str(graph.get("font_family", "")))
+            self.font_combo.setCurrentText(restored_font if restored_font else "Default")
+            self.tick_font_spin.setValue(int(graph.get("tick_font_px", self.tick_font_spin.value())))
+            self.axis_font_spin.setValue(int(graph.get("axis_label_font_px", self.axis_font_spin.value())))
+            self.title_font_spin.setValue(int(graph.get("title_font_px", self.title_font_spin.value())))
+        finally:
+            for widget, was_blocked in graph_blocks:
+                widget.blockSignals(was_blocked)
 
-        if self.raw_data is not None:
-            data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
-            self.plot_data(data, title=self.current_plot_type, keep_view=True)
+        if replot and self.raw_data is not None:
+            if self._apply_noise_clip_to_current_data():
+                data = self.noise_reduced_data
+                title = "Background Subtracted"
+            else:
+                data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
+                title = self.current_plot_type
+            self.plot_data(data, title=title, keep_view=True)
 
-        self._mark_project_dirty()
-        self._log_operation(f"Applied preset: {preset.get('name', 'Unnamed')}")
+        if mark_dirty:
+            self._mark_project_dirty()
+        if log_operation:
+            self._log_operation(f"Applied preset: {preset.get('name', 'Unnamed')}")
         return True
 
     def apply_saved_preset(self):
@@ -8264,6 +8372,38 @@ class MainWindow(QMainWindow):
             return
         self._apply_preset_payload(selected)
 
+    def set_default_preset(self):
+        presets = self._load_global_presets()
+        if not presets:
+            QMessageBox.information(self, "Set Default Preset", "No presets have been saved yet.")
+            return
+        names = [p["name"] for p in presets]
+        current_name = self._default_preset_name()
+        current_index = next(
+            (i for i, name in enumerate(names) if self._preset_name_key(name) == self._preset_name_key(current_name)),
+            0,
+        )
+        choice, ok = QInputDialog.getItem(
+            self,
+            "Set Default Preset",
+            "Apply on FITS load:",
+            names,
+            current_index,
+            False,
+        )
+        if not ok or not choice:
+            return
+        self._set_default_preset_name(str(choice))
+        self.statusBar().showMessage(f"Default FITS-load preset set to '{choice}'.", 3000)
+
+    def clear_default_preset(self):
+        old_name = self._default_preset_name()
+        self._set_default_preset_name(None)
+        if old_name:
+            self.statusBar().showMessage("Default FITS-load preset cleared.", 2500)
+        else:
+            QMessageBox.information(self, "Clear Default Preset", "No default preset is set.")
+
     def delete_saved_preset(self):
         presets = self._load_global_presets()
         if not presets:
@@ -8276,6 +8416,8 @@ class MainWindow(QMainWindow):
         updated, removed = delete_preset(presets, str(choice))
         if removed:
             self._save_global_presets(updated)
+            if self._preset_name_key(self._default_preset_name()) == self._preset_name_key(choice):
+                self._set_default_preset_name(None)
             self.statusBar().showMessage(f"Deleted preset '{choice}'.", 2500)
 
     def _extract_observation_date(self) -> date | None:
