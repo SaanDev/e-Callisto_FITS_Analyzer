@@ -105,3 +105,46 @@ def test_lasso_selection_inside_zero_filled_gap_selects_only_gap_rows():
     assert bool(np.any(window.lasso_mask[gap_rows]))
     assert not bool(np.any(window.lasso_mask[~gap_rows]))
     window.close()
+
+
+def test_lasso_selection_uses_rendered_time_pixel_centers():
+    _app()
+    window = MainWindow(theme=None)
+    freqs = np.array([30.0, 20.0, 10.0], dtype=float)
+    time = np.array([0.0, 1.0, 2.0, 3.0], dtype=float)
+    data = np.arange(freqs.size * time.size, dtype=np.float32).reshape(freqs.size, time.size)
+
+    window._apply_loaded_dataset(
+        data=data,
+        freqs=freqs,
+        time=time,
+        filename="demo.fit",
+        header0=None,
+        source_path=None,
+        ut_start_sec=0.0,
+        combined_mode=None,
+        combined_sources=None,
+        gap_row_mask=None,
+        frequency_step_mhz=10.0,
+        plot_title="Raw",
+    )
+    _flush_events()
+
+    window.noise_reduced_data = data.copy()
+    window.noise_vmin = float(np.nanmin(data))
+    window.noise_vmax = float(np.nanmax(data))
+
+    window.on_lasso_select(
+        [
+            (2.25, 25.0),
+            (3.0, 25.0),
+            (3.0, 15.0),
+            (2.25, 15.0),
+        ]
+    )
+    _flush_events()
+
+    expected = np.zeros_like(data, dtype=bool)
+    expected[1, 3] = True
+    assert np.array_equal(window.lasso_mask, expected)
+    window.close()

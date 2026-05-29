@@ -5077,6 +5077,27 @@ class MainWindow(QMainWindow):
 
         self.lasso = LassoSelector(self.canvas.ax, onselect=self.on_lasso_select)
 
+    @staticmethod
+    def _rendered_axis_centers(start, stop, count: int) -> np.ndarray:
+        count = int(count)
+        if count <= 0:
+            return np.empty(0, dtype=float)
+        step = (float(stop) - float(start)) / float(count)
+        return float(start) + (np.arange(count, dtype=float) + 0.5) * step
+
+    def _lasso_mask_coordinates(self, ny: int, nx: int) -> tuple[np.ndarray, np.ndarray]:
+        # Match the mask grid to the rendered image, not the raw axis arrays.
+        extent = matplotlib_extent(
+            self.freqs,
+            self.time,
+            default_step=self._frequency_step_mhz,
+        )
+        x0, x1, y0, y1 = (float(extent[0]), float(extent[1]), float(extent[2]), float(extent[3]))
+        x = self._rendered_axis_centers(x0, x1, nx)
+        # imshow uses origin="upper" by default, so row 0 is rendered at the top edge.
+        y = self._rendered_axis_centers(y1, y0, ny)
+        return x, y
+
     def on_lasso_select(self, verts):
 
         if self.noise_reduced_data is None:
@@ -5093,8 +5114,7 @@ class MainWindow(QMainWindow):
         path = Path(verts_arr, closed=True)
 
         ny, nx = self.noise_reduced_data.shape
-        y = np.asarray(self.freqs, dtype=float)
-        x = np.asarray(self.time, dtype=float)
+        x, y = self._lasso_mask_coordinates(ny, nx)
         X, Y = np.meshgrid(x, y)
 
         coords = np.column_stack((X.flatten(), Y.flatten()))
