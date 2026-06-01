@@ -25,6 +25,7 @@ from src.Backend.frequency_axis import (
     transparent_bad_cmap,
 )
 from src.Backend.noise_reduction import subtract_background_rows
+from src.Backend.view_config import normalize_view_config
 
 
 _FIT_SUFFIXES = (".fit.gz", ".fits.gz", ".fit", ".fits")
@@ -140,6 +141,34 @@ def _resolve_cmap(cmap_name: str):
         return cm.get_cmap("viridis")
 
 
+def _view_range_from_config(view_config: dict | None) -> dict | None:
+    if not view_config:
+        return None
+    try:
+        cfg = normalize_view_config(view_config)
+    except Exception:
+        return None
+    range_payload = cfg.get("range")
+    return dict(range_payload) if isinstance(range_payload, dict) else None
+
+
+def locked_view_overlaps_data(freqs: np.ndarray, time: np.ndarray, view_config: dict | None) -> bool:
+    view_range = _view_range_from_config(view_config)
+    if not view_range:
+        return True
+    try:
+        extent = matplotlib_extent(freqs, time)
+        data_x = (min(float(extent[0]), float(extent[1])), max(float(extent[0]), float(extent[1])))
+        data_y = (min(float(extent[2]), float(extent[3])), max(float(extent[2]), float(extent[3])))
+        view_x = (float(view_range["time_start_s"]), float(view_range["time_stop_s"]))
+        view_y = (float(view_range["freq_min_mhz"]), float(view_range["freq_max_mhz"]))
+    except Exception:
+        return True
+    x_overlap = min(data_x[1], view_x[1]) - max(data_x[0], view_x[0])
+    y_overlap = min(data_y[1], view_y[1]) - max(data_y[0], view_y[0])
+    return bool(x_overlap > 0.0 and y_overlap > 0.0)
+
+
 def save_background_subtracted_png(
     data: np.ndarray,
     freqs: np.ndarray,
@@ -150,6 +179,7 @@ def save_background_subtracted_png(
     ut_start_sec: float | None = 0.0,
     cold_digits: float = 0.0,
     db_scale: float = DEFAULT_DB_SCALE,
+    view_config: dict | None = None,
 ) -> None:
     arr = np.asarray(data, dtype=np.float32)
     if arr.ndim != 2:
@@ -161,33 +191,64 @@ def save_background_subtracted_png(
         raise ValueError("Frequency/time axes cannot be empty for PNG export.")
 
     ut_start = float(ut_start_sec) if ut_start_sec is not None else 0.0
-    data_db = convert_digits_to_db(arr, cold_digits=float(cold_digits), db_scale=float(db_scale))
+    raw_cfg = dict(view_config or {}) if isinstance(view_config, dict) else {}
+    cfg = normalize_view_config(raw_cfg) if raw_cfg else None
+    apply_visual = bool(raw_cfg.get("_include_visual", True)) if raw_cfg else False
+    visual = dict((cfg or {}).get("visual") or {}) if apply_visual else {}
+    use_db = bool(visual.get("use_db", True)) if apply_visual else True
+    display_data = (
+        convert_digits_to_db(arr, cold_digits=float(cold_digits), db_scale=float(db_scale))
+        if use_db
+        else np.asarray(arr, dtype=np.float32)
+    )
 
     time_start = float(time_arr[0])
     time_end = float(time_arr[-1])
     if abs(time_end - time_start) < 1e-12:
         time_end = time_start + 1.0
 
-    cmap = transparent_bad_cmap(_resolve_cmap(cmap_name))
+    effective_cmap_name = str(visual.get("cmap") or cmap_name) if apply_visual else str(cmap_name or "Custom")
+    cmap = transparent_bad_cmap(_resolve_cmap(effective_cmap_name))
 
     fig = Figure(figsize=(10, 6))
     FigureCanvasAgg(fig)
     try:
         ax = fig.add_subplot(111)
         im = ax.imshow(
-            masked_display_data(data_db),
+            masked_display_data(display_data),
             aspect="auto",
             extent=matplotlib_extent(freq_arr, time_arr),
             cmap=cmap,
         )
-        vmin, vmax = finite_data_limits(data_db)
-        if vmin is not None and vmax is not None:
-            im.set_clim(vmin, vmax)
+        low = float(visual.get("noise_clip_low", 0.0)) if visual else 0.0
+        high = float(visual.get("noise_clip_high", 0.0)) if visual else 0.0
+        levels = None
+        if abs(low) > 1e-9 or abs(high) > 1e-9:
+            lo, hi = sorted((low, high))
+            if use_db:
+                lo = (lo - float(cold_digits)) * float(db_scale)
+                hi = (hi - float(cold_digits)) * float(db_scale)
+            if hi > lo:
+                levels = (lo, hi)
+        if levels is None:
+            vmin, vmax = finite_data_limits(display_data)
+            if vmin is not None and vmax is not None:
+                im.set_clim(vmin, vmax)
+        else:
+            im.set_clim(*levels)
         cbar = fig.colorbar(im, ax=ax)
-        cbar.set_label("Intensity [dB]")
-        ax.set_xlabel("Time [UT]")
-        ax.set_ylabel("Frequency [MHz]")
-        ax.set_title(str(title or "").strip() or "Background Subtracted")
+        cbar.set_label("Intensity [dB]" if use_db else "Intensity [Digits]")
+
+        graph = dict(visual.get("graph") or {}) if apply_visual else {}
+        remove_titles = bool(graph.get("remove_titles", False))
+        if remove_titles:
+            ax.set_xlabel("")
+            ax.set_ylabel("")
+            ax.set_title("")
+        else:
+            ax.set_xlabel("Time [UT]" if bool(visual.get("use_utc", True)) else "Time [s]")
+            ax.set_ylabel("Frequency [MHz]")
+            ax.set_title(str(title or "").strip() or "Background Subtracted")
 
         show_seconds = abs(time_end - time_start) <= 5.0 * 60.0
 
@@ -201,7 +262,14 @@ def save_background_subtracted_png(
                 return f"{hh:02d}:{mm:02d}:{ss:02d}"
             return f"{hh:02d}:{mm:02d}"
 
-        ax.xaxis.set_major_formatter(FuncFormatter(_fmt_ut))
+        use_utc_ticks = bool(visual.get("use_utc", True)) if apply_visual else True
+        if use_utc_ticks:
+            ax.xaxis.set_major_formatter(FuncFormatter(_fmt_ut))
+
+        view_range = dict((cfg or {}).get("range") or {}) if cfg else {}
+        if view_range:
+            ax.set_xlim(float(view_range["time_start_s"]), float(view_range["time_stop_s"]))
+            ax.set_ylim(float(view_range["freq_min_mhz"]), float(view_range["freq_max_mhz"]))
 
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         fig.savefig(output_path, dpi=300, bbox_inches="tight", format="png")

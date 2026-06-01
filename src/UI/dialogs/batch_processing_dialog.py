@@ -13,6 +13,7 @@ from typing import Callable
 from PySide6.QtCore import Qt, QThread, Slot
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from src.Backend.view_config import parse_view_config_json
 from src.UI.gui_workers import BatchProcessWorker
 
 
@@ -51,6 +53,7 @@ class BatchProcessingDialog(QDialog):
         *,
         cmap_name_provider: Callable[[], str] | None = None,
         cold_digits_provider: Callable[[], float] | None = None,
+        view_config_provider: Callable[..., dict | None] | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -59,10 +62,13 @@ class BatchProcessingDialog(QDialog):
 
         self._cmap_name_provider = cmap_name_provider
         self._cold_digits_provider = cold_digits_provider
+        self._view_config_provider = view_config_provider
         self._thread = None
         self._worker = None
         self._close_after_finish = False
         self._last_payload = None
+        self._loaded_view_config = None
+        self._loaded_view_config_path = ""
 
         self._build_ui()
 
@@ -133,6 +139,25 @@ class BatchProcessingDialog(QDialog):
         process_layout.addWidget(self.colormap_combo, 1, 1)
         root.addWidget(process_group)
 
+        aligned_group = QGroupBox("Aligned View")
+        aligned_layout = QGridLayout(aligned_group)
+        aligned_layout.setHorizontalSpacing(8)
+        aligned_layout.setVerticalSpacing(8)
+        self.use_current_range_chk = QCheckBox("Use current display range")
+        self.use_current_visual_chk = QCheckBox("Use current visual settings")
+        has_provider = callable(self._view_config_provider)
+        self.use_current_range_chk.setEnabled(has_provider)
+        self.use_current_visual_chk.setEnabled(has_provider)
+        self.load_view_config_btn = QPushButton("Load View Config...")
+        self.load_view_config_btn.clicked.connect(self._load_view_config_file)
+        self.loaded_view_config_label = QLabel("No view config loaded.")
+        self.loaded_view_config_label.setWordWrap(True)
+        aligned_layout.addWidget(self.use_current_range_chk, 0, 0)
+        aligned_layout.addWidget(self.use_current_visual_chk, 0, 1)
+        aligned_layout.addWidget(self.load_view_config_btn, 1, 0)
+        aligned_layout.addWidget(self.loaded_view_config_label, 1, 1)
+        root.addWidget(aligned_group)
+
         self.raw_output_radio.toggled.connect(self._sync_background_method_enabled)
         self.background_output_radio.toggled.connect(self._sync_background_method_enabled)
         self._sync_background_method_enabled()
@@ -189,6 +214,9 @@ class BatchProcessingDialog(QDialog):
         self.raw_output_radio.setEnabled(flag)
         self.background_output_radio.setEnabled(flag)
         self.colormap_combo.setEnabled(flag)
+        self.use_current_range_chk.setEnabled(flag and callable(self._view_config_provider))
+        self.use_current_visual_chk.setEnabled(flag and callable(self._view_config_provider))
+        self.load_view_config_btn.setEnabled(flag)
         self._sync_background_method_enabled()
 
         if self.is_running():
@@ -235,6 +263,47 @@ class BatchProcessingDialog(QDialog):
         if path:
             self.output_dir_edit.setText(path)
 
+    def _load_view_config_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load View Config",
+            "",
+            "e-CALLISTO View Config (*.efaview.json);;JSON Files (*.json)",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                self._loaded_view_config = parse_view_config_json(handle.read())
+        except Exception as exc:
+            self._loaded_view_config = None
+            self._loaded_view_config_path = ""
+            self.loaded_view_config_label.setText("No view config loaded.")
+            QMessageBox.warning(self, "Load View Config Failed", f"Could not load view config:\n{exc}")
+            return
+        self._loaded_view_config_path = path
+        self.loaded_view_config_label.setText(f"Loaded: {os.path.basename(path)}")
+
+    def _selected_view_config(self) -> dict | None:
+        if isinstance(self._loaded_view_config, dict):
+            return dict(self._loaded_view_config)
+        include_range = bool(self.use_current_range_chk.isChecked())
+        include_visual = bool(self.use_current_visual_chk.isChecked())
+        if not include_range and not include_visual:
+            return None
+        provider = self._view_config_provider
+        if not callable(provider):
+            return None
+        try:
+            return provider(include_range=include_range, include_visual=include_visual)
+        except TypeError:
+            try:
+                return provider()
+            except Exception:
+                return None
+        except Exception:
+            return None
+
     def _start_batch(self):
         if self.is_running():
             QMessageBox.information(self, "Batch Processing", "A batch run is already in progress.")
@@ -272,6 +341,11 @@ class BatchProcessingDialog(QDialog):
         background_method = self.background_method_combo.currentText().strip().lower() or "mean"
         cmap_name = self.colormap_combo.currentText().strip() or "Custom"
         cold_digits = self._current_cold_digits()
+        view_config = self._selected_view_config()
+        if (self.use_current_range_chk.isChecked() or self.use_current_visual_chk.isChecked()) and view_config is None:
+            QMessageBox.warning(self, "Batch Processing", "The current display/view settings are unavailable.")
+            self._set_controls_enabled(True)
+            return
 
         self._thread = QThread(self)
         self._worker = BatchProcessWorker(
@@ -281,6 +355,7 @@ class BatchProcessingDialog(QDialog):
             output_mode=output_mode,
             background_method=background_method,
             cold_digits=cold_digits,
+            view_config=view_config,
         )
         self._worker.moveToThread(self._thread)
 
@@ -340,9 +415,11 @@ class BatchProcessingDialog(QDialog):
         failed = int(data.get("failed", 0) or 0)
         cancelled = bool(data.get("cancelled", False))
         errors = list(data.get("errors") or [])
+        warnings = list(data.get("warnings") or [])
         output_mode = str(data.get("output_mode", "background_subtracted") or "background_subtracted")
         background_method = str(data.get("background_method", "mean") or "mean")
         cmap_name = str(data.get("cmap_name", "Custom") or "Custom")
+        locked_axes = bool(data.get("locked_axes", False))
 
         if self.progress_bar.maximum() < max(total, processed):
             self.progress_bar.setMaximum(max(total, processed))
@@ -361,7 +438,19 @@ class BatchProcessingDialog(QDialog):
             f"Output mode: {mode_text}",
             f"Background method: {method_text}",
             f"Colormap: {cmap_name}",
+            f"Locked axes: {'Yes' if locked_axes else 'No'}",
         ]
+
+        if warnings:
+            preview = warnings[:8]
+            summary_lines.append("")
+            summary_lines.append("Warnings:")
+            for item in preview:
+                path = os.path.basename(str(item.get("input_path", "") or ""))
+                msg = str(item.get("warning", "") or "Warning")
+                summary_lines.append(f"- {path}: {msg}")
+            if len(warnings) > len(preview):
+                summary_lines.append(f"- ... and {len(warnings) - len(preview)} more")
 
         if errors:
             preview = errors[:8]

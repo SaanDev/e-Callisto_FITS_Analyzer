@@ -207,6 +207,47 @@ def test_batch_worker_raw_mode_does_not_call_background_subtraction(monkeypatch,
     assert payload["output_mode"] == "raw"
 
 
+def test_batch_worker_passes_locked_view_config_and_reports_warning(monkeypatch, tmp_path: Path):
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    files = ["/tmp/outside.fit"]
+    payloads = []
+    saved = []
+    view_config = {
+        "range": {"time_start_s": 10.0, "time_stop_s": 20.0, "freq_min_mhz": 10.0, "freq_max_mhz": 20.0},
+        "visual": {"use_db": False, "use_utc": False, "cmap": "plasma"},
+    }
+
+    monkeypatch.setattr("src.UI.gui_workers.list_fit_files", lambda *_a, **_k: files)
+    monkeypatch.setattr("src.UI.gui_workers.load_callisto_fits", lambda *_a, **_k: _build_result())
+    monkeypatch.setattr(
+        "src.UI.gui_workers.build_unique_output_png_path",
+        lambda out_dir, input_name: str(tmp_path / f"{input_name}.png"),
+    )
+    monkeypatch.setattr(
+        "src.UI.gui_workers.save_background_subtracted_png",
+        lambda *args, **kwargs: saved.append(kwargs.get("view_config")),
+    )
+
+    worker = BatchProcessWorker(
+        input_dir=str(input_dir),
+        output_dir=str(tmp_path),
+        cmap_name="plasma",
+        output_mode="raw",
+        background_method="mean",
+        cold_digits=0.0,
+        view_config=view_config,
+    )
+    worker.finished.connect(lambda payload: payloads.append(payload))
+    worker.run()
+
+    assert len(payloads) == 1
+    assert payloads[0]["locked_axes"] is True
+    assert len(payloads[0]["warnings"]) == 1
+    assert saved[0]["range"]["time_start_s"] == pytest.approx(10.0)
+    assert saved[0]["visual"]["use_db"] is False
+
+
 def test_batch_menu_action_opens_and_reuses_window():
     _app()
     win = MainWindow(theme=None)
@@ -282,6 +323,32 @@ def test_batch_dialog_background_method_combo_toggles_with_output_mode():
     assert dlg.background_method_combo.isEnabled() is True
 
     dlg.close()
+    win.close()
+
+
+def test_batch_dialog_builds_current_view_config_from_checkboxes():
+    _app()
+    calls = []
+    win = MainWindow(theme=None)
+
+    from src.UI.dialogs.batch_processing_dialog import BatchProcessingDialog
+
+    dialog = BatchProcessingDialog(
+        view_config_provider=lambda **kwargs: calls.append(kwargs) or {
+            "range": {"time_start_s": 1.0, "time_stop_s": 2.0, "freq_min_mhz": 40.0, "freq_max_mhz": 80.0},
+            "visual": {"use_db": True},
+        },
+        parent=win,
+    )
+    dialog.use_current_range_chk.setChecked(True)
+    dialog.use_current_visual_chk.setChecked(True)
+
+    cfg = dialog._selected_view_config()
+
+    assert calls == [{"include_range": True, "include_visual": True}]
+    assert cfg["range"]["time_start_s"] == pytest.approx(1.0)
+    assert cfg["visual"]["use_db"] is True
+    dialog.close()
     win.close()
 
 

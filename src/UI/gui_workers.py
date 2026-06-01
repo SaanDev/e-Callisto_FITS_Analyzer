@@ -22,6 +22,7 @@ from PySide6.QtCore import QCoreApplication, QObject, QStandardPaths, Signal, Sl
 
 from src.Backend.batch_processing import (
     build_unique_output_png_path,
+    locked_view_overlaps_data,
     subtract_background,
     list_fit_files,
     save_background_subtracted_png,
@@ -30,6 +31,7 @@ from src.Backend.fits_io import extract_ut_start_sec, load_callisto_fits
 from src.Backend.goes_overlay import goes_overlay_payload_from_dict
 from src.Backend.project_report import ReportGenerationCancelled, generate_project_report_pdf
 from src.Backend.update_checker import check_for_updates
+from src.Backend.view_config import normalize_view_config
 
 
 def _default_sunpy_cache_dir() -> Path:
@@ -483,6 +485,7 @@ class BatchProcessWorker(QObject):
         output_mode: str = "background_subtracted",
         background_method: str = "mean",
         cold_digits: float = 0.0,
+        view_config: dict | None = None,
     ):
         super().__init__()
         self.input_dir = str(input_dir or "").strip()
@@ -496,6 +499,20 @@ class BatchProcessWorker(QObject):
             self.cold_digits = float(cold_digits)
         except Exception:
             self.cold_digits = 0.0
+        try:
+            self.view_config = normalize_view_config(view_config) if view_config else None
+            if isinstance(view_config, dict) and not bool(view_config.get("_include_visual", True)):
+                self.view_config["_include_visual"] = False
+        except Exception:
+            self.view_config = None
+        self.effective_cmap_name = self.cmap_name
+        try:
+            if self.view_config and bool(self.view_config.get("_include_visual", True)):
+                visual_cmap = str((self.view_config.get("visual") or {}).get("cmap") or "").strip()
+                if visual_cmap:
+                    self.effective_cmap_name = visual_cmap
+        except Exception:
+            self.effective_cmap_name = self.cmap_name
         self._cancel_requested = False
 
     @Slot()
@@ -544,16 +561,20 @@ class BatchProcessWorker(QObject):
                     "cancelled": False,
                     "output_mode": self.output_mode,
                     "background_method": self.background_method,
-                    "cmap_name": self.cmap_name,
+                    "cmap_name": self.effective_cmap_name,
                     "cold_digits": self.cold_digits,
+                    "view_config": self.view_config,
+                    "locked_axes": bool(self.view_config and self.view_config.get("range")),
                     "results": [],
                     "errors": [],
+                    "warnings": [],
                 }
             )
             return
 
         results: list[dict] = []
         errors: list[dict] = []
+        warnings: list[dict] = []
         processed = 0
 
         for idx, file_path in enumerate(files, start=1):
@@ -592,6 +613,17 @@ class BatchProcessWorker(QObject):
                 ut_start_sec = extract_ut_start_sec(res.header0)
                 if ut_start_sec is None:
                     ut_start_sec = 0.0
+                if self.view_config and self.view_config.get("range") and not locked_view_overlaps_data(
+                    res.freqs,
+                    res.time,
+                    self.view_config,
+                ):
+                    warnings.append(
+                        {
+                            "input_path": file_path,
+                            "warning": "Locked display range does not overlap this file's time/frequency extent.",
+                        }
+                    )
 
                 save_background_subtracted_png(
                     out_data,
@@ -599,9 +631,10 @@ class BatchProcessWorker(QObject):
                     res.time,
                     out_path,
                     title,
-                    self.cmap_name,
+                    self.effective_cmap_name,
                     ut_start_sec=ut_start_sec,
                     cold_digits=self.cold_digits,
+                    view_config=self.view_config,
                 )
                 results.append({"input_path": file_path, "output_path": out_path})
             except Exception as e:
@@ -627,9 +660,12 @@ class BatchProcessWorker(QObject):
                 "cancelled": cancelled,
                 "output_mode": self.output_mode,
                 "background_method": self.background_method,
-                "cmap_name": self.cmap_name,
+                "cmap_name": self.effective_cmap_name,
                 "cold_digits": self.cold_digits,
+                "view_config": self.view_config,
+                "locked_axes": bool(self.view_config and self.view_config.get("range")),
                 "results": results,
                 "errors": errors,
+                "warnings": warnings,
             }
         )

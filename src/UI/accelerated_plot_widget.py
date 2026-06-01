@@ -405,6 +405,10 @@ class AcceleratedPlotWidget(QWidget):
             pass
         finally:
             self._block_range_signals = False
+        try:
+            self._sync_goes_overlay_geometry()
+        except Exception:
+            pass
 
     def set_navigation_locked(self, locked: bool) -> None:
         if not self.is_available:

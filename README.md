@@ -45,6 +45,7 @@ A desktop application for visualizing, processing, and analyzing e-CALLISTO sola
 - **Rendered-path lasso burst isolation:** lasso masking now follows the displayed image pixel centers, so the isolated burst region matches the path drawn on the spectrum more accurately.
 - **Corrected harmonic shock calculations:** harmonic Type II shock-parameter calculations now use the converted fundamental frequency/drift values internally while preserving observed values in saved summaries.
 - **Corrected drift summaries:** drift estimation now ignores invalid/zero-duration segments and reports start frequency, end frequency, duration, and average drift from the valid time-ordered path.
+- **Aligned spectrum view workflow:** set exact display ranges, save/apply display-range presets, export/import `.efaview.json` view configs, and batch-export spectra with locked axes for station comparisons.
 
 ### Bug fixes and improvements
 - Removed the obsolete **Burst Isolated Dynamic Spectrum** section from generated project reports.
@@ -193,6 +194,9 @@ Features:
 
 - **Scroll wheel:** Zoom in and out
 - **Click + drag:** Pan across time and frequency
+- **View → Set Display Range...:** enter exact start/stop times and frequency bounds for aligned station comparisons
+- **View → Save/Apply Display Range Preset...:** reuse the same visible window on later files
+- **View → Export/Import View Config...:** share display range, units, thresholds, colormap, and graph styling as `.efaview.json`
 - Navigation works alongside noise reduction and colormap changes
 
 This allows precise inspection of fine spectral structures.
@@ -425,6 +429,8 @@ Export handling improvements:
 - On Windows, if the default save location is restricted (for example `C:\Program Files`), the user is prompted to select an alternate folder
 
 This supports publication workflows across operating systems.
+
+Batch plot exports are available from **Processing → Batch Processing**. Enable **Use current display range** or load a saved `.efaview.json` config to export multiple station spectra with identical time/frequency axes.
 
 ### Provenance and Analysis Logs
 

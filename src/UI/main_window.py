@@ -130,6 +130,18 @@ from src.Backend.recovery_manager import (
 from src.Backend.noise_reduction import rowwise_baseline, subtract_background_rows
 from src.Backend.rfi_filters import clean_rfi, config_dict as rfi_config_dict
 from src.Backend.update_checker import GITHUB_REPO
+from src.Backend.view_config import (
+    build_display_range_preset,
+    build_view_config,
+    delete_display_range_preset,
+    dump_display_range_presets_json,
+    dump_view_config_json,
+    normalize_display_range,
+    normalize_view_config,
+    parse_display_range_presets_json,
+    parse_view_config_json,
+    upsert_display_range_preset,
+)
 from src.UI.accelerated_plot_widget import (
     AcceleratedPlotWidget,
 )
@@ -140,6 +152,7 @@ from src.UI.dialogs.batch_processing_dialog import BatchProcessingDialog
 from src.UI.dialogs.bug_report_dialog import BugReportDialog
 from src.UI.dialogs.citation_dialog import CitationDialog
 from src.UI.dialogs.combine_dialogs import CombineFrequencyDialog, CombineTimeDialog, FrequencyCombineOptionsDialog
+from src.UI.dialogs.display_range_dialog import DisplayRangeDialog
 from src.UI.dialogs.light_curve_frequency_dialog import LightCurveFrequencyDialog
 from src.UI.dialogs.light_curve_settings_dialog import LightCurveSettingsDialog
 from src.UI.dialogs.max_intensity_dialog import MaxIntensityPlotDialog
@@ -191,6 +204,7 @@ class MainWindow(QMainWindow):
     RAW_FITS_VMIN_PERCENTILE = 5.0
     RAW_FITS_VMAX_PERCENTILE = 98.0
     DEFAULT_PRESET_SETTINGS_KEY = "processing/default_preset_name"
+    DISPLAY_RANGE_PRESETS_SETTINGS_KEY = "view/display_range_presets_json"
     HW_DEFAULT_TICK_FONT_PX = 14
     HW_DEFAULT_AXIS_FONT_PX = 16
     HW_DEFAULT_TITLE_FONT_PX = 22
@@ -963,6 +977,32 @@ class MainWindow(QMainWindow):
         self.view_fits_header_action.setEnabled(False)
         view_menu.addAction(self.view_fits_header_action)
         self.view_fits_header_action.triggered.connect(self.open_fits_header_viewer)
+        self.set_display_range_action = QAction("Set Display Range...", self)
+        self.set_display_range_action.setEnabled(False)
+        view_menu.addAction(self.set_display_range_action)
+        self.set_display_range_action.triggered.connect(self.open_display_range_dialog)
+        view_menu.addSeparator()
+        self.save_display_range_preset_action = QAction("Save Display Range Preset...", self)
+        self.save_display_range_preset_action.setEnabled(False)
+        self.apply_display_range_preset_action = QAction("Apply Display Range Preset...", self)
+        self.apply_display_range_preset_action.setEnabled(False)
+        self.delete_display_range_preset_action = QAction("Delete Display Range Preset...", self)
+        self.delete_display_range_preset_action.setEnabled(False)
+        view_menu.addAction(self.save_display_range_preset_action)
+        view_menu.addAction(self.apply_display_range_preset_action)
+        view_menu.addAction(self.delete_display_range_preset_action)
+        self.save_display_range_preset_action.triggered.connect(self.save_display_range_preset)
+        self.apply_display_range_preset_action.triggered.connect(self.apply_display_range_preset)
+        self.delete_display_range_preset_action.triggered.connect(self.delete_display_range_preset)
+        view_menu.addSeparator()
+        self.export_view_config_action = QAction("Export View Config...", self)
+        self.export_view_config_action.setEnabled(False)
+        self.import_view_config_action = QAction("Import View Config...", self)
+        self.import_view_config_action.setEnabled(False)
+        view_menu.addAction(self.export_view_config_action)
+        view_menu.addAction(self.import_view_config_action)
+        self.export_view_config_action.triggered.connect(self.export_view_config)
+        self.import_view_config_action.triggered.connect(self.import_view_config)
         view_menu.addSeparator()
         theme_menu = view_menu.addMenu("Theme")
         mode_menu = view_menu.addMenu("Mode")
@@ -4529,6 +4569,475 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _full_display_view(self) -> dict | None:
+        if self.time is None or self.freqs is None:
+            return None
+        try:
+            extent = matplotlib_extent(self.freqs, self.time, default_step=self._frequency_step_mhz)
+            x0, x1, y0, y1 = (float(extent[0]), float(extent[1]), float(extent[2]), float(extent[3]))
+            if not np.isfinite([x0, x1, y0, y1]).all():
+                return None
+            return {
+                "xlim": (min(x0, x1), max(x0, x1)),
+                "ylim": (min(y0, y1), max(y0, y1)),
+            }
+        except Exception:
+            return None
+
+    def _display_range_defaults(self) -> tuple[float, float, float, float] | None:
+        full_view = self._full_display_view()
+        if not full_view:
+            return None
+        view = self._capture_view() or full_view
+        try:
+            x0, x1 = view.get("xlim")
+        except Exception:
+            x0, x1 = full_view["xlim"]
+        try:
+            y0, y1 = view.get("ylim")
+        except Exception:
+            y0, y1 = full_view["ylim"]
+        values = [x0, x1, y0, y1]
+        try:
+            values = [float(v) for v in values]
+        except Exception:
+            x0, x1 = full_view["xlim"]
+            y0, y1 = full_view["ylim"]
+            values = [x0, x1, y0, y1]
+        if not np.isfinite(values).all():
+            x0, x1 = full_view["xlim"]
+            y0, y1 = full_view["ylim"]
+            values = [x0, x1, y0, y1]
+        return min(values[0], values[1]), max(values[0], values[1]), min(values[2], values[3]), max(values[2], values[3])
+
+    @staticmethod
+    def _clamp_to_range(value: float, lower: float, upper: float) -> float:
+        return min(max(float(value), float(lower)), float(upper))
+
+    def _ut_seconds_of_day_range_to_relative(
+        self,
+        start_seconds_of_day: float,
+        stop_seconds_of_day: float,
+        full_xlim: tuple[float, float] | None = None,
+    ) -> tuple[float, float] | None:
+        if self.ut_start_sec is None:
+            return None
+        try:
+            start_sod = float(start_seconds_of_day)
+            stop_sod = float(stop_seconds_of_day)
+            ut_start = float(self.ut_start_sec)
+        except Exception:
+            return None
+        if not np.isfinite([start_sod, stop_sod, ut_start]).all():
+            return None
+        if abs(stop_sod - start_sod) <= 1e-9:
+            return None
+
+        if full_xlim is None:
+            full_view = self._full_display_view()
+            if not full_view:
+                return None
+            full_xlim = full_view["xlim"]
+        try:
+            full_lo = float(min(full_xlim))
+            full_hi = float(max(full_xlim))
+        except Exception:
+            return None
+        if not np.isfinite([full_lo, full_hi]).all() or full_hi <= full_lo:
+            return None
+
+        nominal_duration = stop_sod - start_sod if stop_sod > start_sod else (stop_sod + 86400.0) - start_sod
+        day_span = max(3, int(math.ceil((full_hi - full_lo) / 86400.0)) + 3)
+        best: tuple[tuple[float, float, float], tuple[float, float]] | None = None
+        for start_day in range(-1, day_span + 2):
+            start_rel = start_sod - ut_start + start_day * 86400.0
+            for stop_day in range(-1, day_span + 3):
+                stop_rel = stop_sod - ut_start + stop_day * 86400.0
+                if stop_rel <= start_rel:
+                    continue
+                clamped_start = self._clamp_to_range(start_rel, full_lo, full_hi)
+                clamped_stop = self._clamp_to_range(stop_rel, full_lo, full_hi)
+                if clamped_stop <= clamped_start:
+                    continue
+                outside_distance = abs(start_rel - clamped_start) + abs(stop_rel - clamped_stop)
+                duration_distance = abs((stop_rel - start_rel) - nominal_duration)
+                start_distance = abs(start_rel - full_lo)
+                score = (outside_distance, duration_distance, start_distance)
+                if best is None or score < best[0]:
+                    best = (score, (start_rel, stop_rel))
+        return None if best is None else best[1]
+
+    def _show_display_range_warning(self, message: str, *, show_errors: bool) -> None:
+        if show_errors:
+            QMessageBox.warning(self, "Set Display Range", message)
+        else:
+            self.statusBar().showMessage(message, 3000)
+
+    def _apply_display_range(
+        self,
+        time_start_s: float,
+        time_stop_s: float,
+        freq_start_mhz: float,
+        freq_stop_mhz: float,
+        *,
+        show_errors: bool = True,
+    ) -> bool:
+        full_view = self._full_display_view()
+        if not full_view:
+            self._show_display_range_warning("Load a FITS file before setting the display range.", show_errors=show_errors)
+            return False
+
+        try:
+            time_start = float(time_start_s)
+            time_stop = float(time_stop_s)
+            freq_start = float(freq_start_mhz)
+            freq_stop = float(freq_stop_mhz)
+        except Exception:
+            self._show_display_range_warning("Enter numeric time and frequency limits.", show_errors=show_errors)
+            return False
+        if not np.isfinite([time_start, time_stop, freq_start, freq_stop]).all():
+            self._show_display_range_warning("Enter finite time and frequency limits.", show_errors=show_errors)
+            return False
+        if time_stop <= time_start:
+            self._show_display_range_warning("Stop time must be later than start time.", show_errors=show_errors)
+            return False
+        if abs(freq_stop - freq_start) <= 1e-9:
+            self._show_display_range_warning("Frequency start and stop must be different.", show_errors=show_errors)
+            return False
+
+        full_x0, full_x1 = full_view["xlim"]
+        full_y0, full_y1 = full_view["ylim"]
+        x0 = self._clamp_to_range(time_start, full_x0, full_x1)
+        x1 = self._clamp_to_range(time_stop, full_x0, full_x1)
+        if x1 <= x0:
+            self._show_display_range_warning("Selected time range does not overlap the loaded data.", show_errors=show_errors)
+            return False
+
+        freq_lo, freq_hi = sorted((freq_start, freq_stop))
+        y0 = self._clamp_to_range(freq_lo, full_y0, full_y1)
+        y1 = self._clamp_to_range(freq_hi, full_y0, full_y1)
+        if y1 <= y0:
+            self._show_display_range_warning("Selected frequency range does not overlap the loaded data.", show_errors=show_errors)
+            return False
+
+        new_view = {"xlim": (x0, x1), "ylim": (y0, y1)}
+        prev_view = self._capture_view()
+        if prev_view and not self._views_close(prev_view, new_view):
+            self._push_undo_view(prev_view)
+        self._restore_view(new_view)
+        if not self._hardware_mode_enabled():
+            self._render_goes_overlay()
+        else:
+            try:
+                self.accel_canvas.set_goes_overlay(
+                    self._goes_overlay_payload if self._goes_overlay_enabled else None,
+                    visible_channels=self._selected_goes_overlay_channels(),
+                )
+            except Exception:
+                pass
+        try:
+            self.canvas.draw_idle()
+        except Exception:
+            pass
+        self.statusBar().showMessage("Display range applied.", 2500)
+        self._sync_toolbar_enabled_states()
+        return True
+
+    def open_display_range_dialog(self):
+        full_view = self._full_display_view()
+        defaults = self._display_range_defaults()
+        if not full_view or not defaults:
+            QMessageBox.information(self, "Set Display Range", "Load a FITS file before setting the display range.")
+            return
+        time_start, time_stop, freq_start, freq_stop = defaults
+        full_x0, full_x1 = full_view["xlim"]
+        full_y0, full_y1 = full_view["ylim"]
+        dlg = DisplayRangeDialog(
+            time_min_s=full_x0,
+            time_max_s=full_x1,
+            freq_min_mhz=full_y0,
+            freq_max_mhz=full_y1,
+            initial_time_start_s=time_start,
+            initial_time_stop_s=time_stop,
+            initial_freq_start_mhz=freq_start,
+            initial_freq_stop_mhz=freq_stop,
+            ut_start_sec=self.ut_start_sec,
+            initial_mode="ut" if (self.use_utc and self.ut_start_sec is not None) else "seconds",
+            parent=self,
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        if dlg.uses_ut():
+            ut_range = dlg.ut_seconds_of_day_range()
+            relative = self._ut_seconds_of_day_range_to_relative(ut_range[0], ut_range[1], full_view["xlim"])
+            if relative is None:
+                QMessageBox.warning(self, "Set Display Range", "Enter a valid UT start and stop time for this data range.")
+                return
+            time_start, time_stop = relative
+        else:
+            time_start, time_stop = dlg.seconds_range()
+        freq_start, freq_stop = dlg.frequency_range()
+        self._apply_display_range(time_start, time_stop, freq_start, freq_stop)
+
+    def _current_display_range_payload(self) -> dict | None:
+        defaults = self._display_range_defaults()
+        if not defaults:
+            return None
+        time_start, time_stop, freq_start, freq_stop = defaults
+        try:
+            return normalize_display_range(
+                {
+                    "time_start_s": time_start,
+                    "time_stop_s": time_stop,
+                    "freq_min_mhz": freq_start,
+                    "freq_max_mhz": freq_stop,
+                }
+            )
+        except Exception:
+            return None
+
+    def _current_time_mode_label(self) -> str:
+        return "ut" if bool(getattr(self, "use_utc", False)) else "seconds"
+
+    def _load_display_range_presets(self) -> list[dict]:
+        raw = self._ui_settings.value(self.DISPLAY_RANGE_PRESETS_SETTINGS_KEY, "", type=str)
+        return parse_display_range_presets_json(raw)
+
+    def _save_display_range_presets(self, presets: list[dict]) -> None:
+        self._ui_settings.setValue(self.DISPLAY_RANGE_PRESETS_SETTINGS_KEY, dump_display_range_presets_json(presets))
+
+    def _display_range_preset_name_key(self, name) -> str:
+        return " ".join(str(name or "").split()).casefold()
+
+    def _apply_display_range_payload(self, payload: dict, *, show_errors: bool = True) -> bool:
+        try:
+            normalized = normalize_display_range(payload)
+        except Exception as exc:
+            self._show_display_range_warning(str(exc), show_errors=show_errors)
+            return False
+        return self._apply_display_range(
+            normalized["time_start_s"],
+            normalized["time_stop_s"],
+            normalized["freq_min_mhz"],
+            normalized["freq_max_mhz"],
+            show_errors=show_errors,
+        )
+
+    def save_display_range_preset(self):
+        payload = self._current_display_range_payload()
+        if not payload:
+            QMessageBox.information(self, "Save Display Range Preset", "Load a FITS file before saving a display range preset.")
+            return
+        name, ok = QInputDialog.getText(self, "Save Display Range Preset", "Preset name:")
+        if not ok or not str(name).strip():
+            return
+        try:
+            preset = build_display_range_preset(
+                str(name).strip(),
+                payload,
+                time_mode=self._current_time_mode_label(),
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Save Display Range Preset", str(exc))
+            return
+        presets = self._load_display_range_presets()
+        merged, replaced = upsert_display_range_preset(presets, preset)
+        self._save_display_range_presets(merged)
+        verb = "Updated" if replaced else "Saved"
+        self.statusBar().showMessage(f"{verb} display range preset '{preset['name']}'.", 3000)
+
+    def apply_display_range_preset(self):
+        presets = self._load_display_range_presets()
+        if not presets:
+            QMessageBox.information(self, "Apply Display Range Preset", "No display range presets have been saved yet.")
+            return
+        names = [p["name"] for p in presets]
+        choice, ok = QInputDialog.getItem(self, "Apply Display Range Preset", "Choose preset:", names, 0, False)
+        if not ok or not choice:
+            return
+        selected = next((p for p in presets if p["name"] == choice), None)
+        if not selected:
+            return
+        if self._apply_display_range_payload(dict(selected.get("range") or {})):
+            self.statusBar().showMessage(f"Applied display range preset '{choice}'.", 3000)
+
+    def delete_display_range_preset(self):
+        presets = self._load_display_range_presets()
+        if not presets:
+            QMessageBox.information(self, "Delete Display Range Preset", "No display range presets are available.")
+            return
+        names = [p["name"] for p in presets]
+        choice, ok = QInputDialog.getItem(self, "Delete Display Range Preset", "Choose preset:", names, 0, False)
+        if not ok or not choice:
+            return
+        updated, removed = delete_display_range_preset(presets, str(choice))
+        if removed:
+            self._save_display_range_presets(updated)
+            self.statusBar().showMessage(f"Deleted display range preset '{choice}'.", 2500)
+
+    def _view_config_visual_payload(self) -> dict:
+        settings = self._preset_settings_payload()
+        return {
+            "use_db": bool(settings.get("use_db", False)),
+            "use_utc": bool(settings.get("use_utc", False)),
+            "noise_clip_low": float(settings.get("noise_clip_low", 0.0)),
+            "noise_clip_high": float(settings.get("noise_clip_high", 0.0)),
+            "noise_clip_scale": str(settings.get("noise_clip_scale", self.NOISE_CLIP_SCALE_LINEAR)),
+            "cmap": str(settings.get("cmap") or "Custom"),
+            "graph": dict(settings.get("graph") or {}),
+        }
+
+    def _build_view_config_payload(self, *, include_range: bool = True, include_visual: bool = True) -> dict | None:
+        display_range = self._current_display_range_payload() if include_range else None
+        if include_range and display_range is None:
+            return None
+        visual = self._view_config_visual_payload() if include_visual else {}
+        try:
+            config = build_view_config(
+                display_range=display_range,
+                visual=visual,
+                time_mode=self._current_time_mode_label(),
+            )
+            config["_include_visual"] = bool(include_visual)
+            return config
+        except Exception:
+            return None
+
+    def _apply_view_config_visual(self, visual: dict, *, replot: bool = True) -> bool:
+        settings = dict(visual or {})
+        low, high, scale = self._noise_thresholds_from_mapping(
+            settings,
+            default_low=self.noise_clip_low,
+            default_high=self.noise_clip_high,
+            default_scale=self.noise_clip_scale,
+        )
+        self._set_noise_clip_state(low, high, scale=scale, sync_widgets=True)
+        self._set_units_mode_state(bool(settings.get("use_db", False)))
+        self._set_time_axis_state(bool(settings.get("use_utc", False)))
+
+        cmap = str(settings.get("cmap") or "Custom")
+        self.current_cmap_name = cmap
+        blocked = self.cmap_combo.blockSignals(True)
+        try:
+            self.cmap_combo.setCurrentText(cmap)
+        finally:
+            self.cmap_combo.blockSignals(blocked)
+
+        graph = dict(settings.get("graph") or {})
+        graph_widgets = (
+            self.remove_titles_chk,
+            self.title_bold_chk,
+            self.title_italic_chk,
+            self.axis_bold_chk,
+            self.axis_italic_chk,
+            self.ticks_bold_chk,
+            self.ticks_italic_chk,
+            self.title_edit,
+            self.font_combo,
+            self.tick_font_spin,
+            self.axis_font_spin,
+            self.title_font_spin,
+        )
+        graph_blocks = [(widget, widget.blockSignals(True)) for widget in graph_widgets]
+        try:
+            self.remove_titles_chk.setChecked(bool(graph.get("remove_titles", self.remove_titles_chk.isChecked())))
+            self.title_bold_chk.setChecked(bool(graph.get("title_bold", self.title_bold_chk.isChecked())))
+            self.title_italic_chk.setChecked(bool(graph.get("title_italic", self.title_italic_chk.isChecked())))
+            self.axis_bold_chk.setChecked(bool(graph.get("axis_bold", self.axis_bold_chk.isChecked())))
+            self.axis_italic_chk.setChecked(bool(graph.get("axis_italic", self.axis_italic_chk.isChecked())))
+            self.ticks_bold_chk.setChecked(bool(graph.get("ticks_bold", self.ticks_bold_chk.isChecked())))
+            self.ticks_italic_chk.setChecked(bool(graph.get("ticks_italic", self.ticks_italic_chk.isChecked())))
+            self.title_edit.setText(str(graph.get("title_override", self.title_edit.text())))
+            restored_font = normalize_font_family(str(graph.get("font_family", "")))
+            self.font_combo.setCurrentText(restored_font if restored_font else "Default")
+            self.tick_font_spin.setValue(int(graph.get("tick_font_px", self.tick_font_spin.value())))
+            self.axis_font_spin.setValue(int(graph.get("axis_label_font_px", self.axis_font_spin.value())))
+            self.title_font_spin.setValue(int(graph.get("title_font_px", self.title_font_spin.value())))
+        finally:
+            for widget, was_blocked in graph_blocks:
+                widget.blockSignals(was_blocked)
+
+        if replot and self.raw_data is not None:
+            data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
+            self.plot_data(data, title=self.current_plot_type, keep_view=True)
+        self._mark_project_dirty()
+        return True
+
+    def _apply_view_config_payload(self, config: dict, *, show_errors: bool = True) -> bool:
+        try:
+            normalized = normalize_view_config(config)
+        except Exception as exc:
+            if show_errors:
+                QMessageBox.warning(self, "Import View Config", str(exc))
+            return False
+
+        self._apply_view_config_visual(dict(normalized.get("visual") or {}), replot=False)
+        if self.raw_data is not None:
+            if self._apply_noise_clip_to_current_data():
+                data = self.noise_reduced_data
+                title = "Background Subtracted"
+            else:
+                data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
+                title = self.current_plot_type
+            self._plot_data_internal(data, title=title, view=None)
+        range_payload = normalized.get("range")
+        if isinstance(range_payload, dict):
+            return self._apply_display_range_payload(range_payload, show_errors=show_errors)
+        return True
+
+    @staticmethod
+    def _view_config_path_with_extension(path: str) -> str:
+        text = str(path or "").strip()
+        if not text:
+            return ""
+        if text.lower().endswith(".efaview.json"):
+            return text
+        if text.lower().endswith(".json"):
+            return text
+        return f"{text}.efaview.json"
+
+    def export_view_config(self):
+        config = self._build_view_config_payload(include_range=True, include_visual=True)
+        if not config:
+            QMessageBox.information(self, "Export View Config", "Load a FITS file before exporting a view config.")
+            return
+        default_name = self._view_config_path_with_extension(self._sanitize_export_stem(self.filename or "view_config"))
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export View Config",
+            default_name,
+            "e-CALLISTO View Config (*.efaview.json);;JSON Files (*.json)",
+        )
+        path = self._view_config_path_with_extension(path)
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(dump_view_config_json(config))
+        except Exception as exc:
+            QMessageBox.critical(self, "Export View Config Failed", f"Could not write view config:\n{exc}")
+            return
+        QMessageBox.information(self, "Export View Config", f"View config saved:\n{path}")
+
+    def import_view_config(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import View Config",
+            "",
+            "e-CALLISTO View Config (*.efaview.json);;JSON Files (*.json)",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                config = parse_view_config_json(handle.read())
+        except Exception as exc:
+            QMessageBox.warning(self, "Import View Config Failed", f"Could not read view config:\n{exc}")
+            return
+        if self._apply_view_config_payload(config):
+            QMessageBox.information(self, "Import View Config", "View config applied.")
+
     def _clear_current_colorbar_artists(self) -> None:
         cbar = getattr(self, "current_colorbar", None)
         cax = getattr(self, "current_cax", None)
@@ -6684,6 +7193,10 @@ class MainWindow(QMainWindow):
             self._batch_processing_dialog = BatchProcessingDialog(
                 cmap_name_provider=lambda: str(self.current_cmap_name or "Custom"),
                 cold_digits_provider=lambda: float(self._db_hot_cold_digits()[0]),
+                view_config_provider=lambda **kwargs: self._build_view_config_payload(
+                    include_range=bool(kwargs.get("include_range", False)),
+                    include_visual=bool(kwargs.get("include_visual", False)),
+                ),
                 parent=self,
             )
             self._batch_processing_dialog.setAttribute(Qt.WA_DeleteOnClose, True)
@@ -10408,9 +10921,18 @@ class MainWindow(QMainWindow):
 
     def _sync_fits_view_actions(self):
         has_data = getattr(self, "raw_data", None) is not None
-        act = getattr(self, "view_fits_header_action", None)
-        if act is not None:
-            act.setEnabled(bool(has_data))
+        for name in (
+            "view_fits_header_action",
+            "set_display_range_action",
+            "save_display_range_preset_action",
+            "apply_display_range_preset_action",
+            "delete_display_range_preset_action",
+            "export_view_config_action",
+            "import_view_config_action",
+        ):
+            act = getattr(self, name, None)
+            if act is not None:
+                act.setEnabled(bool(has_data))
 
     def _sync_analysis_menu_actions(self):
         has_noise = getattr(self, "noise_reduced_data", None) is not None

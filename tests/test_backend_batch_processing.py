@@ -18,6 +18,7 @@ from src.Backend.batch_processing import (
     build_unique_output_png_path,
     convert_digits_to_db,
     list_fit_files,
+    locked_view_overlaps_data,
     save_background_subtracted_png,
     subtract_background,
     subtract_mean_background,
@@ -143,3 +144,58 @@ def test_save_background_subtracted_png_ut_fallback_when_missing_start(tmp_path:
     )
     assert out.exists()
     assert out.stat().st_size > 0
+
+
+def test_save_background_subtracted_png_applies_locked_axes(monkeypatch, tmp_path: Path):
+    data = np.array([[1.0, 2.0], [2.0, 3.0]], dtype=np.float32)
+    freqs = np.array([90.0, 80.0], dtype=float)
+    time = np.array([0.0, 1.0], dtype=float)
+    out = tmp_path / "locked.png"
+    captured = {}
+
+    def fake_savefig(fig, output_path, *args, **kwargs):
+        ax = fig.axes[0]
+        captured["xlim"] = ax.get_xlim()
+        captured["ylim"] = ax.get_ylim()
+        captured["xlabel"] = ax.get_xlabel()
+        captured["ylabel"] = ax.get_ylabel()
+        Path(output_path).write_bytes(b"png")
+
+    monkeypatch.setattr("matplotlib.figure.Figure.savefig", fake_savefig)
+
+    save_background_subtracted_png(
+        data=data,
+        freqs=freqs,
+        time=time,
+        output_path=str(out),
+        title="locked",
+        cmap_name="inferno",
+        ut_start_sec=0.0,
+        cold_digits=0.0,
+        view_config={
+            "range": {"time_start_s": 10.0, "time_stop_s": 20.0, "freq_min_mhz": 40.0, "freq_max_mhz": 140.0},
+            "visual": {"use_db": False, "use_utc": False, "cmap": "inferno"},
+        },
+    )
+
+    assert captured["xlim"] == pytest.approx((10.0, 20.0))
+    assert captured["ylim"] == pytest.approx((40.0, 140.0))
+    assert captured["xlabel"] == "Time [s]"
+    assert captured["ylabel"] == "Frequency [MHz]"
+    assert out.exists()
+
+
+def test_locked_view_overlap_detection():
+    freqs = np.array([90.0, 80.0], dtype=float)
+    time = np.array([0.0, 1.0], dtype=float)
+
+    assert locked_view_overlaps_data(
+        freqs,
+        time,
+        {"range": {"time_start_s": 0.2, "time_stop_s": 0.8, "freq_min_mhz": 78.0, "freq_max_mhz": 92.0}},
+    ) is True
+    assert locked_view_overlaps_data(
+        freqs,
+        time,
+        {"range": {"time_start_s": 10.0, "time_stop_s": 20.0, "freq_min_mhz": 78.0, "freq_max_mhz": 92.0}},
+    ) is False
