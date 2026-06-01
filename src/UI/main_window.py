@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.5.0
+Version 2.6.0-dev
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -10535,7 +10535,7 @@ class MainWindow(QMainWindow):
             "time_sync": dict(getattr(self, "_last_time_sync_context", {}) or {}),
         }
 
-        # Canonical analysis session (v2.5.0)
+        # Canonical analysis session (v2.6.0-dev)
         session = self._analysis_session_with_context(getattr(self, "_analysis_session", None))
         if session is None:
             session = normalize_analysis_session(
