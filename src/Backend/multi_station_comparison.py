@@ -420,7 +420,7 @@ def render_comparison_figure(
         cbar.set_label(unit_label)
 
     fig.suptitle(str(title or "Multi-Station Comparison"), fontsize=12)
-    fig.tight_layout(rect=(0.0, 0.0, 0.97, 0.96))
+    fig.subplots_adjust(left=0.08, right=0.88, top=0.92, bottom=0.08, hspace=0.32)
     return ComparisonRenderResult(
         figure=fig,
         axes=axes,

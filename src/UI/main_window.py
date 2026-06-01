@@ -156,6 +156,7 @@ from src.UI.dialogs.display_range_dialog import DisplayRangeDialog
 from src.UI.dialogs.light_curve_frequency_dialog import LightCurveFrequencyDialog
 from src.UI.dialogs.light_curve_settings_dialog import LightCurveSettingsDialog
 from src.UI.dialogs.max_intensity_dialog import MaxIntensityPlotDialog
+from src.UI.dialogs.multi_station_comparison_dialog import MultiStationComparisonDialog
 from src.UI.dialogs.rfi_control_dialog import RFIControlDialog
 from src.UI.dialogs.type_ii_band_splitting_dialog import TypeIIBandSplittingDialog
 from src.UI.dst_index_gui import MainWindow as DstIndexWindow
@@ -355,6 +356,7 @@ class MainWindow(QMainWindow):
         self._update_check_interactive = True
         self._import_progress_dialog = None
         self._batch_processing_dialog = None
+        self._multi_station_comparison_dialog = None
         self._bug_report_dialog = None
         self._citation_dialog = None
 
@@ -1003,6 +1005,10 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.import_view_config_action)
         self.export_view_config_action.triggered.connect(self.export_view_config)
         self.import_view_config_action.triggered.connect(self.import_view_config)
+        view_menu.addSeparator()
+        self.multi_station_comparison_action = QAction("Multi-Station Comparison...", self)
+        view_menu.addAction(self.multi_station_comparison_action)
+        self.multi_station_comparison_action.triggered.connect(self.open_multi_station_comparison_dialog)
         view_menu.addSeparator()
         theme_menu = view_menu.addMenu("Theme")
         mode_menu = view_menu.addMenu("Mode")
@@ -7181,6 +7187,9 @@ class MainWindow(QMainWindow):
     def _on_batch_processing_dialog_destroyed(self, *_):
         self._batch_processing_dialog = None
 
+    def _on_multi_station_comparison_dialog_destroyed(self, *_):
+        self._multi_station_comparison_dialog = None
+
     def open_batch_processing_window(self):
         try:
             alive = self._batch_processing_dialog is not None
@@ -7205,6 +7214,34 @@ class MainWindow(QMainWindow):
         self._batch_processing_dialog.show()
         self._batch_processing_dialog.raise_()
         self._batch_processing_dialog.activateWindow()
+
+    def open_multi_station_comparison_dialog(self):
+        try:
+            alive = self._multi_station_comparison_dialog is not None
+            if alive:
+                _ = self._multi_station_comparison_dialog.windowTitle()
+        except Exception:
+            alive = False
+
+        if not alive:
+            initial_paths = []
+            source_path = str(getattr(self, "_fits_source_path", "") or "")
+            if source_path and os.path.exists(source_path):
+                initial_paths.append(source_path)
+            self._multi_station_comparison_dialog = MultiStationComparisonDialog(
+                initial_paths=initial_paths,
+                view_config_provider=lambda **kwargs: self._build_view_config_payload(
+                    include_range=bool(kwargs.get("include_range", False)),
+                    include_visual=bool(kwargs.get("include_visual", False)),
+                ),
+                parent=self,
+            )
+            self._multi_station_comparison_dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+            self._multi_station_comparison_dialog.destroyed.connect(self._on_multi_station_comparison_dialog_destroyed)
+
+        self._multi_station_comparison_dialog.show()
+        self._multi_station_comparison_dialog.raise_()
+        self._multi_station_comparison_dialog.activateWindow()
 
     def _set_checked_if_exists(self, attr_name: str, checked: bool):
         obj = getattr(self, attr_name, None)
@@ -11520,6 +11557,11 @@ class MainWindow(QMainWindow):
             if self._batch_processing_dialog is not None:
                 self._batch_processing_dialog.force_shutdown(timeout_ms=2000)
                 self._batch_processing_dialog.close()
+        except Exception:
+            pass
+        try:
+            if self._multi_station_comparison_dialog is not None:
+                self._multi_station_comparison_dialog.close()
         except Exception:
             pass
         try:
