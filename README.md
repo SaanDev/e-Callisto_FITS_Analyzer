@@ -1,4 +1,4 @@
-# e-CALLISTO FITS Analyzer (v2.5.0)
+# e-CALLISTO FITS Analyzer (v2.6.0-dev)
 A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data.
 
 ---
@@ -36,7 +36,7 @@ A desktop application for visualizing, processing, and analyzing e-CALLISTO sola
 
 ---
 
-## What's New in v2.5.0
+## What's New in v2.6.0-dev
 
 ### Main features
 - **Project report PDF generation:** create a consolidated report from **File → Generate Project Report...** with raw/background-subtracted spectra, light-curve overlays, maximum-intensity analysis, Type II band-splitting output, and available GOES/SGPS/Dst/Kp context figures.
@@ -230,7 +230,7 @@ Light-curve overlays are preserved in project state and can be included in gener
 # 9. Burst Isolation (Lasso Tool)
 
 Click **Isolate Burst** and draw around the emission region.  
-Only the selected region is retained for further analysis. In v2.5.0, the lasso mask is calculated against the rendered image pixel centers, so the isolated region follows the drawn path more accurately on the displayed spectrum.
+Only the selected region is retained for further analysis. In v2.6.0-dev, the lasso mask is calculated against the rendered image pixel centers, so the isolated region follows the drawn path more accurately on the displayed spectrum.
 
 ### Example: Isolated Burst
 ![Isolated Burst](assets/screenshots/burst_isolation.png)
@@ -267,7 +267,7 @@ The Analyzer window performs:
 - Shock height
 - R² and RMSE
 
-Calculation updates in v2.5.0:
+Calculation updates in v2.6.0-dev:
 
 - Harmonic Type II shock calculations convert observed harmonic frequency/drift values to their fundamental equivalents before computing shock parameters
 - Saved analysis summaries retain both the converted calculation values and observed-frequency reference fields
@@ -448,7 +448,7 @@ The report can include:
 - Type II band-splitting output
 - Available GOES X-ray, GOES SGPS proton flux, Dst, and Kp context plots
 
-The obsolete **Burst Isolated Dynamic Spectrum** report section has been removed in v2.5.0.
+The obsolete **Burst Isolated Dynamic Spectrum** report section has been removed in v2.6.0-dev.
 
 ---
 
