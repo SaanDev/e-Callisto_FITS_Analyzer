@@ -1318,6 +1318,12 @@ class MainWindow(QMainWindow):
                 self._ui_settings.setValue("ui/view_mode", self._view_mode)
             self._apply_view_mode_styling()
         self._sync_view_mode_actions()
+        dialog = getattr(self, "_multi_station_comparison_dialog", None)
+        if dialog is not None and hasattr(dialog, "schedule_redraw"):
+            try:
+                dialog.schedule_redraw()
+            except Exception:
+                pass
 
         status = self.statusBar()
         if status is not None:
@@ -7228,12 +7234,20 @@ class MainWindow(QMainWindow):
             source_path = str(getattr(self, "_fits_source_path", "") or "")
             if source_path and os.path.exists(source_path):
                 initial_paths.append(source_path)
+            elif getattr(self, "_combined_sources", None):
+                initial_paths.extend(
+                    str(path)
+                    for path in getattr(self, "_combined_sources", [])
+                    if str(path or "").strip() and os.path.exists(str(path))
+                )
             self._multi_station_comparison_dialog = MultiStationComparisonDialog(
                 initial_paths=initial_paths,
                 view_config_provider=lambda **kwargs: self._build_view_config_payload(
                     include_range=bool(kwargs.get("include_range", False)),
                     include_visual=bool(kwargs.get("include_visual", False)),
                 ),
+                plot_mode_provider=lambda: getattr(self, "_view_mode", "modern"),
+                dark_mode_provider=self._is_dark_ui,
                 parent=self,
             )
             self._multi_station_comparison_dialog.setAttribute(Qt.WA_DeleteOnClose, True)

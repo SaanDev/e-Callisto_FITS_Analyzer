@@ -24,20 +24,29 @@ from src.Backend.multi_station_comparison import (
     TIME_ALIGNMENT_UT,
     aligned_time_axes,
     compute_color_limits,
+    combined_comparison_dataset_from_paths,
+    combined_comparison_datasets_from_paths,
     export_comparison_png,
     load_comparison_dataset,
     render_comparison_figure,
 )
 
 
-def _write_fit(path: Path, *, label: str, time_obs: str | None = "12:00:00", base: float = 0.0) -> None:
+def _write_fit(
+    path: Path,
+    *,
+    label: str,
+    time_obs: str | None = "12:00:00",
+    base: float = 0.0,
+    freq_start: float = 100.0,
+) -> None:
     data = (np.arange(12, dtype=np.float32).reshape(3, 4) + float(base)).astype(np.float32)
     hdu = fits.PrimaryHDU(data=data)
     hdr = hdu.header
     hdr["CRVAL1"] = 0.0
     hdr["CDELT1"] = 1.0
     hdr["CRPIX1"] = 1.0
-    hdr["CRVAL2"] = 100.0
+    hdr["CRVAL2"] = float(freq_start)
     hdr["CDELT2"] = -5.0
     hdr["CRPIX2"] = 1.0
     hdr["INSTRUME"] = label
@@ -156,3 +165,54 @@ def test_render_warns_when_locked_range_is_outside_file(tmp_path: Path):
     )
 
     assert any("no data inside" in warning for warning in result.warnings)
+
+
+def test_combined_comparison_dataset_from_time_combinable_paths(tmp_path: Path):
+    a = tmp_path / "STAT_20260101_120000_A.fit"
+    b = tmp_path / "STAT_20260101_121500_A.fit"
+    _write_fit(a, label="STAT", time_obs="12:00:00", base=1.0)
+    _write_fit(b, label="STAT", time_obs="12:15:00", base=20.0)
+
+    combined = combined_comparison_dataset_from_paths([str(a), str(b)])
+
+    assert combined is not None
+    assert combined.combine_type == "time"
+    assert combined.label == "STAT Combined Time"
+    assert combined.data.shape == (3, 8)
+    assert combined.time[0] == pytest.approx(0.0)
+    assert combined.time[-1] == pytest.approx(7.0)
+    assert combined.sources == (str(a), str(b))
+
+
+def test_grouped_time_combinable_paths_return_one_combined_dataset_per_station(tmp_path: Path):
+    sta_a = tmp_path / "STA_20260101_120000_A.fit"
+    sta_b = tmp_path / "STA_20260101_121500_A.fit"
+    stb_a = tmp_path / "STB_20260101_120000_A.fit"
+    stb_b = tmp_path / "STB_20260101_121500_A.fit"
+    _write_fit(sta_a, label="STA", time_obs="12:00:00", base=1.0)
+    _write_fit(sta_b, label="STA", time_obs="12:15:00", base=10.0)
+    _write_fit(stb_a, label="STB", time_obs="12:00:00", base=100.0)
+    _write_fit(stb_b, label="STB", time_obs="12:15:00", base=200.0)
+
+    grouped = combined_comparison_datasets_from_paths([str(sta_a), str(sta_b), str(stb_a), str(stb_b)])
+
+    assert [dataset.label for dataset in grouped] == ["STA Combined Time", "STB Combined Time"]
+    assert [dataset.combine_type for dataset in grouped] == ["time", "time"]
+    assert [dataset.data.shape for dataset in grouped] == [(3, 8), (3, 8)]
+
+
+def test_grouped_frequency_combinable_paths_return_one_combined_dataset_per_station(tmp_path: Path):
+    sta_a = tmp_path / "STA_20260101_120000_A.fit"
+    sta_b = tmp_path / "STA_20260101_120000_B.fit"
+    stb_a = tmp_path / "STB_20260101_120000_A.fit"
+    stb_b = tmp_path / "STB_20260101_120000_B.fit"
+    _write_fit(sta_a, label="STA", time_obs="12:00:00", base=1.0, freq_start=100.0)
+    _write_fit(sta_b, label="STA", time_obs="12:00:00", base=10.0, freq_start=85.0)
+    _write_fit(stb_a, label="STB", time_obs="12:00:00", base=100.0, freq_start=100.0)
+    _write_fit(stb_b, label="STB", time_obs="12:00:00", base=200.0, freq_start=85.0)
+
+    grouped = combined_comparison_datasets_from_paths([str(sta_a), str(sta_b), str(stb_a), str(stb_b)])
+
+    assert [dataset.label for dataset in grouped] == ["STA Combined Frequency", "STB Combined Frequency"]
+    assert [dataset.combine_type for dataset in grouped] == ["frequency", "frequency"]
+    assert [dataset.data.shape for dataset in grouped] == [(6, 4), (6, 4)]

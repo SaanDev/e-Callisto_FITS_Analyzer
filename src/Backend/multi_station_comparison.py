@@ -20,7 +20,13 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from matplotlib.ticker import FuncFormatter
 
-from src.Backend.frequency_axis import finite_data_limits, masked_display_data, matplotlib_extent, transparent_bad_cmap
+from src.Backend.frequency_axis import (
+    finite_data_limits,
+    masked_display_data,
+    matplotlib_extent,
+    pyqtgraph_extent,
+    transparent_bad_cmap,
+)
 from src.Backend.fits_io import extract_ut_start_sec, load_callisto_fits
 from src.Backend.view_config import normalize_display_range, normalize_visual_config, normalize_view_config
 
@@ -44,6 +50,10 @@ class ComparisonDataset:
     time: np.ndarray
     ut_start_sec: float | None = None
     header0: Any | None = None
+    gap_row_mask: np.ndarray | None = None
+    frequency_step_mhz: float | None = None
+    sources: tuple[str, ...] = field(default_factory=tuple)
+    combine_type: str | None = None
     warnings: tuple[str, ...] = field(default_factory=tuple)
 
 
@@ -65,6 +75,16 @@ class ComparisonRenderResult:
     ylim: tuple[float, float] | None
     color_limits: tuple[tuple[float, float], ...]
     warnings: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class ComparisonPanelPayload:
+    dataset: ComparisonDataset
+    time_axis: np.ndarray
+    display_data: np.ndarray
+    mpl_extent: tuple[float, float, float, float]
+    pg_extent: tuple[float, float, float, float]
+    levels: tuple[float, float]
 
 
 def _is_finite_float(value: Any) -> bool:
@@ -129,8 +149,153 @@ def load_comparison_dataset(path: str, *, memmap: bool = False) -> ComparisonDat
         time=time,
         ut_start_sec=ut_start_sec,
         header0=result.header0,
+        sources=(str(path),),
         warnings=tuple(warnings),
     )
+
+
+def comparison_dataset_from_combined(combined: dict[str, Any]) -> ComparisonDataset:
+    data = np.asarray(combined.get("data"), dtype=np.float32)
+    freqs = np.asarray(combined.get("freqs"), dtype=float).ravel()
+    time = np.asarray(combined.get("time"), dtype=float).ravel()
+    if data.ndim != 2:
+        raise ValueError(f"Expected 2D combined data, got ndim={data.ndim}.")
+    if data.shape != (freqs.size, time.size):
+        raise ValueError(
+            f"Combined data shape {data.shape} does not match axes ({freqs.size}, {time.size})."
+        )
+
+    combine_type = str(combined.get("combine_type") or "combined")
+    filename = str(combined.get("filename") or "Combined")
+    station = _strip_fit_suffix(filename).split("_", 1)[0].strip()
+    prefix = f"{station} " if station else ""
+    label = (
+        f"{prefix}Combined Frequency"
+        if combine_type == "frequency"
+        else f"{prefix}Combined Time"
+        if combine_type == "time"
+        else f"{prefix}Combined"
+    )
+    warnings: list[str] = []
+    if combine_type == "frequency" and combined.get("gap_row_mask") is not None:
+        try:
+            gap_count = int(np.count_nonzero(np.asarray(combined.get("gap_row_mask"), dtype=bool)))
+            if gap_count:
+                warnings.append(f"Frequency-combined view contains {gap_count} gap row(s).")
+        except Exception:
+            pass
+
+    return ComparisonDataset(
+        path=filename,
+        label=label,
+        data=data,
+        freqs=freqs,
+        time=time,
+        ut_start_sec=combined.get("ut_start_sec", None),
+        header0=combined.get("header0", None),
+        gap_row_mask=None if combined.get("gap_row_mask", None) is None else np.asarray(combined.get("gap_row_mask"), dtype=bool).ravel(),
+        frequency_step_mhz=combined.get("frequency_step_mhz", None),
+        sources=tuple(str(path) for path in combined.get("sources", ()) or ()),
+        combine_type=combine_type,
+        warnings=tuple(warnings),
+    )
+
+
+def combined_comparison_dataset_from_paths(file_paths: Iterable[str]) -> ComparisonDataset | None:
+    paths = [str(path) for path in file_paths if str(path or "").strip()]
+    if len(paths) < 2:
+        return None
+
+    from src.Backend.burst_processor import (
+        are_frequency_combinable,
+        are_time_combinable,
+        combine_frequency,
+        combine_time,
+    )
+
+    try:
+        if are_time_combinable(paths):
+            return comparison_dataset_from_combined(combine_time(paths))
+    except Exception:
+        pass
+    try:
+        if are_frequency_combinable(paths):
+            return comparison_dataset_from_combined(combine_frequency(paths))
+    except Exception:
+        pass
+    return None
+
+
+def combined_comparison_datasets_from_paths(file_paths: Iterable[str]) -> list[ComparisonDataset]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    for path in file_paths:
+        text = str(path or "").strip()
+        if not text or text in seen:
+            continue
+        paths.append(text)
+        seen.add(text)
+    if not paths:
+        return []
+
+    combined_all = combined_comparison_dataset_from_paths(paths)
+    if combined_all is not None:
+        return [combined_all]
+
+    from src.Backend.burst_processor import (
+        are_frequency_combinable,
+        are_time_combinable,
+        combine_frequency,
+        combine_time,
+        parse_filename,
+    )
+
+    path_index = {path: idx for idx, path in enumerate(paths)}
+    consumed: set[str] = set()
+    output: list[tuple[int, ComparisonDataset]] = []
+
+    def _group_by(key_func):
+        groups: dict[tuple[str, ...], list[str]] = {}
+        for path in paths:
+            if path in consumed:
+                continue
+            try:
+                key = key_func(path)
+            except Exception:
+                continue
+            groups.setdefault(tuple(key), []).append(path)
+        return sorted(groups.values(), key=lambda group: min(path_index[path] for path in group))
+
+    def _append_combined(group: list[str], dataset: ComparisonDataset) -> None:
+        for path in group:
+            consumed.add(path)
+        output.append((min(path_index[path] for path in group), dataset))
+
+    for group in _group_by(lambda path: (parse_filename(path)[0], parse_filename(path)[3])):
+        if len(group) < 2:
+            continue
+        try:
+            if are_time_combinable(group):
+                _append_combined(group, comparison_dataset_from_combined(combine_time(group)))
+        except Exception:
+            continue
+
+    for group in _group_by(lambda path: (parse_filename(path)[0], parse_filename(path)[1], parse_filename(path)[2])):
+        if len(group) < 2:
+            continue
+        try:
+            if are_frequency_combinable(group):
+                _append_combined(group, comparison_dataset_from_combined(combine_frequency(group)))
+        except Exception:
+            continue
+
+    for path in paths:
+        if path in consumed:
+            continue
+        output.append((path_index[path], load_comparison_dataset(path, memmap=False)))
+
+    output.sort(key=lambda item: item[0])
+    return [dataset for _idx, dataset in output]
 
 
 def _normalize_alignment_mode(value: str) -> str:
@@ -224,7 +389,7 @@ def seconds_of_day_range_to_unwrapped(
 
 def dataset_extent(dataset: ComparisonDataset, time_axis: np.ndarray | None = None) -> tuple[float, float, float, float]:
     axis = np.asarray(dataset.time if time_axis is None else time_axis, dtype=float).ravel()
-    extent = matplotlib_extent(dataset.freqs, axis)
+    extent = matplotlib_extent(dataset.freqs, axis, default_step=dataset.frequency_step_mhz)
     x0, x1, y0, y1 = (float(extent[0]), float(extent[1]), float(extent[2]), float(extent[3]))
     return min(x0, x1), max(x0, x1), min(y0, y1), max(y0, y1)
 
@@ -253,7 +418,7 @@ def shared_extent(
     )
 
 
-def _resolve_cmap(cmap_name: str):
+def comparison_cmap(cmap_name: str):
     name = str(cmap_name or "").strip()
     if name.lower() == "custom":
         colors = [(0.0, "blue"), (0.5, "red"), (1.0, "yellow")]
@@ -262,6 +427,10 @@ def _resolve_cmap(cmap_name: str):
         return mpl.colormaps.get_cmap(name)
     except Exception:
         return cm.get_cmap("viridis")
+
+
+def _resolve_cmap(cmap_name: str):
+    return comparison_cmap(cmap_name)
 
 
 def display_data_for_visual(data: np.ndarray, visual: dict[str, Any] | None, *, cold_digits: float = 0.0) -> np.ndarray:
@@ -304,6 +473,40 @@ def compute_color_limits(
     if hi <= lo:
         hi = lo + 1e-6
     return tuple((float(lo), float(hi)) for _ in items)
+
+
+def comparison_panel_payloads(
+    datasets: Iterable[ComparisonDataset],
+    *,
+    alignment_mode: str = TIME_ALIGNMENT_UT,
+    visual: dict[str, Any] | None = None,
+    color_scale_mode: str = COLOR_SCALE_SHARED,
+    manual_limits: tuple[float, float] | None = None,
+) -> tuple[list[ComparisonPanelPayload], str, tuple[str, ...]]:
+    items = list(datasets)
+    if not items:
+        return [], TIME_ALIGNMENT_SECONDS, tuple()
+    normalized_visual = normalize_visual_config(visual or {})
+    time_axes, effective_mode, warnings = aligned_time_axes(items, alignment_mode)
+    color_limits = compute_color_limits(
+        items,
+        normalized_visual,
+        color_scale_mode,
+        manual_limits=manual_limits,
+    )
+    payloads: list[ComparisonPanelPayload] = []
+    for item, axis, levels in zip(items, time_axes, color_limits):
+        payloads.append(
+            ComparisonPanelPayload(
+                dataset=item,
+                time_axis=np.asarray(axis, dtype=float),
+                display_data=display_data_for_visual(item.data, normalized_visual),
+                mpl_extent=tuple(float(v) for v in matplotlib_extent(item.freqs, axis, default_step=item.frequency_step_mhz)),
+                pg_extent=tuple(float(v) for v in pyqtgraph_extent(item.freqs, axis, default_step=item.frequency_step_mhz)),
+                levels=(float(levels[0]), float(levels[1])),
+            )
+        )
+    return payloads, effective_mode, warnings
 
 
 def _normalize_display_range_or_none(display_range: dict[str, Any] | None) -> dict[str, float] | None:
@@ -353,7 +556,13 @@ def render_comparison_figure(
 
     normalized_visual = normalize_visual_config(visual or {})
     display_range_norm = _normalize_display_range_or_none(display_range)
-    time_axes, effective_mode, alignment_warnings = aligned_time_axes(items, alignment_mode)
+    panel_payloads, effective_mode, alignment_warnings = comparison_panel_payloads(
+        items,
+        alignment_mode=alignment_mode,
+        visual=normalized_visual,
+        color_scale_mode=color_scale_mode,
+        manual_limits=manual_limits,
+    )
     xlim = None
     ylim = None
     if display_range_norm:
@@ -362,19 +571,13 @@ def render_comparison_figure(
     else:
         x_values: list[float] = []
         y_values: list[float] = []
-        for item, axis in zip(items, time_axes):
-            x0, x1, y0, y1 = dataset_extent(item, axis)
+        for payload in panel_payloads:
+            x0, x1, y0, y1 = dataset_extent(payload.dataset, payload.time_axis)
             x_values.extend((x0, x1))
             y_values.extend((y0, y1))
         xlim = (float(min(x_values)), float(max(x_values)))
         ylim = (float(min(y_values)), float(max(y_values)))
 
-    color_limits = compute_color_limits(
-        items,
-        normalized_visual,
-        color_scale_mode,
-        manual_limits=manual_limits,
-    )
     cmap = transparent_bad_cmap(_resolve_cmap(str(normalized_visual.get("cmap") or "Custom")))
 
     axes = tuple(fig.subplots(len(items), 1, sharex=True, squeeze=False).ravel())
@@ -384,23 +587,22 @@ def render_comparison_figure(
     for item in items:
         warnings.extend(item.warnings)
 
-    for ax, item, axis, limits in zip(axes, items, time_axes, color_limits):
-        extent = matplotlib_extent(item.freqs, axis)
-        display_data = display_data_for_visual(item.data, normalized_visual)
+    for ax, payload in zip(axes, panel_payloads):
+        item = payload.dataset
         image = ax.imshow(
-            masked_display_data(display_data),
+            masked_display_data(payload.display_data),
             aspect="auto",
-            extent=extent,
+            extent=payload.mpl_extent,
             cmap=cmap,
-            vmin=float(limits[0]),
-            vmax=float(limits[1]),
+            vmin=float(payload.levels[0]),
+            vmax=float(payload.levels[1]),
         )
         images.append(image)
         ax.set_xlim(*xlim)
         ax.set_ylim(*ylim)
         ax.set_ylabel("MHz")
         ax.set_title(item.label, loc="left", fontsize=10)
-        if display_range_norm and not _range_overlaps_extent(display_range_norm, dataset_extent(item, axis)):
+        if display_range_norm and not _range_overlaps_extent(display_range_norm, dataset_extent(item, payload.time_axis)):
             warnings.append(f"{item.label}: no data inside the locked display range.")
 
     show_seconds = abs(float(xlim[1]) - float(xlim[0])) <= 5.0 * 60.0
@@ -427,7 +629,7 @@ def render_comparison_figure(
         effective_alignment_mode=effective_mode,
         xlim=(float(xlim[0]), float(xlim[1])) if xlim else None,
         ylim=(float(ylim[0]), float(ylim[1])) if ylim else None,
-        color_limits=tuple(color_limits),
+        color_limits=tuple(payload.levels for payload in panel_payloads),
         warnings=tuple(dict.fromkeys(warnings)),
     )
 

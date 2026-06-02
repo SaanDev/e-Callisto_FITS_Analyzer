@@ -17,9 +17,11 @@ pytest.importorskip("astropy")
 pytest.importorskip("matplotlib")
 
 from astropy.io import fits
+from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication
 
 from src.Backend.multi_station_comparison import COLOR_SCALE_MANUAL, TIME_ALIGNMENT_SECONDS, TIME_ALIGNMENT_UT
+from src.UI.accelerated_plot_widget import AcceleratedPlotWidget
 from src.UI.dialogs.multi_station_comparison_dialog import MultiStationComparisonDialog
 from src.UI.main_window import MainWindow
 
@@ -95,6 +97,91 @@ def test_add_remove_reorder_files_updates_station_list(tmp_path: Path):
     dialog.close()
 
 
+def test_time_combinable_files_render_as_combined_view(tmp_path: Path):
+    _app()
+    a = tmp_path / "STAT_20260101_120000_A.fit"
+    b = tmp_path / "STAT_20260101_121500_A.fit"
+    _write_fit(a, label="STAT", time_obs="12:00:00", base=1.0)
+    _write_fit(b, label="STAT", time_obs="12:15:00", base=20.0)
+    dialog = MultiStationComparisonDialog(plot_mode_provider=lambda: "classic")
+
+    dialog.add_files([str(a), str(b)])
+    dialog._render_now()
+
+    assert len(dialog._datasets) == 2
+    assert len(dialog._active_datasets()) == 1
+    assert dialog._active_datasets()[0].combine_type == "time"
+    assert dialog.canvas.fig.axes[0].get_title(loc="left") == "STAT Combined Time"
+    assert "Combined time view" in dialog.status_label.text()
+    dialog.close()
+
+
+def test_four_files_from_two_stations_render_as_two_combined_station_panels(tmp_path: Path):
+    _app()
+    sta_a = tmp_path / "STA_20260101_120000_A.fit"
+    sta_b = tmp_path / "STA_20260101_121500_A.fit"
+    stb_a = tmp_path / "STB_20260101_120000_A.fit"
+    stb_b = tmp_path / "STB_20260101_121500_A.fit"
+    _write_fit(sta_a, label="STA", time_obs="12:00:00", base=1.0)
+    _write_fit(sta_b, label="STA", time_obs="12:15:00", base=10.0)
+    _write_fit(stb_a, label="STB", time_obs="12:00:00", base=100.0)
+    _write_fit(stb_b, label="STB", time_obs="12:15:00", base=200.0)
+    dialog = MultiStationComparisonDialog(plot_mode_provider=lambda: "classic")
+
+    dialog.add_files([str(sta_a), str(sta_b), str(stb_a), str(stb_b)])
+    dialog._render_now()
+
+    active = dialog._active_datasets()
+    assert len(dialog._datasets) == 4
+    assert len(active) == 2
+    assert [dataset.label for dataset in active] == ["STA Combined Time", "STB Combined Time"]
+    assert [dataset.combine_type for dataset in active] == ["time", "time"]
+    assert dialog.canvas.fig.axes[0].get_title(loc="left") == "STA Combined Time"
+    assert dialog.canvas.fig.axes[1].get_title(loc="left") == "STB Combined Time"
+    assert "2 rendered panel(s) from 4 selected file(s)" in dialog.status_label.text()
+    assert "Combined time view" in dialog.status_label.text()
+    dialog.close()
+
+
+def test_dialog_uses_matplotlib_in_classic_mode(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B", base=100.0)
+    dialog = MultiStationComparisonDialog(plot_mode_provider=lambda: "classic")
+
+    dialog.add_files([str(a), str(b)])
+    dialog._render_now()
+
+    assert dialog.plot_stack.currentWidget() is dialog.canvas
+    assert "Matplotlib" in dialog.status_label.text()
+    dialog.close()
+
+
+def test_dialog_uses_hardware_in_modern_mode_when_available(tmp_path: Path):
+    _app()
+    probe = AcceleratedPlotWidget()
+    available = bool(probe.is_available)
+    probe.close()
+    if not available:
+        pytest.skip("pyqtgraph accelerated plotting is unavailable")
+
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B", base=100.0)
+    dialog = MultiStationComparisonDialog(plot_mode_provider=lambda: "modern")
+
+    dialog.add_files([str(a), str(b)])
+    dialog._render_now()
+
+    assert dialog.plot_stack.currentWidget() is dialog.hardware_scroll
+    assert len(dialog._hardware_canvases) == 2
+    assert "Hardware-accelerated" in dialog.status_label.text()
+    dialog.close()
+
+
 def test_load_view_config_applies_visual_settings_and_seconds_range():
     _app()
     dialog = MultiStationComparisonDialog()
@@ -165,6 +252,52 @@ def test_export_is_disabled_until_two_valid_files_are_loaded(tmp_path: Path):
     assert dialog.export_btn.isEnabled() is False
     dialog.add_files([str(b)])
     assert dialog.export_btn.isEnabled() is True
+    dialog.close()
+
+
+def test_visible_comparison_export_supports_main_output_formats(tmp_path: Path):
+    _app()
+    dialog = MultiStationComparisonDialog()
+    image = QImage(120, 80, QImage.Format_ARGB32)
+    image.fill(QColor("#2f6fed"))
+    dialog._capture_visible_plot_image = lambda: image
+
+    outputs = {
+        "png": tmp_path / "comparison.png",
+        "pdf": tmp_path / "comparison.pdf",
+        "eps": tmp_path / "comparison.eps",
+        "svg": tmp_path / "comparison.svg",
+        "tiff": tmp_path / "comparison.tiff",
+    }
+    for ext, path in outputs.items():
+        dialog._export_visible_plot(str(path), ext)
+        assert path.exists()
+        assert path.stat().st_size > 0
+
+    assert "<image" in outputs["svg"].read_text(encoding="utf-8")
+    dialog.close()
+
+
+def test_hardware_visible_export_uses_panel_composition_not_dark_scroll_surface():
+    _app()
+    dialog = MultiStationComparisonDialog(plot_mode_provider=lambda: "modern")
+    dark = QImage(160, 100, QImage.Format_ARGB32)
+    dark.fill(QColor("#282828"))
+    content = QImage(160, 100, QImage.Format_ARGB32)
+    content.fill(QColor("#2f6fed"))
+
+    class _FakePanel:
+        def isVisible(self):
+            return True
+
+    dialog._hardware_canvases = [_FakePanel()]
+    dialog.plot_stack.setCurrentWidget(dialog.hardware_scroll)
+    dialog._compose_hardware_panel_images = lambda: content
+
+    assert dialog._image_looks_blank(dark) is True
+    captured = dialog._capture_visible_plot_image()
+    assert captured.isNull() is False
+    assert captured.pixelColor(10, 10).name().lower() == "#2f6fed"
     dialog.close()
 
 

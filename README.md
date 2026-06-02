@@ -197,7 +197,7 @@ Features:
 - **View → Set Display Range...:** enter exact start/stop times and frequency bounds for aligned station comparisons
 - **View → Save/Apply Display Range Preset...:** reuse the same visible window on later files
 - **View → Export/Import View Config...:** share display range, units, thresholds, colormap, and graph styling as `.efaview.json`
-- **View → Multi-Station Comparison...:** compare several station spectra in vertically stacked panels with shared time/frequency axes, UT or seconds alignment, shared/per-station/manual color scaling, and combined PNG export
+- **View → Multi-Station Comparison...:** compare several station spectra in vertically stacked panels with shared time/frequency axes, UT or seconds alignment, shared/per-station/manual color scaling, automatic time/frequency-combined views for combinable FITS selections, Modern-mode hardware rendering, Classic-mode Matplotlib rendering, and visible-view export as PNG/PDF/EPS/SVG/TIFF
 - Navigation works alongside noise reduction and colormap changes
 
 This allows precise inspection of fine spectral structures.
@@ -433,7 +433,7 @@ This supports publication workflows across operating systems.
 
 Batch plot exports are available from **Processing → Batch Processing**. Enable **Use current display range** or load a saved `.efaview.json` config to export multiple station spectra with identical time/frequency axes.
 
-For visual station-to-station comparison, open **View → Multi-Station Comparison...**. Add multiple FITS files, choose UT-clock or seconds-from-file-start alignment, select shared/per-station/manual color scaling, set a shared display range, and export one combined PNG.
+For visual station-to-station comparison, open **View → Multi-Station Comparison...**. Add multiple FITS files, choose UT-clock or seconds-from-file-start alignment, select shared/per-station/manual color scaling, set a shared display range, and export the visible comparison view as PNG, PDF, EPS, SVG, or TIFF. If the selected files are time- or frequency-combinable, the workspace renders combined views automatically; mixed-station selections are combined per station before comparison. The comparison workspace follows the app mode: Modern uses hardware-accelerated panels when available, while Classic uses Matplotlib.
 
 ### Provenance and Analysis Logs
 
