@@ -299,6 +299,9 @@ def test_noise_clipping_method_toggles_threshold_sliders(tmp_path: Path):
 
     dialog.noise_method_combo.setCurrentIndex(dialog.noise_method_combo.findData(NOISE_METHOD_CLIP))
     assert dialog.noise_clip_panel.isHidden() is False
+    assert dialog._noise_all_settings.clip_low == pytest.approx(0.0)
+    assert dialog._noise_all_settings.clip_high == pytest.approx(0.0)
+    assert dialog.noise_low_slider.value() == dialog.noise_high_slider.value()
 
     dialog.noise_method_combo.setCurrentIndex(dialog.noise_method_combo.findData(NOISE_METHOD_MEDIAN))
     assert dialog.noise_clip_panel.isHidden() is True
@@ -372,6 +375,69 @@ def test_noise_slider_change_updates_override_and_renders_immediately(monkeypatc
     assert dialog._redraw_timer.isActive() is False
     assert calls["count"] == 1
     assert "Digits" in dialog.noise_low_value_label.text()
+    dialog.close()
+
+
+def test_noise_clipping_override_changes_only_selected_panel_data(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B", base=100.0)
+    dialog = MultiStationComparisonDialog()
+    dialog.add_files([str(a), str(b)])
+
+    dialog.noise_target_combo.setCurrentIndex(2)
+    dialog.noise_method_combo.setCurrentIndex(dialog.noise_method_combo.findData(NOISE_METHOD_CLIP))
+    processed = dialog._processed_datasets_for_render(dialog._active_datasets())
+
+    assert np.asarray(processed[0].data) == pytest.approx(np.asarray(dialog._active_datasets()[0].data))
+    assert np.asarray(processed[1].data) == pytest.approx(np.zeros_like(np.asarray(processed[1].data)))
+    assert [setting.method for setting in dialog._effective_noise_settings()] == [NOISE_METHOD_NONE, NOISE_METHOD_CLIP]
+    dialog.close()
+
+
+def test_noise_clip_labels_show_digits_and_db_values(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B")
+    dialog = MultiStationComparisonDialog()
+    dialog.add_files([str(a), str(b)])
+
+    dialog._set_noise_target_settings(ComparisonNoiseSettings(method=NOISE_METHOD_CLIP, clip_low=0.0, clip_high=10.0))
+    dialog._sync_noise_controls_from_target()
+    dialog.units_combo.setCurrentIndex(dialog.units_combo.findData(True))
+
+    assert "Digits" in dialog.noise_low_value_label.text()
+    assert "Digits" in dialog.noise_high_value_label.text()
+    assert dialog.noise_low_sub_value_label.isHidden() is False
+    assert dialog.noise_high_sub_value_label.isHidden() is False
+    assert "dB" in dialog.noise_low_sub_value_label.text()
+    assert "dB" in dialog.noise_high_sub_value_label.text()
+    dialog.close()
+
+
+def test_noise_log_scale_is_stored_per_target(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B")
+    dialog = MultiStationComparisonDialog()
+    dialog.add_files([str(a), str(b)])
+
+    dialog.noise_target_combo.setCurrentIndex(2)
+    dialog.noise_method_combo.setCurrentIndex(dialog.noise_method_combo.findData(NOISE_METHOD_CLIP))
+    dialog.noise_log_scale_chk.setChecked(True)
+    selected_key = dialog._noise_key_for_dataset(dialog._active_datasets()[1])
+
+    dialog.noise_target_combo.setCurrentIndex(1)
+    assert dialog.noise_log_scale_chk.isChecked() is False
+    dialog.noise_target_combo.setCurrentIndex(2)
+    assert dialog.noise_log_scale_chk.isChecked() is True
+    assert dialog._noise_overrides[selected_key].clip_scale == "signed_log"
     dialog.close()
 
 

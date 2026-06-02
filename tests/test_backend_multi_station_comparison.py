@@ -137,6 +137,16 @@ def test_comparison_noise_methods_transform_data_without_mutating_source():
     assert np.array_equal(data, original)
 
 
+def test_comparison_noise_defaults_and_normalization_start_at_zero():
+    data = np.array([[1.0, 2.0, 7.0]], dtype=np.float32)
+    default = ComparisonNoiseSettings()
+    clipped = apply_comparison_noise(data, {"method": NOISE_METHOD_CLIP})
+
+    assert default.clip_low == pytest.approx(0.0)
+    assert default.clip_high == pytest.approx(0.0)
+    assert clipped == pytest.approx(np.zeros_like(data))
+
+
 def test_comparison_noise_preserves_gap_rows_as_nan():
     data = np.array([[1.0, 2.0, 3.0], [10.0, 11.0, 12.0]], dtype=np.float32)
 

@@ -8,6 +8,7 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 from __future__ import annotations
 
 from dataclasses import replace
+import math
 import os
 from pathlib import Path
 import base64
@@ -22,6 +23,7 @@ from PySide6.QtGui import QImage, QPainter, QPdfWriter
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDoubleSpinBox,
@@ -46,6 +48,7 @@ from src.Backend.multi_station_comparison import (
     COLOR_SCALE_MANUAL,
     COLOR_SCALE_PER_STATION,
     COLOR_SCALE_SHARED,
+    DEFAULT_DB_SCALE,
     NOISE_METHOD_CLIP,
     NOISE_METHOD_MEAN,
     NOISE_METHOD_MEDIAN,
@@ -75,7 +78,12 @@ _FITS_FILTER = "FITS files (*.fit *.fits *.fit.gz *.fits.gz)"
 _VIEW_CONFIG_FILTER = "e-CALLISTO View Config (*.efaview.json);;JSON Files (*.json)"
 _EXPORT_FILTERS = "PNG (*.png);;PDF (*.pdf);;EPS (*.eps);;SVG (*.svg);;TIFF (*.tiff)"
 _NOISE_TARGET_ALL = "__all__"
-_NOISE_SLIDER_STEPS = 1000
+_NOISE_SLIDER_STEPS = 4000
+_NOISE_SLIDER_MID = _NOISE_SLIDER_STEPS // 2
+_NOISE_CLIP_MIN = -100.0
+_NOISE_CLIP_MAX = 100.0
+_NOISE_CLIP_SCALE_LINEAR = "linear"
+_NOISE_CLIP_SCALE_SIGNED_LOG = "signed_log"
 _COLORMAP_NAMES = (
     "Custom",
     "viridis",
@@ -120,8 +128,8 @@ class MultiStationComparisonDialog(QDialog):
         self._hardware_available: bool | None = None
         self._noise_all_settings = ComparisonNoiseSettings()
         self._noise_overrides: dict[tuple[str, ...], ComparisonNoiseSettings] = {}
-        self._noise_slider_min = -100.0
-        self._noise_slider_max = 100.0
+        self._noise_slider_min = _NOISE_CLIP_MIN
+        self._noise_slider_max = _NOISE_CLIP_MAX
         self._noise_sync_guard = False
         self._noise_base_cache: dict[tuple, np.ndarray] = {}
         self._colormap_sync_guard = False
@@ -165,7 +173,7 @@ class MultiStationComparisonDialog(QDialog):
         self.units_combo = QComboBox(self)
         self.units_combo.addItem("Digits", False)
         self.units_combo.addItem("dB", True)
-        self.units_combo.currentIndexChanged.connect(self.schedule_redraw)
+        self.units_combo.currentIndexChanged.connect(self._on_units_changed)
 
         self.colormap_combo = QComboBox(self)
         for name in _COLORMAP_NAMES:
@@ -208,20 +216,35 @@ class MultiStationComparisonDialog(QDialog):
         self.noise_high_slider.valueChanged.connect(self._on_noise_slider_changed)
         self.noise_low_value_label = QLabel("", self)
         self.noise_high_value_label = QLabel("", self)
+        self.noise_low_sub_value_label = QLabel("", self)
+        self.noise_high_sub_value_label = QLabel("", self)
+        self.noise_low_sub_value_label.setVisible(False)
+        self.noise_high_sub_value_label.setVisible(False)
+        self.noise_log_scale_chk = QCheckBox("Logarithmic Threshold Scale", self)
+        self.noise_log_scale_chk.toggled.connect(self._on_noise_scale_mode_toggled)
 
         self.noise_clip_panel = QWidget(self)
         noise_clip_layout = QVBoxLayout(self.noise_clip_panel)
         noise_clip_layout.setContentsMargins(0, 0, 0, 0)
         low_clip_row = QHBoxLayout()
         low_clip_row.addWidget(QLabel("Lower threshold", self))
-        low_clip_row.addWidget(self.noise_low_value_label)
+        low_value_col = QVBoxLayout()
+        low_value_col.setSpacing(0)
+        low_value_col.addWidget(self.noise_low_value_label)
+        low_value_col.addWidget(self.noise_low_sub_value_label)
+        low_clip_row.addLayout(low_value_col)
         noise_clip_layout.addLayout(low_clip_row)
         noise_clip_layout.addWidget(self.noise_low_slider)
         high_clip_row = QHBoxLayout()
         high_clip_row.addWidget(QLabel("Upper threshold", self))
-        high_clip_row.addWidget(self.noise_high_value_label)
+        high_value_col = QVBoxLayout()
+        high_value_col.setSpacing(0)
+        high_value_col.addWidget(self.noise_high_value_label)
+        high_value_col.addWidget(self.noise_high_sub_value_label)
+        high_clip_row.addLayout(high_value_col)
         noise_clip_layout.addLayout(high_clip_row)
         noise_clip_layout.addWidget(self.noise_high_slider)
+        noise_clip_layout.addWidget(self.noise_log_scale_chk)
 
         self.set_range_btn = QPushButton("Set Range...", self)
         self.reset_range_btn = QPushButton("Reset Range", self)
@@ -456,9 +479,20 @@ class MultiStationComparisonDialog(QDialog):
         return list(self._display_datasets)
 
     @staticmethod
+    def _noise_sources_for_dataset(dataset: ComparisonDataset) -> tuple[str, ...]:
+        return tuple(str(path) for path in (dataset.sources or ()) if str(path or "").strip())
+
+    @staticmethod
     def _noise_key_for_dataset(dataset: ComparisonDataset) -> tuple[str, ...]:
-        sources = tuple(str(path) for path in (dataset.sources or ()) if str(path or "").strip())
-        return sources or (str(dataset.path),)
+        sources = MultiStationComparisonDialog._noise_sources_for_dataset(dataset)
+        identity = [
+            "__comparison_panel__",
+            str(dataset.combine_type or "single"),
+            str(dataset.label or ""),
+            str(dataset.path or ""),
+        ]
+        identity.extend(sources)
+        return tuple(identity)
 
     def _current_noise_target_key(self) -> tuple[str, ...] | None:
         if getattr(self, "noise_target_combo", None) is None:
@@ -482,6 +516,7 @@ class MultiStationComparisonDialog(QDialog):
 
     def _set_noise_target_settings(self, settings: ComparisonNoiseSettings) -> None:
         normalized = normalize_comparison_noise_settings(settings)
+        self._expand_noise_clip_bounds_for_values(normalized.clip_low, normalized.clip_high)
         key = self._current_noise_target_key()
         if key is None:
             self._noise_all_settings = normalized
@@ -505,7 +540,7 @@ class MultiStationComparisonDialog(QDialog):
                 key = self._noise_key_for_dataset(dataset)
                 self.noise_target_combo.addItem(dataset.label, key)
                 idx = self.noise_target_combo.count() - 1
-                sources = key
+                sources = self._noise_sources_for_dataset(dataset) or (str(dataset.path),)
                 if sources:
                     tooltip = "\n".join(os.path.basename(path) for path in sources)
                     self.noise_target_combo.setItemData(idx, tooltip, Qt.ToolTipRole)
@@ -525,23 +560,82 @@ class MultiStationComparisonDialog(QDialog):
         finally:
             self.noise_method_combo.blockSignals(blocked)
 
+    def _noise_clip_bounds(self) -> tuple[float, float]:
+        try:
+            low = float(self._noise_slider_min)
+            high = float(self._noise_slider_max)
+        except Exception:
+            return _NOISE_CLIP_MIN, _NOISE_CLIP_MAX
+        if not np.isfinite([low, high]).all() or high <= low:
+            return _NOISE_CLIP_MIN, _NOISE_CLIP_MAX
+        return float(low), float(high)
+
+    def _expand_noise_clip_bounds_for_values(self, *values) -> None:
+        finite_values: list[float] = []
+        for value in values:
+            try:
+                val = float(value)
+            except Exception:
+                continue
+            if np.isfinite(val):
+                finite_values.append(float(val))
+        if not finite_values:
+            return
+        cur_min, cur_max = self._noise_clip_bounds()
+        cur_abs = max(abs(cur_min), abs(cur_max), 1.0)
+        required_abs = max(abs(value) for value in finite_values)
+        if required_abs <= cur_abs:
+            return
+        max_abs = max(required_abs * 1.05, cur_abs)
+        self._noise_slider_min = -float(max_abs)
+        self._noise_slider_max = float(max_abs)
+
+    def _clamp_noise_threshold(self, value) -> float:
+        try:
+            out = float(value)
+        except Exception:
+            out = 0.0
+        clip_min, clip_max = self._noise_clip_bounds()
+        return float(max(clip_min, min(clip_max, out)))
+
+    @staticmethod
+    def _normalize_noise_clip_scale(scale) -> str:
+        return (
+            _NOISE_CLIP_SCALE_SIGNED_LOG
+            if str(scale or "").strip().lower() == _NOISE_CLIP_SCALE_SIGNED_LOG
+            else _NOISE_CLIP_SCALE_LINEAR
+        )
+
+    def _noise_clip_scale_is_log(self, scale: str | None = None) -> bool:
+        normalized = self._normalize_noise_clip_scale(scale if scale is not None else self._noise_settings_for_key(self._current_noise_target_key()).clip_scale)
+        return normalized == _NOISE_CLIP_SCALE_SIGNED_LOG
+
     def _noise_threshold_to_slider(self, value: float) -> int:
-        lo = float(self._noise_slider_min)
-        hi = float(self._noise_slider_max)
-        if not np.isfinite([lo, hi]).all() or hi <= lo:
-            lo, hi = -100.0, 100.0
-        val = float(max(lo, min(hi, float(value))))
-        fraction = (val - lo) / (hi - lo)
+        val = self._clamp_noise_threshold(value)
+        clip_min, clip_max = self._noise_clip_bounds()
+        if self._noise_clip_scale_is_log():
+            max_abs = max(abs(clip_min), abs(clip_max))
+            if abs(val) <= 1e-12:
+                unit = 0.0
+            else:
+                denom = math.log10(1.0 + float(max_abs))
+                unit = math.copysign(math.log10(1.0 + abs(val)) / denom, val) if denom > 0.0 else 0.0
+            pos = _NOISE_SLIDER_MID + int(round(unit * _NOISE_SLIDER_MID))
+            return int(max(0, min(_NOISE_SLIDER_STEPS, pos)))
+        fraction = (val - clip_min) / (clip_max - clip_min)
         return int(max(0, min(_NOISE_SLIDER_STEPS, round(fraction * _NOISE_SLIDER_STEPS))))
 
     def _noise_slider_to_threshold(self, value: int) -> float:
-        lo = float(self._noise_slider_min)
-        hi = float(self._noise_slider_max)
-        if not np.isfinite([lo, hi]).all() or hi <= lo:
-            lo, hi = -100.0, 100.0
         raw = int(max(0, min(_NOISE_SLIDER_STEPS, int(value))))
+        clip_min, clip_max = self._noise_clip_bounds()
+        if self._noise_clip_scale_is_log():
+            unit = (raw - _NOISE_SLIDER_MID) / float(_NOISE_SLIDER_MID)
+            unit = max(-1.0, min(1.0, float(unit)))
+            max_abs = max(abs(clip_min), abs(clip_max))
+            magnitude = (10.0 ** (abs(unit) * math.log10(1.0 + float(max_abs)))) - 1.0
+            return self._clamp_noise_threshold(math.copysign(magnitude, unit))
         fraction = raw / float(_NOISE_SLIDER_STEPS)
-        return float(lo + fraction * (hi - lo))
+        return self._clamp_noise_threshold(clip_min + fraction * (clip_max - clip_min))
 
     def _noise_target_datasets(self, key: tuple[str, ...] | None) -> list[ComparisonDataset]:
         active = self._active_datasets()
@@ -584,7 +678,9 @@ class MultiStationComparisonDialog(QDialog):
             return np.asarray(dataset.data, dtype=np.float32)
         if normalized.method == NOISE_METHOD_CLIP:
             base = self._noise_base_for_dataset(dataset, NOISE_METHOD_ROBUST)
-            return np.clip(base, float(normalized.clip_low), float(normalized.clip_high)).astype(np.float32, copy=False)
+            out = np.empty_like(base, dtype=np.float32)
+            np.clip(base, float(normalized.clip_low), float(normalized.clip_high), out=out)
+            return out
         return self._noise_base_for_dataset(dataset, normalized.method)
 
     def _processed_datasets_for_render(self, datasets: list[ComparisonDataset]) -> list[ComparisonDataset]:
@@ -597,43 +693,30 @@ class MultiStationComparisonDialog(QDialog):
             out.append(replace(dataset, data=self._processed_data_for_dataset(dataset, settings)))
         return out
 
+    def _effective_noise_cold_digits(self, datasets: list[ComparisonDataset]) -> tuple[float, ...]:
+        values: list[float] = []
+        for dataset in datasets:
+            settings = self._noise_settings_for_key(self._noise_key_for_dataset(dataset))
+            values.append(float(settings.clip_low))
+        return tuple(values)
+
     def _refresh_noise_slider_range(self, settings: ComparisonNoiseSettings) -> None:
-        values: list[np.ndarray] = []
-        for dataset in self._noise_target_datasets(self._current_noise_target_key()):
-            try:
-                reduced = self._noise_base_for_dataset(dataset, NOISE_METHOD_ROBUST)
-            except Exception:
-                continue
-            finite = np.asarray(reduced, dtype=float)
-            finite = finite[np.isfinite(finite)]
-            if finite.size:
-                values.append(finite)
+        self._expand_noise_clip_bounds_for_values(0.0, settings.clip_low, settings.clip_high)
 
-        if values:
-            combined = np.concatenate(values)
-            lo = float(np.nanpercentile(combined, 1.0))
-            hi = float(np.nanpercentile(combined, 99.0))
-        else:
-            lo, hi = -100.0, 100.0
-
-        anchors = [lo, hi, 0.0, float(settings.clip_low), float(settings.clip_high)]
-        finite_anchors = [float(value) for value in anchors if np.isfinite(value)]
-        lo = min(finite_anchors) if finite_anchors else -100.0
-        hi = max(finite_anchors) if finite_anchors else 100.0
-        if hi <= lo:
-            pad = max(abs(lo) * 0.05, 1.0)
-            lo -= pad
-            hi += pad
-        else:
-            pad = max((hi - lo) * 0.05, 1.0)
-            lo -= pad
-            hi += pad
-        self._noise_slider_min = float(lo)
-        self._noise_slider_max = float(hi)
+    def _set_noise_scale_checkbox(self, scale: str | None = None) -> None:
+        checkbox = getattr(self, "noise_log_scale_chk", None)
+        if checkbox is None:
+            return
+        blocked = checkbox.blockSignals(True)
+        try:
+            checkbox.setChecked(self._normalize_noise_clip_scale(scale) == _NOISE_CLIP_SCALE_SIGNED_LOG)
+        finally:
+            checkbox.blockSignals(blocked)
 
     def _sync_noise_sliders(self, settings: ComparisonNoiseSettings) -> None:
         self._noise_sync_guard = True
         try:
+            self._set_noise_scale_checkbox(settings.clip_scale)
             self.noise_low_slider.setValue(self._noise_threshold_to_slider(float(settings.clip_low)))
             self.noise_high_slider.setValue(self._noise_threshold_to_slider(float(settings.clip_high)))
         finally:
@@ -643,6 +726,26 @@ class MultiStationComparisonDialog(QDialog):
     def _update_noise_value_labels(self, low: float, high: float) -> None:
         self.noise_low_value_label.setText(f"{float(low):.2f} Digits")
         self.noise_high_value_label.setText(f"{float(high):.2f} Digits")
+        use_db = bool(self.units_combo.currentData())
+        if use_db:
+            cold = float(low)
+            low_db = (float(low) - cold) * DEFAULT_DB_SCALE
+            high_db = (float(high) - cold) * DEFAULT_DB_SCALE
+            self.noise_low_sub_value_label.setText(f"{low_db:.2f} dB")
+            self.noise_high_sub_value_label.setText(f"{high_db:.2f} dB")
+            self.noise_low_sub_value_label.setVisible(True)
+            self.noise_high_sub_value_label.setVisible(True)
+            tooltip = "Primary readout shows the clipping threshold in Digits; secondary line shows the display value in dB."
+        else:
+            self.noise_low_sub_value_label.clear()
+            self.noise_high_sub_value_label.clear()
+            self.noise_low_sub_value_label.setVisible(False)
+            self.noise_high_sub_value_label.setVisible(False)
+            tooltip = "Clipping threshold in Digits."
+        self.noise_low_value_label.setToolTip(tooltip)
+        self.noise_high_value_label.setToolTip(tooltip)
+        self.noise_low_sub_value_label.setToolTip(tooltip)
+        self.noise_high_sub_value_label.setToolTip(tooltip)
 
     def _sync_noise_controls_from_target(self) -> None:
         if getattr(self, "noise_method_combo", None) is None:
@@ -668,7 +771,12 @@ class MultiStationComparisonDialog(QDialog):
             return
         current = self._noise_settings_for_key(self._current_noise_target_key())
         method = str(self.noise_method_combo.currentData() or NOISE_METHOD_NONE)
-        settings = ComparisonNoiseSettings(method=method, clip_low=current.clip_low, clip_high=current.clip_high)
+        settings = ComparisonNoiseSettings(
+            method=method,
+            clip_low=current.clip_low,
+            clip_high=current.clip_high,
+            clip_scale=self._normalize_noise_clip_scale(current.clip_scale),
+        )
         self._set_noise_target_settings(settings)
         self._sync_noise_controls_from_target()
         self.schedule_redraw(immediate=True)
@@ -695,9 +803,34 @@ class MultiStationComparisonDialog(QDialog):
                 finally:
                     self._noise_sync_guard = False
         method = str(self.noise_method_combo.currentData() or NOISE_METHOD_CLIP)
-        settings = ComparisonNoiseSettings(method=method, clip_low=float(low), clip_high=float(high))
+        current = self._noise_settings_for_key(self._current_noise_target_key())
+        settings = ComparisonNoiseSettings(
+            method=method,
+            clip_low=float(low),
+            clip_high=float(high),
+            clip_scale=self._normalize_noise_clip_scale(current.clip_scale),
+        )
         self._set_noise_target_settings(settings)
         self._update_noise_value_labels(float(low), float(high))
+        self.schedule_redraw(immediate=True)
+
+    def _on_noise_scale_mode_toggled(self, checked: bool) -> None:
+        if self._noise_sync_guard:
+            return
+        current = self._noise_settings_for_key(self._current_noise_target_key())
+        scale = _NOISE_CLIP_SCALE_SIGNED_LOG if checked else _NOISE_CLIP_SCALE_LINEAR
+        settings = ComparisonNoiseSettings(
+            method=current.method,
+            clip_low=current.clip_low,
+            clip_high=current.clip_high,
+            clip_scale=scale,
+        )
+        self._set_noise_target_settings(settings)
+        self._sync_noise_sliders(settings)
+
+    def _on_units_changed(self) -> None:
+        settings = self._noise_settings_for_key(self._current_noise_target_key())
+        self._update_noise_value_labels(settings.clip_low, settings.clip_high)
         self.schedule_redraw(immediate=True)
 
     def _choose_default_alignment_after_load(self) -> None:
@@ -816,6 +949,7 @@ class MultiStationComparisonDialog(QDialog):
         clip_enabled = has_files and str(self.noise_method_combo.currentData() or NOISE_METHOD_NONE) == NOISE_METHOD_CLIP
         self.noise_low_slider.setEnabled(clip_enabled)
         self.noise_high_slider.setEnabled(clip_enabled)
+        self.noise_log_scale_chk.setEnabled(clip_enabled)
 
     def _requested_plot_mode(self) -> str:
         if callable(self._plot_mode_provider):
@@ -881,6 +1015,7 @@ class MultiStationComparisonDialog(QDialog):
             visual=self._visual_payload(),
             color_scale_mode=self.current_color_scale_mode(),
             manual_limits=self._manual_limits(),
+            cold_digits=self._effective_noise_cold_digits(datasets),
         )
         self.canvas.draw_idle()
         return result
@@ -897,6 +1032,7 @@ class MultiStationComparisonDialog(QDialog):
             visual=visual,
             color_scale_mode=self.current_color_scale_mode(),
             manual_limits=self._manual_limits(),
+            cold_digits=self._effective_noise_cold_digits(datasets),
         )
         cmap = comparison_cmap(str(visual.get("cmap") or "Custom"))
         view = self._display_view_payload()

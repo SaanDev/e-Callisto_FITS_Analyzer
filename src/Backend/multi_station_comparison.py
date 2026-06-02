@@ -77,8 +77,9 @@ class ComparisonViewState:
 @dataclass(frozen=True)
 class ComparisonNoiseSettings:
     method: str = NOISE_METHOD_NONE
-    clip_low: float = -5.0
-    clip_high: float = 20.0
+    clip_low: float = 0.0
+    clip_high: float = 0.0
+    clip_scale: str = "linear"
 
 
 @dataclass(frozen=True)
@@ -114,14 +115,17 @@ def normalize_comparison_noise_settings(settings: Any | None) -> ComparisonNoise
         method = str(settings.method or NOISE_METHOD_NONE).strip().lower()
         clip_low = settings.clip_low
         clip_high = settings.clip_high
+        clip_scale = settings.clip_scale
     elif isinstance(settings, dict):
         method = str(settings.get("method", NOISE_METHOD_NONE) or NOISE_METHOD_NONE).strip().lower()
-        clip_low = settings.get("clip_low", -5.0)
-        clip_high = settings.get("clip_high", 20.0)
+        clip_low = settings.get("clip_low", 0.0)
+        clip_high = settings.get("clip_high", 0.0)
+        clip_scale = settings.get("clip_scale", "linear")
     else:
         method = NOISE_METHOD_NONE
-        clip_low = -5.0
-        clip_high = 20.0
+        clip_low = 0.0
+        clip_high = 0.0
+        clip_scale = "linear"
 
     if method not in {
         NOISE_METHOD_NONE,
@@ -135,16 +139,17 @@ def normalize_comparison_noise_settings(settings: Any | None) -> ComparisonNoise
     try:
         low = float(clip_low)
     except Exception:
-        low = -5.0
+        low = 0.0
     try:
         high = float(clip_high)
     except Exception:
-        high = 20.0
+        high = 0.0
     if not np.isfinite([low, high]).all():
-        low, high = -5.0, 20.0
+        low, high = 0.0, 0.0
     if low > high:
         low, high = high, low
-    return ComparisonNoiseSettings(method=method, clip_low=float(low), clip_high=float(high))
+    scale = "signed_log" if str(clip_scale or "").strip().lower() == "signed_log" else "linear"
+    return ComparisonNoiseSettings(method=method, clip_low=float(low), clip_high=float(high), clip_scale=scale)
 
 
 def _noise_settings_sequence(
@@ -157,6 +162,30 @@ def _noise_settings_sequence(
     for idx in range(total):
         setting = raw[idx] if idx < len(raw) else None
         out.append(normalize_comparison_noise_settings(setting))
+    return tuple(out)
+
+
+def _cold_digits_sequence(count: int, cold_digits: Iterable[Any] | float | int | None = None) -> tuple[float, ...]:
+    total = max(0, int(count))
+    if cold_digits is None:
+        return tuple(0.0 for _ in range(total))
+    if isinstance(cold_digits, (str, bytes)):
+        raw: list[Any] = [cold_digits]
+    else:
+        try:
+            raw = list(cold_digits)  # type: ignore[arg-type]
+        except TypeError:
+            raw = [cold_digits]
+    out: list[float] = []
+    for idx in range(total):
+        value = raw[idx] if idx < len(raw) else 0.0
+        try:
+            val = float(value)
+        except Exception:
+            val = 0.0
+        if not math.isfinite(val):
+            val = 0.0
+        out.append(float(val))
     return tuple(out)
 
 
@@ -563,11 +592,13 @@ def _compute_color_limits_for_arrays(
     visual: dict[str, Any] | None,
     color_scale_mode: str,
     manual_limits: tuple[float, float] | None = None,
+    cold_digits: Iterable[Any] | float | int | None = None,
 ) -> tuple[tuple[float, float], ...]:
     arrays = [np.asarray(data, dtype=np.float32) for data in data_arrays]
     if not arrays:
         return tuple()
     mode = str(color_scale_mode or COLOR_SCALE_SHARED).strip().lower()
+    cold_seq = _cold_digits_sequence(len(arrays), cold_digits)
 
     if mode == COLOR_SCALE_MANUAL and manual_limits is not None:
         lo, hi = sorted((float(manual_limits[0]), float(manual_limits[1])))
@@ -575,8 +606,8 @@ def _compute_color_limits_for_arrays(
             return tuple((lo, hi) for _ in arrays)
 
     per_dataset: list[tuple[float, float]] = []
-    for data in arrays:
-        limits = finite_data_limits(display_data_for_visual(data, visual))
+    for data, cold in zip(arrays, cold_seq):
+        limits = finite_data_limits(display_data_for_visual(data, visual, cold_digits=cold))
         if limits[0] is None or limits[1] is None:
             per_dataset.append((0.0, 1.0))
         else:
@@ -598,6 +629,7 @@ def compute_color_limits(
     color_scale_mode: str,
     manual_limits: tuple[float, float] | None = None,
     noise_settings: Iterable[Any] | None = None,
+    cold_digits: Iterable[Any] | float | int | None = None,
 ) -> tuple[tuple[float, float], ...]:
     items = list(datasets)
     if not items:
@@ -612,6 +644,7 @@ def compute_color_limits(
         visual,
         color_scale_mode,
         manual_limits=manual_limits,
+        cold_digits=cold_digits,
     )
 
 
@@ -623,6 +656,7 @@ def comparison_panel_payloads(
     color_scale_mode: str = COLOR_SCALE_SHARED,
     manual_limits: tuple[float, float] | None = None,
     noise_settings: Iterable[Any] | None = None,
+    cold_digits: Iterable[Any] | float | int | None = None,
 ) -> tuple[list[ComparisonPanelPayload], str, tuple[str, ...]]:
     items = list(datasets)
     if not items:
@@ -630,6 +664,7 @@ def comparison_panel_payloads(
     normalized_visual = normalize_visual_config(visual or {})
     settings_seq = _noise_settings_sequence(len(items), noise_settings)
     time_axes, effective_mode, warnings = aligned_time_axes(items, alignment_mode)
+    cold_seq = _cold_digits_sequence(len(items), cold_digits)
     processed_items = [
         apply_comparison_noise(item.data, settings, gap_row_mask=item.gap_row_mask)
         for item, settings in zip(items, settings_seq)
@@ -639,14 +674,15 @@ def comparison_panel_payloads(
         normalized_visual,
         color_scale_mode,
         manual_limits=manual_limits,
+        cold_digits=cold_seq,
     )
     payloads: list[ComparisonPanelPayload] = []
-    for item, axis, levels, processed in zip(items, time_axes, color_limits, processed_items):
+    for item, axis, levels, processed, cold in zip(items, time_axes, color_limits, processed_items, cold_seq):
         payloads.append(
             ComparisonPanelPayload(
                 dataset=item,
                 time_axis=np.asarray(axis, dtype=float),
-                display_data=display_data_for_visual(processed, normalized_visual),
+                display_data=display_data_for_visual(processed, normalized_visual, cold_digits=cold),
                 mpl_extent=tuple(float(v) for v in matplotlib_extent(item.freqs, axis, default_step=item.frequency_step_mhz)),
                 pg_extent=tuple(float(v) for v in pyqtgraph_extent(item.freqs, axis, default_step=item.frequency_step_mhz)),
                 levels=(float(levels[0]), float(levels[1])),
@@ -690,6 +726,7 @@ def render_comparison_figure(
     color_scale_mode: str = COLOR_SCALE_SHARED,
     manual_limits: tuple[float, float] | None = None,
     noise_settings: Iterable[Any] | None = None,
+    cold_digits: Iterable[Any] | float | int | None = None,
     title: str = "Multi-Station Comparison",
 ) -> ComparisonRenderResult:
     items = list(datasets)
@@ -710,6 +747,7 @@ def render_comparison_figure(
         color_scale_mode=color_scale_mode,
         manual_limits=manual_limits,
         noise_settings=noise_settings,
+        cold_digits=cold_digits,
     )
     xlim = None
     ylim = None
