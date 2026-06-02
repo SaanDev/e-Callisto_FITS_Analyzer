@@ -5,7 +5,6 @@ Usage from the project root:
   powershell -ExecutionPolicy Bypass -File .\src\Installation\repair_windows_venv.ps1
 #>
 
-[CmdletBinding()]
 param(
     [string]$Root = "",
     [string]$Venv = "venv",
@@ -13,99 +12,19 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-Set-StrictMode -Version Latest
 
-function Resolve-RepoRoot {
-    param([string]$RequestedRoot)
-
-    if ($RequestedRoot -and $RequestedRoot.Trim().Length -gt 0) {
-        return (Resolve-Path $RequestedRoot).Path
-    }
-    return (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+if ([string]::IsNullOrWhiteSpace($Root)) {
+    $Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+} else {
+    $Root = (Resolve-Path $Root).Path
 }
 
-function Resolve-VenvPath {
-    param(
-        [string]$RepoRoot,
-        [string]$RequestedVenv
-    )
-
-    if ([System.IO.Path]::IsPathRooted($RequestedVenv)) {
-        return $RequestedVenv
-    }
-    return (Join-Path $RepoRoot $RequestedVenv)
+if ([System.IO.Path]::IsPathRooted($Venv)) {
+    $VenvPath = $Venv
+} else {
+    $VenvPath = Join-Path $Root $Venv
 }
 
-function Resolve-PythonCommand {
-    param([string]$RequestedVersion)
-
-    $py = Get-Command py.exe -ErrorAction SilentlyContinue
-    if ($py) {
-        & $py.Source "-$RequestedVersion" -c "import sys; print(sys.version)" *> $null
-        if ($LASTEXITCODE -eq 0) {
-            return @($py.Source, "-$RequestedVersion")
-        }
-
-        & $py.Source "-3" -c "import sys; print(sys.version)" *> $null
-        if ($LASTEXITCODE -eq 0) {
-            return @($py.Source, "-3")
-        }
-    }
-
-    $python = Get-Command python.exe -ErrorAction SilentlyContinue
-    if ($python) {
-        return @($python.Source)
-    }
-
-    throw "No Python executable found. Install Python $RequestedVersion or add Python to PATH."
-}
-
-function Invoke-Native {
-    param(
-        [Parameter(Mandatory=$true)][string]$Exe,
-        [string[]]$PrefixArgs = @(),
-        [string[]]$NativeArgs = @(),
-        [Parameter(Mandatory=$true)][string]$Description
-    )
-
-    & $Exe @PrefixArgs @NativeArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Description failed with exit code $LASTEXITCODE."
-    }
-}
-
-function Remove-VenvDirectory {
-    param([string]$Path)
-
-    if (-not (Test-Path -LiteralPath $Path)) {
-        return
-    }
-
-    if (Get-Command deactivate -ErrorAction SilentlyContinue) {
-        try {
-            deactivate
-        } catch {
-            Write-Warning "Could not deactivate the current shell automatically: $($_.Exception.Message)"
-        }
-    }
-
-    Write-Host "==> Removing existing virtual environment: $Path"
-    try {
-        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
-    } catch {
-        Write-Warning "PowerShell Remove-Item failed: $($_.Exception.Message)"
-        Write-Host "==> Retrying with cmd.exe rmdir ..."
-        $rmdirCommand = 'rmdir /s /q "{0}"' -f $Path
-        & cmd.exe /d /c $rmdirCommand
-        if ($LASTEXITCODE -ne 0 -or (Test-Path -LiteralPath $Path)) {
-            $message = "Could not remove '$Path'. Close running Python apps, VS Code terminals, and file explorer windows opened inside the venv, then run this script again."
-            throw $message
-        }
-    }
-}
-
-$Root = Resolve-RepoRoot -RequestedRoot $Root
-$VenvPath = Resolve-VenvPath -RepoRoot $Root -RequestedVenv $Venv
 $RequirementsInstaller = Join-Path $Root "src\Installation\install_requirements.py"
 $AppEntry = Join-Path $Root "src\UI\main.py"
 
@@ -116,16 +35,67 @@ if (-not (Test-Path -LiteralPath $RequirementsInstaller)) {
 Write-Host "==> Project root: $Root"
 Write-Host "==> Virtual environment: $VenvPath"
 
-Remove-VenvDirectory -Path $VenvPath
+$deactivateCommand = Get-Command deactivate -ErrorAction SilentlyContinue
+if ($deactivateCommand) {
+    try {
+        deactivate
+    } catch {
+        Write-Warning "Could not deactivate the current shell automatically."
+    }
+}
 
-$PythonCommand = @(Resolve-PythonCommand -RequestedVersion $PythonVersion)
-$PythonExe = $PythonCommand[0]
-$PythonPrefixArgs = @($PythonCommand | Select-Object -Skip 1)
+if (Test-Path -LiteralPath $VenvPath) {
+    Write-Host "==> Removing existing virtual environment ..."
+    $removed = $false
 
-Write-Host "==> Python launcher: $PythonExe $($PythonPrefixArgs -join ' ')"
+    try {
+        Remove-Item -LiteralPath $VenvPath -Recurse -Force -ErrorAction Stop
+        $removed = $true
+    } catch {
+        Write-Warning "PowerShell Remove-Item failed. Retrying with cmd.exe rmdir."
+    }
+
+    if (-not $removed) {
+        $rmdirCommand = 'rmdir /s /q "' + $VenvPath + '"'
+        & cmd.exe /d /c $rmdirCommand
+    }
+
+    if (Test-Path -LiteralPath $VenvPath) {
+        throw "Could not remove '$VenvPath'. Close Python, VS Code terminals, and file explorer windows opened inside the venv, then run this script again."
+    }
+}
 
 Write-Host "==> Creating virtual environment ..."
-Invoke-Native -Exe $PythonExe -PrefixArgs $PythonPrefixArgs -NativeArgs @("-m", "venv", $VenvPath) -Description "venv creation"
+$created = $false
+$pyLauncher = Get-Command py.exe -ErrorAction SilentlyContinue
+
+if ($pyLauncher) {
+    $pyExe = $pyLauncher.Source
+    & $pyExe "-$PythonVersion" -m venv $VenvPath
+    if ($LASTEXITCODE -eq 0) {
+        $created = $true
+    }
+
+    if (-not $created) {
+        & $pyExe -3 -m venv $VenvPath
+        if ($LASTEXITCODE -eq 0) {
+            $created = $true
+        }
+    }
+}
+
+if (-not $created) {
+    $python = Get-Command python.exe -ErrorAction SilentlyContinue
+    if (-not $python) {
+        throw "No Python executable found. Install Python $PythonVersion or add Python to PATH."
+    }
+
+    $pythonExe = $python.Source
+    & $pythonExe -m venv $VenvPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "Virtual environment creation failed with exit code $LASTEXITCODE."
+    }
+}
 
 $VenvPython = Join-Path $VenvPath "Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $VenvPython)) {
@@ -133,10 +103,16 @@ if (-not (Test-Path -LiteralPath $VenvPython)) {
 }
 
 Write-Host "==> Upgrading pip ..."
-Invoke-Native -Exe $VenvPython -NativeArgs @("-m", "pip", "install", "--upgrade", "pip") -Description "pip upgrade"
+& $VenvPython -m pip install --upgrade pip
+if ($LASTEXITCODE -ne 0) {
+    throw "pip upgrade failed with exit code $LASTEXITCODE."
+}
 
 Write-Host "==> Installing runtime requirements ..."
-Invoke-Native -Exe $VenvPython -NativeArgs @($RequirementsInstaller) -Description "runtime dependency install"
+& $VenvPython $RequirementsInstaller
+if ($LASTEXITCODE -ne 0) {
+    throw "runtime dependency install failed with exit code $LASTEXITCODE."
+}
 
 Write-Host ""
 Write-Host "Repair complete. Start the app with:"

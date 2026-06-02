@@ -90,10 +90,10 @@ def test_windows_venv_repair_script_exists_and_uses_rmdir_fallback():
     assert script.exists()
 
     text = script.read_text(encoding="utf-8")
-    assert "Remove-VenvDirectory" in text
     assert "cmd.exe" in text
     assert "rmdir /s /q" in text
     assert "install_requirements.py" in text
+    assert "throw (" not in text
 
 
 def test_smoke_script_exists_and_checks_helper_mode():
