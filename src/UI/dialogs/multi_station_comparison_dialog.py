@@ -7,7 +7,7 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import math
 import os
 from pathlib import Path
@@ -58,6 +58,7 @@ from src.Backend.multi_station_comparison import (
     TIME_ALIGNMENT_UT,
     ComparisonDataset,
     ComparisonNoiseSettings,
+    ComparisonPanelPayload,
     apply_comparison_noise,
     combined_comparison_datasets_from_paths,
     comparison_cmap,
@@ -68,6 +69,7 @@ from src.Backend.multi_station_comparison import (
     seconds_of_day_range_to_unwrapped,
     shared_extent,
 )
+from src.Backend.frequency_axis import masked_display_data
 from src.Backend.view_config import normalize_display_range, normalize_view_config, parse_view_config_json
 from src.UI.accelerated_plot_widget import AcceleratedPlotWidget
 from src.UI.dialogs.display_range_dialog import DisplayRangeDialog
@@ -98,6 +100,12 @@ _COLORMAP_NAMES = (
     "gray",
     "bone_r",
 )
+
+
+@dataclass
+class _VisiblePanelState:
+    payload: ComparisonPanelPayload
+    settings: ComparisonNoiseSettings
 
 
 class MultiStationComparisonDialog(QDialog):
@@ -133,6 +141,11 @@ class MultiStationComparisonDialog(QDialog):
         self._noise_sync_guard = False
         self._noise_base_cache: dict[tuple, np.ndarray] = {}
         self._colormap_sync_guard = False
+        self._visible_panel_states: dict[tuple[str, ...], _VisiblePanelState] = {}
+        self._visible_panel_order: list[tuple[str, ...]] = []
+        self._visible_effective_alignment_mode = TIME_ALIGNMENT_SECONDS
+        self._mpl_axes_by_key: dict[tuple[str, ...], object] = {}
+        self._mpl_images_by_key: dict[tuple[str, ...], object] = {}
 
         self._redraw_timer = QTimer(self)
         self._redraw_timer.setSingleShot(True)
@@ -141,6 +154,7 @@ class MultiStationComparisonDialog(QDialog):
 
         self.file_list = QListWidget(self)
         self.file_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.file_list.itemSelectionChanged.connect(self._on_file_selection_changed)
 
         self.add_btn = QPushButton("Add Files...", self)
         self.remove_btn = QPushButton("Remove", self)
@@ -412,6 +426,7 @@ class MultiStationComparisonDialog(QDialog):
 
         if added:
             self._invalidate_noise_base_cache()
+            self._invalidate_visible_panel_cache()
         self._refresh_display_datasets()
         self._rebuild_noise_targets()
         self._rebuild_file_list()
@@ -431,6 +446,7 @@ class MultiStationComparisonDialog(QDialog):
             if 0 <= row < len(self._datasets):
                 del self._datasets[row]
         self._invalidate_noise_base_cache()
+        self._invalidate_visible_panel_cache()
         self._display_range = None
         self._refresh_display_datasets()
         self._rebuild_noise_targets()
@@ -445,6 +461,7 @@ class MultiStationComparisonDialog(QDialog):
         self._combined_mode = None
         self._display_range = None
         self._invalidate_noise_base_cache()
+        self._invalidate_visible_panel_cache()
         self._rebuild_noise_targets()
         self._rebuild_file_list()
         self._sync_actions()
@@ -479,6 +496,13 @@ class MultiStationComparisonDialog(QDialog):
         return list(self._display_datasets)
 
     @staticmethod
+    def _path_key(path: str) -> str:
+        try:
+            return os.path.abspath(str(path or ""))
+        except Exception:
+            return str(path or "")
+
+    @staticmethod
     def _noise_sources_for_dataset(dataset: ComparisonDataset) -> tuple[str, ...]:
         return tuple(str(path) for path in (dataset.sources or ()) if str(path or "").strip())
 
@@ -493,6 +517,62 @@ class MultiStationComparisonDialog(QDialog):
         ]
         identity.extend(sources)
         return tuple(identity)
+
+    def _dataset_sources_for_matching(self, dataset: ComparisonDataset) -> set[str]:
+        sources = self._noise_sources_for_dataset(dataset) or (str(dataset.path),)
+        out = {self._path_key(path) for path in sources}
+        out.add(self._path_key(dataset.path))
+        return {path for path in out if path}
+
+    def _noise_key_for_source_path(self, path: str) -> tuple[str, ...] | None:
+        target = self._path_key(path)
+        if not target:
+            return None
+        for dataset in self._active_datasets():
+            if target in self._dataset_sources_for_matching(dataset):
+                return self._noise_key_for_dataset(dataset)
+        return None
+
+    def _visible_dataset_for_key(self, key: tuple[str, ...] | None) -> ComparisonDataset | None:
+        if key is None:
+            return None
+        target = tuple(key)
+        for dataset in self._active_datasets():
+            if self._noise_key_for_dataset(dataset) == target:
+                return dataset
+        return None
+
+    def _combo_index_for_noise_key(self, key: tuple[str, ...] | None) -> int:
+        if key is None:
+            return 0
+        for idx in range(self.noise_target_combo.count()):
+            data = self.noise_target_combo.itemData(idx)
+            if data == key or (isinstance(data, (tuple, list)) and tuple(data) == tuple(key)):
+                return idx
+        return -1
+
+    def _set_noise_target_key(self, key: tuple[str, ...] | None) -> bool:
+        idx = self._combo_index_for_noise_key(key)
+        if idx < 0:
+            return False
+        if idx == self.noise_target_combo.currentIndex():
+            return True
+        self.noise_target_combo.setCurrentIndex(idx)
+        return True
+
+    def _on_file_selection_changed(self) -> None:
+        items = self.file_list.selectedItems()
+        if not items:
+            return
+        key = self._noise_key_for_source_path(str(items[0].data(Qt.UserRole) or ""))
+        if key is not None:
+            self._set_noise_target_key(key)
+
+    def _invalidate_visible_panel_cache(self) -> None:
+        self._visible_panel_states.clear()
+        self._visible_panel_order.clear()
+        self._mpl_axes_by_key.clear()
+        self._mpl_images_by_key.clear()
 
     def _current_noise_target_key(self) -> tuple[str, ...] | None:
         if getattr(self, "noise_target_combo", None) is None:
@@ -769,7 +849,9 @@ class MultiStationComparisonDialog(QDialog):
     def _on_noise_method_changed(self) -> None:
         if self._noise_sync_guard:
             return
-        current = self._noise_settings_for_key(self._current_noise_target_key())
+        target_key = self._current_noise_target_key()
+        self._ensure_visible_cache_for_individual_edit(target_key)
+        current = self._noise_settings_for_key(target_key)
         method = str(self.noise_method_combo.currentData() or NOISE_METHOD_NONE)
         settings = ComparisonNoiseSettings(
             method=method,
@@ -779,11 +861,16 @@ class MultiStationComparisonDialog(QDialog):
         )
         self._set_noise_target_settings(settings)
         self._sync_noise_controls_from_target()
-        self.schedule_redraw(immediate=True)
+        if target_key is None:
+            self.schedule_redraw(immediate=True)
+        elif not self._render_noise_target_preview():
+            self.schedule_redraw(immediate=True)
 
     def _on_noise_slider_changed(self, _value: int) -> None:
         if self._noise_sync_guard:
             return
+        target_key = self._current_noise_target_key()
+        self._ensure_visible_cache_for_individual_edit(target_key)
         low = self._noise_slider_to_threshold(self.noise_low_slider.value())
         high = self._noise_slider_to_threshold(self.noise_high_slider.value())
         sender = self.sender()
@@ -803,7 +890,7 @@ class MultiStationComparisonDialog(QDialog):
                 finally:
                     self._noise_sync_guard = False
         method = str(self.noise_method_combo.currentData() or NOISE_METHOD_CLIP)
-        current = self._noise_settings_for_key(self._current_noise_target_key())
+        current = self._noise_settings_for_key(target_key)
         settings = ComparisonNoiseSettings(
             method=method,
             clip_low=float(low),
@@ -812,7 +899,10 @@ class MultiStationComparisonDialog(QDialog):
         )
         self._set_noise_target_settings(settings)
         self._update_noise_value_labels(float(low), float(high))
-        self.schedule_redraw(immediate=True)
+        if target_key is None:
+            self.schedule_redraw(immediate=True)
+        elif not self._render_noise_target_preview():
+            self.schedule_redraw(immediate=True)
 
     def _on_noise_scale_mode_toggled(self, checked: bool) -> None:
         if self._noise_sync_guard:
@@ -930,6 +1020,7 @@ class MultiStationComparisonDialog(QDialog):
         return tuple(sorted((low, high)))
 
     def schedule_redraw(self, *_args, immediate: bool = False) -> None:
+        self._invalidate_visible_panel_cache()
         if immediate:
             self._redraw_timer.stop()
             self._render_now()
@@ -1003,6 +1094,65 @@ class MultiStationComparisonDialog(QDialog):
             "ylim": (float(self._display_range["freq_min_mhz"]), float(self._display_range["freq_max_mhz"])),
         }
 
+    def _store_visible_panel_payloads(
+        self,
+        datasets: list[ComparisonDataset],
+        payloads: list[ComparisonPanelPayload] | tuple[ComparisonPanelPayload, ...],
+        effective_mode: str,
+    ) -> None:
+        self._visible_panel_states.clear()
+        self._visible_panel_order.clear()
+        for dataset, payload in zip(datasets, payloads):
+            key = self._noise_key_for_dataset(dataset)
+            settings = self._noise_settings_for_key(key)
+            self._visible_panel_states[key] = _VisiblePanelState(payload=payload, settings=settings)
+            self._visible_panel_order.append(key)
+        self._visible_effective_alignment_mode = str(effective_mode or TIME_ALIGNMENT_SECONDS)
+
+    def _store_mpl_artists(
+        self,
+        datasets: list[ComparisonDataset],
+        axes: tuple[object, ...],
+    ) -> None:
+        self._mpl_axes_by_key.clear()
+        self._mpl_images_by_key.clear()
+        for dataset, ax in zip(datasets, axes):
+            key = self._noise_key_for_dataset(dataset)
+            self._mpl_axes_by_key[key] = ax
+            images = getattr(ax, "images", None)
+            if images:
+                self._mpl_images_by_key[key] = images[0]
+
+    def _visible_cache_is_complete(self, datasets: list[ComparisonDataset]) -> bool:
+        keys = [self._noise_key_for_dataset(dataset) for dataset in datasets]
+        return bool(keys) and keys == self._visible_panel_order and all(key in self._visible_panel_states for key in keys)
+
+    def _ensure_visible_cache_for_individual_edit(self, key: tuple[str, ...] | None) -> None:
+        if key is None:
+            return
+        active = self._active_datasets()
+        if not active or self._visible_cache_is_complete(active):
+            return
+        self._redraw_timer.stop()
+        self._render_now()
+
+    def _payload_for_single_dataset(
+        self,
+        dataset: ComparisonDataset,
+        settings: ComparisonNoiseSettings,
+        alignment_mode: str,
+    ) -> ComparisonPanelPayload | None:
+        processed = replace(dataset, data=self._processed_data_for_dataset(dataset, settings))
+        payloads, _effective_mode, _warnings = comparison_panel_payloads(
+            [processed],
+            alignment_mode=alignment_mode,
+            visual=self._visual_payload(),
+            color_scale_mode=self.current_color_scale_mode(),
+            manual_limits=self._manual_limits(),
+            cold_digits=(float(settings.clip_low),),
+        )
+        return payloads[0] if payloads else None
+
     def _render_matplotlib(self, datasets: list[ComparisonDataset], requested_mode: str):
         self._clear_hardware_canvases()
         self.plot_stack.setCurrentWidget(self.canvas)
@@ -1017,6 +1167,8 @@ class MultiStationComparisonDialog(QDialog):
             manual_limits=self._manual_limits(),
             cold_digits=self._effective_noise_cold_digits(datasets),
         )
+        self._store_visible_panel_payloads(datasets, result.panel_payloads, result.effective_alignment_mode)
+        self._store_mpl_artists(datasets, result.axes)
         self.canvas.draw_idle()
         return result
 
@@ -1034,6 +1186,9 @@ class MultiStationComparisonDialog(QDialog):
             manual_limits=self._manual_limits(),
             cold_digits=self._effective_noise_cold_digits(datasets),
         )
+        self._store_visible_panel_payloads(datasets, payloads, effective_mode)
+        self._mpl_axes_by_key.clear()
+        self._mpl_images_by_key.clear()
         cmap = comparison_cmap(str(visual.get("cmap") or "Custom"))
         view = self._display_view_payload()
         all_warnings = list(warnings)
@@ -1073,6 +1228,82 @@ class MultiStationComparisonDialog(QDialog):
             warnings=tuple(dict.fromkeys(all_warnings)),
             effective_alignment_mode=effective_mode,
         )
+
+    def _render_noise_target_preview(self, key: tuple[str, ...] | None = None) -> bool:
+        target_key = tuple(key or self._current_noise_target_key() or ())
+        if not target_key:
+            return False
+
+        active = self._active_datasets()
+        if not active:
+            return False
+        if not self._visible_cache_is_complete(active):
+            self._redraw_timer.stop()
+            self._render_now()
+            active = self._active_datasets()
+            if not self._visible_cache_is_complete(active):
+                return False
+
+        dataset = self._visible_dataset_for_key(target_key)
+        if dataset is None:
+            return False
+
+        settings = self._noise_settings_for_key(target_key)
+        try:
+            payload = self._payload_for_single_dataset(dataset, settings, self._visible_effective_alignment_mode)
+        except Exception:
+            return False
+        if payload is None:
+            return False
+
+        self._visible_panel_states[target_key] = _VisiblePanelState(payload=payload, settings=settings)
+
+        if self.plot_stack.currentWidget() is self.hardware_scroll or self._hardware_canvases:
+            try:
+                index = self._visible_panel_order.index(target_key)
+            except ValueError:
+                return False
+            if index < 0 or index >= len(self._hardware_canvases):
+                return False
+            widget = self._hardware_canvases[index]
+            visual = self._visual_payload()
+            x_label = "Time [UT]" if self._visible_effective_alignment_mode == TIME_ALIGNMENT_UT else "Time [s]"
+            unit_label = "Intensity [dB]" if bool(visual.get("use_db", False)) else "Intensity [Digits]"
+            try:
+                widget.set_dark(bool(self._dark_mode_provider() if callable(self._dark_mode_provider) else False))
+            except Exception:
+                pass
+            widget.update_image(
+                payload.display_data,
+                extent=payload.pg_extent,
+                cmap=comparison_cmap(str(visual.get("cmap") or "Custom")),
+                gap_row_mask=payload.dataset.gap_row_mask,
+                levels=payload.levels,
+                title=payload.dataset.label,
+                x_label=x_label,
+                y_label="Frequency [MHz]",
+                colorbar_label=unit_label,
+                view=self._display_view_payload(),
+            )
+            widget.set_time_mode(self._visible_effective_alignment_mode == TIME_ALIGNMENT_UT, 0.0)
+        else:
+            image = self._mpl_images_by_key.get(target_key)
+            if image is None:
+                return False
+            try:
+                image.set_data(masked_display_data(payload.display_data))
+                image.set_extent(payload.mpl_extent)
+                image.set_clim(float(payload.levels[0]), float(payload.levels[1]))
+            except Exception:
+                return False
+            self.canvas.draw_idle()
+
+        self._sync_actions()
+        if any(setting.method != NOISE_METHOD_NONE for setting in self._effective_noise_settings()):
+            text = self.status_label.text()
+            if "Noise reduction active." not in text:
+                self.status_label.setText((text + " Noise reduction active.").strip())
+        return True
 
     def _render_now(self) -> None:
         self._sync_actions()

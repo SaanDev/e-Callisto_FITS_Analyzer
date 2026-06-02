@@ -348,7 +348,7 @@ def test_noise_method_change_affects_classic_rendered_data(tmp_path: Path):
     dialog.close()
 
 
-def test_noise_slider_change_updates_override_and_renders_immediately(monkeypatch, tmp_path: Path):
+def test_noise_slider_change_updates_override_with_target_preview(monkeypatch, tmp_path: Path):
     _app()
     a = tmp_path / "a.fit"
     b = tmp_path / "b.fit"
@@ -356,25 +356,53 @@ def test_noise_slider_change_updates_override_and_renders_immediately(monkeypatc
     _write_fit(b, label="B")
     dialog = MultiStationComparisonDialog()
     dialog.add_files([str(a), str(b)])
+    dialog._render_now()
     dialog.noise_target_combo.setCurrentIndex(1)
     dialog.noise_method_combo.setCurrentIndex(dialog.noise_method_combo.findData(NOISE_METHOD_CLIP))
     dialog._redraw_timer.stop()
-    calls = {"count": 0}
+    render_calls = {"count": 0}
+    preview_calls = {"count": 0}
     original_render = dialog._render_now
+    original_preview = dialog._render_noise_target_preview
 
     def wrapped_render():
-        calls["count"] += 1
+        render_calls["count"] += 1
         original_render()
 
+    def wrapped_preview(*args, **kwargs):
+        preview_calls["count"] += 1
+        return original_preview(*args, **kwargs)
+
     monkeypatch.setattr(dialog, "_render_now", wrapped_render)
+    monkeypatch.setattr(dialog, "_render_noise_target_preview", wrapped_preview)
 
     dialog.noise_low_slider.setValue(min(dialog.noise_low_slider.maximum(), dialog.noise_low_slider.value() + 20))
 
     key = dialog._noise_key_for_dataset(dialog._active_datasets()[0])
     assert dialog._noise_overrides[key].method == NOISE_METHOD_CLIP
     assert dialog._redraw_timer.isActive() is False
-    assert calls["count"] == 1
+    assert preview_calls["count"] == 1
+    assert render_calls["count"] == 0
     assert "Digits" in dialog.noise_low_value_label.text()
+    dialog.close()
+
+
+def test_file_selection_maps_to_containing_noise_target_panel(tmp_path: Path):
+    _app()
+    sta_a = tmp_path / "STA_20260101_120000_A.fit"
+    sta_b = tmp_path / "STA_20260101_121500_A.fit"
+    stb_a = tmp_path / "STB_20260101_120000_A.fit"
+    stb_b = tmp_path / "STB_20260101_121500_A.fit"
+    _write_fit(sta_a, label="STA", time_obs="12:00:00", base=1.0)
+    _write_fit(sta_b, label="STA", time_obs="12:15:00", base=10.0)
+    _write_fit(stb_a, label="STB", time_obs="12:00:00", base=100.0)
+    _write_fit(stb_b, label="STB", time_obs="12:15:00", base=200.0)
+    dialog = MultiStationComparisonDialog()
+    dialog.add_files([str(sta_a), str(sta_b), str(stb_a), str(stb_b)])
+
+    dialog.file_list.setCurrentRow(2)
+
+    assert dialog.noise_target_combo.currentText() == "STB - 2026-01-01"
     dialog.close()
 
 
@@ -394,6 +422,64 @@ def test_noise_clipping_override_changes_only_selected_panel_data(tmp_path: Path
     assert np.asarray(processed[0].data) == pytest.approx(np.asarray(dialog._active_datasets()[0].data))
     assert np.asarray(processed[1].data) == pytest.approx(np.zeros_like(np.asarray(processed[1].data)))
     assert [setting.method for setting in dialog._effective_noise_settings()] == [NOISE_METHOD_NONE, NOISE_METHOD_CLIP]
+    dialog.close()
+
+
+def test_individual_slider_preview_keeps_non_target_payload_and_levels_frozen(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B", base=100.0)
+    dialog = MultiStationComparisonDialog()
+    dialog.add_files([str(a), str(b)])
+    dialog._render_now()
+    first_key = dialog._noise_key_for_dataset(dialog._active_datasets()[0])
+    first_before = dialog._visible_panel_states[first_key].payload.display_data.copy()
+    first_levels = dialog._visible_panel_states[first_key].payload.levels
+
+    dialog.noise_target_combo.setCurrentIndex(2)
+    dialog.noise_method_combo.setCurrentIndex(dialog.noise_method_combo.findData(NOISE_METHOD_CLIP))
+    dialog.noise_high_slider.setValue(min(dialog.noise_high_slider.maximum(), dialog.noise_high_slider.value() + 80))
+
+    first_after = dialog._visible_panel_states[first_key].payload.display_data
+    assert first_after == pytest.approx(first_before)
+    assert dialog._visible_panel_states[first_key].payload.levels == pytest.approx(first_levels)
+    dialog.close()
+
+
+def test_hardware_target_preview_updates_only_selected_widget(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B", base=100.0)
+    dialog = MultiStationComparisonDialog()
+    dialog.add_files([str(a), str(b)])
+    dialog._render_now()
+
+    class _FakeHardwarePanel:
+        def __init__(self):
+            self.update_calls = 0
+
+        def set_dark(self, *_args, **_kwargs):
+            pass
+
+        def update_image(self, *_args, **_kwargs):
+            self.update_calls += 1
+
+        def set_time_mode(self, *_args, **_kwargs):
+            pass
+
+    panels = [_FakeHardwarePanel(), _FakeHardwarePanel()]
+    dialog._hardware_canvases = panels
+    dialog.plot_stack.setCurrentWidget(dialog.hardware_scroll)
+
+    dialog.noise_target_combo.setCurrentIndex(2)
+    dialog.noise_method_combo.setCurrentIndex(dialog.noise_method_combo.findData(NOISE_METHOD_CLIP))
+
+    assert panels[0].update_calls == 0
+    assert panels[1].update_calls == 1
     dialog.close()
 
 

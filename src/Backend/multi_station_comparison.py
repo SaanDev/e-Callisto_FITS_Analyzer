@@ -90,6 +90,7 @@ class ComparisonRenderResult:
     xlim: tuple[float, float] | None
     ylim: tuple[float, float] | None
     color_limits: tuple[tuple[float, float], ...]
+    panel_payloads: tuple[ComparisonPanelPayload, ...] = field(default_factory=tuple)
     warnings: tuple[str, ...] = field(default_factory=tuple)
 
 
@@ -816,6 +817,7 @@ def render_comparison_figure(
         xlim=(float(xlim[0]), float(xlim[1])) if xlim else None,
         ylim=(float(ylim[0]), float(ylim[1])) if ylim else None,
         color_limits=tuple(payload.levels for payload in panel_payloads),
+        panel_payloads=tuple(panel_payloads),
         warnings=tuple(dict.fromkeys(warnings)),
     )
 
