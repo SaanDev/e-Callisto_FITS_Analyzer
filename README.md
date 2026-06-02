@@ -588,12 +588,9 @@ Use **About → Check for Updates...** to query the latest release from GitHub.
   - `python src/Installation/install_requirements.py`
 - Start the app:
   - `python src/UI/main.py`
-- Windows: if `PySide6.QtCore` fails with `ImportError: DLL load failed`, recreate the venv and reinstall the pinned runtime stack:
-  - `deactivate`
-  - `Remove-Item -Recurse -Force .\venv`
-  - `py -3.12 -m venv venv`
-  - `.\venv\Scripts\Activate.ps1`
-  - `python src\Installation\install_requirements.py`
+- Windows: if `PySide6.QtCore` fails with `ImportError: DLL load failed`, repair the venv and reinstall the pinned runtime stack:
+  - `powershell -ExecutionPolicy Bypass -File .\src\Installation\repair_windows_venv.ps1`
+  - `.\venv\Scripts\python.exe src\UI\main.py`
 - Start the standalone Kyoto Dst index plotter:
   - `python src/UI/dst_index_gui.py`
 - Start the standalone GFZ Kp index plotter:

@@ -80,8 +80,20 @@ def test_install_requirements_bootstraps_pip_or_shows_linux_hint():
     assert "ensurepip" in text
     assert "python3-venv python3-pip" in text
     assert "validate_qtcore_import" in text
+    assert "repair_windows_venv.ps1" in text
     assert "Microsoft Visual C++ 2015-2022" in text
     assert "Redistributable (x64)" in text
+
+
+def test_windows_venv_repair_script_exists_and_uses_rmdir_fallback():
+    script = ROOT / "src" / "Installation" / "repair_windows_venv.ps1"
+    assert script.exists()
+
+    text = script.read_text(encoding="utf-8")
+    assert "Remove-VenvDirectory" in text
+    assert "cmd.exe" in text
+    assert "rmdir /s /q" in text
+    assert "install_requirements.py" in text
 
 
 def test_smoke_script_exists_and_checks_helper_mode():

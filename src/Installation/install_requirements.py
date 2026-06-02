@@ -103,12 +103,8 @@ def validate_qtcore_import() -> None:
     except subprocess.CalledProcessError as exc:
         raise SystemExit(
             "PySide6 installed, but PySide6.QtCore still cannot be loaded.\n"
-            "On Windows, recreate the virtual environment and reinstall dependencies:\n"
-            "  deactivate\n"
-            "  Remove-Item -Recurse -Force .\\venv\n"
-            "  py -3.12 -m venv venv\n"
-            "  .\\venv\\Scripts\\Activate.ps1\n"
-            "  python src\\Installation\\install_requirements.py\n"
+            "On Windows, run the venv repair script from the project root:\n"
+            "  powershell -ExecutionPolicy Bypass -File .\\src\\Installation\\repair_windows_venv.ps1\n"
             "If the error persists, repair/install the Microsoft Visual C++ 2015-2022 "
             "Redistributable (x64).\n"
             f"QtCore import check failed with exit code {exc.returncode}."
