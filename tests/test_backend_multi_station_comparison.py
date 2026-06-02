@@ -21,8 +21,14 @@ from src.Backend.multi_station_comparison import (
     COLOR_SCALE_MANUAL,
     COLOR_SCALE_PER_STATION,
     COLOR_SCALE_SHARED,
+    NOISE_METHOD_CLIP,
+    NOISE_METHOD_MEAN,
+    NOISE_METHOD_MEDIAN,
+    NOISE_METHOD_ROBUST,
     TIME_ALIGNMENT_UT,
+    ComparisonNoiseSettings,
     aligned_time_axes,
+    apply_comparison_noise,
     compute_color_limits,
     combined_comparison_dataset_from_paths,
     combined_comparison_datasets_from_paths,
@@ -113,6 +119,52 @@ def test_color_scale_modes_compute_expected_limits(tmp_path: Path):
     assert np.asarray(shared) == pytest.approx(np.asarray(((0.0, 111.0), (0.0, 111.0))))
     assert np.asarray(per_station) == pytest.approx(np.asarray(((0.0, 11.0), (100.0, 111.0))))
     assert np.asarray(manual) == pytest.approx(np.asarray(((-2.0, 8.0), (-2.0, 8.0))))
+
+
+def test_comparison_noise_methods_transform_data_without_mutating_source():
+    data = np.array([[1.0, 2.0, 7.0], [4.0, 8.0, 12.0]], dtype=np.float32)
+    original = data.copy()
+
+    mean = apply_comparison_noise(data, ComparisonNoiseSettings(method=NOISE_METHOD_MEAN))
+    median = apply_comparison_noise(data, ComparisonNoiseSettings(method=NOISE_METHOD_MEDIAN))
+    robust = apply_comparison_noise(data, ComparisonNoiseSettings(method=NOISE_METHOD_ROBUST))
+    clipped = apply_comparison_noise(data, ComparisonNoiseSettings(method=NOISE_METHOD_CLIP, clip_low=-1.0, clip_high=2.0))
+
+    assert mean == pytest.approx(data - np.nanmean(data, axis=1, keepdims=True))
+    assert median == pytest.approx(data - np.nanmedian(data, axis=1, keepdims=True))
+    assert robust == pytest.approx(data - np.nanpercentile(data, 25.0, axis=1, keepdims=True))
+    assert clipped == pytest.approx(np.clip(robust, -1.0, 2.0))
+    assert np.array_equal(data, original)
+
+
+def test_comparison_noise_preserves_gap_rows_as_nan():
+    data = np.array([[1.0, 2.0, 3.0], [10.0, 11.0, 12.0]], dtype=np.float32)
+
+    result = apply_comparison_noise(
+        data,
+        ComparisonNoiseSettings(method=NOISE_METHOD_MEDIAN),
+        gap_row_mask=np.array([False, True]),
+    )
+
+    assert result[0] == pytest.approx([-1.0, 0.0, 1.0])
+    assert np.all(np.isnan(result[1]))
+
+
+def test_color_limits_use_noise_processed_data(tmp_path: Path):
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A", base=0.0)
+    _write_fit(b, label="B", base=100.0)
+    datasets = [load_comparison_dataset(str(a)), load_comparison_dataset(str(b))]
+
+    limits = compute_color_limits(
+        datasets,
+        {"use_db": False},
+        COLOR_SCALE_SHARED,
+        noise_settings=[ComparisonNoiseSettings(method=NOISE_METHOD_MEAN), ComparisonNoiseSettings(method=NOISE_METHOD_MEAN)],
+    )
+
+    assert np.asarray(limits) == pytest.approx(np.asarray(((-1.5, 1.5), (-1.5, 1.5))))
 
 
 def test_render_and_export_comparison_png_applies_exact_locked_axes(monkeypatch, tmp_path: Path):

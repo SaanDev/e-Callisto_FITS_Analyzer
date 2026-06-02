@@ -17,10 +17,20 @@ pytest.importorskip("astropy")
 pytest.importorskip("matplotlib")
 
 from astropy.io import fits
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication
 
-from src.Backend.multi_station_comparison import COLOR_SCALE_MANUAL, TIME_ALIGNMENT_SECONDS, TIME_ALIGNMENT_UT
+from src.Backend.multi_station_comparison import (
+    COLOR_SCALE_MANUAL,
+    NOISE_METHOD_CLIP,
+    NOISE_METHOD_MEAN,
+    NOISE_METHOD_MEDIAN,
+    NOISE_METHOD_NONE,
+    TIME_ALIGNMENT_SECONDS,
+    TIME_ALIGNMENT_UT,
+    ComparisonNoiseSettings,
+)
 from src.UI.accelerated_plot_widget import AcceleratedPlotWidget
 from src.UI.dialogs.multi_station_comparison_dialog import MultiStationComparisonDialog
 from src.UI.main_window import MainWindow
@@ -252,6 +262,135 @@ def test_export_is_disabled_until_two_valid_files_are_loaded(tmp_path: Path):
     assert dialog.export_btn.isEnabled() is False
     dialog.add_files([str(b)])
     assert dialog.export_btn.isEnabled() is True
+    dialog.close()
+
+
+def test_noise_target_combo_tracks_visible_combined_panels(tmp_path: Path):
+    _app()
+    sta_a = tmp_path / "STA_20260101_120000_A.fit"
+    sta_b = tmp_path / "STA_20260101_121500_A.fit"
+    stb_a = tmp_path / "STB_20260101_120000_A.fit"
+    stb_b = tmp_path / "STB_20260101_121500_A.fit"
+    _write_fit(sta_a, label="STA", time_obs="12:00:00", base=1.0)
+    _write_fit(sta_b, label="STA", time_obs="12:15:00", base=10.0)
+    _write_fit(stb_a, label="STB", time_obs="12:00:00", base=100.0)
+    _write_fit(stb_b, label="STB", time_obs="12:15:00", base=200.0)
+    dialog = MultiStationComparisonDialog(plot_mode_provider=lambda: "classic")
+
+    dialog.add_files([str(sta_a), str(sta_b), str(stb_a), str(stb_b)])
+
+    assert dialog.noise_target_combo.count() == 3
+    assert dialog.noise_target_combo.itemText(0) == "All panels"
+    assert dialog.noise_target_combo.itemText(1) == "STA Combined Time"
+    assert dialog.noise_target_combo.itemText(2) == "STB Combined Time"
+    assert "STA_20260101_120000_A.fit" in dialog.noise_target_combo.itemData(1, Qt.ToolTipRole)
+    dialog.close()
+
+
+def test_noise_clipping_method_toggles_threshold_sliders(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B")
+    dialog = MultiStationComparisonDialog()
+    dialog.add_files([str(a), str(b)])
+
+    assert dialog.noise_clip_panel.isHidden() is True
+
+    dialog.noise_method_combo.setCurrentIndex(dialog.noise_method_combo.findData(NOISE_METHOD_CLIP))
+    assert dialog.noise_clip_panel.isHidden() is False
+
+    dialog.noise_method_combo.setCurrentIndex(dialog.noise_method_combo.findData(NOISE_METHOD_MEDIAN))
+    assert dialog.noise_clip_panel.isHidden() is True
+    dialog.close()
+
+
+def test_noise_all_settings_clear_per_panel_overrides(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B")
+    dialog = MultiStationComparisonDialog()
+    dialog.add_files([str(a), str(b)])
+
+    dialog.noise_target_combo.setCurrentIndex(2)
+    dialog.noise_method_combo.setCurrentIndex(dialog.noise_method_combo.findData(NOISE_METHOD_MEDIAN))
+    assert len(dialog._noise_overrides) == 1
+    assert [setting.method for setting in dialog._effective_noise_settings()] == [NOISE_METHOD_NONE, NOISE_METHOD_MEDIAN]
+
+    dialog.noise_target_combo.setCurrentIndex(0)
+    dialog.noise_method_combo.setCurrentIndex(dialog.noise_method_combo.findData(NOISE_METHOD_MEAN))
+
+    assert dialog._noise_overrides == {}
+    assert dialog._noise_all_settings.method == NOISE_METHOD_MEAN
+    assert [setting.method for setting in dialog._effective_noise_settings()] == [NOISE_METHOD_MEAN, NOISE_METHOD_MEAN]
+    dialog.close()
+
+
+def test_noise_slider_change_updates_override_and_schedules_redraw(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B")
+    dialog = MultiStationComparisonDialog()
+    dialog.add_files([str(a), str(b)])
+    dialog.noise_target_combo.setCurrentIndex(1)
+    dialog.noise_method_combo.setCurrentIndex(dialog.noise_method_combo.findData(NOISE_METHOD_CLIP))
+    dialog._redraw_timer.stop()
+
+    dialog.noise_low_slider.setValue(min(dialog.noise_low_slider.maximum(), dialog.noise_low_slider.value() + 20))
+
+    key = dialog._noise_key_for_dataset(dialog._active_datasets()[0])
+    assert dialog._noise_overrides[key].method == NOISE_METHOD_CLIP
+    assert dialog._redraw_timer.isActive() is True
+    assert "Digits" in dialog.noise_low_value_label.text()
+    dialog.close()
+
+
+def test_noise_overrides_are_pruned_when_target_is_removed(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B")
+    dialog = MultiStationComparisonDialog()
+    dialog.add_files([str(a), str(b)])
+    dialog.noise_target_combo.setCurrentIndex(2)
+    dialog.noise_method_combo.setCurrentIndex(dialog.noise_method_combo.findData(NOISE_METHOD_MEDIAN))
+
+    dialog.file_list.setCurrentRow(1)
+    dialog.remove_selected_files()
+
+    assert dialog._noise_overrides == {}
+    assert dialog.noise_target_combo.count() == 2
+    dialog.close()
+
+
+def test_hardware_render_receives_effective_noise_settings(monkeypatch, tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B")
+    dialog = MultiStationComparisonDialog(plot_mode_provider=lambda: "modern")
+    dialog.add_files([str(a), str(b)])
+    dialog._noise_all_settings = ComparisonNoiseSettings(method=NOISE_METHOD_MEAN)
+    captured = {}
+
+    def fake_payloads(_datasets, **kwargs):
+        captured["noise_settings"] = tuple(kwargs.get("noise_settings") or ())
+        return [], TIME_ALIGNMENT_SECONDS, ()
+
+    monkeypatch.setattr("src.UI.dialogs.multi_station_comparison_dialog.comparison_panel_payloads", fake_payloads)
+    dialog._ensure_hardware_canvases = lambda _count: None
+    dialog._hardware_canvases = []
+
+    dialog._render_hardware(dialog._active_datasets(), TIME_ALIGNMENT_SECONDS)
+
+    assert [setting.method for setting in captured["noise_settings"]] == [NOISE_METHOD_MEAN, NOISE_METHOD_MEAN]
     dialog.close()
 
 
