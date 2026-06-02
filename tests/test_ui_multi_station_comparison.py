@@ -82,7 +82,7 @@ def test_multi_station_action_opens_and_reuses_dialog():
     win.close()
 
 
-def test_add_remove_reorder_files_updates_station_list(tmp_path: Path):
+def test_add_remove_files_updates_station_list_without_move_buttons(tmp_path: Path):
     _app()
     a = tmp_path / "a.fit"
     b = tmp_path / "b.fit"
@@ -95,15 +95,13 @@ def test_add_remove_reorder_files_updates_station_list(tmp_path: Path):
 
     assert dialog.file_list.count() == 2
     assert [item.label for item in dialog._datasets] == ["A", "B"]
-
-    dialog.file_list.setCurrentRow(1)
-    dialog._move_selected(-1)
-    assert [item.label for item in dialog._datasets] == ["B", "A"]
+    assert not hasattr(dialog, "up_btn")
+    assert not hasattr(dialog, "down_btn")
 
     dialog.file_list.setCurrentRow(0)
     dialog.remove_selected_files()
     assert dialog.file_list.count() == 1
-    assert [item.label for item in dialog._datasets] == ["A"]
+    assert [item.label for item in dialog._datasets] == ["B"]
     dialog.close()
 
 
@@ -326,6 +324,23 @@ def test_noise_all_settings_clear_per_panel_overrides(tmp_path: Path):
     assert dialog._noise_overrides == {}
     assert dialog._noise_all_settings.method == NOISE_METHOD_MEAN
     assert [setting.method for setting in dialog._effective_noise_settings()] == [NOISE_METHOD_MEAN, NOISE_METHOD_MEAN]
+    dialog.close()
+
+
+def test_noise_method_change_affects_classic_rendered_data(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B", base=100.0)
+    dialog = MultiStationComparisonDialog(plot_mode_provider=lambda: "classic")
+    dialog.add_files([str(a), str(b)])
+    dialog._set_alignment_mode(TIME_ALIGNMENT_SECONDS)
+
+    dialog.noise_method_combo.setCurrentIndex(dialog.noise_method_combo.findData(NOISE_METHOD_MEAN))
+    result = dialog._render_matplotlib(dialog._active_datasets(), TIME_ALIGNMENT_SECONDS)
+
+    assert np.asarray(result.color_limits) == pytest.approx(np.asarray(((-1.5, 1.5), (-1.5, 1.5))))
     dialog.close()
 
 

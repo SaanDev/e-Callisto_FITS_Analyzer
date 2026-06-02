@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSlider,
+    QSizePolicy,
     QSplitter,
     QStackedLayout,
     QVBoxLayout,
@@ -119,28 +120,25 @@ class MultiStationComparisonDialog(QDialog):
         self.add_btn = QPushButton("Add Files...", self)
         self.remove_btn = QPushButton("Remove", self)
         self.clear_btn = QPushButton("Clear", self)
-        self.up_btn = QPushButton("Move Up", self)
-        self.down_btn = QPushButton("Move Down", self)
 
         self.add_btn.clicked.connect(self._choose_files)
         self.remove_btn.clicked.connect(self.remove_selected_files)
         self.clear_btn.clicked.connect(self.clear_files)
-        self.up_btn.clicked.connect(lambda: self._move_selected(-1))
-        self.down_btn.clicked.connect(lambda: self._move_selected(1))
 
         file_buttons = QHBoxLayout()
+        file_buttons.setSpacing(6)
         for button in (self.add_btn, self.remove_btn, self.clear_btn):
+            button.setMinimumHeight(34)
             file_buttons.addWidget(button)
-        move_buttons = QHBoxLayout()
-        move_buttons.addWidget(self.up_btn)
-        move_buttons.addWidget(self.down_btn)
 
-        file_panel = QWidget(self)
+        file_panel = QGroupBox("Stations / Files", self)
         file_layout = QVBoxLayout(file_panel)
-        file_layout.addWidget(QLabel("Stations / Files", self))
+        file_layout.setSpacing(8)
+        self.file_list.setMinimumHeight(96)
+        self.file_list.setMaximumHeight(150)
+        self.file_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         file_layout.addWidget(self.file_list)
         file_layout.addLayout(file_buttons)
-        file_layout.addLayout(move_buttons)
 
         self.alignment_combo = QComboBox(self)
         self.alignment_combo.addItem("UT clock", TIME_ALIGNMENT_UT)
@@ -216,46 +214,72 @@ class MultiStationComparisonDialog(QDialog):
         self.status_label = QLabel("Add FITS files to build a comparison.", self)
         self.status_label.setWordWrap(True)
 
-        controls = QGroupBox("Comparison Controls", self)
-        controls_layout = QVBoxLayout(controls)
-        controls_layout.addWidget(QLabel("Time alignment", self))
-        controls_layout.addWidget(self.alignment_combo)
-        controls_layout.addWidget(QLabel("Units", self))
-        controls_layout.addWidget(self.units_combo)
-        controls_layout.addWidget(QLabel("Colormap", self))
-        controls_layout.addWidget(self.colormap_combo)
-        controls_layout.addWidget(QLabel("Color scale", self))
-        controls_layout.addWidget(self.color_scale_combo)
+        view_group = QGroupBox("View", self)
+        view_layout = QVBoxLayout(view_group)
+        view_layout.setSpacing(6)
+        view_layout.addWidget(QLabel("Time alignment", self))
+        view_layout.addWidget(self.alignment_combo)
+
+        appearance_group = QGroupBox("Appearance", self)
+        appearance_layout = QVBoxLayout(appearance_group)
+        appearance_layout.setSpacing(6)
+        appearance_layout.addWidget(QLabel("Units", self))
+        appearance_layout.addWidget(self.units_combo)
+        appearance_layout.addWidget(QLabel("Colormap", self))
+        appearance_layout.addWidget(self.colormap_combo)
+        appearance_layout.addWidget(QLabel("Color scale", self))
+        appearance_layout.addWidget(self.color_scale_combo)
 
         manual_row = QHBoxLayout()
+        manual_row.setSpacing(6)
         manual_row.addWidget(QLabel("Low", self))
         manual_row.addWidget(self.manual_low_spin)
         manual_row.addWidget(QLabel("High", self))
         manual_row.addWidget(self.manual_high_spin)
-        controls_layout.addLayout(manual_row)
+        appearance_layout.addLayout(manual_row)
 
         noise_group = QGroupBox("Noise Reduction", self)
         noise_layout = QVBoxLayout(noise_group)
+        noise_layout.setSpacing(6)
         noise_layout.addWidget(QLabel("Target", self))
         noise_layout.addWidget(self.noise_target_combo)
         noise_layout.addWidget(QLabel("Method", self))
         noise_layout.addWidget(self.noise_method_combo)
         noise_layout.addWidget(self.noise_clip_panel)
-        controls_layout.addWidget(noise_group)
 
+        actions_group = QGroupBox("Actions", self)
+        actions_layout = QVBoxLayout(actions_group)
+        actions_layout.setSpacing(6)
         range_row = QHBoxLayout()
+        range_row.setSpacing(6)
         range_row.addWidget(self.set_range_btn)
         range_row.addWidget(self.reset_range_btn)
-        controls_layout.addLayout(range_row)
-        controls_layout.addWidget(self.load_config_btn)
-        controls_layout.addWidget(self.export_btn)
+        actions_layout.addLayout(range_row)
+        actions_layout.addWidget(self.load_config_btn)
+        actions_layout.addWidget(self.export_btn)
+        actions_layout.addWidget(self.status_label)
+
+        controls_content = QWidget(self)
+        controls_layout = QVBoxLayout(controls_content)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(10)
+        controls_layout.addWidget(view_group)
+        controls_layout.addWidget(appearance_group)
+        controls_layout.addWidget(noise_group)
+        controls_layout.addWidget(actions_group)
         controls_layout.addStretch(1)
-        controls_layout.addWidget(self.status_label)
+
+        controls_scroll = QScrollArea(self)
+        controls_scroll.setWidgetResizable(True)
+        controls_scroll.setFrameShape(QScrollArea.NoFrame)
+        controls_scroll.setWidget(controls_content)
 
         left_panel = QWidget(self)
+        left_panel.setMinimumWidth(360)
         left_layout = QVBoxLayout(left_panel)
+        left_layout.setSpacing(10)
         left_layout.addWidget(file_panel)
-        left_layout.addWidget(controls)
+        left_layout.addWidget(controls_scroll, 1)
 
         self.canvas = MplCanvas(self, width=10, height=6, dpi=100)
         self.hardware_panel = QWidget(self)
@@ -277,7 +301,7 @@ class MultiStationComparisonDialog(QDialog):
         splitter.addWidget(self.plot_area)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([300, 1100])
+        splitter.setSizes([380, 1020])
 
         layout = QVBoxLayout(self)
         layout.addWidget(splitter)
@@ -373,18 +397,6 @@ class MultiStationComparisonDialog(QDialog):
         self._rebuild_noise_targets()
         self._rebuild_file_list()
         self._sync_actions()
-        self.schedule_redraw()
-
-    def _move_selected(self, delta: int) -> None:
-        selected = self.file_list.currentRow()
-        target = selected + int(delta)
-        if selected < 0 or target < 0 or target >= len(self._datasets):
-            return
-        self._datasets[selected], self._datasets[target] = self._datasets[target], self._datasets[selected]
-        self._refresh_display_datasets()
-        self._rebuild_noise_targets()
-        self._rebuild_file_list()
-        self.file_list.setCurrentRow(target)
         self.schedule_redraw()
 
     def _rebuild_file_list(self) -> None:
@@ -685,8 +697,6 @@ class MultiStationComparisonDialog(QDialog):
         has_files = bool(self._datasets)
         self.remove_btn.setEnabled(has_files)
         self.clear_btn.setEnabled(has_files)
-        self.up_btn.setEnabled(has_files)
-        self.down_btn.setEnabled(has_files)
         self.set_range_btn.setEnabled(has_files)
         self.reset_range_btn.setEnabled(has_files and self._display_range is not None)
         self.export_btn.setEnabled(len(self._datasets) >= 2)
