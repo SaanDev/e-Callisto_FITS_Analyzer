@@ -7,6 +7,7 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
 from __future__ import annotations
 
+from dataclasses import replace
 import os
 from pathlib import Path
 import base64
@@ -75,6 +76,7 @@ _VIEW_CONFIG_FILTER = "e-CALLISTO View Config (*.efaview.json);;JSON Files (*.js
 _EXPORT_FILTERS = "PNG (*.png);;PDF (*.pdf);;EPS (*.eps);;SVG (*.svg);;TIFF (*.tiff)"
 _NOISE_TARGET_ALL = "__all__"
 _NOISE_SLIDER_STEPS = 1000
+_COLORMAP_NAMES = ("Custom", "viridis", "plasma", "inferno", "magma", "cividis", "gray", "bone_r")
 
 
 class MultiStationComparisonDialog(QDialog):
@@ -108,10 +110,12 @@ class MultiStationComparisonDialog(QDialog):
         self._noise_slider_min = -100.0
         self._noise_slider_max = 100.0
         self._noise_sync_guard = False
+        self._noise_base_cache: dict[tuple, np.ndarray] = {}
+        self._colormap_sync_guard = False
 
         self._redraw_timer = QTimer(self)
         self._redraw_timer.setSingleShot(True)
-        self._redraw_timer.setInterval(120)
+        self._redraw_timer.setInterval(35)
         self._redraw_timer.timeout.connect(self._render_now)
 
         self.file_list = QListWidget(self)
@@ -151,9 +155,9 @@ class MultiStationComparisonDialog(QDialog):
         self.units_combo.currentIndexChanged.connect(self.schedule_redraw)
 
         self.colormap_combo = QComboBox(self)
-        for name in ("Custom", "viridis", "plasma", "inferno", "magma", "cividis", "gray", "bone_r"):
+        for name in _COLORMAP_NAMES:
             self.colormap_combo.addItem(name)
-        self.colormap_combo.currentIndexChanged.connect(self.schedule_redraw)
+        self.colormap_combo.currentIndexChanged.connect(self._on_colormap_changed)
 
         self.color_scale_combo = QComboBox(self)
         self.color_scale_combo.addItem("Shared scale", COLOR_SCALE_SHARED)
@@ -177,6 +181,11 @@ class MultiStationComparisonDialog(QDialog):
         self.noise_method_combo.addItem("Robust background", NOISE_METHOD_ROBUST)
         self.noise_method_combo.addItem("Noise clipping", NOISE_METHOD_CLIP)
         self.noise_method_combo.currentIndexChanged.connect(self._on_noise_method_changed)
+
+        self.noise_colormap_combo = QComboBox(self)
+        for name in _COLORMAP_NAMES:
+            self.noise_colormap_combo.addItem(name)
+        self.noise_colormap_combo.currentIndexChanged.connect(self._on_noise_colormap_changed)
 
         self.noise_low_slider = QSlider(Qt.Horizontal, self)
         self.noise_low_slider.setRange(0, _NOISE_SLIDER_STEPS)
@@ -245,6 +254,8 @@ class MultiStationComparisonDialog(QDialog):
         noise_layout.addWidget(self.noise_target_combo)
         noise_layout.addWidget(QLabel("Method", self))
         noise_layout.addWidget(self.noise_method_combo)
+        noise_layout.addWidget(QLabel("Colormap", self))
+        noise_layout.addWidget(self.noise_colormap_combo)
         noise_layout.addWidget(self.noise_clip_panel)
 
         actions_group = QGroupBox("Actions", self)
@@ -363,6 +374,8 @@ class MultiStationComparisonDialog(QDialog):
             existing.add(dataset.path)
             added += 1
 
+        if added:
+            self._invalidate_noise_base_cache()
         self._refresh_display_datasets()
         self._rebuild_noise_targets()
         self._rebuild_file_list()
@@ -381,6 +394,7 @@ class MultiStationComparisonDialog(QDialog):
         for row in rows:
             if 0 <= row < len(self._datasets):
                 del self._datasets[row]
+        self._invalidate_noise_base_cache()
         self._display_range = None
         self._refresh_display_datasets()
         self._rebuild_noise_targets()
@@ -394,6 +408,7 @@ class MultiStationComparisonDialog(QDialog):
         self._display_datasets.clear()
         self._combined_mode = None
         self._display_range = None
+        self._invalidate_noise_base_cache()
         self._rebuild_noise_targets()
         self._rebuild_file_list()
         self._sync_actions()
@@ -522,15 +537,58 @@ class MultiStationComparisonDialog(QDialog):
         target = tuple(key)
         return [dataset for dataset in active if self._noise_key_for_dataset(dataset) == target]
 
+    def _invalidate_noise_base_cache(self) -> None:
+        self._noise_base_cache.clear()
+
+    def _noise_base_cache_key(self, dataset: ComparisonDataset, method: str) -> tuple:
+        data = np.asarray(dataset.data)
+        gap = dataset.gap_row_mask
+        return (
+            self._noise_key_for_dataset(dataset),
+            id(dataset.data),
+            tuple(data.shape),
+            str(data.dtype),
+            id(gap) if gap is not None else None,
+            str(method),
+        )
+
+    def _noise_base_for_dataset(self, dataset: ComparisonDataset, method: str) -> np.ndarray:
+        key = self._noise_base_cache_key(dataset, method)
+        cached = self._noise_base_cache.get(key)
+        if cached is not None:
+            return cached
+        data = apply_comparison_noise(
+            dataset.data,
+            ComparisonNoiseSettings(method=method),
+            gap_row_mask=dataset.gap_row_mask,
+        )
+        self._noise_base_cache[key] = data
+        return data
+
+    def _processed_data_for_dataset(self, dataset: ComparisonDataset, settings: ComparisonNoiseSettings) -> np.ndarray:
+        normalized = normalize_comparison_noise_settings(settings)
+        if normalized.method == NOISE_METHOD_NONE:
+            return np.asarray(dataset.data, dtype=np.float32)
+        if normalized.method == NOISE_METHOD_CLIP:
+            base = self._noise_base_for_dataset(dataset, NOISE_METHOD_ROBUST)
+            return np.clip(base, float(normalized.clip_low), float(normalized.clip_high)).astype(np.float32, copy=False)
+        return self._noise_base_for_dataset(dataset, normalized.method)
+
+    def _processed_datasets_for_render(self, datasets: list[ComparisonDataset]) -> list[ComparisonDataset]:
+        out: list[ComparisonDataset] = []
+        for dataset in datasets:
+            settings = self._noise_settings_for_key(self._noise_key_for_dataset(dataset))
+            if settings.method == NOISE_METHOD_NONE:
+                out.append(dataset)
+                continue
+            out.append(replace(dataset, data=self._processed_data_for_dataset(dataset, settings)))
+        return out
+
     def _refresh_noise_slider_range(self, settings: ComparisonNoiseSettings) -> None:
         values: list[np.ndarray] = []
         for dataset in self._noise_target_datasets(self._current_noise_target_key()):
             try:
-                reduced = apply_comparison_noise(
-                    dataset.data,
-                    ComparisonNoiseSettings(method=NOISE_METHOD_ROBUST),
-                    gap_row_mask=dataset.gap_row_mask,
-                )
+                reduced = self._noise_base_for_dataset(dataset, NOISE_METHOD_ROBUST)
             except Exception:
                 continue
             finite = np.asarray(reduced, dtype=float)
@@ -600,7 +658,7 @@ class MultiStationComparisonDialog(QDialog):
         settings = ComparisonNoiseSettings(method=method, clip_low=current.clip_low, clip_high=current.clip_high)
         self._set_noise_target_settings(settings)
         self._sync_noise_controls_from_target()
-        self.schedule_redraw()
+        self.schedule_redraw(immediate=True)
 
     def _on_noise_slider_changed(self, _value: int) -> None:
         if self._noise_sync_guard:
@@ -627,7 +685,7 @@ class MultiStationComparisonDialog(QDialog):
         settings = ComparisonNoiseSettings(method=method, clip_low=float(low), clip_high=float(high))
         self._set_noise_target_settings(settings)
         self._update_noise_value_labels(float(low), float(high))
-        self.schedule_redraw()
+        self.schedule_redraw(immediate=True)
 
     def _choose_default_alignment_after_load(self) -> None:
         if self._user_changed_alignment:
@@ -670,6 +728,41 @@ class MultiStationComparisonDialog(QDialog):
     def current_color_scale_mode(self) -> str:
         return str(self.color_scale_combo.currentData() or COLOR_SCALE_SHARED)
 
+    def _set_combo_text(self, combo: QComboBox, text: str) -> None:
+        value = str(text or "Custom")
+        idx = combo.findText(value)
+        if idx < 0:
+            combo.addItem(value)
+            idx = combo.findText(value)
+        combo.setCurrentIndex(max(0, idx))
+
+    def _sync_colormap_combo(self, combo: QComboBox, text: str) -> None:
+        blocked = combo.blockSignals(True)
+        try:
+            self._set_combo_text(combo, text)
+        finally:
+            combo.blockSignals(blocked)
+
+    def _on_colormap_changed(self) -> None:
+        if self._colormap_sync_guard:
+            return
+        self._colormap_sync_guard = True
+        try:
+            self._sync_colormap_combo(self.noise_colormap_combo, str(self.colormap_combo.currentText() or "Custom"))
+        finally:
+            self._colormap_sync_guard = False
+        self.schedule_redraw(immediate=True)
+
+    def _on_noise_colormap_changed(self) -> None:
+        if self._colormap_sync_guard:
+            return
+        self._colormap_sync_guard = True
+        try:
+            self._sync_colormap_combo(self.colormap_combo, str(self.noise_colormap_combo.currentText() or "Custom"))
+        finally:
+            self._colormap_sync_guard = False
+        self.schedule_redraw(immediate=True)
+
     def _visual_payload(self) -> dict:
         return {
             "use_db": bool(self.units_combo.currentData()),
@@ -690,7 +783,11 @@ class MultiStationComparisonDialog(QDialog):
             return None
         return tuple(sorted((low, high)))
 
-    def schedule_redraw(self) -> None:
+    def schedule_redraw(self, *_args, immediate: bool = False) -> None:
+        if immediate:
+            self._redraw_timer.stop()
+            self._render_now()
+            return
         self._redraw_timer.start()
 
     def _sync_actions(self) -> None:
@@ -702,6 +799,7 @@ class MultiStationComparisonDialog(QDialog):
         self.export_btn.setEnabled(len(self._datasets) >= 2)
         self.noise_target_combo.setEnabled(has_files)
         self.noise_method_combo.setEnabled(has_files)
+        self.noise_colormap_combo.setEnabled(has_files)
         clip_enabled = has_files and str(self.noise_method_combo.currentData() or NOISE_METHOD_NONE) == NOISE_METHOD_CLIP
         self.noise_low_slider.setEnabled(clip_enabled)
         self.noise_high_slider.setEnabled(clip_enabled)
@@ -761,15 +859,15 @@ class MultiStationComparisonDialog(QDialog):
     def _render_matplotlib(self, datasets: list[ComparisonDataset], requested_mode: str):
         self._clear_hardware_canvases()
         self.plot_stack.setCurrentWidget(self.canvas)
+        render_datasets = self._processed_datasets_for_render(datasets)
         result = render_comparison_figure(
-            datasets,
+            render_datasets,
             figure=self.canvas.fig,
             alignment_mode=requested_mode,
             display_range=self._display_range,
             visual=self._visual_payload(),
             color_scale_mode=self.current_color_scale_mode(),
             manual_limits=self._manual_limits(),
-            noise_settings=self._effective_noise_settings(),
         )
         self.canvas.draw_idle()
         return result
@@ -779,13 +877,13 @@ class MultiStationComparisonDialog(QDialog):
         self._ensure_hardware_canvases(len(datasets))
         self.plot_stack.setCurrentWidget(self.hardware_scroll)
         visual = self._visual_payload()
+        render_datasets = self._processed_datasets_for_render(datasets)
         payloads, effective_mode, warnings = comparison_panel_payloads(
-            datasets,
+            render_datasets,
             alignment_mode=requested_mode,
             visual=visual,
             color_scale_mode=self.current_color_scale_mode(),
             manual_limits=self._manual_limits(),
-            noise_settings=self._effective_noise_settings(),
         )
         cmap = comparison_cmap(str(visual.get("cmap") or "Custom"))
         view = self._display_view_payload()
@@ -953,11 +1051,12 @@ class MultiStationComparisonDialog(QDialog):
 
     def _set_colormap(self, name: str) -> None:
         text = str(name or "Custom")
-        idx = self.colormap_combo.findText(text)
-        if idx < 0:
-            self.colormap_combo.addItem(text)
-            idx = self.colormap_combo.findText(text)
-        self.colormap_combo.setCurrentIndex(max(0, idx))
+        self._colormap_sync_guard = True
+        try:
+            self._sync_colormap_combo(self.colormap_combo, text)
+            self._sync_colormap_combo(self.noise_colormap_combo, text)
+        finally:
+            self._colormap_sync_guard = False
 
     def _apply_view_config_payload(
         self,

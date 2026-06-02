@@ -69,7 +69,7 @@ def test_load_multiple_comparison_datasets(tmp_path: Path):
 
     datasets = [load_comparison_dataset(str(a)), load_comparison_dataset(str(b))]
 
-    assert [item.label for item in datasets] == ["Station A", "Station B"]
+    assert [item.label for item in datasets] == ["Station A - 2026-01-01", "Station B - 2026-01-01"]
     assert datasets[0].data.shape == (3, 4)
     assert datasets[0].ut_start_sec == pytest.approx(12 * 3600)
     assert datasets[1].ut_start_sec == pytest.approx(12 * 3600 + 60)
@@ -229,7 +229,7 @@ def test_combined_comparison_dataset_from_time_combinable_paths(tmp_path: Path):
 
     assert combined is not None
     assert combined.combine_type == "time"
-    assert combined.label == "STAT Combined Time"
+    assert combined.label == "STAT - 2026-01-01"
     assert combined.data.shape == (3, 8)
     assert combined.time[0] == pytest.approx(0.0)
     assert combined.time[-1] == pytest.approx(7.0)
@@ -248,7 +248,7 @@ def test_grouped_time_combinable_paths_return_one_combined_dataset_per_station(t
 
     grouped = combined_comparison_datasets_from_paths([str(sta_a), str(sta_b), str(stb_a), str(stb_b)])
 
-    assert [dataset.label for dataset in grouped] == ["STA Combined Time", "STB Combined Time"]
+    assert [dataset.label for dataset in grouped] == ["STA - 2026-01-01", "STB - 2026-01-01"]
     assert [dataset.combine_type for dataset in grouped] == ["time", "time"]
     assert [dataset.data.shape for dataset in grouped] == [(3, 8), (3, 8)]
 
@@ -265,6 +265,6 @@ def test_grouped_frequency_combinable_paths_return_one_combined_dataset_per_stat
 
     grouped = combined_comparison_datasets_from_paths([str(sta_a), str(sta_b), str(stb_a), str(stb_b)])
 
-    assert [dataset.label for dataset in grouped] == ["STA Combined Frequency", "STB Combined Frequency"]
+    assert [dataset.label for dataset in grouped] == ["STA - 2026-01-01", "STB - 2026-01-01"]
     assert [dataset.combine_type for dataset in grouped] == ["frequency", "frequency"]
     assert [dataset.data.shape for dataset in grouped] == [(6, 4), (6, 4)]

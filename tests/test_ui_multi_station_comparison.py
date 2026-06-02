@@ -119,7 +119,7 @@ def test_time_combinable_files_render_as_combined_view(tmp_path: Path):
     assert len(dialog._datasets) == 2
     assert len(dialog._active_datasets()) == 1
     assert dialog._active_datasets()[0].combine_type == "time"
-    assert dialog.canvas.fig.axes[0].get_title(loc="left") == "STAT Combined Time"
+    assert dialog.canvas.fig.axes[0].get_title(loc="left") == "STAT - 2026-01-01"
     assert "Combined time view" in dialog.status_label.text()
     dialog.close()
 
@@ -142,10 +142,10 @@ def test_four_files_from_two_stations_render_as_two_combined_station_panels(tmp_
     active = dialog._active_datasets()
     assert len(dialog._datasets) == 4
     assert len(active) == 2
-    assert [dataset.label for dataset in active] == ["STA Combined Time", "STB Combined Time"]
+    assert [dataset.label for dataset in active] == ["STA - 2026-01-01", "STB - 2026-01-01"]
     assert [dataset.combine_type for dataset in active] == ["time", "time"]
-    assert dialog.canvas.fig.axes[0].get_title(loc="left") == "STA Combined Time"
-    assert dialog.canvas.fig.axes[1].get_title(loc="left") == "STB Combined Time"
+    assert dialog.canvas.fig.axes[0].get_title(loc="left") == "STA - 2026-01-01"
+    assert dialog.canvas.fig.axes[1].get_title(loc="left") == "STB - 2026-01-01"
     assert "2 rendered panel(s) from 4 selected file(s)" in dialog.status_label.text()
     assert "Combined time view" in dialog.status_label.text()
     dialog.close()
@@ -206,6 +206,7 @@ def test_load_view_config_applies_visual_settings_and_seconds_range():
     assert ok is True
     assert dialog.units_combo.currentText() == "dB"
     assert dialog.colormap_combo.currentText() == "plasma"
+    assert dialog.noise_colormap_combo.currentText() == "plasma"
     assert dialog.current_color_scale_mode() == COLOR_SCALE_MANUAL
     assert dialog._display_range["time_start_s"] == pytest.approx(1.0)
     dialog.close()
@@ -279,8 +280,8 @@ def test_noise_target_combo_tracks_visible_combined_panels(tmp_path: Path):
 
     assert dialog.noise_target_combo.count() == 3
     assert dialog.noise_target_combo.itemText(0) == "All panels"
-    assert dialog.noise_target_combo.itemText(1) == "STA Combined Time"
-    assert dialog.noise_target_combo.itemText(2) == "STB Combined Time"
+    assert dialog.noise_target_combo.itemText(1) == "STA - 2026-01-01"
+    assert dialog.noise_target_combo.itemText(2) == "STB - 2026-01-01"
     assert "STA_20260101_120000_A.fit" in dialog.noise_target_combo.itemData(1, Qt.ToolTipRole)
     dialog.close()
 
@@ -344,7 +345,7 @@ def test_noise_method_change_affects_classic_rendered_data(tmp_path: Path):
     dialog.close()
 
 
-def test_noise_slider_change_updates_override_and_schedules_redraw(tmp_path: Path):
+def test_noise_slider_change_updates_override_and_renders_immediately(monkeypatch, tmp_path: Path):
     _app()
     a = tmp_path / "a.fit"
     b = tmp_path / "b.fit"
@@ -355,13 +356,38 @@ def test_noise_slider_change_updates_override_and_schedules_redraw(tmp_path: Pat
     dialog.noise_target_combo.setCurrentIndex(1)
     dialog.noise_method_combo.setCurrentIndex(dialog.noise_method_combo.findData(NOISE_METHOD_CLIP))
     dialog._redraw_timer.stop()
+    calls = {"count": 0}
+    original_render = dialog._render_now
+
+    def wrapped_render():
+        calls["count"] += 1
+        original_render()
+
+    monkeypatch.setattr(dialog, "_render_now", wrapped_render)
 
     dialog.noise_low_slider.setValue(min(dialog.noise_low_slider.maximum(), dialog.noise_low_slider.value() + 20))
 
     key = dialog._noise_key_for_dataset(dialog._active_datasets()[0])
     assert dialog._noise_overrides[key].method == NOISE_METHOD_CLIP
-    assert dialog._redraw_timer.isActive() is True
+    assert dialog._redraw_timer.isActive() is False
+    assert calls["count"] == 1
     assert "Digits" in dialog.noise_low_value_label.text()
+    dialog.close()
+
+
+def test_noise_colormap_combo_syncs_with_render_colormap(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B")
+    dialog = MultiStationComparisonDialog()
+    dialog.add_files([str(a), str(b)])
+
+    dialog.noise_colormap_combo.setCurrentIndex(dialog.noise_colormap_combo.findText("plasma"))
+
+    assert dialog.colormap_combo.currentText() == "plasma"
+    assert dialog._visual_payload()["cmap"] == "plasma"
     dialog.close()
 
 
@@ -396,6 +422,7 @@ def test_hardware_render_receives_effective_noise_settings(monkeypatch, tmp_path
     captured = {}
 
     def fake_payloads(_datasets, **kwargs):
+        captured["datasets"] = list(_datasets)
         captured["noise_settings"] = tuple(kwargs.get("noise_settings") or ())
         return [], TIME_ALIGNMENT_SECONDS, ()
 
@@ -405,7 +432,9 @@ def test_hardware_render_receives_effective_noise_settings(monkeypatch, tmp_path
 
     dialog._render_hardware(dialog._active_datasets(), TIME_ALIGNMENT_SECONDS)
 
-    assert [setting.method for setting in captured["noise_settings"]] == [NOISE_METHOD_MEAN, NOISE_METHOD_MEAN]
+    assert captured["noise_settings"] == ()
+    assert np.asarray(captured["datasets"][0].data) == pytest.approx(np.asarray([[-1.5, -0.5, 0.5, 1.5]] * 3))
+    assert np.asarray(captured["datasets"][1].data) == pytest.approx(np.asarray([[-1.5, -0.5, 0.5, 1.5]] * 3))
     dialog.close()
 
 

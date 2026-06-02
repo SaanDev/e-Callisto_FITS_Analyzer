@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import math
 import os
+import re
 from typing import Any, Iterable
 
 import matplotlib as mpl
@@ -198,6 +199,28 @@ def _strip_fit_suffix(path: str) -> str:
     return os.path.splitext(name)[0]
 
 
+def _date_label_from_path(path: str) -> str:
+    stem = _strip_fit_suffix(path)
+    for part in stem.split("_"):
+        if re.fullmatch(r"\d{8}", part or ""):
+            return f"{part[0:4]}-{part[4:6]}-{part[6:8]}"
+    match = re.search(r"(?<!\d)(\d{8})(?!\d)", stem)
+    if match:
+        part = match.group(1)
+        return f"{part[0:4]}-{part[4:6]}-{part[6:8]}"
+    return ""
+
+
+def _date_label_from_sources(sources: Iterable[str]) -> str:
+    dates = [text for text in (_date_label_from_path(path) for path in sources) if text]
+    unique = sorted(dict.fromkeys(dates))
+    if not unique:
+        return ""
+    if len(unique) == 1:
+        return unique[0]
+    return f"{unique[0]} to {unique[-1]}"
+
+
 def station_label_from_header(path: str, header: Any | None) -> str:
     for key in ("STATION", "OBSERVAT", "INSTRUME", "TELESCOP"):
         try:
@@ -214,6 +237,12 @@ def station_label_from_header(path: str, header: Any | None) -> str:
         if first:
             return first
     return stem or "Station"
+
+
+def station_date_label(path: str, header: Any | None = None, sources: Iterable[str] | None = None) -> str:
+    station = station_label_from_header(path, header)
+    date_text = _date_label_from_sources(tuple(sources or ()) or (path,))
+    return f"{station} - {date_text}" if date_text else station
 
 
 def load_comparison_dataset(path: str, *, memmap: bool = False) -> ComparisonDataset:
@@ -238,7 +267,7 @@ def load_comparison_dataset(path: str, *, memmap: bool = False) -> ComparisonDat
 
     return ComparisonDataset(
         path=str(path),
-        label=station_label_from_header(path, result.header0),
+        label=station_date_label(path, result.header0),
         data=data,
         freqs=freqs,
         time=time,
@@ -262,15 +291,8 @@ def comparison_dataset_from_combined(combined: dict[str, Any]) -> ComparisonData
 
     combine_type = str(combined.get("combine_type") or "combined")
     filename = str(combined.get("filename") or "Combined")
-    station = _strip_fit_suffix(filename).split("_", 1)[0].strip()
-    prefix = f"{station} " if station else ""
-    label = (
-        f"{prefix}Combined Frequency"
-        if combine_type == "frequency"
-        else f"{prefix}Combined Time"
-        if combine_type == "time"
-        else f"{prefix}Combined"
-    )
+    sources = tuple(str(path) for path in combined.get("sources", ()) or ())
+    label = station_date_label(filename, combined.get("header0", None), sources=sources)
     warnings: list[str] = []
     if combine_type == "frequency" and combined.get("gap_row_mask") is not None:
         try:
@@ -290,7 +312,7 @@ def comparison_dataset_from_combined(combined: dict[str, Any]) -> ComparisonData
         header0=combined.get("header0", None),
         gap_row_mask=None if combined.get("gap_row_mask", None) is None else np.asarray(combined.get("gap_row_mask"), dtype=bool).ravel(),
         frequency_step_mhz=combined.get("frequency_step_mhz", None),
-        sources=tuple(str(path) for path in combined.get("sources", ()) or ()),
+        sources=sources,
         combine_type=combine_type,
         warnings=tuple(warnings),
     )
