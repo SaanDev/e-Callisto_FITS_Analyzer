@@ -95,12 +95,11 @@ function Remove-VenvDirectory {
     } catch {
         Write-Warning "PowerShell Remove-Item failed: $($_.Exception.Message)"
         Write-Host "==> Retrying with cmd.exe rmdir ..."
-        & cmd.exe /d /c "rmdir /s /q `"$Path`""
+        $rmdirCommand = 'rmdir /s /q "{0}"' -f $Path
+        & cmd.exe /d /c $rmdirCommand
         if ($LASTEXITCODE -ne 0 -or (Test-Path -LiteralPath $Path)) {
-            throw (
-                "Could not remove '$Path'. Close running Python apps, VS Code terminals, "
-                + "and file explorer windows opened inside the venv, then run this script again."
-            )
+            $message = "Could not remove '$Path'. Close running Python apps, VS Code terminals, and file explorer windows opened inside the venv, then run this script again."
+            throw $message
         }
     }
 }
