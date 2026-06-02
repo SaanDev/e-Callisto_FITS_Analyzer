@@ -391,6 +391,18 @@ def test_noise_colormap_combo_syncs_with_render_colormap(tmp_path: Path):
     dialog.close()
 
 
+def test_comparison_colormap_dropdowns_include_main_app_options():
+    _app()
+    dialog = MultiStationComparisonDialog()
+    appearance_options = [dialog.colormap_combo.itemText(i) for i in range(dialog.colormap_combo.count())]
+    noise_options = [dialog.noise_colormap_combo.itemText(i) for i in range(dialog.noise_colormap_combo.count())]
+
+    for name in ("Custom", "turbo", "RdYlBu", "jet", "cubehelix", "gray", "bone_r"):
+        assert name in appearance_options
+        assert name in noise_options
+    dialog.close()
+
+
 def test_noise_overrides_are_pruned_when_target_is_removed(tmp_path: Path):
     _app()
     a = tmp_path / "a.fit"

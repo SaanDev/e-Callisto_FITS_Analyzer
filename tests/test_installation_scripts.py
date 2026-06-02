@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_install_requirements_packages_list():
     assert "PySide6" in install_requirements.packages
+    assert "shiboken6" in install_requirements.packages
     assert "matplotlib" in install_requirements.packages
     assert "reportlab" in install_requirements.packages
     assert "setuptools" in install_requirements.build_packages
@@ -78,6 +79,9 @@ def test_install_requirements_bootstraps_pip_or_shows_linux_hint():
     )
     assert "ensurepip" in text
     assert "python3-venv python3-pip" in text
+    assert "validate_qtcore_import" in text
+    assert "Microsoft Visual C++ 2015-2022" in text
+    assert "Redistributable (x64)" in text
 
 
 def test_smoke_script_exists_and_checks_helper_mode():
@@ -149,6 +153,7 @@ def test_specs_bundle_type_ii_band_splitting_icons():
 
 def test_runtime_requirements_include_sunpy_network_stack():
     text = (ROOT / "src" / "Installation" / "requirements-runtime.txt").read_text(encoding="utf-8")
+    assert "shiboken6==" in text
     assert "reportlab==" in text
     assert "sunpy[map,net,timeseries]" in text
     assert "lxml==" in text

@@ -16,6 +16,12 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 RUNTIME_REQUIREMENTS = HERE / "requirements-runtime.txt"
 BUILD_REQUIREMENTS = HERE / "requirements-build.txt"
+QT_BINDING_PACKAGES = (
+    "PySide6",
+    "PySide6-Addons",
+    "PySide6-Essentials",
+    "shiboken6",
+)
 
 
 def _requirement_lines(path: Path) -> list[str]:
@@ -75,6 +81,40 @@ def install_requirements_file(path: Path) -> None:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "--requirement", str(path)])
 
 
+def refresh_qt_bindings_for_windows() -> None:
+    if not sys.platform.startswith("win"):
+        return
+
+    ensure_pip_available()
+    print("Refreshing PySide6 Qt bindings for Windows ...")
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "uninstall", "-y", *QT_BINDING_PACKAGES]
+    )
+
+
+def validate_qtcore_import() -> None:
+    code = (
+        "import PySide6, shiboken6; "
+        "from PySide6.QtCore import qVersion; "
+        "print(f'PySide6 {PySide6.__version__}, shiboken6 {shiboken6.__version__}, Qt {qVersion()}')"
+    )
+    try:
+        subprocess.check_call([sys.executable, "-c", code])
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(
+            "PySide6 installed, but PySide6.QtCore still cannot be loaded.\n"
+            "On Windows, recreate the virtual environment and reinstall dependencies:\n"
+            "  deactivate\n"
+            "  Remove-Item -Recurse -Force .\\venv\n"
+            "  py -3.12 -m venv venv\n"
+            "  .\\venv\\Scripts\\Activate.ps1\n"
+            "  python src\\Installation\\install_requirements.py\n"
+            "If the error persists, repair/install the Microsoft Visual C++ 2015-2022 "
+            "Redistributable (x64).\n"
+            f"QtCore import check failed with exit code {exc.returncode}."
+        ) from exc
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Install pinned dependencies for e-CALLISTO FITS Analyzer."
@@ -87,7 +127,9 @@ def main() -> None:
     args = parser.parse_args()
 
     print("=== Installing runtime requirements for e-CALLISTO FITS Analyzer ===")
+    refresh_qt_bindings_for_windows()
     install_requirements_file(RUNTIME_REQUIREMENTS)
+    validate_qtcore_import()
 
     if args.with_build:
         print("\n=== Installing build requirements ===")

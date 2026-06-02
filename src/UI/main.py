@@ -10,10 +10,9 @@ import argparse
 import faulthandler
 import os
 import platform
+import site
 import sys
 import threading
-
-from PySide6.QtCore import QTimer
 
 
 def _force_software_opengl() -> bool:
@@ -135,15 +134,51 @@ def _configure_platform_env() -> None:
                 os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = ":".join(parts)
 
 
+_WINDOWS_DLL_DIRECTORY_HANDLES = []
+
+
+def _configure_windows_dll_search_path() -> None:
+    if not sys.platform.startswith("win") or not hasattr(os, "add_dll_directory"):
+        return
+
+    site_paths: list[str] = []
+    try:
+        site_paths.extend(site.getsitepackages())
+    except Exception:
+        pass
+    try:
+        site_paths.append(site.getusersitepackages())
+    except Exception:
+        pass
+    site_paths.extend(path for path in sys.path if path)
+
+    candidates = []
+    for base in site_paths:
+        candidates.append(os.path.join(base, "PySide6"))
+        candidates.append(os.path.join(base, "shiboken6"))
+
+    seen = set()
+    for path in candidates:
+        norm = os.path.normcase(os.path.abspath(path))
+        if norm in seen or not os.path.isdir(path):
+            continue
+        seen.add(norm)
+        try:
+            _WINDOWS_DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(path))
+        except OSError:
+            continue
+
+
 BASE_PATH = _project_base_path()
 if BASE_PATH not in sys.path:
     sys.path.insert(0, BASE_PATH)
 
 _configure_platform_env()
+_configure_windows_dll_search_path()
 _install_macos_stderr_filter()
 
 # Now import from src (after sys.path is configured)
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 from src.UI.font_utils import sanitize_application_font

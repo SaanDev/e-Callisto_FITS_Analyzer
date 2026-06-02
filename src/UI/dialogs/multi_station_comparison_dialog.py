@@ -76,7 +76,20 @@ _VIEW_CONFIG_FILTER = "e-CALLISTO View Config (*.efaview.json);;JSON Files (*.js
 _EXPORT_FILTERS = "PNG (*.png);;PDF (*.pdf);;EPS (*.eps);;SVG (*.svg);;TIFF (*.tiff)"
 _NOISE_TARGET_ALL = "__all__"
 _NOISE_SLIDER_STEPS = 1000
-_COLORMAP_NAMES = ("Custom", "viridis", "plasma", "inferno", "magma", "cividis", "gray", "bone_r")
+_COLORMAP_NAMES = (
+    "Custom",
+    "viridis",
+    "plasma",
+    "inferno",
+    "magma",
+    "cividis",
+    "turbo",
+    "RdYlBu",
+    "jet",
+    "cubehelix",
+    "gray",
+    "bone_r",
+)
 
 
 class MultiStationComparisonDialog(QDialog):
