@@ -107,6 +107,7 @@ from src.Backend.goes_overlay import (
     goes_flux_axis_limits,
     preferred_goes_satellite_numbers_for_time,
 )
+from src.Backend.measurements import MeasurementPoint, MeasurementResult, calculate_two_point_measurement
 from src.Backend.presets import (
     PRESET_SCHEMA_VERSION,
     build_preset,
@@ -166,6 +167,7 @@ from src.UI.goes_sgps_gui import MainWindow as SepProtonWindow
 from src.UI.goes_xrs_gui import MainWindow as GoesXrsWindow
 from src.UI.kp_index_gui import MainWindow as KpIndexWindow
 from src.UI.learmonth_downloader import LearmonthDownloaderApp
+from src.UI.widgets.measurement_readout import MeasurementReadout
 from src.UI.gui_shared import (
     MplCanvas,
     _ext_from_filter,
@@ -394,6 +396,12 @@ class MainWindow(QMainWindow):
         self._annotation_artists = []
         self._annotation_style_defaults = self._merge_annotation_style_defaults()
 
+        # Transient ruler/measurement state
+        self._measurement_result: MeasurementResult | None = None
+        self._measurement_capture_points = []
+        self._measurement_mpl_cid = None
+        self._measurement_artists = []
+
         # Light-curve overlay state
         self._light_curve_frequency_mhz = None
         self._light_curve_records = []
@@ -423,6 +431,7 @@ class MainWindow(QMainWindow):
             self.accel_canvas.lassoFinished.connect(self._on_accel_lasso_finished)
             self.accel_canvas.driftPointAdded.connect(self._on_accel_drift_point_added)
             self.accel_canvas.driftCaptureFinished.connect(self._on_accel_drift_capture_finished)
+            self.accel_canvas.measurementCaptureFinished.connect(self._on_accel_measurement_capture_finished)
             self.accel_canvas.annotationCaptureFinished.connect(self._on_accel_annotation_capture_finished)
             self.accel_canvas.annotationCaptureCancelled.connect(self._on_accel_annotation_capture_cancelled)
             self.accel_canvas.plotClicked.connect(self._on_accel_plot_clicked)
@@ -744,6 +753,9 @@ class MainWindow(QMainWindow):
         self.analysis_summary_label.setWordWrap(True)
         analysis_summary_layout.addWidget(self.analysis_summary_label)
 
+        self.measurement_readout = MeasurementReadout("Ruler Measurement", self)
+        self.measurement_readout.clearRequested.connect(self.clear_ruler_measurement)
+
         # -------------------------
         # Build the LEFT PANEL as a widget, then put it in a ScrollArea
         # This is the key fix for Windows (no overlaps, no clipping).
@@ -757,6 +769,7 @@ class MainWindow(QMainWindow):
         side_panel_layout.addWidget(self.units_group_box)
         side_panel_layout.addWidget(self.graph_group)
         side_panel_layout.addWidget(self.analysis_summary_group)
+        side_panel_layout.addWidget(self.measurement_readout)
         side_panel_layout.addStretch(1)
 
         # Consistent width for all groups (better on Windows DPI scaling)
@@ -765,6 +778,7 @@ class MainWindow(QMainWindow):
         self.units_group_box.setMaximumWidth(SIDEBAR_W)
         self.graph_group.setMaximumWidth(SIDEBAR_W)
         self.analysis_summary_group.setMaximumWidth(SIDEBAR_W)
+        self.measurement_readout.setMaximumWidth(SIDEBAR_W)
 
         self.side_scroll = QScrollArea()
         self.side_scroll.setWidgetResizable(True)
@@ -1055,6 +1069,13 @@ class MainWindow(QMainWindow):
         self.clear_light_curve_action = QAction("Clear light curve(s)", self)
         self.clear_light_curve_action.setEnabled(False)
         self.light_curves_menu.addAction(self.clear_light_curve_action)
+        analysis_menu.addSeparator()
+        self.ruler_measurement_action = QAction("Ruler Measurement", self)
+        self.ruler_measurement_action.setEnabled(False)
+        self.clear_ruler_measurement_action = QAction("Clear Ruler Measurement", self)
+        self.clear_ruler_measurement_action.setEnabled(False)
+        analysis_menu.addAction(self.ruler_measurement_action)
+        analysis_menu.addAction(self.clear_ruler_measurement_action)
 
         processing_menu = menubar.addMenu("Processing")
         hw_menu = processing_menu.addMenu("Hardware Acceleration")
@@ -1220,6 +1241,8 @@ class MainWindow(QMainWindow):
         self.click_light_curve_frequency_action.toggled.connect(self._on_light_curve_click_mode_toggled)
         self.light_curve_settings_action.triggered.connect(self._open_or_focus_light_curve_settings_dialog)
         self.clear_light_curve_action.triggered.connect(self.clear_light_curve)
+        self.ruler_measurement_action.triggered.connect(self.activate_ruler_tool)
+        self.clear_ruler_measurement_action.triggered.connect(self.clear_ruler_measurement)
         self.open_restored_analysis_action.triggered.connect(self.open_restored_analysis_windows)
         self.open_batch_processing_action.triggered.connect(self.open_batch_processing_window)
 
@@ -1851,6 +1874,10 @@ class MainWindow(QMainWindow):
         self.tb_drift.triggered.connect(self.activate_drift_tool)
         tb.addAction(self.tb_drift)
 
+        self.tb_ruler = QAction("Ruler Measurement", self)
+        self.tb_ruler.triggered.connect(self.activate_ruler_tool)
+        tb.addAction(self.tb_ruler)
+
         self.tb_isolate = QAction(self._icon("isolate.svg"), "Isolate Burst", self)
         self.tb_isolate.triggered.connect(self.activate_lasso)
         tb.addAction(self.tb_isolate)
@@ -1943,6 +1970,7 @@ class MainWindow(QMainWindow):
 
         # Tools that require processed data
         self.tb_drift.setEnabled(has_noise)
+        self.tb_ruler.setEnabled(has_file)
         self.tb_isolate.setEnabled(has_noise)
         self.tb_max.setEnabled(has_noise)
         self.tb_reset_sel.setEnabled(has_noise or can_reset_view)
@@ -3076,6 +3104,7 @@ class MainWindow(QMainWindow):
     def _reset_feature_state_for_new_data(self):
         self._clear_analysis_session_state(close_windows=True)
         self._reset_annotation_mode()
+        self.clear_ruler_measurement(reset_readout=True)
         self._clear_light_curve_overlay(clear_frequency=True)
         self._set_light_curve_click_mode_checked(False)
         self._cancel_goes_overlay_request()
@@ -5152,6 +5181,7 @@ class MainWindow(QMainWindow):
         self._render_goes_overlay()
         self._render_annotations()
         self._render_light_curve_overlay()
+        self._render_measurement_overlay()
 
         self.current_plot_type = plot_type
         if self._hardware_mode_enabled():
@@ -5217,6 +5247,237 @@ class MainWindow(QMainWindow):
             f"I = {intensity:.2f} {unit_label}"
         )
         self.cursor_label.setText(self._append_goes_peak_status(msg))
+
+    def _format_measurement_time(self, value: float) -> str:
+        t_val = float(value)
+        if self.use_utc and self.ut_start_sec is not None:
+            total_seconds = int(round(float(self.ut_start_sec) + t_val))
+            hours = int(total_seconds // 3600) % 24
+            minutes = int((total_seconds % 3600) // 60)
+            seconds = int(total_seconds % 60)
+            return f"{hours:02d}:{minutes:02d}:{seconds:02d} UT ({t_val:.3f} s)"
+        return f"{t_val:.3f} s"
+
+    @staticmethod
+    def _measurement_points_for_plot(result: MeasurementResult) -> list[tuple[float, float]]:
+        return [
+            (float(result.point1.time_s), float(result.point1.frequency_mhz)),
+            (float(result.point2.time_s), float(result.point2.frequency_mhz)),
+        ]
+
+    @staticmethod
+    def _measurement_overlay_label(result: MeasurementResult) -> str:
+        return (
+            f"dt={result.duration_s:.3f} s\n"
+            f"df={result.frequency_delta_mhz:.3f} MHz\n"
+            f"{result.slope_mhz_s:.6f} MHz/s"
+        )
+
+    def _disconnect_measurement_mpl(self, *, restore_navigation: bool = False) -> None:
+        cid = getattr(self, "_measurement_mpl_cid", None)
+        if cid is not None:
+            try:
+                self.canvas.mpl_disconnect(cid)
+            except Exception:
+                pass
+            self._measurement_mpl_cid = None
+        if restore_navigation and not self._hardware_mode_enabled():
+            for name in ("_cid_press", "_cid_motion", "_cid_release"):
+                cid_existing = getattr(self, name, None)
+                if cid_existing is not None:
+                    try:
+                        self.canvas.mpl_disconnect(cid_existing)
+                    except Exception:
+                        pass
+            self._cid_press = self.canvas.mpl_connect("button_press_event", self.on_mouse_press)
+            self._cid_motion = self.canvas.mpl_connect("motion_notify_event", self.on_mouse_move)
+            self._cid_release = self.canvas.mpl_connect("button_release_event", self.on_mouse_release)
+
+    def _clear_measurement_artists(self) -> None:
+        for artist in list(getattr(self, "_measurement_artists", []) or []):
+            try:
+                artist.remove()
+            except Exception:
+                pass
+        self._measurement_artists = []
+
+    def _render_measurement_overlay(self) -> None:
+        self._clear_measurement_artists()
+        result = getattr(self, "_measurement_result", None)
+        capture_points = list(getattr(self, "_measurement_capture_points", []) or [])
+
+        if getattr(self, "accel_canvas", None) is not None and self.accel_canvas.is_available:
+            try:
+                if result is not None:
+                    self.accel_canvas.show_measurement(
+                        self._measurement_points_for_plot(result),
+                        self._measurement_overlay_label(result),
+                    )
+                elif capture_points:
+                    self.accel_canvas.show_measurement(capture_points)
+                else:
+                    self.accel_canvas.clear_measurement()
+            except Exception:
+                pass
+
+        if self.canvas.ax is None:
+            return
+        points = []
+        label = ""
+        if result is not None:
+            points = self._measurement_points_for_plot(result)
+            label = self._measurement_overlay_label(result)
+        elif capture_points:
+            points = [(float(x), float(y)) for x, y in capture_points]
+        if not points:
+            try:
+                self.canvas.draw_idle()
+            except Exception:
+                pass
+            return
+
+        xs = [float(p[0]) for p in points]
+        ys = [float(p[1]) for p in points]
+        try:
+            scatter = self.canvas.ax.scatter(
+                xs,
+                ys,
+                marker="o",
+                s=46,
+                facecolors="white",
+                edgecolors="#18b4ff",
+                linewidths=1.5,
+                zorder=20,
+            )
+            self._measurement_artists.append(scatter)
+            if len(points) >= 2:
+                line, = self.canvas.ax.plot(xs[:2], ys[:2], color="#18b4ff", linewidth=1.8, zorder=19)
+                self._measurement_artists.append(line)
+                if label:
+                    text = self.canvas.ax.text(
+                        xs[-1],
+                        ys[-1],
+                        label,
+                        color="white",
+                        fontsize=9,
+                        ha="left",
+                        va="bottom",
+                        bbox={"boxstyle": "round,pad=0.25", "facecolor": "#0f172a", "edgecolor": "#18b4ff", "alpha": 0.82},
+                        zorder=21,
+                    )
+                    self._measurement_artists.append(text)
+        except Exception:
+            self._measurement_artists = []
+        try:
+            self.canvas.draw_idle()
+        except Exception:
+            pass
+
+    def _set_measurement_result(self, result: MeasurementResult, *, title: str | None = None) -> None:
+        self._measurement_result = result
+        self._measurement_capture_points = []
+        self.measurement_readout.set_measurement(
+            result,
+            title=title,
+            time_formatter=self._format_measurement_time,
+        )
+        self._render_measurement_overlay()
+        self.statusBar().showMessage(
+            f"Measurement: dt={result.duration_s:.3f} s, "
+            f"df={result.frequency_delta_mhz:.3f} MHz, "
+            f"slope={result.slope_mhz_s:.6f} MHz/s",
+            0,
+        )
+        self._sync_toolbar_enabled_states()
+
+    def clear_ruler_measurement(self, *_, reset_readout: bool = True) -> None:
+        self._disconnect_measurement_mpl(restore_navigation=True)
+        self._measurement_result = None
+        self._measurement_capture_points = []
+        self._clear_measurement_artists()
+        try:
+            self.accel_canvas.clear_measurement()
+            self.accel_canvas.stop_interaction_capture()
+        except Exception:
+            pass
+        if reset_readout:
+            self.measurement_readout.set_empty()
+            self.statusBar().showMessage("Ruler measurement cleared.", 2500)
+        self._sync_toolbar_enabled_states()
+        try:
+            self.canvas.draw_idle()
+        except Exception:
+            pass
+
+    def activate_ruler_tool(self):
+        if self.raw_data is None:
+            QMessageBox.information(self, "Ruler Measurement", "Load a FITS file first.")
+            return
+        self._disable_light_curve_click_mode()
+        self._reset_annotation_mode()
+        self._disconnect_measurement_mpl(restore_navigation=False)
+        self._measurement_result = None
+        self._measurement_capture_points = []
+        self._clear_measurement_artists()
+        try:
+            self.accel_canvas.clear_measurement()
+        except Exception:
+            pass
+        self.measurement_readout.set_pending("Click the first point on the spectrum.")
+
+        if self._hardware_mode_enabled():
+            self._show_accel_canvas()
+            self.accel_canvas.begin_measurement_capture()
+            self.statusBar().showMessage("Click two points to measure duration, frequency drift, and slope.", 6000)
+            self._sync_toolbar_enabled_states()
+            return
+
+        self._show_plot_canvas()
+        for name in ("_cid_press", "_cid_motion", "_cid_release"):
+            cid_existing = getattr(self, name, None)
+            if cid_existing is not None:
+                try:
+                    self.canvas.mpl_disconnect(cid_existing)
+                except Exception:
+                    pass
+        self._measurement_mpl_cid = self.canvas.mpl_connect("button_press_event", self._on_measurement_mpl_click)
+        self.statusBar().showMessage("Click two points to measure duration, frequency drift, and slope.", 6000)
+        self._sync_toolbar_enabled_states()
+
+    def _on_measurement_mpl_click(self, event) -> None:
+        if event.inaxes != self.canvas.ax:
+            return
+        if event.button == 3:
+            self.clear_ruler_measurement()
+            return
+        if event.button not in (None, 1):
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+
+        point = (float(event.xdata), float(event.ydata))
+        if not self._measurement_capture_points:
+            self._measurement_result = None
+            self._measurement_capture_points = [point]
+            self.measurement_readout.set_pending("Click the second point on the same spectrum.")
+            self._render_measurement_overlay()
+            return
+
+        points = [self._measurement_capture_points[0], point]
+        try:
+            result = calculate_two_point_measurement(points[0], points[1])
+        except ValueError as exc:
+            self._measurement_capture_points = []
+            self._measurement_result = None
+            self._render_measurement_overlay()
+            self.measurement_readout.set_error(str(exc))
+            self.statusBar().showMessage(str(exc), 4000)
+            self._disconnect_measurement_mpl(restore_navigation=True)
+            self._sync_toolbar_enabled_states()
+            return
+
+        self._disconnect_measurement_mpl(restore_navigation=True)
+        self._set_measurement_result(result)
 
     def change_cmap(self, name):
         self._push_undo_state()
@@ -5344,6 +5605,27 @@ class MainWindow(QMainWindow):
     def _on_accel_drift_capture_finished(self, points):
         self.drift_points = [(float(x), float(y)) for (x, y) in (points or [])]
         self.finish_drift_estimation()
+
+    def _on_accel_measurement_capture_finished(self, points):
+        if not self._hardware_mode_enabled():
+            return
+        pts = [(float(x), float(y)) for (x, y) in (points or [])]
+        if len(pts) < 2:
+            return
+        try:
+            result = calculate_two_point_measurement(pts[0], pts[1])
+        except ValueError as exc:
+            self._measurement_result = None
+            self._measurement_capture_points = []
+            try:
+                self.accel_canvas.clear_measurement()
+            except Exception:
+                pass
+            self.measurement_readout.set_error(str(exc))
+            self.statusBar().showMessage(str(exc), 4000)
+            self._sync_toolbar_enabled_states()
+            return
+        self._set_measurement_result(result)
 
     def on_scroll_zoom(self, event):
         """Smooth zoom using mouse scroll wheel."""
@@ -6425,6 +6707,7 @@ class MainWindow(QMainWindow):
             pass
         self._clear_light_curve_overlay(clear_frequency=True)
         self._set_light_curve_click_mode_checked(False)
+        self.clear_ruler_measurement(reset_readout=True)
 
         self._clear_current_colorbar_artists()
 
@@ -6586,7 +6869,6 @@ class MainWindow(QMainWindow):
                 pass
             try:
                 self.accel_canvas.show_drift_points([], with_segments=False)
-                self.accel_canvas.clear_overlays()
             except Exception:
                 pass
             return had_drift_points
@@ -11072,6 +11354,7 @@ class MainWindow(QMainWindow):
                 act.setEnabled(bool(has_data))
 
     def _sync_analysis_menu_actions(self):
+        has_data = getattr(self, "raw_data", None) is not None
         has_noise = getattr(self, "noise_reduced_data", None) is not None
         has_light_curve_data = self._has_light_curve_dataset()
         has_light_curve = bool(self._light_curve_records_payload())
@@ -11089,6 +11372,12 @@ class MainWindow(QMainWindow):
         act = getattr(self, "light_curve_settings_action", None)
         if act is not None:
             act.setEnabled(True)
+        act = getattr(self, "ruler_measurement_action", None)
+        if act is not None:
+            act.setEnabled(bool(has_data))
+        act = getattr(self, "clear_ruler_measurement_action", None)
+        if act is not None:
+            act.setEnabled(bool(getattr(self, "_measurement_result", None) or getattr(self, "_measurement_capture_points", [])))
         if not has_light_curve_data:
             self._set_light_curve_click_mode_checked(False)
 

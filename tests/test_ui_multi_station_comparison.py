@@ -8,6 +8,7 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -552,6 +553,55 @@ def test_comparison_colormap_dropdowns_include_main_app_options():
     for name in ("Custom", "turbo", "RdYlBu", "jet", "cubehelix", "gray", "bone_r"):
         assert name in appearance_options
         assert name in noise_options
+    dialog.close()
+
+
+def test_comparison_classic_ruler_measures_only_selected_panel(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B", base=100.0)
+    dialog = MultiStationComparisonDialog(plot_mode_provider=lambda: "classic")
+    dialog.add_files([str(a), str(b)])
+    dialog._render_now()
+    keys = list(dialog._visible_panel_order)
+    assert len(keys) == 2
+    ax = dialog._mpl_axes_by_key[keys[0]]
+
+    dialog.start_ruler_measurement()
+    dialog._on_measurement_mpl_click(SimpleNamespace(inaxes=ax, button=1, xdata=0.0, ydata=100.0))
+    dialog._on_measurement_mpl_click(SimpleNamespace(inaxes=ax, button=1, xdata=3.0, ydata=85.0))
+
+    assert set(dialog._measurement_results.keys()) == {keys[0]}
+    result = dialog._measurement_results[keys[0]]
+    assert result.duration_s == pytest.approx(3.0)
+    assert result.frequency_delta_mhz == pytest.approx(-15.0)
+    assert keys[1] not in dialog._measurement_artists_by_key
+    assert "Slope:" in dialog.measurement_readout.text()
+    dialog.close()
+
+
+def test_comparison_classic_ruler_second_panel_click_restarts_capture(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B", base=100.0)
+    dialog = MultiStationComparisonDialog(plot_mode_provider=lambda: "classic")
+    dialog.add_files([str(a), str(b)])
+    dialog._render_now()
+    keys = list(dialog._visible_panel_order)
+    ax_a = dialog._mpl_axes_by_key[keys[0]]
+    ax_b = dialog._mpl_axes_by_key[keys[1]]
+
+    dialog.start_ruler_measurement()
+    dialog._on_measurement_mpl_click(SimpleNamespace(inaxes=ax_a, button=1, xdata=0.0, ydata=100.0))
+    dialog._on_measurement_mpl_click(SimpleNamespace(inaxes=ax_b, button=1, xdata=1.0, ydata=90.0))
+
+    assert dialog._measurement_results == {}
+    assert dialog._measurement_capture_key == keys[1]
+    assert dialog._measurement_capture_points == [(1.0, 90.0)]
     dialog.close()
 
 

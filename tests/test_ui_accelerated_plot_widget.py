@@ -285,6 +285,20 @@ def test_accelerated_widget_annotation_capture_api_no_crash():
     widget.stop_interaction_capture()
 
 
+def test_accelerated_widget_measurement_overlay_api_no_crash():
+    _app()
+    widget = AcceleratedPlotWidget()
+    if not widget.is_available:
+        pytest.skip("pyqtgraph not available in test environment")
+    widget.begin_measurement_capture()
+    widget.show_measurement([(1.0, 20.0), (4.0, 35.0)], "dt=3.000 s")
+    assert widget._measurement_scatter_item is not None
+    assert widget._measurement_line_item is not None
+    widget.clear_measurement()
+    assert widget._measurement_scatter_item is None
+    widget.stop_interaction_capture()
+
+
 def test_accelerated_widget_goes_overlay_lifecycle():
     _app()
     widget = AcceleratedPlotWidget()

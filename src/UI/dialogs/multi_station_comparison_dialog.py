@@ -70,10 +70,12 @@ from src.Backend.multi_station_comparison import (
     shared_extent,
 )
 from src.Backend.frequency_axis import masked_display_data
+from src.Backend.measurements import MeasurementResult, calculate_two_point_measurement
 from src.Backend.view_config import normalize_display_range, normalize_view_config, parse_view_config_json
 from src.UI.accelerated_plot_widget import AcceleratedPlotWidget
 from src.UI.dialogs.display_range_dialog import DisplayRangeDialog
 from src.UI.gui_shared import MplCanvas, pick_export_path
+from src.UI.widgets.measurement_readout import MeasurementReadout
 
 
 _FITS_FILTER = "FITS files (*.fit *.fits *.fit.gz *.fits.gz)"
@@ -146,6 +148,11 @@ class MultiStationComparisonDialog(QDialog):
         self._visible_effective_alignment_mode = TIME_ALIGNMENT_SECONDS
         self._mpl_axes_by_key: dict[tuple[str, ...], object] = {}
         self._mpl_images_by_key: dict[tuple[str, ...], object] = {}
+        self._measurement_results: dict[tuple[str, ...], MeasurementResult] = {}
+        self._measurement_capture_key: tuple[str, ...] | None = None
+        self._measurement_capture_points: list[tuple[float, float]] = []
+        self._measurement_mpl_cid = None
+        self._measurement_artists_by_key: dict[tuple[str, ...], list[object]] = {}
 
         self._redraw_timer = QTimer(self)
         self._redraw_timer.setSingleShot(True)
@@ -264,14 +271,20 @@ class MultiStationComparisonDialog(QDialog):
         self.reset_range_btn = QPushButton("Reset Range", self)
         self.load_config_btn = QPushButton("Load View Config...", self)
         self.export_btn = QPushButton("Export...", self)
+        self.measure_start_btn = QPushButton("Start Ruler", self)
+        self.measure_clear_btn = QPushButton("Clear", self)
 
         self.set_range_btn.clicked.connect(self.open_display_range_dialog)
         self.reset_range_btn.clicked.connect(self.reset_display_range)
         self.load_config_btn.clicked.connect(self._load_view_config_file)
         self.export_btn.clicked.connect(self.export_png)
+        self.measure_start_btn.clicked.connect(self.start_ruler_measurement)
+        self.measure_clear_btn.clicked.connect(self.clear_ruler_measurements)
 
         self.status_label = QLabel("Add FITS files to build a comparison.", self)
         self.status_label.setWordWrap(True)
+        self.measurement_readout = MeasurementReadout("Readout", self)
+        self.measurement_readout.clearRequested.connect(self.clear_ruler_measurements)
 
         view_group = QGroupBox("View", self)
         view_layout = QVBoxLayout(view_group)
@@ -308,6 +321,16 @@ class MultiStationComparisonDialog(QDialog):
         noise_layout.addWidget(self.noise_colormap_combo)
         noise_layout.addWidget(self.noise_clip_panel)
 
+        measurement_group = QGroupBox("Measurement", self)
+        measurement_layout = QVBoxLayout(measurement_group)
+        measurement_layout.setSpacing(6)
+        measure_button_row = QHBoxLayout()
+        measure_button_row.setSpacing(6)
+        measure_button_row.addWidget(self.measure_start_btn)
+        measure_button_row.addWidget(self.measure_clear_btn)
+        measurement_layout.addLayout(measure_button_row)
+        measurement_layout.addWidget(self.measurement_readout)
+
         actions_group = QGroupBox("Actions", self)
         actions_layout = QVBoxLayout(actions_group)
         actions_layout.setSpacing(6)
@@ -327,6 +350,7 @@ class MultiStationComparisonDialog(QDialog):
         controls_layout.addWidget(view_group)
         controls_layout.addWidget(appearance_group)
         controls_layout.addWidget(noise_group)
+        controls_layout.addWidget(measurement_group)
         controls_layout.addWidget(actions_group)
         controls_layout.addStretch(1)
 
@@ -460,6 +484,7 @@ class MultiStationComparisonDialog(QDialog):
         self._display_datasets.clear()
         self._combined_mode = None
         self._display_range = None
+        self.clear_ruler_measurements(reset_readout=True)
         self._invalidate_noise_base_cache()
         self._invalidate_visible_panel_cache()
         self._rebuild_noise_targets()
@@ -541,6 +566,281 @@ class MultiStationComparisonDialog(QDialog):
             if self._noise_key_for_dataset(dataset) == target:
                 return dataset
         return None
+
+    def _active_panel_keys(self) -> set[tuple[str, ...]]:
+        return {self._noise_key_for_dataset(dataset) for dataset in self._active_datasets()}
+
+    def _disconnect_measurement_mpl(self) -> None:
+        cid = getattr(self, "_measurement_mpl_cid", None)
+        if cid is not None:
+            try:
+                self.canvas.mpl_disconnect(cid)
+            except Exception:
+                pass
+            self._measurement_mpl_cid = None
+
+    def _clear_measurement_artists(self, key: tuple[str, ...] | None = None) -> None:
+        keys = [tuple(key)] if key is not None else list(self._measurement_artists_by_key.keys())
+        for item_key in keys:
+            for artist in list(self._measurement_artists_by_key.get(item_key, []) or []):
+                try:
+                    artist.remove()
+                except Exception:
+                    pass
+            self._measurement_artists_by_key.pop(item_key, None)
+
+    def _prune_measurements_for_active_panels(self) -> None:
+        valid = self._active_panel_keys()
+        self._measurement_results = {key: result for key, result in self._measurement_results.items() if key in valid}
+        if self._measurement_capture_key not in valid:
+            self._measurement_capture_key = None
+            self._measurement_capture_points = []
+        for key in list(self._measurement_artists_by_key.keys()):
+            if key not in valid:
+                self._clear_measurement_artists(key)
+
+    def _format_measurement_time(self, value: float) -> str:
+        seconds = float(value)
+        if self._visible_effective_alignment_mode == TIME_ALIGNMENT_UT:
+            total = int(round(seconds))
+            hours = int(total // 3600) % 24
+            minutes = int((total % 3600) // 60)
+            secs = int(total % 60)
+            return f"{hours:02d}:{minutes:02d}:{secs:02d} UT"
+        return f"{seconds:.3f} s"
+
+    @staticmethod
+    def _measurement_points_for_plot(result: MeasurementResult) -> list[tuple[float, float]]:
+        return [
+            (float(result.point1.time_s), float(result.point1.frequency_mhz)),
+            (float(result.point2.time_s), float(result.point2.frequency_mhz)),
+        ]
+
+    @staticmethod
+    def _measurement_overlay_label(result: MeasurementResult) -> str:
+        return (
+            f"dt={result.duration_s:.3f} s\n"
+            f"df={result.frequency_delta_mhz:.3f} MHz\n"
+            f"{result.slope_mhz_s:.6f} MHz/s"
+        )
+
+    def _measurement_panel_label(self, key: tuple[str, ...] | None) -> str:
+        dataset = self._visible_dataset_for_key(key)
+        return str(getattr(dataset, "label", "") or "Panel")
+
+    def _render_measurement_overlays(self) -> None:
+        self._prune_measurements_for_active_panels()
+
+        if self._hardware_canvases:
+            for widget, key in zip(self._hardware_canvases, self._visible_panel_order):
+                result = self._measurement_results.get(key)
+                if result is not None:
+                    widget.show_measurement(
+                        self._measurement_points_for_plot(result),
+                        self._measurement_overlay_label(result),
+                    )
+                elif key == self._measurement_capture_key and self._measurement_capture_points:
+                    widget.show_measurement(self._measurement_capture_points)
+                else:
+                    widget.clear_measurement()
+
+        self._clear_measurement_artists()
+        for key, result in self._measurement_results.items():
+            ax = self._mpl_axes_by_key.get(key)
+            if ax is None:
+                continue
+            points = self._measurement_points_for_plot(result)
+            self._draw_mpl_measurement(key, ax, points, self._measurement_overlay_label(result))
+
+        if self._measurement_capture_key and self._measurement_capture_points:
+            ax = self._mpl_axes_by_key.get(self._measurement_capture_key)
+            if ax is not None:
+                self._draw_mpl_measurement(self._measurement_capture_key, ax, self._measurement_capture_points, "")
+        try:
+            self.canvas.draw_idle()
+        except Exception:
+            pass
+
+    def _draw_mpl_measurement(self, key: tuple[str, ...], ax, points, label: str) -> None:
+        clean = [(float(x), float(y)) for x, y in points if np.isfinite([float(x), float(y)]).all()]
+        if not clean:
+            return
+        xs = [p[0] for p in clean]
+        ys = [p[1] for p in clean]
+        artists = self._measurement_artists_by_key.setdefault(tuple(key), [])
+        try:
+            scatter = ax.scatter(
+                xs,
+                ys,
+                marker="o",
+                s=42,
+                facecolors="white",
+                edgecolors="#18b4ff",
+                linewidths=1.4,
+                zorder=20,
+            )
+            artists.append(scatter)
+            if len(clean) >= 2:
+                line, = ax.plot(xs[:2], ys[:2], color="#18b4ff", linewidth=1.7, zorder=19)
+                artists.append(line)
+                if label:
+                    text = ax.text(
+                        xs[-1],
+                        ys[-1],
+                        label,
+                        color="white",
+                        fontsize=8,
+                        ha="left",
+                        va="bottom",
+                        bbox={"boxstyle": "round,pad=0.22", "facecolor": "#0f172a", "edgecolor": "#18b4ff", "alpha": 0.82},
+                        zorder=21,
+                    )
+                    artists.append(text)
+        except Exception:
+            self._measurement_artists_by_key.pop(tuple(key), None)
+
+    def _set_measurement_result(self, key: tuple[str, ...], result: MeasurementResult) -> None:
+        panel_key = tuple(key)
+        self._measurement_results[panel_key] = result
+        self._measurement_capture_key = None
+        self._measurement_capture_points = []
+        self.measurement_readout.set_measurement(
+            result,
+            title=self._measurement_panel_label(panel_key),
+            time_formatter=self._format_measurement_time,
+        )
+        self._render_measurement_overlays()
+        self.status_label.setText(
+            f"Measurement for {self._measurement_panel_label(panel_key)}: "
+            f"dt={result.duration_s:.3f} s, df={result.frequency_delta_mhz:.3f} MHz, "
+            f"slope={result.slope_mhz_s:.6f} MHz/s."
+        )
+        self._sync_actions()
+
+    def clear_ruler_measurements(self, *_args, reset_readout: bool = True) -> None:
+        self._disconnect_measurement_mpl()
+        self._measurement_results.clear()
+        self._measurement_capture_key = None
+        self._measurement_capture_points = []
+        self._clear_measurement_artists()
+        for widget in list(self._hardware_canvases):
+            try:
+                widget.clear_measurement()
+                widget.stop_interaction_capture()
+            except Exception:
+                pass
+        if reset_readout:
+            self.measurement_readout.set_empty()
+            self.status_label.setText("Ruler measurement cleared.")
+        self._sync_actions()
+        try:
+            self.canvas.draw_idle()
+        except Exception:
+            pass
+
+    def start_ruler_measurement(self) -> None:
+        active = self._active_datasets()
+        if not active:
+            QMessageBox.information(self, "Ruler Measurement", "Add FITS files first.")
+            return
+        if not self._visible_cache_is_complete(active):
+            self._redraw_timer.stop()
+            self._render_now()
+        if self._use_hardware_view() and not self._hardware_canvases:
+            self._redraw_timer.stop()
+            self._render_now()
+        self._disconnect_measurement_mpl()
+        self._measurement_capture_key = None
+        self._measurement_capture_points = []
+        self.measurement_readout.set_pending("Click the first point in a comparison panel.")
+
+        if self._use_hardware_view():
+            for widget in self._hardware_canvases:
+                try:
+                    widget.begin_measurement_capture()
+                except Exception:
+                    pass
+            self.status_label.setText("Click two points in one panel to measure duration, frequency drift, and slope.")
+            self._sync_actions()
+            return
+
+        self._measurement_mpl_cid = self.canvas.mpl_connect("button_press_event", self._on_measurement_mpl_click)
+        self.status_label.setText("Click two points in one panel to measure duration, frequency drift, and slope.")
+        self._sync_actions()
+
+    def _key_for_mpl_axes(self, axes) -> tuple[str, ...] | None:
+        for key, ax in self._mpl_axes_by_key.items():
+            if ax is axes:
+                return tuple(key)
+        return None
+
+    def _on_measurement_mpl_click(self, event) -> None:
+        key = self._key_for_mpl_axes(getattr(event, "inaxes", None))
+        if key is None:
+            return
+        if event.button == 3:
+            self._measurement_capture_key = None
+            self._measurement_capture_points = []
+            self.measurement_readout.set_pending("Ruler capture cancelled.")
+            self._disconnect_measurement_mpl()
+            self._render_measurement_overlays()
+            self._sync_actions()
+            return
+        if event.button not in (None, 1) or event.xdata is None or event.ydata is None:
+            return
+
+        point = (float(event.xdata), float(event.ydata))
+        if self._measurement_capture_key != key or not self._measurement_capture_points:
+            self._measurement_capture_key = key
+            self._measurement_capture_points = [point]
+            self.measurement_readout.set_pending(
+                f"{self._measurement_panel_label(key)}\nClick the second point in the same panel."
+            )
+            self._render_measurement_overlays()
+            return
+
+        points = [self._measurement_capture_points[0], point]
+        try:
+            result = calculate_two_point_measurement(points[0], points[1])
+        except ValueError as exc:
+            self._measurement_capture_key = None
+            self._measurement_capture_points = []
+            self.measurement_readout.set_error(str(exc))
+            self.status_label.setText(str(exc))
+            self._disconnect_measurement_mpl()
+            self._render_measurement_overlays()
+            self._sync_actions()
+            return
+
+        self._disconnect_measurement_mpl()
+        self._set_measurement_result(key, result)
+
+    def _on_hardware_measurement_finished(self, widget: AcceleratedPlotWidget, points) -> None:
+        try:
+            index = self._hardware_canvases.index(widget)
+            key = self._visible_panel_order[index]
+        except Exception:
+            return
+        pts = [(float(x), float(y)) for (x, y) in (points or [])]
+        if len(pts) < 2:
+            return
+        for candidate in self._hardware_canvases:
+            if candidate is not widget:
+                try:
+                    candidate.stop_interaction_capture()
+                except Exception:
+                    pass
+        try:
+            result = calculate_two_point_measurement(pts[0], pts[1])
+        except ValueError as exc:
+            self._measurement_capture_key = None
+            self._measurement_capture_points = []
+            widget.clear_measurement()
+            self.measurement_readout.set_error(str(exc))
+            self.status_label.setText(str(exc))
+            self._sync_actions()
+            return
+        self._set_measurement_result(tuple(key), result)
 
     def _combo_index_for_noise_key(self, key: tuple[str, ...] | None) -> int:
         if key is None:
@@ -950,6 +1250,7 @@ class MultiStationComparisonDialog(QDialog):
             self._set_alignment_mode(TIME_ALIGNMENT_SECONDS)
             self.status_label.setText("UT alignment requires TIME-OBS in every selected file. Switched to seconds.")
         self._display_range = None
+        self.clear_ruler_measurements(reset_readout=True)
         self.schedule_redraw()
 
     def current_alignment_mode(self) -> str:
@@ -1037,6 +1338,8 @@ class MultiStationComparisonDialog(QDialog):
         self.noise_target_combo.setEnabled(has_files)
         self.noise_method_combo.setEnabled(has_files)
         self.noise_colormap_combo.setEnabled(has_files)
+        self.measure_start_btn.setEnabled(has_files)
+        self.measure_clear_btn.setEnabled(bool(self._measurement_results or self._measurement_capture_points))
         clip_enabled = has_files and str(self.noise_method_combo.currentData() or NOISE_METHOD_NONE) == NOISE_METHOD_CLIP
         self.noise_low_slider.setEnabled(clip_enabled)
         self.noise_high_slider.setEnabled(clip_enabled)
@@ -1074,6 +1377,9 @@ class MultiStationComparisonDialog(QDialog):
     def _ensure_hardware_canvases(self, count: int) -> None:
         while len(self._hardware_canvases) < int(count):
             widget = AcceleratedPlotWidget(self.hardware_panel)
+            widget.measurementCaptureFinished.connect(
+                lambda points, widget=widget: self._on_hardware_measurement_finished(widget, points)
+            )
             try:
                 widget.set_dark(bool(self._dark_mode_provider() if callable(self._dark_mode_provider) else False))
             except Exception:
@@ -1169,6 +1475,7 @@ class MultiStationComparisonDialog(QDialog):
         )
         self._store_visible_panel_payloads(datasets, result.panel_payloads, result.effective_alignment_mode)
         self._store_mpl_artists(datasets, result.axes)
+        self._render_measurement_overlays()
         self.canvas.draw_idle()
         return result
 
@@ -1224,6 +1531,7 @@ class MultiStationComparisonDialog(QDialog):
                 view=view,
             )
             widget.set_time_mode(effective_mode == TIME_ALIGNMENT_UT, 0.0)
+        self._render_measurement_overlays()
         return SimpleNamespace(
             warnings=tuple(dict.fromkeys(all_warnings)),
             effective_alignment_mode=effective_mode,
@@ -1309,6 +1617,7 @@ class MultiStationComparisonDialog(QDialog):
         self._sync_actions()
         active = self._active_datasets()
         if not active:
+            self.clear_ruler_measurements(reset_readout=True)
             self.canvas.fig.clear()
             self._clear_hardware_canvases()
             ax = self.canvas.fig.add_subplot(111)

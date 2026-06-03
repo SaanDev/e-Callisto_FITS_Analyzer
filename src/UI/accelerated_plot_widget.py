@@ -174,6 +174,7 @@ class AcceleratedPlotWidget(QWidget):
     lassoFinished = Signal(list)
     driftPointAdded = Signal(float, float)
     driftCaptureFinished = Signal(list)
+    measurementCaptureFinished = Signal(list)
     annotationCaptureFinished = Signal(str, object)
     annotationCaptureCancelled = Signal(str)
     viewInteractionFinished = Signal(dict, dict)
@@ -223,13 +224,17 @@ class AcceleratedPlotWidget(QWidget):
         self._ticks_bold = False
         self._ticks_italic = False
 
-        self._interaction_mode = None  # None | lasso | drift
+        self._interaction_mode = None  # None | lasso | drift | measurement
         self._lasso_points = []
         self._lasso_line_item = None
         self._lasso_drag_active = False
         self._drift_points = []
         self._drift_scatter_item = None
         self._drift_line_item = None
+        self._measurement_points = []
+        self._measurement_scatter_item = None
+        self._measurement_line_item = None
+        self._measurement_text_item = None
         self._light_curve_item = None
         self._light_curve_items = []
         self._light_curve_label_items = []
@@ -792,6 +797,19 @@ class AcceleratedPlotWidget(QWidget):
                 pass
             self._drift_line_item = None
 
+    def clear_measurement(self) -> None:
+        if not self.is_available:
+            return
+        self._measurement_points = []
+        for attr in ("_measurement_scatter_item", "_measurement_line_item", "_measurement_text_item"):
+            item = getattr(self, attr, None)
+            if item is not None:
+                try:
+                    self._plot.removeItem(item)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+
     def clear_light_curve_overlay(self) -> None:
         if not self.is_available:
             return
@@ -1037,6 +1055,7 @@ class AcceleratedPlotWidget(QWidget):
             return
         self._clear_lasso_overlay()
         self._clear_drift_overlay()
+        self.clear_measurement()
         self._clear_annotation_capture_overlay()
 
     def clear(self) -> None:
@@ -1047,6 +1066,7 @@ class AcceleratedPlotWidget(QWidget):
         self._interaction_mode = None
         self._clear_lasso_overlay()
         self._clear_drift_overlay()
+        self.clear_measurement()
         self.clear_light_curve_overlay()
         self._clear_annotation_capture_overlay()
         self._clear_annotation_overlay()
@@ -1174,6 +1194,15 @@ class AcceleratedPlotWidget(QWidget):
         self._clear_drift_overlay()
         self._clear_annotation_capture_overlay()
 
+    def begin_measurement_capture(self) -> None:
+        if not self.is_available:
+            return
+        self._interaction_mode = "measurement"
+        self.clear_measurement()
+        self._clear_lasso_overlay()
+        self._clear_annotation_capture_overlay()
+        self._plot.setMouseEnabled(x=False, y=False)
+
     def begin_annotation_capture(self, kind: str) -> None:
         if not self.is_available:
             return
@@ -1187,10 +1216,13 @@ class AcceleratedPlotWidget(QWidget):
         self._plot.setMouseEnabled(x=False, y=False)
 
     def stop_interaction_capture(self) -> None:
+        was_measurement = self._interaction_mode == "measurement"
         self._interaction_mode = None
         self._annotation_capture_suppress_next_click = False
         self._clear_lasso_overlay()
         self._clear_annotation_capture_overlay()
+        if was_measurement:
+            self.clear_measurement()
         self._apply_navigation_state()
 
     def show_drift_points(self, points, with_segments: bool = False) -> None:
@@ -1217,6 +1249,49 @@ class AcceleratedPlotWidget(QWidget):
             self._drift_line_item.setData(pts[:, 0], pts[:, 1])
         elif self._drift_line_item is not None:
             self._drift_line_item.setData([], [])
+
+    def show_measurement(self, points, label: str = "") -> None:
+        if not self.is_available:
+            return
+        pts = np.asarray(points, dtype=float) if points is not None else np.empty((0, 2), dtype=float)
+        if pts.ndim != 2 or pts.shape[1] != 2 or pts.size == 0:
+            self.clear_measurement()
+            return
+        pts = pts[np.isfinite(pts[:, 0]) & np.isfinite(pts[:, 1])]
+        if pts.size == 0:
+            self.clear_measurement()
+            return
+        self._measurement_points = [(float(x), float(y)) for x, y in pts[:2]]
+
+        if self._measurement_scatter_item is None:
+            self._measurement_scatter_item = pg.ScatterPlotItem(
+                size=11,
+                brush=pg.mkBrush(255, 255, 255, 235),
+                pen=pg.mkPen(24, 180, 255, 250, width=2),
+            )
+            self._measurement_scatter_item.setZValue(35)
+            self._plot.addItem(self._measurement_scatter_item)
+        self._measurement_scatter_item.setData(pts[:, 0], pts[:, 1])
+
+        if pts.shape[0] >= 2:
+            if self._measurement_line_item is None:
+                self._measurement_line_item = pg.PlotDataItem(pen=pg.mkPen(24, 180, 255, width=2))
+                self._measurement_line_item.setZValue(34)
+                self._plot.addItem(self._measurement_line_item)
+            self._measurement_line_item.setData(pts[:2, 0], pts[:2, 1])
+        elif self._measurement_line_item is not None:
+            self._measurement_line_item.setData([], [])
+
+        text = str(label or "").strip()
+        if text and pts.shape[0] >= 2:
+            if self._measurement_text_item is None:
+                self._measurement_text_item = pg.TextItem(text="", color="#ffffff", anchor=(0, 1))
+                self._measurement_text_item.setZValue(36)
+                self._plot.addItem(self._measurement_text_item)
+            self._measurement_text_item.setText(text)
+            self._measurement_text_item.setPos(float(pts[-1, 0]), float(pts[-1, 1]))
+        elif self._measurement_text_item is not None:
+            self._measurement_text_item.setText("")
 
     def _clear_annotation_overlay(self) -> None:
         if not self.is_available:
@@ -1454,6 +1529,12 @@ class AcceleratedPlotWidget(QWidget):
         self.driftCaptureFinished.emit(out)
         self._interaction_mode = None
 
+    def _finish_measurement(self):
+        out = [(float(p[0]), float(p[1])) for p in self._measurement_points[:2]]
+        self.measurementCaptureFinished.emit(out)
+        self._interaction_mode = None
+        self._apply_navigation_state()
+
     def _on_scene_mouse_clicked(self, ev):
         if self._annotation_capture_suppress_next_click:
             self._annotation_capture_suppress_next_click = False
@@ -1505,6 +1586,20 @@ class AcceleratedPlotWidget(QWidget):
                     self._finish_drift()
             elif button == Qt.MouseButton.RightButton:
                 self._finish_drift()
+            return
+
+        if self._interaction_mode == "measurement":
+            if button == Qt.MouseButton.RightButton:
+                self._interaction_mode = None
+                self.clear_measurement()
+                self._apply_navigation_state()
+                return
+            if button != Qt.MouseButton.LeftButton:
+                return
+            self._measurement_points.append((x, y))
+            self.show_measurement(self._measurement_points)
+            if len(self._measurement_points) >= 2:
+                self._finish_measurement()
             return
 
         if self._interaction_mode is None and button == Qt.MouseButton.LeftButton:
