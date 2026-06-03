@@ -7221,7 +7221,16 @@ class MainWindow(QMainWindow):
         self._batch_processing_dialog.raise_()
         self._batch_processing_dialog.activateWindow()
 
-    def open_multi_station_comparison_dialog(self):
+    def open_multi_station_comparison_dialog(self, initial_paths=None):
+        if isinstance(initial_paths, bool):
+            initial_paths = None
+        elif isinstance(initial_paths, (str, os.PathLike)):
+            initial_paths = [initial_paths]
+        requested_paths = [
+            str(path)
+            for path in (initial_paths or [])
+            if str(path or "").strip() and os.path.exists(str(path))
+        ]
         try:
             alive = self._multi_station_comparison_dialog is not None
             if alive:
@@ -7230,18 +7239,19 @@ class MainWindow(QMainWindow):
             alive = False
 
         if not alive:
-            initial_paths = []
-            source_path = str(getattr(self, "_fits_source_path", "") or "")
-            if source_path and os.path.exists(source_path):
-                initial_paths.append(source_path)
-            elif getattr(self, "_combined_sources", None):
-                initial_paths.extend(
-                    str(path)
-                    for path in getattr(self, "_combined_sources", [])
-                    if str(path or "").strip() and os.path.exists(str(path))
-                )
+            dialog_paths = list(requested_paths)
+            if not dialog_paths:
+                source_path = str(getattr(self, "_fits_source_path", "") or "")
+                if source_path and os.path.exists(source_path):
+                    dialog_paths.append(source_path)
+                elif getattr(self, "_combined_sources", None):
+                    dialog_paths.extend(
+                        str(path)
+                        for path in getattr(self, "_combined_sources", [])
+                        if str(path or "").strip() and os.path.exists(str(path))
+                    )
             self._multi_station_comparison_dialog = MultiStationComparisonDialog(
-                initial_paths=initial_paths,
+                initial_paths=dialog_paths,
                 view_config_provider=lambda **kwargs: self._build_view_config_payload(
                     include_range=bool(kwargs.get("include_range", False)),
                     include_visual=bool(kwargs.get("include_visual", False)),
@@ -7252,6 +7262,14 @@ class MainWindow(QMainWindow):
             )
             self._multi_station_comparison_dialog.setAttribute(Qt.WA_DeleteOnClose, True)
             self._multi_station_comparison_dialog.destroyed.connect(self._on_multi_station_comparison_dialog_destroyed)
+        elif requested_paths:
+            self._multi_station_comparison_dialog.add_files(
+                [
+                    str(path)
+                    for path in requested_paths
+                    if str(path or "").strip() and os.path.exists(str(path))
+                ]
+            )
 
         self._multi_station_comparison_dialog.show()
         self._multi_station_comparison_dialog.raise_()
@@ -7712,6 +7730,7 @@ class MainWindow(QMainWindow):
     def launch_downloader(self):
         self.downloader_dialog = CallistoDownloaderApp()
         self.downloader_dialog.import_request.connect(self.process_imported_files)
+        self.downloader_dialog.comparison_request.connect(self.open_multi_station_comparison_dialog)
 
         self.import_success_signal = lambda: self.downloader_dialog.accept()
         self.downloader_dialog.import_success.connect(self.import_success_signal)

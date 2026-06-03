@@ -674,3 +674,30 @@ def test_opening_comparison_dialog_does_not_mutate_main_window_data_or_view(tmp_
 
     win._multi_station_comparison_dialog.close()
     win.close()
+
+
+def test_open_comparison_dialog_accepts_downloaded_initial_paths(tmp_path: Path):
+    _app()
+    path_a = tmp_path / "BIR_20240102_000000_01.fit"
+    path_b = tmp_path / "GREENLAND_20240102_000000_01.fit"
+    _write_fit(path_a, label="BIR")
+    _write_fit(path_b, label="GREENLAND")
+
+    win = MainWindow(theme=None)
+    win.open_multi_station_comparison_dialog([str(path_a), str(path_b)])
+    _flush_events()
+
+    dialog = win._multi_station_comparison_dialog
+    assert dialog is not None
+    assert dialog.file_list.count() == 2
+
+    path_c = tmp_path / "Arecibo-observatory_20240102_000000_01.fit"
+    _write_fit(path_c, label="Arecibo-observatory")
+    win.open_multi_station_comparison_dialog([str(path_c)])
+    _flush_events()
+
+    assert win._multi_station_comparison_dialog is dialog
+    assert dialog.file_list.count() == 3
+
+    dialog.close()
+    win.close()
