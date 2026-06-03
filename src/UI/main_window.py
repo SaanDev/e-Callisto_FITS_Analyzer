@@ -1874,10 +1874,6 @@ class MainWindow(QMainWindow):
         self.tb_drift.triggered.connect(self.activate_drift_tool)
         tb.addAction(self.tb_drift)
 
-        self.tb_ruler = QAction("Ruler Measurement", self)
-        self.tb_ruler.triggered.connect(self.activate_ruler_tool)
-        tb.addAction(self.tb_ruler)
-
         self.tb_isolate = QAction(self._icon("isolate.svg"), "Isolate Burst", self)
         self.tb_isolate.triggered.connect(self.activate_lasso)
         tb.addAction(self.tb_isolate)
@@ -1970,7 +1966,6 @@ class MainWindow(QMainWindow):
 
         # Tools that require processed data
         self.tb_drift.setEnabled(has_noise)
-        self.tb_ruler.setEnabled(has_file)
         self.tb_isolate.setEnabled(has_noise)
         self.tb_max.setEnabled(has_noise)
         self.tb_reset_sel.setEnabled(has_noise or can_reset_view)

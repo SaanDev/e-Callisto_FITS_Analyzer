@@ -38,7 +38,7 @@ def test_main_window_ruler_action_and_classic_capture_do_not_mutate_project_stat
 
     window._sync_toolbar_enabled_states()
     assert window.ruler_measurement_action.isEnabled() is True
-    assert window.tb_ruler.isEnabled() is True
+    assert not hasattr(window, "tb_ruler")
 
     window.activate_ruler_tool()
     window._on_measurement_mpl_click(SimpleNamespace(inaxes=window.canvas.ax, button=1, xdata=10.0, ydata=90.0))
