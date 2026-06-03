@@ -18,26 +18,37 @@ def _linux_wayland_env(monkeypatch):
     monkeypatch.setattr(main_module.sys, "argv", ["main.py"])
     monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
     monkeypatch.delenv("CALLISTO_ALLOW_QT_WAYLAND", raising=False)
+    monkeypatch.delenv("CALLISTO_PREFER_QT_XCB", raising=False)
     monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
     monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
     monkeypatch.setenv("DISPLAY", ":0")
 
 
-def test_linux_wayland_prefers_xcb_when_xwayland_is_available(monkeypatch):
+def test_linux_wayland_does_not_override_platform_by_default(monkeypatch):
     _linux_wayland_env(monkeypatch)
+
+    main_module._configure_platform_env()
+
+    assert "QT_QPA_PLATFORM" not in main_module.os.environ
+
+
+def test_linux_wayland_can_prefer_xcb_when_requested(monkeypatch):
+    _linux_wayland_env(monkeypatch)
+    monkeypatch.setenv("CALLISTO_PREFER_QT_XCB", "1")
 
     main_module._configure_platform_env()
 
     assert main_module.os.environ["QT_QPA_PLATFORM"] == "xcb;wayland"
 
 
-def test_linux_wayland_overrides_explicit_wayland_platform(monkeypatch):
+def test_linux_wayland_respects_explicit_wayland_platform(monkeypatch):
     _linux_wayland_env(monkeypatch)
     monkeypatch.setenv("QT_QPA_PLATFORM", "wayland")
+    monkeypatch.setenv("CALLISTO_PREFER_QT_XCB", "1")
 
     main_module._configure_platform_env()
 
-    assert main_module.os.environ["QT_QPA_PLATFORM"] == "xcb;wayland"
+    assert main_module.os.environ["QT_QPA_PLATFORM"] == "wayland"
 
 
 def test_linux_wayland_respects_explicit_non_wayland_qpa_platform(monkeypatch):

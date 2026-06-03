@@ -23,15 +23,17 @@ def _force_software_opengl() -> bool:
 FORCE_SOFTWARE_OPENGL = _force_software_opengl()
 
 
-def _linux_qt_wayland_fallback_disabled() -> bool:
-    raw = os.environ.get("CALLISTO_ALLOW_QT_WAYLAND", "").strip().lower()
+def _linux_qt_xcb_requested() -> bool:
+    raw = os.environ.get("CALLISTO_PREFER_QT_XCB", "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
 
 
 def _prefer_xcb_for_linux_wayland() -> None:
     if not sys.platform.startswith("linux"):
         return
-    if _linux_qt_wayland_fallback_disabled():
+    if os.environ.get("QT_QPA_PLATFORM", "").strip():
+        return
+    if not _linux_qt_xcb_requested():
         return
 
     session_type = os.environ.get("XDG_SESSION_TYPE", "").strip().lower()
@@ -40,15 +42,7 @@ def _prefer_xcb_for_linux_wayland() -> None:
     if not x_display or not (session_type == "wayland" or wayland_display):
         return
 
-    current_qpa = os.environ.get("QT_QPA_PLATFORM", "").strip().lower()
-    current_platforms = [part.strip() for part in current_qpa.split(";") if part.strip()]
-    if current_platforms and not any(part.startswith("wayland") for part in current_platforms):
-        return
-    if current_platforms and any(part.startswith("xcb") for part in current_platforms):
-        return
-
-    if not current_platforms or any(part.startswith("wayland") for part in current_platforms):
-        os.environ["QT_QPA_PLATFORM"] = "xcb;wayland"
+    os.environ["QT_QPA_PLATFORM"] = "xcb;wayland"
 
 
 def _suppress_macos_tsm_warnings_enabled() -> bool:

@@ -649,7 +649,7 @@ Use **About → Check for Updates...** to query the latest release from GitHub.
 - Robust export system with OS-aware save handling
 - Major plots are publication ready
 - Linux fallback for problematic GPU stacks: `CALLISTO_FORCE_SOFTWARE_OPENGL=1`
-- Linux Wayland text-input fallback: the app prefers Qt `xcb` automatically when running under Wayland with XWayland available. Set `CALLISTO_ALLOW_QT_WAYLAND=1` to opt back into Wayland, or use a non-Wayland `QT_QPA_PLATFORM` value for another explicit backend.
+- Linux Qt platform fallback: Wayland is used by default when the desktop session provides it. If a specific Ubuntu/Wayland setup has Qt input issues, try `CALLISTO_PREFER_QT_XCB=1`; explicit `QT_QPA_PLATFORM` values are respected.
 
 ---
 
