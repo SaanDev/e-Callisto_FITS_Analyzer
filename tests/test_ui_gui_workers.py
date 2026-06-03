@@ -14,7 +14,7 @@ pytest.importorskip("PySide6")
 pytest.importorskip("requests")
 pytest.importorskip("astropy")
 
-from src.UI.gui_workers import DownloaderImportWorker
+from src.UI.gui_workers import DownloaderComparisonWorker, DownloaderImportWorker
 from tests.helpers_learmonth import write_test_callisto_fit
 
 
@@ -125,3 +125,27 @@ def test_downloader_import_worker_marks_non_consecutive_local_fits_invalid(tmp_p
 
     assert failed == []
     assert finished[0]["kind"] == "invalid"
+
+
+def test_downloader_comparison_worker_returns_local_paths_without_combining(tmp_path):
+    path1 = write_test_callisto_fit(
+        tmp_path / "BIR_20240401_000000_01.fit",
+        data=np.ones((2, 2), dtype=np.uint8),
+        freqs=np.array([25.0, 26.0]),
+        time=np.array([0.0, 3.0]),
+        date_obs="2024/04/01",
+        time_obs="00:00:00",
+    )
+    path2 = write_test_callisto_fit(
+        tmp_path / "GREENLAND_20240401_000000_01.fit",
+        data=np.zeros((2, 2), dtype=np.uint8),
+        freqs=np.array([25.0, 26.0]),
+        time=np.array([0.0, 3.0]),
+        date_obs="2024/04/01",
+        time_obs="00:00:00",
+    )
+
+    finished, failed = _run_worker(DownloaderComparisonWorker([str(path1), str(path2)]))
+
+    assert failed == []
+    assert finished == [[str(path1), str(path2)]]

@@ -174,6 +174,7 @@ from src.UI.gui_shared import (
     resource_path,
 )
 from src.UI.gui_workers import (
+    DownloaderComparisonWorker,
     DownloaderImportWorker,
     GoesOverlayLoadWorker,
     ProjectReportWorker,
@@ -345,6 +346,8 @@ class MainWindow(QMainWindow):
 
         self._import_thread = None
         self._import_worker = None
+        self._comparison_thread = None
+        self._comparison_worker = None
         self._update_thread = None
         self._update_worker = None
         self._update_download_thread = None
@@ -7433,6 +7436,16 @@ class MainWindow(QMainWindow):
         self._import_thread = None
         self._import_worker = None
 
+    def _cleanup_comparison_worker(self):
+        thread = getattr(self, "_comparison_thread", None)
+        if thread is not None:
+            try:
+                thread.deleteLater()
+            except Exception:
+                pass
+        self._comparison_thread = None
+        self._comparison_worker = None
+
     def _emit_downloader_import_success(self):
         dlg = self._active_import_dialog()
         if dlg is None:
@@ -7523,6 +7536,60 @@ class MainWindow(QMainWindow):
     def _on_downloader_import_failed(self, message: str):
         self._close_import_progress_dialog()
         QMessageBox.critical(self, "Import Failed", str(message or "Import failed."))
+
+    @Slot(object)
+    def _on_downloader_comparison_finished(self, paths):
+        self._close_import_progress_dialog()
+        local_paths = list(paths or [])
+        if not local_paths:
+            QMessageBox.warning(self, "Comparison", "No FITS files were prepared for comparison.")
+            return
+        self.open_multi_station_comparison_dialog(local_paths)
+
+    @Slot(str)
+    def _on_downloader_comparison_failed(self, message: str):
+        self._close_import_progress_dialog()
+        QMessageBox.critical(self, "Comparison Failed", str(message or "Could not prepare FITS files for comparison."))
+
+    def process_comparison_sources(self, sources):
+        if not sources:
+            QMessageBox.warning(self, "No Files", "No files were received for comparison.")
+            return
+
+        if self._comparison_thread is not None and self._comparison_thread.isRunning():
+            QMessageBox.information(self, "Comparison In Progress", "Another comparison preparation is already running.")
+            return
+
+        source_list = list(sources or [])
+        remote_count = sum(
+            1 for source in source_list
+            if str(source or "").strip().lower().startswith(("http://", "https://"))
+        )
+        if remote_count == 0:
+            label_text = "Opening selected FITS files for comparison..."
+        else:
+            label_text = "Preparing selected FITS files for comparison..."
+
+        self._show_import_progress_dialog(len(source_list), label_text=label_text)
+
+        self._comparison_thread = QThread(self)
+        self._comparison_worker = DownloaderComparisonWorker(source_list)
+        self._comparison_worker.moveToThread(self._comparison_thread)
+
+        self._comparison_thread.started.connect(self._comparison_worker.run)
+        self._comparison_worker.progress_text.connect(self._on_import_progress_text)
+        self._comparison_worker.progress_range.connect(self._on_import_progress_range)
+        self._comparison_worker.progress_value.connect(self._on_import_progress_value)
+        self._comparison_worker.finished.connect(self._on_downloader_comparison_finished)
+        self._comparison_worker.failed.connect(self._on_downloader_comparison_failed)
+
+        self._comparison_worker.finished.connect(self._comparison_thread.quit)
+        self._comparison_worker.failed.connect(self._comparison_thread.quit)
+        self._comparison_worker.finished.connect(self._comparison_worker.deleteLater)
+        self._comparison_worker.failed.connect(self._comparison_worker.deleteLater)
+        self._comparison_thread.finished.connect(self._cleanup_comparison_worker)
+
+        self._comparison_thread.start()
 
     def process_imported_files(self, sources):
         if not sources:
@@ -7730,7 +7797,7 @@ class MainWindow(QMainWindow):
     def launch_downloader(self):
         self.downloader_dialog = CallistoDownloaderApp()
         self.downloader_dialog.import_request.connect(self.process_imported_files)
-        self.downloader_dialog.comparison_request.connect(self.open_multi_station_comparison_dialog)
+        self.downloader_dialog.comparison_request.connect(self.process_comparison_sources)
 
         self.import_success_signal = lambda: self.downloader_dialog.accept()
         self.downloader_dialog.import_success.connect(self.import_success_signal)

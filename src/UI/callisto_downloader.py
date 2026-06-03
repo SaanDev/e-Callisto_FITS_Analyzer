@@ -536,7 +536,7 @@ class DownloaderCalendarWidget(QCalendarWidget):
 # -----------------------------
 class CallistoDownloaderApp(QDialog):
     import_request = Signal(list)   # list of URLs
-    comparison_request = Signal(list)   # list of downloaded local FITS paths
+    comparison_request = Signal(list)   # list of URLs or local FITS paths
     import_success = Signal()
 
     def __init__(self, parent=None):
@@ -778,15 +778,17 @@ class CallistoDownloaderApp(QDialog):
         self.deselect_all_btn = QPushButton("Deselect All")
         self.download_btn = QPushButton("Download Selected")
         self.preview_btn = QPushButton("Preview Selected")
+        self.compare_button = QPushButton("Compare")
         self.import_button = QPushButton("Import")
 
         self.select_all_btn.clicked.connect(self.select_all_files)
         self.deselect_all_btn.clicked.connect(self.deselect_all_files)
         self.download_btn.clicked.connect(self.download_selected_files)
         self.preview_btn.clicked.connect(self.preview_selected_files)
+        self.compare_button.clicked.connect(self.handle_compare)
         self.import_button.clicked.connect(self.handle_import)
 
-        for b in [self.select_all_btn, self.deselect_all_btn, self.download_btn, self.preview_btn, self.import_button]:
+        for b in [self.select_all_btn, self.deselect_all_btn, self.download_btn, self.preview_btn, self.compare_button, self.import_button]:
             action_layout.addWidget(b)
         action_group.setLayout(action_layout)
 
@@ -885,6 +887,7 @@ class CallistoDownloaderApp(QDialog):
         action_layout.setSpacing(8)
         self.event_select_all_results_btn = QPushButton("Select All")
         self.event_clear_results_btn = QPushButton("Clear Selection")
+        self.event_compare_btn = QPushButton("Compare")
         self.event_download_btn = QPushButton("Download Selected")
         self.event_download_btn.setObjectName("PrimaryDownloaderButton")
         self.event_auto_open_chk = QCheckBox("Open in Multi-Station Comparison after download")
@@ -892,9 +895,11 @@ class CallistoDownloaderApp(QDialog):
         self.event_auto_open_chk.setChecked(True)
         self.event_select_all_results_btn.clicked.connect(self.select_all_event_results)
         self.event_clear_results_btn.clicked.connect(self.clear_event_results_selection)
+        self.event_compare_btn.clicked.connect(self.compare_selected_event_files)
         self.event_download_btn.clicked.connect(self.download_selected_event_files)
         action_layout.addWidget(self.event_select_all_results_btn)
         action_layout.addWidget(self.event_clear_results_btn)
+        action_layout.addWidget(self.event_compare_btn)
         action_layout.addWidget(self.event_download_btn)
         action_layout.addStretch(1)
         action_layout.addWidget(self.event_auto_open_chk)
@@ -996,6 +1001,7 @@ class CallistoDownloaderApp(QDialog):
         has_results = self.event_results_table.rowCount() > 0
         self.event_select_all_results_btn.setEnabled(has_results)
         self.event_clear_results_btn.setEnabled(has_results)
+        self.event_compare_btn.setEnabled(has_results)
         self.event_download_btn.setEnabled(has_results)
 
     def search_event_fits(self):
@@ -1132,6 +1138,15 @@ class CallistoDownloaderApp(QDialog):
             if isinstance(candidate, CallistoEventCandidate):
                 selected.append(candidate)
         return selected
+
+    def compare_selected_event_files(self):
+        selected = self._checked_event_candidates()
+        if not selected:
+            QMessageBox.warning(self, "No Selection", "Please select files to compare.")
+            return
+
+        self.comparison_request.emit([candidate.url for candidate in selected])
+        self.accept()
 
     def download_selected_event_files(self):
         selected = self._checked_event_candidates()
@@ -1386,6 +1401,23 @@ class CallistoDownloaderApp(QDialog):
             return
 
         self.import_request.emit(urls)
+
+    def handle_compare(self):
+        selected = self._checked_items()
+        urls = []
+
+        for item in selected:
+            name = item.text()
+            url = self.file_url_map.get(name)
+            if url:
+                urls.append(url)
+
+        if not urls:
+            QMessageBox.warning(self, "No Selection", "Please select at least one FITS file.")
+            return
+
+        self.comparison_request.emit(urls)
+        self.accept()
 
     # -----------------------------
     # Preview

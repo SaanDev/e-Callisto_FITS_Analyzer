@@ -151,6 +151,59 @@ class DownloaderImportWorker(QObject):
             self.failed.emit(f"An error occurred while combining files:\n{e}")
 
 
+class DownloaderComparisonWorker(QObject):
+    progress_text = Signal(str)
+    progress_range = Signal(int, int)
+    progress_value = Signal(int)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, sources):
+        super().__init__()
+        self.sources = list(sources or [])
+
+    @Slot()
+    def run(self):
+        if not self.sources:
+            self.failed.emit("No files were received for comparison.")
+            return
+
+        remote_count = sum(1 for source in self.sources if _is_remote_source(source))
+        if remote_count == 0:
+            self.progress_text.emit("Opening selected FITS files for comparison...")
+        else:
+            self.progress_text.emit("Preparing selected FITS files for comparison...")
+        self.progress_range.emit(0, len(self.sources))
+        self.progress_value.emit(0)
+
+        local_files = []
+        try:
+            temp_dir = tempfile.mkdtemp(prefix="callisto_compare_")
+
+            for i, source in enumerate(self.sources, start=1):
+                if _is_remote_source(source):
+                    r = requests.get(source, timeout=25)
+                    r.raise_for_status()
+
+                    original_name = str(source).split("/")[-1] or f"compare_{i}.fit"
+                    local_path = os.path.join(temp_dir, original_name)
+
+                    with open(local_path, "wb") as f:
+                        f.write(r.content)
+                else:
+                    local_path = os.path.abspath(os.fspath(source))
+                    if not os.path.isfile(local_path):
+                        raise FileNotFoundError(f"Local FITS file does not exist: {local_path}")
+
+                local_files.append(local_path)
+                self.progress_value.emit(i)
+        except Exception as e:
+            self.failed.emit(f"Failed to prepare selected FITS files for comparison:\n{e}")
+            return
+
+        self.finished.emit(local_files)
+
+
 def _is_remote_source(value) -> bool:
     try:
         parsed = urlparse(str(value or "").strip())

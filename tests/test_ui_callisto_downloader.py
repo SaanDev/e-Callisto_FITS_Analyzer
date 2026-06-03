@@ -15,7 +15,8 @@ requests = pytest.importorskip("requests")
 pytest.importorskip("astropy")
 pytest.importorskip("matplotlib")
 
-from PySide6.QtWidgets import QApplication, QSpinBox
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QDialog, QSpinBox
 
 from src.UI.callisto_downloader import (
     BASE_URL,
@@ -315,6 +316,27 @@ def test_downloader_event_tab_defaults_and_empty_state():
     dlg.close()
 
 
+def test_single_station_compare_emits_selected_urls_and_closes():
+    _app()
+    dlg = CallistoDownloaderApp()
+    emitted = []
+    dlg.comparison_request.connect(lambda urls: emitted.append(urls))
+    dlg.display_fetched_files([
+        ("BIR_20240102_000000_01.fit.gz", "https://example.test/bir.fit.gz"),
+        ("GREENLAND_20240102_000000_01.fit.gz", "https://example.test/greenland.fit.gz"),
+    ])
+    for row in range(dlg.file_list.count()):
+        dlg.file_list.item(row).setCheckState(Qt.Checked)
+
+    dlg.handle_compare()
+
+    assert emitted == [[
+        "https://example.test/bir.fit.gz",
+        "https://example.test/greenland.fit.gz",
+    ]]
+    assert dlg.result() == QDialog.Accepted
+
+
 def test_event_results_default_to_checked_and_auto_open_emits(monkeypatch, tmp_path):
     _app()
     dlg = CallistoDownloaderApp()
@@ -342,6 +364,35 @@ def test_event_results_default_to_checked_and_auto_open_emits(monkeypatch, tmp_p
 
     assert emitted == [[path_a, path_b]]
     dlg.close()
+
+
+def test_event_compare_emits_candidate_urls_and_closes():
+    _app()
+    dlg = CallistoDownloaderApp()
+    emitted = []
+    dlg.comparison_request.connect(lambda urls: emitted.append(urls))
+
+    first = CallistoEventCandidate(
+        station="BIR",
+        observed_at_utc=datetime(2024, 1, 2, 0, 0),
+        filename="BIR_20240102_000000_01.fit.gz",
+        url="https://example.test/bir.fit.gz",
+        receiver_id="01",
+    )
+    second = CallistoEventCandidate(
+        station="GREENLAND",
+        observed_at_utc=datetime(2024, 1, 2, 0, 0),
+        filename="GREENLAND_20240102_000000_01.fit.gz",
+        url="https://example.test/greenland.fit.gz",
+        receiver_id="01",
+    )
+    dlg._append_event_candidate_row(first)
+    dlg._append_event_candidate_row(second)
+
+    dlg.compare_selected_event_files()
+
+    assert emitted == [["https://example.test/bir.fit.gz", "https://example.test/greenland.fit.gz"]]
+    assert dlg.result() == QDialog.Accepted
 
 
 def test_downloader_date_edit_shows_full_year():
