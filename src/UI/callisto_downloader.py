@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem, QProgressBar, QGroupBox, QDialog, QApplication,
     QCalendarWidget, QSpinBox, QTabWidget, QWidget, QDateTimeEdit,
     QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox,
-    QAbstractItemView
+    QAbstractItemView, QGridLayout, QSizePolicy
 )
 
 from matplotlib.figure import Figure
@@ -560,31 +560,182 @@ class CallistoDownloaderApp(QDialog):
         self._event_download_failures: list[str] = []
 
         self.setWindowTitle("e-CALLISTO FITS Downloader")
-        self.resize(1050, 720)
+        self.setObjectName("CallistoDownloaderDialog")
+        self.resize(1180, 760)
 
 
         self.init_ui()
+        self._connect_theme_updates()
 
     def init_ui(self):
         layout = QVBoxLayout()
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(8)
 
         self.tabs = QTabWidget(self)
+        self.tabs.setObjectName("DownloaderTabs")
+        self.tabs.setDocumentMode(True)
         self.tabs.addTab(self._build_single_station_tab(), "Single Station")
         self.tabs.addTab(self._build_event_tab(), "Multi-Station Event")
         layout.addWidget(self.tabs)
         self.setLayout(layout)
+        self._apply_downloader_style()
+
+    def _connect_theme_updates(self) -> None:
+        app = QApplication.instance()
+        theme = app.property("theme_manager") if app is not None else None
+        if theme is None:
+            return
+        try:
+            theme.themeChanged.connect(lambda _dark: self._apply_downloader_style())
+        except Exception:
+            pass
+        try:
+            theme.viewModeChanged.connect(lambda _mode: self._apply_downloader_style())
+        except Exception:
+            pass
+
+    def _apply_downloader_style(self) -> None:
+        app = QApplication.instance()
+        theme = app.property("theme_manager") if app is not None else None
+        view_mode = ""
+        dark = False
+        if theme is not None:
+            try:
+                view_mode = str(theme.view_mode()).lower()
+            except Exception:
+                view_mode = ""
+            try:
+                dark = bool(theme.is_dark())
+            except Exception:
+                dark = False
+        if view_mode and view_mode != "modern":
+            self.setStyleSheet("")
+            return
+
+        if dark:
+            page_bg = "#0f151e"
+            surface_bg = "#171f2b"
+            surface_alt = "#202b3b"
+            input_bg = "#121a25"
+            border = "#314055"
+            text = "#e8eef8"
+            muted = "#9db0c9"
+            hover = "#29364a"
+            accent = "#4ea3ff"
+            accent_pressed = "#2f83d8"
+            accent_soft = "#1f3650"
+        else:
+            page_bg = "#f4f7fc"
+            surface_bg = "#ffffff"
+            surface_alt = "#f5f9ff"
+            input_bg = "#ffffff"
+            border = "#d3dcea"
+            text = "#202a36"
+            muted = "#61758f"
+            hover = "#ecf3ff"
+            accent = "#146fda"
+            accent_pressed = "#0f5fba"
+            accent_soft = "#e8f2ff"
+
+        self.setStyleSheet(
+            f"""
+            QDialog#CallistoDownloaderDialog {{
+                background: {page_bg};
+            }}
+            QTabWidget#DownloaderTabs::pane {{
+                border: none;
+                background: transparent;
+                top: 6px;
+            }}
+            QTabWidget#DownloaderTabs QTabBar {{
+                qproperty-drawBase: 0;
+            }}
+            QTabWidget#DownloaderTabs QTabBar::tab {{
+                min-height: 30px;
+                min-width: 150px;
+                padding: 6px 18px;
+                margin-right: 6px;
+                border: 1px solid {border};
+                border-radius: 8px;
+                background: {surface_bg};
+                color: {muted};
+                font-weight: 600;
+            }}
+            QTabWidget#DownloaderTabs QTabBar::tab:hover {{
+                background: {hover};
+                color: {text};
+            }}
+            QTabWidget#DownloaderTabs QTabBar::tab:selected {{
+                background: {accent_soft};
+                border-color: {accent};
+                color: {text};
+            }}
+            QWidget#DownloaderTabPage {{
+                background: transparent;
+            }}
+            QGroupBox#DownloaderSection {{
+                background: {surface_bg};
+                border: 1px solid {border};
+                border-radius: 8px;
+                margin-top: 12px;
+                padding: 10px;
+                font-weight: 600;
+            }}
+            QGroupBox#DownloaderSection::title {{
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+                color: {muted};
+            }}
+            QListWidget#EventStationList,
+            QListWidget#DownloaderFileList,
+            QTableWidget#EventResultsTable {{
+                background: {input_bg};
+                border: 1px solid {border};
+                border-radius: 8px;
+                padding: 5px;
+            }}
+            QTableWidget#EventResultsTable::item {{
+                padding: 5px;
+            }}
+            QPushButton#PrimaryDownloaderButton {{
+                background: {accent};
+                border-color: {accent};
+                color: #ffffff;
+                font-weight: 600;
+            }}
+            QPushButton#PrimaryDownloaderButton:hover {{
+                background: {accent_pressed};
+                border-color: {accent_pressed};
+            }}
+            QPushButton#PrimaryDownloaderButton:disabled {{
+                background: {surface_alt};
+                border-color: {border};
+                color: {muted};
+            }}
+            QLabel#DownloaderStatusLabel {{
+                color: {muted};
+                padding: 2px 4px;
+            }}
+            QCheckBox#AutoOpenComparison {{
+                color: {text};
+            }}
+            """
+        )
 
     def _build_single_station_tab(self) -> QWidget:
         page = QWidget(self)
+        page.setObjectName("DownloaderTabPage")
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(10)
+        layout.setContentsMargins(2, 10, 2, 2)
+        layout.setSpacing(8)
 
         # ---- Parameters
         param_group = QGroupBox("Observation Parameters")
+        param_group.setObjectName("DownloaderSection")
         param_layout = QHBoxLayout()
+        param_layout.setSpacing(8)
 
         self.date_edit = QDateEdit(QDate.currentDate())
         self.date_edit.setCalendarPopup(True)
@@ -598,6 +749,7 @@ class CallistoDownloaderApp(QDialog):
         self.station_dropdown.addItems(CALLISTO_STATIONS)
 
         self.show_button = QPushButton("Show Available FITS")
+        self.show_button.setObjectName("PrimaryDownloaderButton")
         self.show_button.clicked.connect(self.show_available_fits)
 
         param_layout.addWidget(QLabel("Date:"))
@@ -609,14 +761,18 @@ class CallistoDownloaderApp(QDialog):
 
         # ---- File list
         file_group = QGroupBox("Available FITS Files (Whole Day)")
+        file_group.setObjectName("DownloaderSection")
         file_layout = QVBoxLayout()
         self.file_list = QListWidget()
+        self.file_list.setObjectName("DownloaderFileList")
         file_layout.addWidget(self.file_list)
         file_group.setLayout(file_layout)
 
         # ---- Actions
         action_group = QGroupBox("Actions")
+        action_group.setObjectName("DownloaderSection")
         action_layout = QHBoxLayout()
+        action_layout.setSpacing(8)
 
         self.select_all_btn = QPushButton("Select All")
         self.deselect_all_btn = QPushButton("Deselect All")
@@ -646,23 +802,31 @@ class CallistoDownloaderApp(QDialog):
 
     def _build_event_tab(self) -> QWidget:
         page = QWidget(self)
+        page.setObjectName("DownloaderTabPage")
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(10)
+        layout.setContentsMargins(2, 10, 2, 2)
+        layout.setSpacing(8)
 
         station_group = QGroupBox("Stations")
+        station_group.setObjectName("DownloaderSection")
+        station_group.setMinimumWidth(280)
+        station_group.setMaximumWidth(360)
         station_layout = QVBoxLayout(station_group)
+        station_layout.setSpacing(8)
         self.event_station_filter = QLineEdit(self)
         self.event_station_filter.setPlaceholderText("Filter stations")
         self.event_station_filter.textChanged.connect(self._filter_event_stations)
         self.event_station_list = QListWidget(self)
-        self.event_station_list.setMinimumHeight(140)
+        self.event_station_list.setObjectName("EventStationList")
+        self.event_station_list.setMinimumHeight(260)
+        self.event_station_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         for station in CALLISTO_STATIONS:
             item = QListWidgetItem(station)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Unchecked)
             self.event_station_list.addItem(item)
         station_button_row = QHBoxLayout()
+        station_button_row.setSpacing(8)
         self.event_select_all_stations_btn = QPushButton("Select All")
         self.event_clear_stations_btn = QPushButton("Clear")
         self.event_select_all_stations_btn.clicked.connect(self.select_all_event_stations)
@@ -673,8 +837,11 @@ class CallistoDownloaderApp(QDialog):
         station_layout.addWidget(self.event_station_list)
         station_layout.addLayout(station_button_row)
 
-        window_group = QGroupBox("Event Time Window (UTC)")
-        window_layout = QHBoxLayout(window_group)
+        window_group = QGroupBox("Event Window")
+        window_group.setObjectName("DownloaderSection")
+        window_layout = QGridLayout(window_group)
+        window_layout.setHorizontalSpacing(8)
+        window_layout.setVerticalSpacing(8)
         now = QDateTime.currentDateTimeUtc()
         self.event_start_dt_edit = QDateTimeEdit(now.addSecs(-3600), self)
         self.event_stop_dt_edit = QDateTimeEdit(now, self)
@@ -683,19 +850,27 @@ class CallistoDownloaderApp(QDialog):
             edit.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
             edit.setMinimumWidth(190)
         self.event_search_btn = QPushButton("Search Matching FITS")
+        self.event_search_btn.setObjectName("PrimaryDownloaderButton")
         self.event_search_btn.clicked.connect(self.search_event_fits)
-        window_layout.addWidget(QLabel("Start:"))
-        window_layout.addWidget(self.event_start_dt_edit)
-        window_layout.addWidget(QLabel("Stop:"))
-        window_layout.addWidget(self.event_stop_dt_edit)
-        window_layout.addWidget(self.event_search_btn)
+        window_layout.addWidget(QLabel("Start (UTC):"), 0, 0)
+        window_layout.addWidget(self.event_start_dt_edit, 0, 1)
+        window_layout.addWidget(QLabel("Stop (UTC):"), 1, 0)
+        window_layout.addWidget(self.event_stop_dt_edit, 1, 1)
+        window_layout.addWidget(self.event_search_btn, 0, 2, 2, 1)
+        window_layout.setColumnStretch(1, 1)
 
         results_group = QGroupBox("Matching FITS Files")
+        results_group.setObjectName("DownloaderSection")
         results_layout = QVBoxLayout(results_group)
+        results_layout.setContentsMargins(10, 12, 10, 10)
         self.event_results_table = QTableWidget(0, 5, self)
+        self.event_results_table.setObjectName("EventResultsTable")
         self.event_results_table.setHorizontalHeaderLabels(["", "Station", "UTC Time", "Filename", "Receiver"])
         self.event_results_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.event_results_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.event_results_table.setAlternatingRowColors(True)
+        self.event_results_table.setShowGrid(False)
+        self.event_results_table.setWordWrap(False)
         self.event_results_table.verticalHeader().setVisible(False)
         self.event_results_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.event_results_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
@@ -704,12 +879,16 @@ class CallistoDownloaderApp(QDialog):
         self.event_results_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
         results_layout.addWidget(self.event_results_table)
 
-        action_group = QGroupBox("Actions")
+        action_group = QGroupBox("Download")
+        action_group.setObjectName("DownloaderSection")
         action_layout = QHBoxLayout(action_group)
+        action_layout.setSpacing(8)
         self.event_select_all_results_btn = QPushButton("Select All")
         self.event_clear_results_btn = QPushButton("Clear Selection")
         self.event_download_btn = QPushButton("Download Selected")
+        self.event_download_btn.setObjectName("PrimaryDownloaderButton")
         self.event_auto_open_chk = QCheckBox("Open in Multi-Station Comparison after download")
+        self.event_auto_open_chk.setObjectName("AutoOpenComparison")
         self.event_auto_open_chk.setChecked(True)
         self.event_select_all_results_btn.clicked.connect(self.select_all_event_results)
         self.event_clear_results_btn.clicked.connect(self.clear_event_results_selection)
@@ -717,21 +896,31 @@ class CallistoDownloaderApp(QDialog):
         action_layout.addWidget(self.event_select_all_results_btn)
         action_layout.addWidget(self.event_clear_results_btn)
         action_layout.addWidget(self.event_download_btn)
+        action_layout.addStretch(1)
         action_layout.addWidget(self.event_auto_open_chk)
 
         self.event_progress_bar = QProgressBar(self)
         self.event_progress_bar.setVisible(False)
         self.event_status_label = QLabel("Select stations and a UTC event time window.", self)
+        self.event_status_label.setObjectName("DownloaderStatusLabel")
         self.event_status_label.setWordWrap(True)
 
-        top_row = QHBoxLayout()
-        top_row.addWidget(station_group, 1)
-        top_row.addWidget(window_group, 1)
-        layout.addLayout(top_row)
-        layout.addWidget(results_group, 1)
-        layout.addWidget(action_group)
-        layout.addWidget(self.event_progress_bar)
-        layout.addWidget(self.event_status_label)
+        right_panel = QWidget(self)
+        right_panel.setObjectName("DownloaderWorkflowPanel")
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(8)
+        right_layout.addWidget(window_group, 0)
+        right_layout.addWidget(results_group, 1)
+        right_layout.addWidget(action_group, 0)
+        right_layout.addWidget(self.event_progress_bar, 0)
+        right_layout.addWidget(self.event_status_label, 0)
+
+        content_row = QHBoxLayout()
+        content_row.setSpacing(10)
+        content_row.addWidget(station_group, 0)
+        content_row.addWidget(right_panel, 1)
+        layout.addLayout(content_row, 1)
         self._sync_event_actions()
         return page
 
@@ -747,7 +936,6 @@ class CallistoDownloaderApp(QDialog):
         year_edit.setStyleSheet(
             """
             QSpinBox {
-                min-height: 34px;
                 padding: 0px 22px 0px 4px;
             }
             QSpinBox::up-button,
@@ -767,6 +955,7 @@ class CallistoDownloaderApp(QDialog):
             }
             """
         )
+        year_edit.setMinimumHeight(34)
 
         line_edit = year_edit.lineEdit()
         if line_edit is not None:
