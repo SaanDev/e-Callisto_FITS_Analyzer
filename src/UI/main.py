@@ -23,6 +23,26 @@ def _force_software_opengl() -> bool:
 FORCE_SOFTWARE_OPENGL = _force_software_opengl()
 
 
+def _linux_qt_wayland_fallback_disabled() -> bool:
+    raw = os.environ.get("CALLISTO_ALLOW_QT_WAYLAND", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _prefer_xcb_for_linux_wayland() -> None:
+    if not sys.platform.startswith("linux"):
+        return
+    if os.environ.get("QT_QPA_PLATFORM", "").strip():
+        return
+    if _linux_qt_wayland_fallback_disabled():
+        return
+
+    session_type = os.environ.get("XDG_SESSION_TYPE", "").strip().lower()
+    wayland_display = os.environ.get("WAYLAND_DISPLAY", "").strip()
+    x_display = os.environ.get("DISPLAY", "").strip()
+    if x_display and (session_type == "wayland" or wayland_display):
+        os.environ["QT_QPA_PLATFORM"] = "xcb;wayland"
+
+
 def _suppress_macos_tsm_warnings_enabled() -> bool:
     raw = os.environ.get("CALLISTO_SUPPRESS_MACOS_TSM_WARNINGS", "1").strip().lower()
     return raw not in {"0", "false", "no", "off"}
@@ -106,6 +126,7 @@ def _project_base_path() -> str:
 
 def _configure_platform_env() -> None:
     if sys.platform.startswith("linux"):
+        _prefer_xcb_for_linux_wayland()
         helper_mode = _is_cme_helper_mode_argv(sys.argv)
         if FORCE_SOFTWARE_OPENGL:
             os.environ.setdefault("QT_OPENGL", "software")

@@ -10,6 +10,16 @@ import os
 import sys
 
 if sys.platform.startswith("linux"):
+    if (
+        not os.environ.get("QT_QPA_PLATFORM", "").strip()
+        and os.environ.get("CALLISTO_ALLOW_QT_WAYLAND", "").strip().lower() not in {"1", "true", "yes", "on"}
+        and os.environ.get("DISPLAY", "").strip()
+        and (
+            os.environ.get("XDG_SESSION_TYPE", "").strip().lower() == "wayland"
+            or os.environ.get("WAYLAND_DISPLAY", "").strip()
+        )
+    ):
+        os.environ["QT_QPA_PLATFORM"] = "xcb;wayland"
     os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --disable-gpu-compositing")
     os.environ.setdefault("QT_OPENGL", "software")
     os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")

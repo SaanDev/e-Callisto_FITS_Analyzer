@@ -1,0 +1,49 @@
+"""
+e-CALLISTO FITS Analyzer
+Version 2.6.0-dev
+Sahan S Liyanage (sahanslst@gmail.com)
+Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
+"""
+
+
+import pytest
+
+pytest.importorskip("PySide6")
+
+import src.UI.main as main_module
+
+
+def _linux_wayland_env(monkeypatch):
+    monkeypatch.setattr(main_module.sys, "platform", "linux")
+    monkeypatch.setattr(main_module.sys, "argv", ["main.py"])
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    monkeypatch.delenv("CALLISTO_ALLOW_QT_WAYLAND", raising=False)
+    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.setenv("DISPLAY", ":0")
+
+
+def test_linux_wayland_prefers_xcb_when_xwayland_is_available(monkeypatch):
+    _linux_wayland_env(monkeypatch)
+
+    main_module._configure_platform_env()
+
+    assert main_module.os.environ["QT_QPA_PLATFORM"] == "xcb;wayland"
+
+
+def test_linux_wayland_respects_explicit_qpa_platform(monkeypatch):
+    _linux_wayland_env(monkeypatch)
+    monkeypatch.setenv("QT_QPA_PLATFORM", "wayland")
+
+    main_module._configure_platform_env()
+
+    assert main_module.os.environ["QT_QPA_PLATFORM"] == "wayland"
+
+
+def test_linux_wayland_can_be_opted_back_in(monkeypatch):
+    _linux_wayland_env(monkeypatch)
+    monkeypatch.setenv("CALLISTO_ALLOW_QT_WAYLAND", "1")
+
+    main_module._configure_platform_env()
+
+    assert "QT_QPA_PLATFORM" not in main_module.os.environ
