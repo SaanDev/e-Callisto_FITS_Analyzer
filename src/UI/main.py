@@ -31,15 +31,23 @@ def _linux_qt_wayland_fallback_disabled() -> bool:
 def _prefer_xcb_for_linux_wayland() -> None:
     if not sys.platform.startswith("linux"):
         return
-    if os.environ.get("QT_QPA_PLATFORM", "").strip():
-        return
     if _linux_qt_wayland_fallback_disabled():
         return
 
     session_type = os.environ.get("XDG_SESSION_TYPE", "").strip().lower()
     wayland_display = os.environ.get("WAYLAND_DISPLAY", "").strip()
     x_display = os.environ.get("DISPLAY", "").strip()
-    if x_display and (session_type == "wayland" or wayland_display):
+    if not x_display or not (session_type == "wayland" or wayland_display):
+        return
+
+    current_qpa = os.environ.get("QT_QPA_PLATFORM", "").strip().lower()
+    current_platforms = [part.strip() for part in current_qpa.split(";") if part.strip()]
+    if current_platforms and not any(part.startswith("wayland") for part in current_platforms):
+        return
+    if current_platforms and any(part.startswith("xcb") for part in current_platforms):
+        return
+
+    if not current_platforms or any(part.startswith("wayland") for part in current_platforms):
         os.environ["QT_QPA_PLATFORM"] = "xcb;wayland"
 
 

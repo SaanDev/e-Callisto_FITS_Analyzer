@@ -31,13 +31,22 @@ def test_linux_wayland_prefers_xcb_when_xwayland_is_available(monkeypatch):
     assert main_module.os.environ["QT_QPA_PLATFORM"] == "xcb;wayland"
 
 
-def test_linux_wayland_respects_explicit_qpa_platform(monkeypatch):
+def test_linux_wayland_overrides_explicit_wayland_platform(monkeypatch):
     _linux_wayland_env(monkeypatch)
     monkeypatch.setenv("QT_QPA_PLATFORM", "wayland")
 
     main_module._configure_platform_env()
 
-    assert main_module.os.environ["QT_QPA_PLATFORM"] == "wayland"
+    assert main_module.os.environ["QT_QPA_PLATFORM"] == "xcb;wayland"
+
+
+def test_linux_wayland_respects_explicit_non_wayland_qpa_platform(monkeypatch):
+    _linux_wayland_env(monkeypatch)
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+
+    main_module._configure_platform_env()
+
+    assert main_module.os.environ["QT_QPA_PLATFORM"] == "offscreen"
 
 
 def test_linux_wayland_can_be_opted_back_in(monkeypatch):
