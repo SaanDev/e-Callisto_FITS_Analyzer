@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.6.0-dev
+Version 2.6.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -118,13 +118,13 @@ def test_update_available_sets_status_bar_label_without_dialog_on_startup(monkey
     window._update_check_interactive = False
     result = UpdateCheckResult(
         status="update_available",
-        current_version="2.6.0-dev",
-        latest_version="2.6.0-dev",
+        current_version="2.6.0",
+        latest_version="2.6.0",
     )
     window._on_update_check_finished(result)
 
-    assert window.update_status_label.text() == "Updates: v2.6.0-dev available"
-    assert window.statusBar().currentMessage() == "Update available: v2.6.0-dev"
+    assert window.update_status_label.text() == "Updates: v2.6.0 available"
+    assert window.statusBar().currentMessage() == "Update available: v2.6.0"
     assert shown["dialog"] == 0
 
 
@@ -138,10 +138,10 @@ def test_manual_update_check_keeps_dialog_behavior(monkeypatch):
     window._update_check_interactive = True
     result = UpdateCheckResult(
         status="update_available",
-        current_version="2.6.0-dev",
-        latest_version="2.6.0-dev",
+        current_version="2.6.0",
+        latest_version="2.6.0",
     )
     window._on_update_check_finished(result)
 
-    assert window.update_status_label.text() == "Updates: v2.6.0-dev available"
+    assert window.update_status_label.text() == "Updates: v2.6.0 available"
     assert shown["dialog"] == 1
