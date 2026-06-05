@@ -13,6 +13,7 @@ def test_settings_metadata():
     assert settings.application.endswith("e-Callisto FITS Analyzer.app")
     assert settings.volume_name == "e-Callisto FITS Analyzer"
     assert settings.format == "UDZO"
+    assert settings.size == "3g"
 
 
 def test_settings_dmg_contents():
