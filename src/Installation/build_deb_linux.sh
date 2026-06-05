@@ -173,4 +173,5 @@ fpm -s dir -t deb \
 
 echo "Built: $OUT_DEB"
 echo "Install: sudo apt install -y \"$OUT_DEB\""
+echo "Install from package directory: cd \"$(dirname "$OUT_DEB")\" && sudo apt install -y ./$(basename "$OUT_DEB")"
 echo "Run: $APP_ID"

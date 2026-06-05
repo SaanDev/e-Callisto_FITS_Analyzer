@@ -625,6 +625,9 @@ Use **About → Check for Updates...** to query the latest release from GitHub.
   - `PYTHON_BIN="$(pwd)/.venv/bin/python" PIP_INDEX_URL=https://pypi.org/simple bash src/Installation/build_deb_linux.sh`
 - Recommended `.deb` packaging workflow:
   - `bash src/Installation/build_deb_linux.sh`
+- Install the generated local package using a path, not a bare filename:
+  - `sudo apt install -y ./dist/e-callisto-fits-analyzer_2.6.0_amd64.deb`
+  - If you are already inside `dist`, use `sudo apt install -y ./e-callisto-fits-analyzer_2.6.0_amd64.deb`
 - Manual PyInstaller build:
   - `pyinstaller src/Installation/FITS_Analyzer_linux.spec`
 
