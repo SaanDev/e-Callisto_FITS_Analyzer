@@ -211,6 +211,15 @@ OPTIONS = {
 
     "frameworks": LZMA_FRAMEWORKS,
 
+    "excludes": [
+        # Build-only tooling can be present in the packaging venv; py2app should
+        # not crawl those packages into the application dependency graph.
+        "PyInstaller",
+        "pyinstaller_hooks_contrib",
+        "torch",
+        "torchgen",
+    ],
+
     "plist": {
         "CFBundleName": "e-Callisto FITS Analyzer",
         "CFBundleShortVersionString": APP_VERSION,
