@@ -15,6 +15,7 @@ import pytest
 pytest.importorskip("matplotlib")
 
 from src.Backend.batch_processing import (
+    PLOTUTIL_DB_SCALE,
     build_unique_output_png_path,
     convert_digits_to_db,
     list_fit_files,
@@ -83,6 +84,34 @@ def test_subtract_background_median_per_row():
     assert np.allclose(result, expected)
 
 
+def test_subtract_background_preserves_robust_baseline_support():
+    data = np.array([[0.0, 4.0, 8.0, 100.0]], dtype=np.float32)
+
+    result = subtract_background(data, method="robust")
+
+    assert np.allclose(result, data - np.percentile(data, 25.0, axis=1, keepdims=True))
+
+
+def test_subtract_background_plotutil_matches_reference_median_db_method():
+    data = np.array(
+        [
+            [10.0, 12.0, 30.0],
+            [20.0, 25.0, 35.0],
+        ],
+        dtype=np.float32,
+    )
+
+    dref = data - np.min(data)
+    db = (dref / 255.0 * 2500.0) / 25.4
+    expected = db - np.median(db, axis=1, keepdims=True)
+
+    result = subtract_background(data, method="plotutil_median_db")
+
+    assert result.dtype == np.float32
+    assert PLOTUTIL_DB_SCALE == pytest.approx(2500.0 / 255.0 / 25.4)
+    assert np.allclose(result, expected)
+
+
 def test_convert_digits_to_db_uses_cold_baseline():
     data = np.array([[10.0, 20.0]], dtype=np.float32)
     out = convert_digits_to_db(data, cold_digits=5.0)
@@ -144,6 +173,32 @@ def test_save_background_subtracted_png_ut_fallback_when_missing_start(tmp_path:
     )
     assert out.exists()
     assert out.stat().st_size > 0
+
+
+def test_save_background_subtracted_png_does_not_reconvert_db_input(monkeypatch, tmp_path: Path):
+    data = np.array([[-1.0, 1.0], [-2.0, 2.0]], dtype=np.float32)
+    out = tmp_path / "preconverted_db.png"
+    captured = {}
+
+    def fake_savefig(fig, output_path, *args, **kwargs):
+        captured["display_data"] = np.asarray(fig.axes[0].images[0].get_array())
+        Path(output_path).write_bytes(b"png")
+
+    monkeypatch.setattr("matplotlib.figure.Figure.savefig", fake_savefig)
+
+    save_background_subtracted_png(
+        data=data,
+        freqs=np.array([90.0, 80.0], dtype=float),
+        time=np.array([0.0, 1.0], dtype=float),
+        output_path=str(out),
+        title="preconverted-db",
+        cmap_name="magma",
+        cold_digits=100.0,
+        db_scale=PLOTUTIL_DB_SCALE,
+        data_units="db",
+    )
+
+    assert np.allclose(captured["display_data"], data)
 
 
 def test_save_background_subtracted_png_applies_locked_axes(monkeypatch, tmp_path: Path):

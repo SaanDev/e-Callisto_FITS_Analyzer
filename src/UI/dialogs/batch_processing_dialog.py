@@ -29,6 +29,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from src.Backend.batch_processing import (
+    BACKGROUND_METHOD_MEAN,
+    BACKGROUND_METHOD_MEDIAN,
+    BACKGROUND_METHOD_PLOTUTIL,
+    background_method_label,
+)
 from src.Backend.view_config import parse_view_config_json
 from src.UI.gui_workers import BatchProcessWorker
 
@@ -122,7 +128,9 @@ class BatchProcessingDialog(QDialog):
 
         self.background_method_label = QLabel("Background Method")
         self.background_method_combo = QComboBox()
-        self.background_method_combo.addItems(["Mean", "Median"])
+        self.background_method_combo.addItem("Mean", BACKGROUND_METHOD_MEAN)
+        self.background_method_combo.addItem("Median", BACKGROUND_METHOD_MEDIAN)
+        self.background_method_combo.addItem("Plotutil Median (dB)", BACKGROUND_METHOD_PLOTUTIL)
 
         self.colormap_label = QLabel("Colormap")
         self.colormap_combo = QComboBox()
@@ -338,7 +346,7 @@ class BatchProcessingDialog(QDialog):
         self.status_label.setText("Preparing batch processing...")
         self._set_controls_enabled(False)
         output_mode = "raw" if self.raw_output_radio.isChecked() else "background_subtracted"
-        background_method = self.background_method_combo.currentText().strip().lower() or "mean"
+        background_method = str(self.background_method_combo.currentData() or BACKGROUND_METHOD_MEAN)
         cmap_name = self.colormap_combo.currentText().strip() or "Custom"
         cold_digits = self._current_cold_digits()
         view_config = self._selected_view_config()
@@ -428,7 +436,7 @@ class BatchProcessingDialog(QDialog):
         self._set_controls_enabled(True)
 
         mode_text = "Raw" if output_mode == "raw" else "Background Subtracted"
-        method_text = "N/A" if output_mode == "raw" else background_method.capitalize()
+        method_text = "N/A" if output_mode == "raw" else background_method_label(background_method)
         summary_lines = [
             f"Total files found: {total}",
             f"Processed: {processed}",

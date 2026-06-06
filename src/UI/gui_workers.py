@@ -21,11 +21,16 @@ import requests
 from PySide6.QtCore import QCoreApplication, QObject, QStandardPaths, Signal, Slot
 
 from src.Backend.batch_processing import (
+    BACKGROUND_METHOD_PLOTUTIL,
+    DEFAULT_DB_SCALE,
+    PLOTUTIL_DB_SCALE,
+    background_method_label,
     build_unique_output_png_path,
     locked_view_overlaps_data,
-    subtract_background,
     list_fit_files,
+    normalize_background_method,
     save_background_subtracted_png,
+    subtract_background,
 )
 from src.Backend.fits_io import extract_ut_start_sec, load_callisto_fits
 from src.Backend.goes_overlay import goes_overlay_payload_from_dict
@@ -546,8 +551,7 @@ class BatchProcessWorker(QObject):
         self.cmap_name = str(cmap_name or "").strip() or "Custom"
         mode = str(output_mode or "").strip().lower()
         self.output_mode = "raw" if mode == "raw" else "background_subtracted"
-        method = str(background_method or "").strip().lower()
-        self.background_method = "median" if method == "median" else "mean"
+        self.background_method = normalize_background_method(background_method)
         try:
             self.cold_digits = float(cold_digits)
         except Exception:
@@ -643,10 +647,14 @@ class BatchProcessWorker(QObject):
                 if self.output_mode == "raw":
                     out_data = np.asarray(res.data, dtype=np.float32)
                     title_suffix = "Raw"
+                    output_data_units = "digits"
+                    output_db_scale = DEFAULT_DB_SCALE
                 else:
                     out_data = subtract_background(res.data, method=self.background_method)
-                    method_label = "Mean" if self.background_method == "mean" else "Median"
+                    method_label = background_method_label(self.background_method)
                     title_suffix = f"Background Subtracted ({method_label})"
+                    output_data_units = "db" if self.background_method == BACKGROUND_METHOD_PLOTUTIL else "digits"
+                    output_db_scale = PLOTUTIL_DB_SCALE if output_data_units == "db" else DEFAULT_DB_SCALE
 
                 out_path = build_unique_output_png_path(self.output_dir, base)
 
@@ -687,6 +695,8 @@ class BatchProcessWorker(QObject):
                     self.effective_cmap_name,
                     ut_start_sec=ut_start_sec,
                     cold_digits=self.cold_digits,
+                    db_scale=output_db_scale,
+                    data_units=output_data_units,
                     view_config=self.view_config,
                 )
                 results.append({"input_path": file_path, "output_path": out_path})

@@ -30,6 +30,44 @@ from src.Backend.view_config import normalize_view_config
 
 _FIT_SUFFIXES = (".fit.gz", ".fits.gz", ".fit", ".fits")
 DEFAULT_DB_SCALE = 2500.0 / 256.0 / 25.4
+PLOTUTIL_DB_SCALE = 2500.0 / 255.0 / 25.4
+
+BACKGROUND_METHOD_MEAN = "mean"
+BACKGROUND_METHOD_MEDIAN = "median"
+BACKGROUND_METHOD_ROBUST = "robust"
+BACKGROUND_METHOD_PLOTUTIL = "plotutil_median_db"
+
+_BACKGROUND_METHOD_LABELS = {
+    BACKGROUND_METHOD_MEAN: "Mean",
+    BACKGROUND_METHOD_MEDIAN: "Median",
+    BACKGROUND_METHOD_ROBUST: "Robust",
+    BACKGROUND_METHOD_PLOTUTIL: "Plotutil Median (dB)",
+}
+
+
+def normalize_background_method(method: str, *, strict: bool = False) -> str:
+    mode = str(method or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if mode in {
+        "plotutil",
+        "plotutil_median",
+        "plotutil_median_(db)",
+        "plotutil_median_db",
+        "callisto_plotutil",
+    }:
+        return BACKGROUND_METHOD_PLOTUTIL
+    if mode == BACKGROUND_METHOD_MEDIAN:
+        return BACKGROUND_METHOD_MEDIAN
+    if mode in {BACKGROUND_METHOD_ROBUST, "percentile", "p25"}:
+        return BACKGROUND_METHOD_ROBUST
+    if mode in {"", BACKGROUND_METHOD_MEAN}:
+        return BACKGROUND_METHOD_MEAN
+    if strict:
+        raise ValueError(f"Unsupported baseline method: {method}")
+    return BACKGROUND_METHOD_MEAN
+
+
+def background_method_label(method: str) -> str:
+    return _BACKGROUND_METHOD_LABELS[normalize_background_method(method)]
 
 
 def _is_fit_path(path: str) -> bool:
@@ -92,12 +130,19 @@ def subtract_background(
     gap_row_mask: np.ndarray | None = None,
     equalize_noise: bool = False,
 ) -> np.ndarray:
-    return subtract_background_rows(
+    mode = normalize_background_method(method, strict=True)
+    baseline_method = BACKGROUND_METHOD_MEDIAN if mode == BACKGROUND_METHOD_PLOTUTIL else mode
+    centered = subtract_background_rows(
         data,
-        method=method,
+        method=baseline_method,
         gap_row_mask=gap_row_mask,
         equalize_noise=equalize_noise,
     )
+    if mode == BACKGROUND_METHOD_PLOTUTIL:
+        # Equivalent to Plotutil's dref -> Digit2Voltage -> dB -> row-median
+        # subtraction. The global minimum offset cancels during subtraction.
+        return (centered * np.float32(PLOTUTIL_DB_SCALE)).astype(np.float32, copy=False)
+    return centered
 
 
 def subtract_mean_background(data: np.ndarray) -> np.ndarray:
@@ -179,6 +224,7 @@ def save_background_subtracted_png(
     ut_start_sec: float | None = 0.0,
     cold_digits: float = 0.0,
     db_scale: float = DEFAULT_DB_SCALE,
+    data_units: str = "digits",
     view_config: dict | None = None,
 ) -> None:
     arr = np.asarray(data, dtype=np.float32)
@@ -196,11 +242,15 @@ def save_background_subtracted_png(
     apply_visual = bool(raw_cfg.get("_include_visual", True)) if raw_cfg else False
     visual = dict((cfg or {}).get("visual") or {}) if apply_visual else {}
     use_db = bool(visual.get("use_db", True)) if apply_visual else True
-    display_data = (
-        convert_digits_to_db(arr, cold_digits=float(cold_digits), db_scale=float(db_scale))
-        if use_db
-        else np.asarray(arr, dtype=np.float32)
-    )
+    input_is_db = str(data_units or "").strip().lower() == "db"
+    if input_is_db:
+        display_data = arr if use_db else (arr / float(db_scale)).astype(np.float32, copy=False)
+    else:
+        display_data = (
+            convert_digits_to_db(arr, cold_digits=float(cold_digits), db_scale=float(db_scale))
+            if use_db
+            else np.asarray(arr, dtype=np.float32)
+        )
 
     time_start = float(time_arr[0])
     time_end = float(time_arr[-1])
