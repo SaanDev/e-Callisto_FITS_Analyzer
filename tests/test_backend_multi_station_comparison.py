@@ -29,11 +29,15 @@ from src.Backend.multi_station_comparison import (
     ComparisonNoiseSettings,
     aligned_time_axes,
     apply_comparison_noise,
+    comparison_grid_dimensions,
+    comparison_panel_payloads,
     compute_color_limits,
     combined_comparison_dataset_from_paths,
     combined_comparison_datasets_from_paths,
+    export_comparison_grid,
     export_comparison_png,
     load_comparison_dataset,
+    render_comparison_grid_figure,
     render_comparison_figure,
 )
 
@@ -227,6 +231,91 @@ def test_render_warns_when_locked_range_is_outside_file(tmp_path: Path):
     )
 
     assert any("no data inside" in warning for warning in result.warnings)
+
+
+@pytest.mark.parametrize(
+    ("panel_count", "columns", "expected"),
+    [
+        (1, None, (1, 1)),
+        (2, None, (1, 2)),
+        (4, None, (2, 3)),
+        (9, None, (3, 3)),
+        (10, None, (3, 4)),
+        (5, 2, (3, 2)),
+    ],
+)
+def test_comparison_grid_dimensions(panel_count: int, columns: int | None, expected: tuple[int, int]):
+    assert comparison_grid_dimensions(panel_count, columns) == expected
+
+
+def test_grid_render_preserves_panel_order_and_locked_axes(tmp_path: Path):
+    datasets = []
+    for index in range(5):
+        path = tmp_path / f"S{index}_20260101_120000.fit"
+        _write_fit(path, label=f"Station {index}", base=float(index * 20))
+        datasets.append(load_comparison_dataset(str(path)))
+    payloads, mode, _warnings = comparison_panel_payloads(
+        datasets,
+        alignment_mode="seconds",
+        visual={"use_db": False, "cmap": "jet"},
+        color_scale_mode=COLOR_SCALE_SHARED,
+    )
+    display_range = {
+        "time_start_s": 20.0,
+        "time_stop_s": 80.0,
+        "freq_min_mhz": 45.0,
+        "freq_max_mhz": 150.0,
+    }
+
+    result = render_comparison_grid_figure(
+        payloads,
+        alignment_mode=mode,
+        display_range=display_range,
+        visual={"use_db": False, "cmap": "jet"},
+        color_scale_mode=COLOR_SCALE_SHARED,
+        columns=3,
+        title="Grid Export",
+    )
+
+    assert [payload.dataset.label for payload in result.panel_payloads] == [dataset.label for dataset in datasets]
+    assert len(result.axes) == 5
+    assert all(ax.get_xlim() == pytest.approx((20.0, 80.0)) for ax in result.axes)
+    assert all(ax.get_ylim() == pytest.approx((45.0, 150.0)) for ax in result.axes)
+    assert result.axes[2].get_xlabel() == "Time [s]"
+    assert result.axes[3].get_xlabel() == "Time [s]"
+    assert result.axes[4].get_xlabel() == "Time [s]"
+    assert result.figure.axes[5].get_visible() is False
+    assert len(result.figure.axes) == 7  # Six grid cells plus one shared colorbar.
+
+
+@pytest.mark.parametrize("output_format", ["png", "pdf", "eps", "svg", "tiff"])
+def test_grid_export_supports_main_output_formats(monkeypatch, tmp_path: Path, output_format: str):
+    path = tmp_path / "station.fit"
+    output = tmp_path / f"comparison.{output_format}"
+    _write_fit(path, label="Station")
+    payloads, mode, _warnings = comparison_panel_payloads(
+        [load_comparison_dataset(str(path))],
+        alignment_mode="seconds",
+        visual={"use_db": False},
+    )
+    captured = {}
+
+    def fake_savefig(_figure, file_path, *args, **kwargs):
+        captured["format"] = kwargs.get("format")
+        Path(file_path).write_bytes(b"export")
+
+    monkeypatch.setattr("matplotlib.figure.Figure.savefig", fake_savefig)
+
+    export_comparison_grid(
+        payloads,
+        str(output),
+        alignment_mode=mode,
+        visual={"use_db": False},
+        output_format=output_format,
+    )
+
+    assert captured["format"] == output_format
+    assert output.exists()
 
 
 def test_combined_comparison_dataset_from_time_combinable_paths(tmp_path: Path):

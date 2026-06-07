@@ -12,6 +12,7 @@ import math
 import os
 from pathlib import Path
 import base64
+import re
 import tempfile
 from types import SimpleNamespace
 from typing import Callable
@@ -63,6 +64,7 @@ from src.Backend.multi_station_comparison import (
     combined_comparison_datasets_from_paths,
     comparison_cmap,
     comparison_panel_payloads,
+    export_comparison_grid,
     load_comparison_dataset,
     normalize_comparison_noise_settings,
     render_comparison_figure,
@@ -73,6 +75,11 @@ from src.Backend.frequency_axis import masked_display_data
 from src.Backend.measurements import MeasurementResult, calculate_two_point_measurement
 from src.Backend.view_config import normalize_display_range, normalize_view_config, parse_view_config_json
 from src.UI.accelerated_plot_widget import AcceleratedPlotWidget
+from src.UI.dialogs.comparison_export_dialog import (
+    EXPORT_LAYOUT_GRID,
+    ComparisonExportDialog,
+    ComparisonExportOptions,
+)
 from src.UI.dialogs.display_range_dialog import DisplayRangeDialog
 from src.UI.gui_shared import MplCanvas, pick_export_path
 from src.UI.widgets.measurement_readout import MeasurementReadout
@@ -153,6 +160,7 @@ class MultiStationComparisonDialog(QDialog):
         self._measurement_capture_points: list[tuple[float, float]] = []
         self._measurement_mpl_cid = None
         self._measurement_artists_by_key: dict[tuple[str, ...], list[object]] = {}
+        self._comparison_export_options = ComparisonExportOptions()
 
         self._redraw_timer = QTimer(self)
         self._redraw_timer.setSingleShot(True)
@@ -277,7 +285,7 @@ class MultiStationComparisonDialog(QDialog):
         self.set_range_btn.clicked.connect(self.open_display_range_dialog)
         self.reset_range_btn.clicked.connect(self.reset_display_range)
         self.load_config_btn.clicked.connect(self._load_view_config_file)
-        self.export_btn.clicked.connect(self.export_png)
+        self.export_btn.clicked.connect(self.export_comparison)
         self.measure_start_btn.clicked.connect(self.start_ruler_measurement)
         self.measure_clear_btn.clicked.connect(self.clear_ruler_measurements)
 
@@ -2061,10 +2069,76 @@ class MultiStationComparisonDialog(QDialog):
         if not image.save(file_path, self._qt_image_format_for_ext(ext_final)):
             raise RuntimeError(f"Unsupported export format: {ext_final}.")
 
-    def export_png(self) -> None:
+    def _default_grid_export_title(self) -> str:
+        dates: list[str] = []
+        for dataset in self._active_datasets():
+            dates.extend(re.findall(r"\b\d{4}-\d{2}-\d{2}\b", str(dataset.label or "")))
+        unique_dates = sorted(dict.fromkeys(dates))
+        if len(unique_dates) == 1:
+            return f"e-CALLISTO Multi-Station Comparison - {unique_dates[0].replace('-', '/')}"
+        if len(unique_dates) > 1:
+            start = unique_dates[0].replace("-", "/")
+            stop = unique_dates[-1].replace("-", "/")
+            return f"e-CALLISTO Multi-Station Comparison - {start} to {stop}"
+        return "e-CALLISTO Multi-Station Comparison"
+
+    def _grid_export_payloads(self) -> list[ComparisonPanelPayload]:
+        active = self._active_datasets()
+        if not active:
+            return []
+        if self._redraw_timer.isActive() or not self._visible_cache_is_complete(active):
+            self._redraw_timer.stop()
+            self._render_now()
+        if self._visible_cache_is_complete(active):
+            return [self._visible_panel_states[key].payload for key in self._visible_panel_order]
+
+        render_datasets = self._processed_datasets_for_render(active)
+        payloads, _effective_mode, _warnings = comparison_panel_payloads(
+            render_datasets,
+            alignment_mode=self.current_alignment_mode(),
+            visual=self._visual_payload(),
+            color_scale_mode=self.current_color_scale_mode(),
+            manual_limits=self._manual_limits(),
+            cold_digits=self._effective_noise_cold_digits(active),
+        )
+        return list(payloads)
+
+    def _export_grid_plot(
+        self,
+        file_path: str,
+        ext: str,
+        options: ComparisonExportOptions,
+    ) -> None:
+        payloads = self._grid_export_payloads()
+        if not payloads:
+            raise RuntimeError("Could not prepare comparison panels for grid export.")
+        export_comparison_grid(
+            payloads,
+            file_path,
+            alignment_mode=self._visible_effective_alignment_mode,
+            display_range=self._display_range,
+            visual=self._visual_payload(),
+            color_scale_mode=self.current_color_scale_mode(),
+            columns=options.columns,
+            title=options.title,
+            dpi=options.dpi,
+            output_format=ext,
+        )
+
+    def export_comparison(self) -> None:
         if len(self._datasets) < 2:
             QMessageBox.information(self, "Export Comparison", "Add at least two FITS files before exporting.")
             return
+
+        initial_options = self._comparison_export_options
+        if initial_options.title == "e-CALLISTO Multi-Station Comparison":
+            initial_options = replace(initial_options, title=self._default_grid_export_title())
+        options_dialog = ComparisonExportDialog(initial_options=initial_options, parent=self)
+        if options_dialog.exec() != QDialog.Accepted:
+            return
+        options = options_dialog.selected_options()
+        self._comparison_export_options = options
+
         path, ext = pick_export_path(
             self,
             "Export Comparison",
@@ -2080,8 +2154,14 @@ class MultiStationComparisonDialog(QDialog):
             ext_final = self._normalize_export_ext(current_ext or ext)
             if not current_ext:
                 path = f"{path}.{ext_final}"
-            self._export_visible_plot(str(Path(path)), ext_final)
+            if options.layout == EXPORT_LAYOUT_GRID:
+                self._export_grid_plot(str(Path(path)), ext_final, options)
+            else:
+                self._export_visible_plot(str(Path(path)), ext_final)
         except Exception as exc:
             QMessageBox.critical(self, "Export Comparison Failed", f"Could not export comparison image:\n{exc}")
             return
         QMessageBox.information(self, "Export Comparison", f"Comparison image saved:\n{path}")
+
+    def export_png(self) -> None:
+        self.export_comparison()

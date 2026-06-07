@@ -33,6 +33,12 @@ from src.Backend.multi_station_comparison import (
     ComparisonNoiseSettings,
 )
 from src.UI.accelerated_plot_widget import AcceleratedPlotWidget
+from src.UI.dialogs.comparison_export_dialog import (
+    EXPORT_LAYOUT_GRID,
+    EXPORT_LAYOUT_VISIBLE,
+    ComparisonExportDialog,
+    ComparisonExportOptions,
+)
 from src.UI.dialogs.multi_station_comparison_dialog import MultiStationComparisonDialog
 from src.UI.main_window import MainWindow
 
@@ -672,6 +678,72 @@ def test_visible_comparison_export_supports_main_output_formats(tmp_path: Path):
         assert path.stat().st_size > 0
 
     assert "<image" in outputs["svg"].read_text(encoding="utf-8")
+    dialog.close()
+
+
+def test_comparison_export_options_dialog_switches_layouts():
+    _app()
+    dialog = ComparisonExportDialog(
+        initial_options=ComparisonExportOptions(
+            layout=EXPORT_LAYOUT_GRID,
+            columns=3,
+            title="Publication Grid",
+            dpi=450,
+        )
+    )
+
+    assert dialog.grid_radio.isChecked() is True
+    assert dialog.grid_group.isEnabled() is True
+    assert dialog.selected_options() == ComparisonExportOptions(
+        layout=EXPORT_LAYOUT_GRID,
+        columns=3,
+        title="Publication Grid",
+        dpi=450,
+    )
+
+    dialog.visible_radio.setChecked(True)
+    assert dialog.grid_group.isEnabled() is False
+    assert dialog.selected_options().layout == EXPORT_LAYOUT_VISIBLE
+    dialog.close()
+
+
+@pytest.mark.parametrize("layout", [EXPORT_LAYOUT_VISIBLE, EXPORT_LAYOUT_GRID])
+def test_export_comparison_routes_selected_layout(monkeypatch, tmp_path: Path, layout: str):
+    _app()
+    dialog = MultiStationComparisonDialog()
+    dialog._datasets = [SimpleNamespace(), SimpleNamespace()]
+    dialog._comparison_export_options = ComparisonExportOptions(title="Remembered title")
+    output = tmp_path / f"{layout}.png"
+    calls = []
+
+    class _FakeOptionsDialog:
+        def __init__(self, **_kwargs):
+            pass
+
+        def exec(self):
+            return 1
+
+        def selected_options(self):
+            return ComparisonExportOptions(layout=layout, columns=3, title="Export title", dpi=300)
+
+    monkeypatch.setattr("src.UI.dialogs.multi_station_comparison_dialog.ComparisonExportDialog", _FakeOptionsDialog)
+    monkeypatch.setattr(
+        "src.UI.dialogs.multi_station_comparison_dialog.pick_export_path",
+        lambda *_args, **_kwargs: (str(output), "png"),
+    )
+    monkeypatch.setattr(
+        "src.UI.dialogs.multi_station_comparison_dialog.QMessageBox.information",
+        lambda *_args, **_kwargs: None,
+    )
+    dialog._export_visible_plot = lambda path, ext: calls.append(("visible", path, ext))
+    dialog._export_grid_plot = lambda path, ext, options: calls.append(("grid", path, ext, options.columns))
+
+    dialog.export_comparison()
+
+    if layout == EXPORT_LAYOUT_GRID:
+        assert calls == [("grid", str(output), "png", 3)]
+    else:
+        assert calls == [("visible", str(output), "png")]
     dialog.close()
 
 

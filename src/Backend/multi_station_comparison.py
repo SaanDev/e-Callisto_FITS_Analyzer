@@ -19,6 +19,7 @@ import matplotlib.colors as mcolors
 import numpy as np
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
+from matplotlib.patches import Rectangle
 from matplotlib.ticker import FuncFormatter
 
 from src.Backend.frequency_axis import (
@@ -820,6 +821,193 @@ def render_comparison_figure(
         panel_payloads=tuple(panel_payloads),
         warnings=tuple(dict.fromkeys(warnings)),
     )
+
+
+def comparison_grid_dimensions(panel_count: int, columns: int | None = None) -> tuple[int, int]:
+    count = max(1, int(panel_count))
+    if columns is None:
+        if count <= 2:
+            column_count = count
+        elif count <= 6:
+            column_count = 3
+        else:
+            column_count = min(4, int(math.ceil(math.sqrt(count))))
+    else:
+        column_count = max(1, min(int(columns), count))
+    return int(math.ceil(count / column_count)), column_count
+
+
+def render_comparison_grid_figure(
+    panel_payloads: Iterable[ComparisonPanelPayload],
+    *,
+    figure: Figure | None = None,
+    alignment_mode: str = TIME_ALIGNMENT_SECONDS,
+    display_range: dict[str, Any] | None = None,
+    visual: dict[str, Any] | None = None,
+    color_scale_mode: str = COLOR_SCALE_SHARED,
+    columns: int | None = None,
+    title: str = "e-CALLISTO Multi-Station Comparison",
+) -> ComparisonRenderResult:
+    payloads = list(panel_payloads)
+    if not payloads:
+        raise ValueError("At least one comparison panel is required.")
+
+    rows, column_count = comparison_grid_dimensions(len(payloads), columns)
+    fig = figure if figure is not None else Figure(figsize=(4.6 * column_count + 1.2, 2.8 * rows + 1.0))
+    if fig.canvas is None:
+        FigureCanvasAgg(fig)
+    fig.clear()
+    fig.patch.set_facecolor("white")
+
+    normalized_visual = normalize_visual_config(visual or {})
+    display_range_norm = _normalize_display_range_or_none(display_range)
+    if display_range_norm:
+        xlim = (float(display_range_norm["time_start_s"]), float(display_range_norm["time_stop_s"]))
+        ylim = (float(display_range_norm["freq_min_mhz"]), float(display_range_norm["freq_max_mhz"]))
+    else:
+        extents = [dataset_extent(payload.dataset, payload.time_axis) for payload in payloads]
+        xlim = (min(extent[0] for extent in extents), max(extent[1] for extent in extents))
+        ylim = (min(extent[2] for extent in extents), max(extent[3] for extent in extents))
+
+    axes_grid = fig.subplots(rows, column_count, sharex=True, sharey=True, squeeze=False)
+    all_axes = tuple(axes_grid.ravel())
+    axes = all_axes[: len(payloads)]
+    for unused_ax in all_axes[len(payloads) :]:
+        unused_ax.set_visible(False)
+
+    cmap = transparent_bad_cmap(_resolve_cmap(str(normalized_visual.get("cmap") or "Custom")))
+    images = []
+    warnings: list[str] = []
+    show_seconds = abs(float(xlim[1]) - float(xlim[0])) <= 5.0 * 60.0
+    effective_mode = str(alignment_mode or TIME_ALIGNMENT_SECONDS)
+
+    for index, (ax, payload) in enumerate(zip(axes, payloads)):
+        item = payload.dataset
+        warnings.extend(item.warnings)
+        image = ax.imshow(
+            masked_display_data(payload.display_data),
+            aspect="auto",
+            extent=payload.mpl_extent,
+            cmap=cmap,
+            vmin=float(payload.levels[0]),
+            vmax=float(payload.levels[1]),
+        )
+        images.append(image)
+        ax.set_xlim(*xlim)
+        ax.set_ylim(*ylim)
+        ax.set_facecolor("white")
+        ax.tick_params(axis="both", labelsize=8, colors="black")
+
+        column = index % column_count
+        if column == 0:
+            ax.set_ylabel("Frequency [MHz]", fontsize=9)
+        else:
+            ax.tick_params(axis="y", labelleft=False)
+        if index + column_count >= len(payloads):
+            ax.set_xlabel("Observation time [UTC]" if effective_mode == TIME_ALIGNMENT_UT else "Time [s]", fontsize=9)
+        else:
+            ax.tick_params(axis="x", labelbottom=False)
+        if effective_mode == TIME_ALIGNMENT_UT:
+            ax.xaxis.set_major_formatter(FuncFormatter(lambda value, _pos: _format_ut_tick(value, show_seconds)))
+
+        ax.add_patch(
+            Rectangle(
+                (0.0, 1.0),
+                1.0,
+                0.105,
+                transform=ax.transAxes,
+                facecolor="#11155c",
+                edgecolor="#11155c",
+                linewidth=0.0,
+                clip_on=False,
+                zorder=5,
+            )
+        )
+        ax.text(
+            0.5,
+            1.052,
+            item.label,
+            transform=ax.transAxes,
+            color="white",
+            fontsize=9,
+            fontweight="bold",
+            ha="center",
+            va="center",
+            clip_on=False,
+            zorder=6,
+        )
+
+        if display_range_norm and not _range_overlaps_extent(display_range_norm, dataset_extent(item, payload.time_axis)):
+            warnings.append(f"{item.label}: no data inside the locked display range.")
+
+    unit_label = "Intensity [dB]" if bool(normalized_visual.get("use_db", False)) else "Intensity [Digits]"
+    per_station_scale = str(color_scale_mode or "").strip().lower() == COLOR_SCALE_PER_STATION
+    fig.subplots_adjust(
+        left=0.075,
+        right=0.89 if per_station_scale else 0.865,
+        top=0.88,
+        bottom=0.08,
+        wspace=0.16,
+        hspace=0.42,
+    )
+    if per_station_scale:
+        for ax, image in zip(axes, images):
+            cbar = fig.colorbar(image, ax=ax, fraction=0.038, pad=0.018)
+            cbar.ax.tick_params(labelsize=7)
+            cbar.set_label(unit_label, fontsize=8)
+    elif images:
+        colorbar_ax = fig.add_axes([0.905, 0.16, 0.018, 0.66])
+        cbar = fig.colorbar(images[0], cax=colorbar_ax)
+        cbar.ax.tick_params(labelsize=8)
+        cbar.set_label(unit_label, fontsize=9)
+
+    fig.suptitle(str(title or "e-CALLISTO Multi-Station Comparison"), fontsize=16, fontweight="bold", color="#11113f")
+    return ComparisonRenderResult(
+        figure=fig,
+        axes=axes,
+        effective_alignment_mode=effective_mode,
+        xlim=(float(xlim[0]), float(xlim[1])),
+        ylim=(float(ylim[0]), float(ylim[1])),
+        color_limits=tuple(payload.levels for payload in payloads),
+        panel_payloads=tuple(payloads),
+        warnings=tuple(dict.fromkeys(warnings)),
+    )
+
+
+def export_comparison_grid(
+    panel_payloads: Iterable[ComparisonPanelPayload],
+    output_path: str,
+    *,
+    alignment_mode: str = TIME_ALIGNMENT_SECONDS,
+    display_range: dict[str, Any] | None = None,
+    visual: dict[str, Any] | None = None,
+    color_scale_mode: str = COLOR_SCALE_SHARED,
+    columns: int | None = None,
+    title: str = "e-CALLISTO Multi-Station Comparison",
+    dpi: int = 300,
+    output_format: str | None = None,
+) -> ComparisonRenderResult:
+    result = render_comparison_grid_figure(
+        panel_payloads,
+        alignment_mode=alignment_mode,
+        display_range=display_range,
+        visual=visual,
+        color_scale_mode=color_scale_mode,
+        columns=columns,
+        title=title,
+    )
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    normalized_format = str(output_format or os.path.splitext(output_path)[1] or "png").lower().lstrip(".")
+    if normalized_format == "tif":
+        normalized_format = "tiff"
+    result.figure.savefig(
+        output_path,
+        dpi=int(dpi),
+        bbox_inches="tight",
+        facecolor="white",
+        format=normalized_format,
+    )
+    return result
 
 
 def export_comparison_png(
