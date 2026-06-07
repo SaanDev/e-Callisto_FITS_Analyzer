@@ -248,11 +248,16 @@ def test_comparison_grid_dimensions(panel_count: int, columns: int | None, expec
     assert comparison_grid_dimensions(panel_count, columns) == expected
 
 
-def test_grid_render_preserves_panel_order_and_locked_axes(tmp_path: Path):
+def test_grid_render_preserves_panel_order_shared_time_and_native_frequency_ranges(tmp_path: Path):
     datasets = []
     for index in range(5):
         path = tmp_path / f"S{index}_20260101_120000.fit"
-        _write_fit(path, label=f"Station {index}", base=float(index * 20))
+        _write_fit(
+            path,
+            label=f"Station {index}",
+            base=float(index * 20),
+            freq_start=100.0 + float(index * 20),
+        )
         datasets.append(load_comparison_dataset(str(path)))
     payloads, mode, _warnings = comparison_panel_payloads(
         datasets,
@@ -280,12 +285,40 @@ def test_grid_render_preserves_panel_order_and_locked_axes(tmp_path: Path):
     assert [payload.dataset.label for payload in result.panel_payloads] == [dataset.label for dataset in datasets]
     assert len(result.axes) == 5
     assert all(ax.get_xlim() == pytest.approx((20.0, 80.0)) for ax in result.axes)
-    assert all(ax.get_ylim() == pytest.approx((45.0, 150.0)) for ax in result.axes)
+    for ax, payload in zip(result.axes, payloads):
+        assert ax.get_ylim() == pytest.approx(tuple(sorted(payload.mpl_extent[2:4])))
+    assert len({tuple(round(value, 3) for value in ax.get_ylim()) for ax in result.axes}) == 5
+    assert result.ylim is None
     assert result.axes[2].get_xlabel() == "Time [s]"
     assert result.axes[3].get_xlabel() == "Time [s]"
     assert result.axes[4].get_xlabel() == "Time [s]"
+    assert result.axes[0].get_title() == datasets[0].label
+    assert len(result.axes[0].patches) == 0
     assert result.figure.axes[5].get_visible() is False
     assert len(result.figure.axes) == 7  # Six grid cells plus one shared colorbar.
+
+
+def test_grid_ignores_locked_frequency_range_and_warns_only_for_time_miss(tmp_path: Path):
+    path = tmp_path / "station.fit"
+    _write_fit(path, label="Station", freq_start=100.0)
+    dataset = load_comparison_dataset(str(path))
+    payloads, mode, _warnings = comparison_panel_payloads([dataset], alignment_mode="seconds", visual={"use_db": False})
+
+    result = render_comparison_grid_figure(
+        payloads,
+        alignment_mode=mode,
+        display_range={
+            "time_start_s": 0.0,
+            "time_stop_s": 2.0,
+            "freq_min_mhz": 500.0,
+            "freq_max_mhz": 600.0,
+        },
+        visual={"use_db": False},
+    )
+
+    assert result.axes[0].get_xlim() == pytest.approx((0.0, 2.0))
+    assert result.axes[0].get_ylim() == pytest.approx(tuple(sorted(payloads[0].mpl_extent[2:4])))
+    assert not any("no data inside" in warning for warning in result.warnings)
 
 
 @pytest.mark.parametrize("output_format", ["png", "pdf", "eps", "svg", "tiff"])

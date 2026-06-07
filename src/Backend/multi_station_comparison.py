@@ -19,7 +19,6 @@ import matplotlib.colors as mcolors
 import numpy as np
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
-from matplotlib.patches import Rectangle
 from matplotlib.ticker import FuncFormatter
 
 from src.Backend.frequency_axis import (
@@ -853,7 +852,7 @@ def render_comparison_grid_figure(
         raise ValueError("At least one comparison panel is required.")
 
     rows, column_count = comparison_grid_dimensions(len(payloads), columns)
-    fig = figure if figure is not None else Figure(figsize=(4.6 * column_count + 1.2, 2.8 * rows + 1.0))
+    fig = figure if figure is not None else Figure(figsize=(5.0 * column_count + 1.2, 3.6 * rows + 1.4))
     if fig.canvas is None:
         FigureCanvasAgg(fig)
     fig.clear()
@@ -863,13 +862,11 @@ def render_comparison_grid_figure(
     display_range_norm = _normalize_display_range_or_none(display_range)
     if display_range_norm:
         xlim = (float(display_range_norm["time_start_s"]), float(display_range_norm["time_stop_s"]))
-        ylim = (float(display_range_norm["freq_min_mhz"]), float(display_range_norm["freq_max_mhz"]))
     else:
         extents = [dataset_extent(payload.dataset, payload.time_axis) for payload in payloads]
         xlim = (min(extent[0] for extent in extents), max(extent[1] for extent in extents))
-        ylim = (min(extent[2] for extent in extents), max(extent[3] for extent in extents))
 
-    axes_grid = fig.subplots(rows, column_count, sharex=True, sharey=True, squeeze=False)
+    axes_grid = fig.subplots(rows, column_count, sharex=True, sharey=False, squeeze=False)
     all_axes = tuple(axes_grid.ravel())
     axes = all_axes[: len(payloads)]
     for unused_ax in all_axes[len(payloads) :]:
@@ -894,15 +891,14 @@ def render_comparison_grid_figure(
         )
         images.append(image)
         ax.set_xlim(*xlim)
-        ax.set_ylim(*ylim)
+        native_extent = dataset_extent(item, payload.time_axis)
+        ax.set_ylim(float(native_extent[2]), float(native_extent[3]))
         ax.set_facecolor("white")
         ax.tick_params(axis="both", labelsize=8, colors="black")
 
         column = index % column_count
         if column == 0:
             ax.set_ylabel("Frequency [MHz]", fontsize=9)
-        else:
-            ax.tick_params(axis="y", labelleft=False)
         if index + column_count >= len(payloads):
             ax.set_xlabel("Observation time [UTC]" if effective_mode == TIME_ALIGNMENT_UT else "Time [s]", fontsize=9)
         else:
@@ -910,34 +906,15 @@ def render_comparison_grid_figure(
         if effective_mode == TIME_ALIGNMENT_UT:
             ax.xaxis.set_major_formatter(FuncFormatter(lambda value, _pos: _format_ut_tick(value, show_seconds)))
 
-        ax.add_patch(
-            Rectangle(
-                (0.0, 1.0),
-                1.0,
-                0.105,
-                transform=ax.transAxes,
-                facecolor="#11155c",
-                edgecolor="#11155c",
-                linewidth=0.0,
-                clip_on=False,
-                zorder=5,
-            )
-        )
-        ax.text(
-            0.5,
-            1.052,
+        ax.set_title(
             item.label,
-            transform=ax.transAxes,
-            color="white",
-            fontsize=9,
-            fontweight="bold",
-            ha="center",
-            va="center",
-            clip_on=False,
-            zorder=6,
+            color="#111827",
+            fontsize=10,
+            fontweight="semibold",
+            pad=9,
         )
 
-        if display_range_norm and not _range_overlaps_extent(display_range_norm, dataset_extent(item, payload.time_axis)):
+        if display_range_norm and min(float(xlim[1]), native_extent[1]) - max(float(xlim[0]), native_extent[0]) <= 0.0:
             warnings.append(f"{item.label}: no data inside the locked display range.")
 
     unit_label = "Intensity [dB]" if bool(normalized_visual.get("use_db", False)) else "Intensity [Digits]"
@@ -945,10 +922,10 @@ def render_comparison_grid_figure(
     fig.subplots_adjust(
         left=0.075,
         right=0.89 if per_station_scale else 0.865,
-        top=0.88,
+        top=0.84,
         bottom=0.08,
-        wspace=0.16,
-        hspace=0.42,
+        wspace=0.28,
+        hspace=0.48,
     )
     if per_station_scale:
         for ax, image in zip(axes, images):
@@ -961,13 +938,19 @@ def render_comparison_grid_figure(
         cbar.ax.tick_params(labelsize=8)
         cbar.set_label(unit_label, fontsize=9)
 
-    fig.suptitle(str(title or "e-CALLISTO Multi-Station Comparison"), fontsize=16, fontweight="bold", color="#11113f")
+    fig.suptitle(
+        str(title or "e-CALLISTO Multi-Station Comparison"),
+        fontsize=15,
+        fontweight="bold",
+        color="#11113f",
+        y=0.975,
+    )
     return ComparisonRenderResult(
         figure=fig,
         axes=axes,
         effective_alignment_mode=effective_mode,
         xlim=(float(xlim[0]), float(xlim[1])),
-        ylim=(float(ylim[0]), float(ylim[1])),
+        ylim=None,
         color_limits=tuple(payload.levels for payload in payloads),
         panel_payloads=tuple(payloads),
         warnings=tuple(dict.fromkeys(warnings)),

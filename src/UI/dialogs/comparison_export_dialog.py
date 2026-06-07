@@ -88,7 +88,7 @@ class ComparisonExportDialog(QDialog):
         grid_form.addRow("Raster resolution", self.dpi_spin)
 
         self.note_label = QLabel(
-            "Grid exports use shared time and frequency axes and a white publication-style background.",
+            "Grid exports use a shared time axis, each station's native frequency range, and a white publication-style background.",
             self,
         )
         self.note_label.setWordWrap(True)
