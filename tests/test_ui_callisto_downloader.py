@@ -368,6 +368,9 @@ def test_downloader_spectral_overview_tab_defaults():
     assert dlg.overview_generate_btn.isEnabled() is True
     assert dlg.overview_cancel_btn.isEnabled() is False
     assert dlg.overview_export_btn.isEnabled() is False
+    assert dlg.overview_plot_scroll.widgetResizable() is True
+    assert dlg.overview_canvas.minimumWidth() == 0
+    assert dlg.overview_canvas.minimumHeight() == 0
     dlg._set_overview_running(True)
     assert dlg.tabs.isTabEnabled(0) is False
     assert dlg.tabs.isTabEnabled(1) is False
@@ -555,8 +558,8 @@ def test_spectral_overview_worker_emits_cancelled_before_start():
     assert cancelled == [True]
 
 
-def test_downloader_displays_each_focus_code_in_separate_large_preview_tab(monkeypatch):
-    _app()
+def test_downloader_displays_each_focus_code_in_screen_fitted_preview_tabs(monkeypatch):
+    app = _app()
     dlg = CallistoDownloaderApp()
     results = [
         SpectralOverviewResult("BIR", date(2024, 1, 2), focus, (), 1, 1, 1.0)
@@ -566,12 +569,18 @@ def test_downloader_displays_each_focus_code_in_separate_large_preview_tab(monke
 
     dlg._on_spectral_overview_finished({"results": results, "errors": []})
 
-    assert dlg.minimumWidth() >= 1280
-    assert dlg.minimumHeight() >= 820
+    available = (dlg.screen() or app.primaryScreen()).availableGeometry()
+    assert dlg.width() <= available.width()
+    assert dlg.height() <= available.height()
+    assert dlg.minimumWidth() <= available.width()
+    assert dlg.minimumHeight() <= available.height()
     assert dlg.overview_preview_tabs.count() == 2
     assert [dlg.overview_preview_tabs.tabText(i) for i in range(2)] == ["Focus 01", "Focus 02"]
-    assert all(canvas.minimumWidth() >= 1400 for canvas in dlg._overview_canvases.values())
-    assert all(canvas.minimumHeight() >= 1000 for canvas in dlg._overview_canvases.values())
+    for index, canvas in enumerate(dlg._overview_canvases.values()):
+        scroll = dlg.overview_preview_tabs.widget(index)
+        assert scroll.widgetResizable() is True
+        assert canvas.minimumWidth() == 0
+        assert canvas.minimumHeight() == 0
     dlg.overview_preview_tabs.setCurrentIndex(1)
     assert dlg._overview_result.focus_code == "02"
     dlg.close()

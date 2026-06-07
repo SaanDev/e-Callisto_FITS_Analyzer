@@ -796,11 +796,9 @@ class CallistoDownloaderApp(QDialog):
 
         self.setWindowTitle("e-CALLISTO FITS Downloader")
         self.setObjectName("CallistoDownloaderDialog")
-        self.setMinimumSize(1280, 820)
-        self.resize(1540, 980)
-
 
         self.init_ui()
+        self._fit_to_available_screen()
         self._connect_theme_updates()
 
     def init_ui(self):
@@ -817,6 +815,30 @@ class CallistoDownloaderApp(QDialog):
         layout.addWidget(self.tabs)
         self.setLayout(layout)
         self._apply_downloader_style()
+
+    def _fit_to_available_screen(self) -> None:
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            self.setMinimumSize(640, 480)
+            self.resize(1200, 800)
+            return
+
+        available = screen.availableGeometry()
+        width = min(1540, max(760, int(available.width() * 0.94)), available.width())
+        height = min(980, max(560, int(available.height() * 0.90)), available.height())
+        self.setMinimumSize(min(640, width), min(480, height))
+        self.resize(width, height)
+        self.move(
+            available.x() + max(0, (available.width() - width) // 2),
+            available.y() + max(0, (available.height() - height) // 2),
+        )
+
+    @staticmethod
+    def _configure_overview_canvas(canvas: FigureCanvas, scroll: QScrollArea) -> None:
+        canvas.setMinimumSize(0, 0)
+        canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(canvas)
 
     def _connect_theme_updates(self) -> None:
         app = QApplication.instance()
@@ -1182,18 +1204,18 @@ class CallistoDownloaderApp(QDialog):
         self.overview_date_edit = QDateEdit(QDate.currentDate(), self)
         self.overview_date_edit.setCalendarPopup(True)
         self.overview_date_edit.setDisplayFormat("yyyy-MM-dd")
-        self.overview_date_edit.setMinimumWidth(140)
+        self.overview_date_edit.setMinimumWidth(128)
         self.overview_calendar_popup = DownloaderCalendarWidget(self._configure_calendar_popup, self)
         self.overview_date_edit.setCalendarWidget(self.overview_calendar_popup)
         self._configure_calendar_popup(self.overview_calendar_popup)
 
         self.overview_station_dropdown = QComboBox(self)
         self.overview_station_dropdown.addItems(CALLISTO_STATIONS)
-        self.overview_station_dropdown.setMinimumWidth(220)
+        self.overview_station_dropdown.setMinimumWidth(180)
 
         self.overview_focus_combo = QComboBox(self)
         self.overview_focus_combo.addItem("All available focus codes", "")
-        self.overview_focus_combo.setMinimumWidth(210)
+        self.overview_focus_combo.setMinimumWidth(180)
         self.overview_date_edit.dateChanged.connect(self._reset_overview_focus_selector)
         self.overview_station_dropdown.currentTextChanged.connect(self._reset_overview_focus_selector)
 
@@ -1210,12 +1232,12 @@ class CallistoDownloaderApp(QDialog):
         controls_layout.addWidget(QLabel("Date (UTC):", self), 0, 0)
         controls_layout.addWidget(self.overview_date_edit, 0, 1)
         controls_layout.addWidget(QLabel("Station:", self), 0, 2)
-        controls_layout.addWidget(self.overview_station_dropdown, 0, 3)
-        controls_layout.addWidget(QLabel("Focus code:", self), 0, 4)
-        controls_layout.addWidget(self.overview_focus_combo, 0, 5)
-        controls_layout.addWidget(self.overview_generate_btn, 0, 6)
-        controls_layout.addWidget(self.overview_cancel_btn, 0, 7)
-        controls_layout.addWidget(self.overview_export_btn, 0, 8)
+        controls_layout.addWidget(self.overview_station_dropdown, 0, 3, 1, 3)
+        controls_layout.addWidget(QLabel("Focus code:", self), 1, 0)
+        controls_layout.addWidget(self.overview_focus_combo, 1, 1)
+        controls_layout.addWidget(self.overview_generate_btn, 1, 2, 1, 2)
+        controls_layout.addWidget(self.overview_cancel_btn, 1, 4)
+        controls_layout.addWidget(self.overview_export_btn, 1, 5)
         controls_layout.setColumnStretch(3, 1)
 
         self.overview_progress_bar = QProgressBar(self)
@@ -1227,8 +1249,8 @@ class CallistoDownloaderApp(QDialog):
         )
         self.overview_status_label.setObjectName("DownloaderStatusLabel")
         self.overview_status_label.setWordWrap(True)
-        controls_layout.addWidget(self.overview_progress_bar, 1, 0, 1, 9)
-        controls_layout.addWidget(self.overview_status_label, 2, 0, 1, 9)
+        controls_layout.addWidget(self.overview_progress_bar, 2, 0, 1, 6)
+        controls_layout.addWidget(self.overview_status_label, 3, 0, 1, 6)
 
         plot_group = QGroupBox("Overview Preview")
         plot_group.setObjectName("DownloaderSection")
@@ -1247,10 +1269,8 @@ class CallistoDownloaderApp(QDialog):
             color="#737b84",
         )
         self.overview_canvas = FigureCanvas(placeholder)
-        self.overview_canvas.setMinimumSize(1400, 980)
         self.overview_plot_scroll = QScrollArea(self)
-        self.overview_plot_scroll.setWidgetResizable(False)
-        self.overview_plot_scroll.setWidget(self.overview_canvas)
+        self._configure_overview_canvas(self.overview_canvas, self.overview_plot_scroll)
         self.overview_preview_tabs.addTab(self.overview_plot_scroll, "Preview")
         plot_layout.addWidget(self.overview_preview_tabs)
 
@@ -1406,10 +1426,8 @@ class CallistoDownloaderApp(QDialog):
         for result, figure in rendered:
             focus_code = str(result.focus_code)
             canvas = FigureCanvas(figure)
-            canvas.setMinimumSize(1400, 1000)
             scroll = QScrollArea(self)
-            scroll.setWidgetResizable(False)
-            scroll.setWidget(canvas)
+            self._configure_overview_canvas(canvas, scroll)
             self.overview_preview_tabs.addTab(scroll, f"Focus {focus_code}")
             self._overview_results[focus_code] = result
             self._overview_figures[focus_code] = figure
