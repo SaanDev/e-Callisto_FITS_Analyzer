@@ -20,6 +20,7 @@ from requests.adapters import HTTPAdapter
 from astropy.io import fits
 from src.Backend.fits_io import load_callisto_fits
 from src.Backend.spectral_overview import (
+    SPECTRAL_OVERVIEW_FIGURE_SIZE,
     SpectralOverviewCancelled,
     SpectralOverviewResult,
     SpectralOverviewSource,
@@ -757,6 +758,40 @@ class DownloaderCalendarWidget(QCalendarWidget):
             self._configure_hook(self)
 
 
+class SpectralOverviewScrollArea(QScrollArea):
+    """Fit overview width to the viewport while preserving readable panel height."""
+
+    _FIGURE_HEIGHT_TO_WIDTH = SPECTRAL_OVERVIEW_FIGURE_SIZE[1] / SPECTRAL_OVERVIEW_FIGURE_SIZE[0]
+    _MINIMUM_PREVIEW_HEIGHT = 650
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._overview_canvas: FigureCanvas | None = None
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+    def set_overview_canvas(self, canvas: FigureCanvas) -> None:
+        self._overview_canvas = canvas
+        canvas.setMinimumWidth(0)
+        canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setWidget(canvas)
+        self._sync_canvas_height()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_canvas_height()
+
+    def _sync_canvas_height(self) -> None:
+        if self._overview_canvas is None:
+            return
+        viewport_width = max(1, self.viewport().width())
+        target_height = max(
+            self._MINIMUM_PREVIEW_HEIGHT,
+            int(round(viewport_width * self._FIGURE_HEIGHT_TO_WIDTH)),
+        )
+        self._overview_canvas.setMinimumHeight(target_height)
+
+
 # -----------------------------
 # Main downloader dialog
 # -----------------------------
@@ -834,11 +869,8 @@ class CallistoDownloaderApp(QDialog):
         )
 
     @staticmethod
-    def _configure_overview_canvas(canvas: FigureCanvas, scroll: QScrollArea) -> None:
-        canvas.setMinimumSize(0, 0)
-        canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(canvas)
+    def _configure_overview_canvas(canvas: FigureCanvas, scroll: SpectralOverviewScrollArea) -> None:
+        scroll.set_overview_canvas(canvas)
 
     def _connect_theme_updates(self) -> None:
         app = QApplication.instance()
@@ -1269,7 +1301,7 @@ class CallistoDownloaderApp(QDialog):
             color="#737b84",
         )
         self.overview_canvas = FigureCanvas(placeholder)
-        self.overview_plot_scroll = QScrollArea(self)
+        self.overview_plot_scroll = SpectralOverviewScrollArea(self)
         self._configure_overview_canvas(self.overview_canvas, self.overview_plot_scroll)
         self.overview_preview_tabs.addTab(self.overview_plot_scroll, "Preview")
         plot_layout.addWidget(self.overview_preview_tabs)
@@ -1426,7 +1458,7 @@ class CallistoDownloaderApp(QDialog):
         for result, figure in rendered:
             focus_code = str(result.focus_code)
             canvas = FigureCanvas(figure)
-            scroll = QScrollArea(self)
+            scroll = SpectralOverviewScrollArea(self)
             self._configure_overview_canvas(canvas, scroll)
             self.overview_preview_tabs.addTab(scroll, f"Focus {focus_code}")
             self._overview_results[focus_code] = result

@@ -370,7 +370,8 @@ def test_downloader_spectral_overview_tab_defaults():
     assert dlg.overview_export_btn.isEnabled() is False
     assert dlg.overview_plot_scroll.widgetResizable() is True
     assert dlg.overview_canvas.minimumWidth() == 0
-    assert dlg.overview_canvas.minimumHeight() == 0
+    assert dlg.overview_canvas.minimumHeight() >= 650
+    assert dlg.overview_plot_scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
     dlg._set_overview_running(True)
     assert dlg.tabs.isTabEnabled(0) is False
     assert dlg.tabs.isTabEnabled(1) is False
@@ -580,7 +581,11 @@ def test_downloader_displays_each_focus_code_in_screen_fitted_preview_tabs(monke
         scroll = dlg.overview_preview_tabs.widget(index)
         assert scroll.widgetResizable() is True
         assert canvas.minimumWidth() == 0
-        assert canvas.minimumHeight() == 0
+        assert canvas.minimumHeight() >= 650
+        assert scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
+        scroll.resize(1600, 500)
+        scroll._sync_canvas_height()
+        assert canvas.minimumHeight() >= round(scroll.viewport().width() * 9 / 24)
     dlg.overview_preview_tabs.setCurrentIndex(1)
     assert dlg._overview_result.focus_code == "02"
     dlg.close()

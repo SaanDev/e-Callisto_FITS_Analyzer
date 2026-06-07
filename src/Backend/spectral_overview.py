@@ -30,6 +30,7 @@ FREQUENCY_MATCH_ATOL_MHZ = 1e-3
 DEFAULT_PANEL_RENDER_COLUMNS = 1440
 SECONDS_PER_DAY = 24 * 60 * 60
 SECONDS_PER_PANEL = 4 * 60 * 60
+SPECTRAL_OVERVIEW_FIGURE_SIZE = (24.0, 9.0)
 
 
 class SpectralOverviewCancelled(RuntimeError):
@@ -349,8 +350,8 @@ def render_spectral_overview_figure(result: SpectralOverviewResult) -> Figure:
     freq_min = float(np.nanmin(finite_freqs))
     freq_max = float(np.nanmax(finite_freqs))
 
-    fig, axes = Figure(figsize=(22, 13), facecolor="white"), []
-    grid = fig.add_gridspec(6, 1, left=0.065, right=0.87, bottom=0.065, top=0.88, hspace=0.20)
+    fig, axes = Figure(figsize=SPECTRAL_OVERVIEW_FIGURE_SIZE, facecolor="white"), []
+    grid = fig.add_gridspec(6, 1, left=0.065, right=0.87, bottom=0.070, top=0.915, hspace=0.30)
     cmap = transparent_bad_cmap(mpl.colormaps.get_cmap("viridis"))
     norm = mpl.colors.Normalize(vmin=float(PLOTUTIL_DISPLAY_LIMITS[0]), vmax=float(PLOTUTIL_DISPLAY_LIMITS[1]))
 
@@ -399,7 +400,7 @@ def render_spectral_overview_figure(result: SpectralOverviewResult) -> Figure:
         )
         ax.grid(which="major", color="#59636e", linewidth=0.7, alpha=0.55)
         ax.grid(which="minor", color="#a8b0b8", linewidth=0.4, alpha=0.45)
-        ax.tick_params(axis="both", labelsize=9)
+        ax.tick_params(axis="both", labelsize=8)
         label_stop = (panel_index + 1) * 4
         ax.text(
             1.012,
@@ -408,7 +409,7 @@ def render_spectral_overview_figure(result: SpectralOverviewResult) -> Figure:
             transform=ax.transAxes,
             va="center",
             ha="left",
-            fontsize=13,
+            fontsize=11,
         )
         if not rendered:
             ax.text(
@@ -419,20 +420,21 @@ def render_spectral_overview_figure(result: SpectralOverviewResult) -> Figure:
                 ha="center",
                 va="center",
                 color="#7a828a",
-                fontsize=13,
+                fontsize=11,
             )
 
     fig.suptitle(
-        f"Full-day spectrum {result.observation_date:%Y-%m-%d}\n"
-        f"Station: {result.station} | Focus code: {result.focus_code}",
-        fontsize=18,
-        y=0.98,
+        f"Full-day spectrum | {result.observation_date:%Y-%m-%d} | "
+        f"{result.station} | Focus {result.focus_code}",
+        fontsize=14,
+        y=0.975,
     )
-    fig.text(0.020, 0.5, "Frequency [MHz]", va="center", rotation="vertical", fontsize=14)
-    fig.text(0.49, 0.018, "Time [UTC]", ha="center", fontsize=14)
+    fig.text(0.020, 0.5, "Frequency [MHz]", va="center", rotation="vertical", fontsize=12)
+    fig.text(0.47, 0.020, "Time [UTC]", ha="center", fontsize=12)
     scalar = mpl.cm.ScalarMappable(norm=norm, cmap=cmap)
     scalar.set_array([])
     colorbar_ax = fig.add_axes([0.935, 0.18, 0.014, 0.64])
     colorbar = fig.colorbar(scalar, cax=colorbar_ax)
-    colorbar.set_label("Background-subtracted intensity [dB]")
+    colorbar.ax.tick_params(labelsize=9)
+    colorbar.set_label("Background-subtracted intensity [dB]", fontsize=11)
     return fig

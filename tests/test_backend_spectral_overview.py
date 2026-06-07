@@ -14,6 +14,7 @@ pytest.importorskip("matplotlib")
 
 from src.Backend.batch_processing import PLOTUTIL_DB_SCALE, PLOTUTIL_DISPLAY_LIMITS
 from src.Backend.spectral_overview import (
+    SPECTRAL_OVERVIEW_FIGURE_SIZE,
     SpectralOverviewCancelled,
     SpectralOverviewSource,
     build_spectral_overview,
@@ -223,8 +224,11 @@ def test_render_spectral_overview_builds_six_fixed_scale_panels(tmp_path):
     figure = render_spectral_overview_figure(result)
 
     panels = figure.axes[:6]
+    assert tuple(figure.get_size_inches()) == pytest.approx(SPECTRAL_OVERVIEW_FIGURE_SIZE)
     assert len(panels) == 6
     assert panels[0].images[0].get_clim() == pytest.approx(PLOTUTIL_DISPLAY_LIMITS)
     assert any(text.get_text() == "No data" for text in panels[1].texts)
-    assert "Station: TEST" in figure._suptitle.get_text()
-    assert "Focus code: 01" in figure._suptitle.get_text()
+    assert "TEST" in figure._suptitle.get_text()
+    assert "Focus 01" in figure._suptitle.get_text()
+    assert "\n" not in figure._suptitle.get_text()
+    assert panels[0].get_position().y1 < figure._suptitle.get_position()[1]
