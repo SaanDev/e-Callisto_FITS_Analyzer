@@ -275,6 +275,20 @@ def select_spectral_overview_focus_code(
     return focus_codes, selected, sort_event_candidates(groups[selected])
 
 
+def group_spectral_overview_candidates(
+    candidates: list[CallistoEventCandidate],
+) -> dict[str, list[CallistoEventCandidate]]:
+    groups: dict[str, list[CallistoEventCandidate]] = {}
+    for candidate in candidates:
+        focus_code = str(candidate.receiver_id or "").strip()
+        if focus_code:
+            groups.setdefault(focus_code, []).append(candidate)
+    return {
+        focus_code: sort_event_candidates(groups[focus_code])
+        for focus_code in sorted(groups)
+    }
+
+
 def _normalize_utc_datetime(dt: datetime) -> datetime:
     if dt.tzinfo is not None:
         return dt.astimezone(timezone.utc).replace(tzinfo=None)
@@ -520,16 +534,31 @@ class SpectralOverviewWorker(QObject):
                 if not candidates:
                     raise ValueError("No FITS files were found for the selected station on that UTC date.")
 
-                focus_codes, selected_focus, selected = select_spectral_overview_focus_code(
-                    candidates,
-                    self.focus_code,
-                )
-                self.focusCodesDiscovered.emit(focus_codes, selected_focus)
+                focus_groups = group_spectral_overview_candidates(candidates)
+                focus_codes = list(focus_groups)
+                if not focus_codes:
+                    raise ValueError("No focus codes were found for the selected station and date.")
+                if self.focus_code:
+                    if self.focus_code not in focus_groups:
+                        raise ValueError(
+                            f"Focus code '{self.focus_code}' is not available for the selected station and date."
+                        )
+                    selected_codes = [self.focus_code]
+                else:
+                    selected_codes = focus_codes
+                selected = [
+                    candidate
+                    for focus_code in selected_codes
+                    for candidate in focus_groups[focus_code]
+                ]
+                self.focusCodesDiscovered.emit(focus_codes, self.focus_code)
                 self.progressRange.emit(0, len(selected))
                 self.progressValue.emit(0)
 
-                warnings: list[str] = []
-                sources: list[SpectralOverviewSource] = []
+                warnings_by_focus: dict[str, list[str]] = {focus_code: [] for focus_code in selected_codes}
+                sources_by_focus: dict[str, list[SpectralOverviewSource]] = {
+                    focus_code: [] for focus_code in selected_codes
+                }
                 with tempfile.TemporaryDirectory(prefix="callisto_spectral_overview_") as temp_dir:
                     for index, candidate in enumerate(selected, start=1):
                         self._check_cancelled()
@@ -545,38 +574,58 @@ class SpectralOverviewWorker(QObject):
                                         self._check_cancelled()
                                         if chunk:
                                             handle.write(chunk)
-                            sources.append(
+                            sources_by_focus[candidate.receiver_id].append(
                                 SpectralOverviewSource(
                                     path=out_path,
                                     station=candidate.station,
                                     observed_at_utc=candidate.observed_at_utc,
-                                    focus_code=selected_focus,
+                                    focus_code=candidate.receiver_id,
                                     filename=candidate.filename,
                                 )
                             )
                         except SpectralOverviewCancelled:
                             raise
                         except Exception as exc:
-                            warnings.append(f"{candidate.filename}: {exc}")
+                            warnings_by_focus[candidate.receiver_id].append(f"{candidate.filename}: {exc}")
                         self.progressValue.emit(index)
 
-                    if not sources:
+                    if not any(sources_by_focus.values()):
                         raise ValueError("None of the selected focus-code FITS files could be downloaded.")
 
                     self.progressRange.emit(0, 0)
-                    result = build_spectral_overview(
-                        sources,
-                        temp_dir=temp_dir,
-                        cancel_check=self._is_cancelled,
-                        progress_callback=self.progressText.emit,
-                    )
-                    result = replace(
-                        result,
-                        total_sources=len(selected),
-                        warnings=tuple(warnings) + tuple(result.warnings),
-                    )
+                    results: list[SpectralOverviewResult] = []
+                    build_errors: list[str] = []
+                    for focus_index, focus_code in enumerate(selected_codes, start=1):
+                        self._check_cancelled()
+                        sources = sources_by_focus[focus_code]
+                        if not sources:
+                            build_errors.append(f"Focus code {focus_code}: no FITS files could be downloaded.")
+                            continue
+                        self.progressText.emit(
+                            f"Building focus code {focus_code} ({focus_index}/{len(selected_codes)})..."
+                        )
+                        try:
+                            result = build_spectral_overview(
+                                sources,
+                                temp_dir=temp_dir,
+                                cancel_check=self._is_cancelled,
+                                progress_callback=self.progressText.emit,
+                            )
+                            results.append(
+                                replace(
+                                    result,
+                                    total_sources=len(focus_groups[focus_code]),
+                                    warnings=tuple(warnings_by_focus[focus_code]) + tuple(result.warnings),
+                                )
+                            )
+                        except SpectralOverviewCancelled:
+                            raise
+                        except Exception as exc:
+                            build_errors.append(f"Focus code {focus_code}: {exc}")
+                    if not results:
+                        raise ValueError("\n".join(build_errors) or "No focus-code overview could be generated.")
                     self._check_cancelled()
-                    self.finished.emit(result)
+                    self.finished.emit({"results": results, "errors": build_errors})
         except SpectralOverviewCancelled:
             self.cancelled.emit()
         except Exception as exc:
@@ -740,11 +789,15 @@ class CallistoDownloaderApp(QDialog):
         self._overview_worker: SpectralOverviewWorker | None = None
         self._overview_result: SpectralOverviewResult | None = None
         self._overview_figure: Figure | None = None
+        self._overview_results: dict[str, SpectralOverviewResult] = {}
+        self._overview_figures: dict[str, Figure] = {}
+        self._overview_canvases: dict[str, FigureCanvas] = {}
         self._overview_close_after_finish = False
 
         self.setWindowTitle("e-CALLISTO FITS Downloader")
         self.setObjectName("CallistoDownloaderDialog")
-        self.resize(1180, 760)
+        self.setMinimumSize(1280, 820)
+        self.resize(1540, 980)
 
 
         self.init_ui()
@@ -1139,7 +1192,7 @@ class CallistoDownloaderApp(QDialog):
         self.overview_station_dropdown.setMinimumWidth(220)
 
         self.overview_focus_combo = QComboBox(self)
-        self.overview_focus_combo.addItem("Auto (most coverage)", "")
+        self.overview_focus_combo.addItem("All available focus codes", "")
         self.overview_focus_combo.setMinimumWidth(210)
         self.overview_date_edit.dateChanged.connect(self._reset_overview_focus_selector)
         self.overview_station_dropdown.currentTextChanged.connect(self._reset_overview_focus_selector)
@@ -1168,7 +1221,8 @@ class CallistoDownloaderApp(QDialog):
         self.overview_progress_bar = QProgressBar(self)
         self.overview_progress_bar.setVisible(False)
         self.overview_status_label = QLabel(
-            "Select a station and UTC date, then generate a full-day Plotutil median-dB overview.",
+            "Select a station and UTC date, then generate full-day Plotutil median-dB overviews "
+            "for every available focus code.",
             self,
         )
         self.overview_status_label.setObjectName("DownloaderStatusLabel")
@@ -1179,9 +1233,8 @@ class CallistoDownloaderApp(QDialog):
         plot_group = QGroupBox("Overview Preview")
         plot_group.setObjectName("DownloaderSection")
         plot_layout = QVBoxLayout(plot_group)
-        self.overview_plot_scroll = QScrollArea(self)
-        self.overview_plot_scroll.setWidgetResizable(True)
-        self.overview_plot_scroll.setMinimumHeight(430)
+        self.overview_preview_tabs = QTabWidget(self)
+        self.overview_preview_tabs.currentChanged.connect(self._on_overview_preview_tab_changed)
         placeholder = Figure(figsize=(12, 8), facecolor="white")
         placeholder_ax = placeholder.add_subplot(111)
         placeholder_ax.axis("off")
@@ -1194,9 +1247,12 @@ class CallistoDownloaderApp(QDialog):
             color="#737b84",
         )
         self.overview_canvas = FigureCanvas(placeholder)
-        self.overview_canvas.setMinimumSize(1050, 700)
+        self.overview_canvas.setMinimumSize(1400, 980)
+        self.overview_plot_scroll = QScrollArea(self)
+        self.overview_plot_scroll.setWidgetResizable(False)
         self.overview_plot_scroll.setWidget(self.overview_canvas)
-        plot_layout.addWidget(self.overview_plot_scroll)
+        self.overview_preview_tabs.addTab(self.overview_plot_scroll, "Preview")
+        plot_layout.addWidget(self.overview_preview_tabs)
 
         layout.addWidget(controls_group, 0)
         layout.addWidget(plot_group, 1)
@@ -1246,7 +1302,7 @@ class CallistoDownloaderApp(QDialog):
     # -----------------------------
     def _reset_overview_focus_selector(self, *_args) -> None:
         self.overview_focus_combo.clear()
-        self.overview_focus_combo.addItem("Auto (most coverage)", "")
+        self.overview_focus_combo.addItem("All available focus codes", "")
 
     def _set_overview_running(self, running: bool) -> None:
         self.tabs.setTabEnabled(0, not running)
@@ -1318,54 +1374,105 @@ class CallistoDownloaderApp(QDialog):
         requested = str(self.overview_focus_combo.currentData() or "")
         codes = [str(code) for code in list(focus_codes or [])]
         self.overview_focus_combo.clear()
-        self.overview_focus_combo.addItem(f"Auto (most coverage: {selected_focus})", "")
+        self.overview_focus_combo.addItem(f"All available focus codes ({len(codes)})", "")
         for code in codes:
             self.overview_focus_combo.addItem(code, code)
         if requested and requested in codes:
             self.overview_focus_combo.setCurrentIndex(self.overview_focus_combo.findData(requested))
 
-    def _set_overview_figure(self, figure: Figure) -> None:
-        old_canvas = self.overview_plot_scroll.takeWidget()
-        if old_canvas is not None:
-            old_canvas.setParent(None)
-            old_canvas.deleteLater()
-        if self._overview_figure is not None and self._overview_figure is not figure:
+    def _clear_overview_previews(self) -> None:
+        for figure in self._overview_figures.values():
             try:
-                self._overview_figure.clear()
+                figure.clear()
             except Exception:
                 pass
-        self._overview_figure = figure
-        self.overview_canvas = FigureCanvas(figure)
-        self.overview_canvas.setMinimumSize(1050, 700)
-        self.overview_plot_scroll.setWidget(self.overview_canvas)
-        self.overview_canvas.draw_idle()
+        self._overview_results.clear()
+        self._overview_figures.clear()
+        self._overview_canvases.clear()
+        self._overview_result = None
+        self._overview_figure = None
+        while self.overview_preview_tabs.count():
+            widget = self.overview_preview_tabs.widget(0)
+            self.overview_preview_tabs.removeTab(0)
+            if widget is not None:
+                widget.deleteLater()
+
+    def _set_overview_results(self, results: list[SpectralOverviewResult]) -> None:
+        rendered: list[tuple[SpectralOverviewResult, Figure]] = []
+        for result in results:
+            rendered.append((result, render_spectral_overview_figure(result)))
+
+        self._clear_overview_previews()
+        for result, figure in rendered:
+            focus_code = str(result.focus_code)
+            canvas = FigureCanvas(figure)
+            canvas.setMinimumSize(1400, 1000)
+            scroll = QScrollArea(self)
+            scroll.setWidgetResizable(False)
+            scroll.setWidget(canvas)
+            self.overview_preview_tabs.addTab(scroll, f"Focus {focus_code}")
+            self._overview_results[focus_code] = result
+            self._overview_figures[focus_code] = figure
+            self._overview_canvases[focus_code] = canvas
+            canvas.draw_idle()
+        self.overview_preview_tabs.setCurrentIndex(0)
+        self._on_overview_preview_tab_changed(0)
+
+    @Slot(int)
+    def _on_overview_preview_tab_changed(self, index: int) -> None:
+        if index < 0:
+            self._overview_result = None
+            self._overview_figure = None
+            self.overview_export_btn.setEnabled(False)
+            return
+        focus_code = self.overview_preview_tabs.tabText(index).removeprefix("Focus ").strip()
+        self._overview_result = self._overview_results.get(focus_code)
+        self._overview_figure = self._overview_figures.get(focus_code)
+        self.overview_export_btn.setEnabled(
+            self._overview_figure is not None
+            and not (self._overview_thread is not None and self._overview_thread.isRunning())
+        )
 
     @Slot(object)
-    def _on_spectral_overview_finished(self, result):
-        if not isinstance(result, SpectralOverviewResult):
+    def _on_spectral_overview_finished(self, payload):
+        if isinstance(payload, SpectralOverviewResult):
+            results = [payload]
+            errors = []
+        elif isinstance(payload, dict):
+            results = list(payload.get("results") or [])
+            errors = list(payload.get("errors") or [])
+        else:
             self._on_spectral_overview_failed("Unexpected spectral overview result.")
             return
+        if not results or not all(isinstance(result, SpectralOverviewResult) for result in results):
+            self._on_spectral_overview_failed("No valid focus-code spectral overview was returned.")
+            return
         try:
-            figure = render_spectral_overview_figure(result)
+            self._set_overview_results(results)
         except Exception as exc:
             self._on_spectral_overview_failed(f"Could not render spectral overview:\n{exc}")
             return
 
-        self._overview_result = result
-        self._set_overview_figure(figure)
-        coverage_hours = float(result.coverage_seconds) / 3600.0
+        total_files = sum(result.total_sources for result in results)
+        loaded_files = sum(result.loaded_sources for result in results)
+        total_warnings = sum(len(result.warnings) for result in results) + len(errors)
+        focus_codes = ", ".join(result.focus_code for result in results)
         status = (
-            f"Generated focus code {result.focus_code}: {len(result.segments)} segment(s), "
-            f"{result.loaded_sources}/{result.total_sources} FITS file(s), "
-            f"{coverage_hours:.2f} hours of UTC coverage."
+            f"Generated {len(results)} focus-code overview(s): {focus_codes}. "
+            f"Loaded {loaded_files}/{total_files} FITS file(s)."
         )
-        if result.warnings:
-            status += f" {len(result.warnings)} warning(s); hover for details."
-            self.overview_status_label.setToolTip("\n".join(result.warnings))
+        warning_details = errors + [
+            f"Focus {result.focus_code}: {warning}"
+            for result in results
+            for warning in result.warnings
+        ]
+        if total_warnings:
+            status += f" {total_warnings} warning(s); hover for details."
+            self.overview_status_label.setToolTip("\n".join(warning_details))
         else:
             self.overview_status_label.setToolTip("")
         self.overview_status_label.setText(status)
-        self.overview_export_btn.setEnabled(True)
+        self.overview_export_btn.setEnabled(self._overview_figure is not None)
 
     @Slot(str)
     def _on_spectral_overview_failed(self, message: str):
@@ -1907,9 +2014,6 @@ class CallistoDownloaderApp(QDialog):
                 self._overview_worker.request_cancel()
             event.ignore()
             return
-        if self._overview_figure is not None:
-            try:
-                self._overview_figure.clear()
-            except Exception:
-                pass
+        if hasattr(self, "overview_preview_tabs"):
+            self._clear_overview_previews()
         super().closeEvent(event)

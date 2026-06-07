@@ -18,6 +18,7 @@ pytest.importorskip("matplotlib")
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QDialog, QSpinBox
+from matplotlib.figure import Figure
 
 from src.Backend.spectral_overview import SpectralOverviewResult
 from src.UI.callisto_downloader import (
@@ -363,6 +364,7 @@ def test_downloader_spectral_overview_tab_defaults():
     assert dlg.tabs.tabText(2) == "Spectral Overview"
     assert dlg.overview_date_edit.displayFormat() == "yyyy-MM-dd"
     assert dlg.overview_focus_combo.currentData() == ""
+    assert "All available focus codes" in dlg.overview_focus_combo.currentText()
     assert dlg.overview_generate_btn.isEnabled() is True
     assert dlg.overview_cancel_btn.isEnabled() is False
     assert dlg.overview_export_btn.isEnabled() is False
@@ -456,11 +458,89 @@ def test_spectral_overview_worker_continues_after_download_failure_and_cleans_te
     worker.run()
 
     assert errors == []
-    assert focus == [(["01"], "01")]
-    assert emitted[0].loaded_sources == 1
-    assert emitted[0].total_sources == 2
-    assert any("download failed" in warning for warning in emitted[0].warnings)
+    assert focus == [(["01"], "")]
+    result = emitted[0]["results"][0]
+    assert result.loaded_sources == 1
+    assert result.total_sources == 2
+    assert any("download failed" in warning for warning in result.warnings)
     assert captured_paths and all(not os.path.exists(path) for path in captured_paths)
+
+
+def test_spectral_overview_worker_generates_every_available_focus_code(monkeypatch):
+    _app()
+    emitted = []
+    errors = []
+    built_focus_codes = []
+    day_url = f"{BASE_URL}2024/01/02/"
+
+    class FakeResponse:
+        def __init__(self, *, text="", data=b"fit"):
+            self.status_code = 200
+            self.text = text
+            self.data = data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def close(self):
+            pass
+
+        def raise_for_status(self):
+            pass
+
+        def iter_content(self, chunk_size):
+            yield self.data
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def close(self):
+            pass
+
+        def head(self, *_args, **_kwargs):
+            return FakeResponse()
+
+        def get(self, url, **_kwargs):
+            if url == day_url:
+                return FakeResponse(
+                    text=(
+                        '<a href="BIR_20240102_000000_01.fit.gz">one</a>'
+                        '<a href="BIR_20240102_001500_02.fit.gz">two</a>'
+                    )
+                )
+            return FakeResponse()
+
+    def fake_build(sources, **_kwargs):
+        focus_code = sources[0].focus_code
+        built_focus_codes.append(focus_code)
+        return SpectralOverviewResult(
+            station="BIR",
+            observation_date=date(2024, 1, 2),
+            focus_code=focus_code,
+            segments=(),
+            total_sources=len(sources),
+            loaded_sources=len(sources),
+            coverage_seconds=1.0,
+        )
+
+    monkeypatch.setattr("src.UI.callisto_downloader.build_archive_session", lambda: FakeSession())
+    monkeypatch.setattr("src.UI.callisto_downloader.build_spectral_overview", fake_build)
+    worker = SpectralOverviewWorker(date(2024, 1, 2), "BIR")
+    worker.finished.connect(emitted.append)
+    worker.failed.connect(errors.append)
+
+    worker.run()
+
+    assert errors == []
+    assert built_focus_codes == ["01", "02"]
+    assert [result.focus_code for result in emitted[0]["results"]] == ["01", "02"]
 
 
 def test_spectral_overview_worker_emits_cancelled_before_start():
@@ -473,6 +553,28 @@ def test_spectral_overview_worker_emits_cancelled_before_start():
     worker.run()
 
     assert cancelled == [True]
+
+
+def test_downloader_displays_each_focus_code_in_separate_large_preview_tab(monkeypatch):
+    _app()
+    dlg = CallistoDownloaderApp()
+    results = [
+        SpectralOverviewResult("BIR", date(2024, 1, 2), focus, (), 1, 1, 1.0)
+        for focus in ("01", "02")
+    ]
+    monkeypatch.setattr("src.UI.callisto_downloader.render_spectral_overview_figure", lambda _result: Figure())
+
+    dlg._on_spectral_overview_finished({"results": results, "errors": []})
+
+    assert dlg.minimumWidth() >= 1280
+    assert dlg.minimumHeight() >= 820
+    assert dlg.overview_preview_tabs.count() == 2
+    assert [dlg.overview_preview_tabs.tabText(i) for i in range(2)] == ["Focus 01", "Focus 02"]
+    assert all(canvas.minimumWidth() >= 1400 for canvas in dlg._overview_canvases.values())
+    assert all(canvas.minimumHeight() >= 1000 for canvas in dlg._overview_canvases.values())
+    dlg.overview_preview_tabs.setCurrentIndex(1)
+    assert dlg._overview_result.focus_code == "02"
+    dlg.close()
 
 
 @pytest.mark.parametrize(

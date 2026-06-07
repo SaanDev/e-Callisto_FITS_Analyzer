@@ -345,7 +345,7 @@ Features:
 - Automatic detection of frequency or time stitching compatibility
 - Clear error messages when selected files cannot be combined
 - Generate a station's full UTC-day spectral overview from the **Spectral Overview** tab
-- Automatically select the focus code with the most coverage, or regenerate a selected focus code
+- Generate separate preview tabs for every focus code available for the selected station/date, or regenerate one selected code
 - Apply a day-wide Plotutil median-dB background baseline and export the organized six-panel overview
 
 ### Example: Downloader

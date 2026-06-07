@@ -349,8 +349,8 @@ def render_spectral_overview_figure(result: SpectralOverviewResult) -> Figure:
     freq_min = float(np.nanmin(finite_freqs))
     freq_max = float(np.nanmax(finite_freqs))
 
-    fig, axes = Figure(figsize=(18, 10), facecolor="white"), []
-    grid = fig.add_gridspec(6, 1, left=0.075, right=0.86, bottom=0.07, top=0.91, hspace=0.18)
+    fig, axes = Figure(figsize=(22, 13), facecolor="white"), []
+    grid = fig.add_gridspec(6, 1, left=0.065, right=0.87, bottom=0.065, top=0.88, hspace=0.20)
     cmap = transparent_bad_cmap(mpl.colormaps.get_cmap("viridis"))
     norm = mpl.colors.Normalize(vmin=float(PLOTUTIL_DISPLAY_LIMITS[0]), vmax=float(PLOTUTIL_DISPLAY_LIMITS[1]))
 
@@ -408,7 +408,7 @@ def render_spectral_overview_figure(result: SpectralOverviewResult) -> Figure:
             transform=ax.transAxes,
             va="center",
             ha="left",
-            fontsize=11,
+            fontsize=13,
         )
         if not rendered:
             ax.text(
@@ -419,20 +419,20 @@ def render_spectral_overview_figure(result: SpectralOverviewResult) -> Figure:
                 ha="center",
                 va="center",
                 color="#7a828a",
-                fontsize=11,
+                fontsize=13,
             )
 
     fig.suptitle(
-        f"Full-day spectrum {result.observation_date:%Y-%m-%d} | "
+        f"Full-day spectrum {result.observation_date:%Y-%m-%d}\n"
         f"Station: {result.station} | Focus code: {result.focus_code}",
-        fontsize=16,
-        y=0.975,
+        fontsize=18,
+        y=0.98,
     )
-    fig.text(0.022, 0.5, "Frequency [MHz]", va="center", rotation="vertical", fontsize=12)
-    fig.text(0.49, 0.018, "Time [UTC]", ha="center", fontsize=12)
+    fig.text(0.020, 0.5, "Frequency [MHz]", va="center", rotation="vertical", fontsize=14)
+    fig.text(0.49, 0.018, "Time [UTC]", ha="center", fontsize=14)
     scalar = mpl.cm.ScalarMappable(norm=norm, cmap=cmap)
     scalar.set_array([])
-    colorbar_ax = fig.add_axes([0.925, 0.18, 0.016, 0.64])
+    colorbar_ax = fig.add_axes([0.935, 0.18, 0.014, 0.64])
     colorbar = fig.colorbar(scalar, cax=colorbar_ax)
     colorbar.set_label("Background-subtracted intensity [dB]")
     return fig
