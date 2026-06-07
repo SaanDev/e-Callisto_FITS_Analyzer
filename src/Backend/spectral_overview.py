@@ -82,6 +82,21 @@ def _report(progress_callback: Callable[[str], None] | None, message: str) -> No
         progress_callback(str(message))
 
 
+def _close_memmap(memmap_array: np.memmap | None) -> None:
+    if memmap_array is None:
+        return
+    try:
+        memmap_array.flush()
+    except Exception:
+        pass
+    mmap_handle = getattr(memmap_array, "_mmap", None)
+    if mmap_handle is not None:
+        try:
+            mmap_handle.close()
+        except Exception:
+            pass
+
+
 def _compatible_frequency_group(groups: list[_FrequencyGroup], freqs: np.ndarray) -> _FrequencyGroup | None:
     freq_arr = np.asarray(freqs, dtype=float).ravel()
     for group in groups:
@@ -219,7 +234,7 @@ def build_spectral_overview(
                 f"Building day-wide median for frequency configuration {group_index + 1}/{len(groups)}...",
             )
             mmap_path = os.path.join(work_dir, f"frequency_group_{group_index}.dat")
-            day_data = np.memmap(
+            day_data: np.memmap | None = np.memmap(
                 mmap_path,
                 dtype=np.float32,
                 mode="w+",
@@ -258,7 +273,9 @@ def build_spectral_overview(
                 baseline = np.full((group.freqs.size, 1), np.nan, dtype=np.float32)
                 for row in range(group.freqs.size):
                     _check_cancel(cancel_check)
-                    values = np.asarray(day_data[row, :], dtype=np.float32)
+                    # Copy each row so no memmap-backed view survives until
+                    # TemporaryDirectory cleanup on Windows.
+                    values = np.array(day_data[row, :], dtype=np.float32, copy=True)
                     if np.any(np.isfinite(values)):
                         baseline[row, 0] = np.float32(np.nanmedian(values))
 
@@ -302,7 +319,8 @@ def build_spectral_overview(
                     except Exception as exc:
                         warnings.append(f"{source.filename or os.path.basename(source.path)}: {exc}")
             finally:
-                del day_data
+                _close_memmap(day_data)
+                day_data = None
 
     if not segments:
         raise ValueError("No valid FITS data remained after processing.")

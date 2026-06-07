@@ -131,6 +131,34 @@ def test_build_spectral_overview_cancellation_cleans_work_files(tmp_path):
     assert list(work_parent.iterdir()) == []
 
 
+def test_build_spectral_overview_closes_memmap_before_temp_cleanup(monkeypatch, tmp_path):
+    source_path = write_test_callisto_fit(
+        tmp_path / "TEST_20240101_000000_01.fit",
+        data=np.ones((2, 2), dtype=np.uint8),
+        freqs=np.array([30.0, 20.0]),
+        time=np.array([0.0, 1.0]),
+        date_obs="2024/01/01",
+        time_obs="00:00:00",
+    )
+    created_memmaps = []
+    real_memmap = np.memmap
+
+    def tracked_memmap(*args, **kwargs):
+        mapped = real_memmap(*args, **kwargs)
+        created_memmaps.append(mapped)
+        return mapped
+
+    monkeypatch.setattr("src.Backend.spectral_overview.np.memmap", tracked_memmap)
+
+    build_spectral_overview(
+        [_source(source_path, datetime(2024, 1, 1, 0, 0))],
+        temp_dir=str(tmp_path),
+    )
+
+    assert created_memmaps
+    assert all(mapped._mmap.closed for mapped in created_memmaps)
+
+
 def test_build_spectral_overview_continues_after_unreadable_source(tmp_path):
     valid_path = write_test_callisto_fit(
         tmp_path / "TEST_20240101_000000_01.fit",
