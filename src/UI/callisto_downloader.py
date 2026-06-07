@@ -7,7 +7,7 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import os
 import re
@@ -19,6 +19,14 @@ import requests
 from requests.adapters import HTTPAdapter
 from astropy.io import fits
 from src.Backend.fits_io import load_callisto_fits
+from src.Backend.spectral_overview import (
+    SpectralOverviewCancelled,
+    SpectralOverviewResult,
+    SpectralOverviewSource,
+    build_spectral_overview,
+    render_spectral_overview_figure,
+)
+from src.UI.gui_shared import pick_export_path
 from urllib3.util.retry import Retry
 
 from PySide6.QtCore import (
@@ -31,7 +39,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem, QProgressBar, QGroupBox, QDialog, QApplication,
     QCalendarWidget, QSpinBox, QTabWidget, QWidget, QDateTimeEdit,
     QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox,
-    QAbstractItemView, QGridLayout, QSizePolicy
+    QAbstractItemView, QGridLayout, QSizePolicy, QScrollArea
 )
 
 from matplotlib.figure import Figure
@@ -48,6 +56,7 @@ _HREF_RE = re.compile(
 _FITS_SUFFIXES = (".fit.gz", ".fits.gz", ".fit", ".fits")
 _DATE_RE = re.compile(r"^\d{8}$")
 _TIME_RE = re.compile(r"^\d{6}$")
+_OVERVIEW_EXPORT_FILTERS = "PNG (*.png);;PDF (*.pdf);;EPS (*.eps);;SVG (*.svg);;TIFF (*.tiff)"
 
 CALLISTO_STATIONS = (
     "ALASKA-ANCHORAGE", "ALASKA-COHOE", "ALASKA-HAARP", "ALGERIA-CRAAG",
@@ -213,6 +222,57 @@ def sort_event_candidates(candidates: list[CallistoEventCandidate]) -> list[Call
         unique.append(candidate)
     unique.sort(key=lambda item: (_station_key(item.station), item.observed_at_utc, item.filename.lower()))
     return unique
+
+
+def filter_spectral_overview_candidates(
+    hrefs: list[str],
+    *,
+    day_url: str,
+    station: str,
+    observation_date,
+) -> list[CallistoEventCandidate]:
+    selected_key = _station_key(station)
+    candidates: list[CallistoEventCandidate] = []
+    for href in hrefs:
+        filename = os.path.basename(str(href or ""))
+        try:
+            parsed_station, observed_at, receiver_id = parse_callisto_archive_filename(filename)
+        except ValueError:
+            continue
+        if _station_key(parsed_station) != selected_key or observed_at.date() != observation_date:
+            continue
+        candidates.append(
+            CallistoEventCandidate(
+                station=parsed_station,
+                observed_at_utc=observed_at,
+                filename=filename,
+                url=urljoin(day_url, href),
+                receiver_id=receiver_id,
+            )
+        )
+    return sort_event_candidates(candidates)
+
+
+def select_spectral_overview_focus_code(
+    candidates: list[CallistoEventCandidate],
+    requested_focus_code: str = "",
+) -> tuple[list[str], str, list[CallistoEventCandidate]]:
+    groups: dict[str, list[CallistoEventCandidate]] = {}
+    for candidate in candidates:
+        groups.setdefault(str(candidate.receiver_id or "").strip(), []).append(candidate)
+    groups.pop("", None)
+    focus_codes = sorted(groups)
+    if not focus_codes:
+        raise ValueError("No focus codes were found for the selected station and date.")
+
+    requested = str(requested_focus_code or "").strip()
+    if requested:
+        if requested not in groups:
+            raise ValueError(f"Focus code '{requested}' is not available for the selected station and date.")
+        selected = requested
+    else:
+        selected = sorted(focus_codes, key=lambda code: (-len(groups[code]), code))[0]
+    return focus_codes, selected, sort_event_candidates(groups[selected])
 
 
 def _normalize_utc_datetime(dt: datetime) -> datetime:
@@ -406,6 +466,123 @@ class EventFetchWorker(QObject):
         )
 
 
+class SpectralOverviewWorker(QObject):
+    progressRange = Signal(int, int)
+    progressValue = Signal(int)
+    progressText = Signal(str)
+    focusCodesDiscovered = Signal(object, str)
+    finished = Signal(object)
+    failed = Signal(str)
+    cancelled = Signal()
+
+    def __init__(self, date_py, station: str, focus_code: str = ""):
+        super().__init__()
+        self.date = date_py
+        self.station = str(station or "").strip()
+        self.focus_code = str(focus_code or "").strip()
+        self._cancel_requested = False
+
+    @Slot()
+    def request_cancel(self):
+        self._cancel_requested = True
+
+    def _is_cancelled(self) -> bool:
+        return bool(self._cancel_requested)
+
+    def _check_cancelled(self) -> None:
+        if self._is_cancelled():
+            raise SpectralOverviewCancelled("Spectral overview generation was cancelled.")
+
+    def _day_url(self) -> str:
+        return f"{BASE_URL}{self.date.year}/{self.date.month:02}/{self.date.day:02}/"
+
+    @Slot()
+    def run(self):
+        try:
+            self._check_cancelled()
+            self.progressText.emit("Reading the selected archive day...")
+            day_url = self._day_url()
+            with build_archive_session() as session:
+                ok, message = check_archive_server(session)
+                if not ok:
+                    raise RuntimeError(f"FITS server is not responding: {message}")
+                with session.get(day_url, timeout=REQUEST_TIMEOUT) as page:
+                    if page.status_code >= 400:
+                        raise RuntimeError(f"HTTP {page.status_code} for {day_url}")
+                    hrefs = extract_fits_links(page.text)
+
+                candidates = filter_spectral_overview_candidates(
+                    hrefs,
+                    day_url=day_url,
+                    station=self.station,
+                    observation_date=self.date,
+                )
+                if not candidates:
+                    raise ValueError("No FITS files were found for the selected station on that UTC date.")
+
+                focus_codes, selected_focus, selected = select_spectral_overview_focus_code(
+                    candidates,
+                    self.focus_code,
+                )
+                self.focusCodesDiscovered.emit(focus_codes, selected_focus)
+                self.progressRange.emit(0, len(selected))
+                self.progressValue.emit(0)
+
+                warnings: list[str] = []
+                sources: list[SpectralOverviewSource] = []
+                with tempfile.TemporaryDirectory(prefix="callisto_spectral_overview_") as temp_dir:
+                    for index, candidate in enumerate(selected, start=1):
+                        self._check_cancelled()
+                        self.progressText.emit(
+                            f"Downloading {candidate.filename} ({index}/{len(selected)})..."
+                        )
+                        out_path = os.path.join(temp_dir, candidate.filename)
+                        try:
+                            with session.get(candidate.url, stream=True, timeout=DOWNLOAD_TIMEOUT) as response:
+                                response.raise_for_status()
+                                with open(out_path, "wb") as handle:
+                                    for chunk in response.iter_content(chunk_size=1024 * 128):
+                                        self._check_cancelled()
+                                        if chunk:
+                                            handle.write(chunk)
+                            sources.append(
+                                SpectralOverviewSource(
+                                    path=out_path,
+                                    station=candidate.station,
+                                    observed_at_utc=candidate.observed_at_utc,
+                                    focus_code=selected_focus,
+                                    filename=candidate.filename,
+                                )
+                            )
+                        except SpectralOverviewCancelled:
+                            raise
+                        except Exception as exc:
+                            warnings.append(f"{candidate.filename}: {exc}")
+                        self.progressValue.emit(index)
+
+                    if not sources:
+                        raise ValueError("None of the selected focus-code FITS files could be downloaded.")
+
+                    self.progressRange.emit(0, 0)
+                    result = build_spectral_overview(
+                        sources,
+                        temp_dir=temp_dir,
+                        cancel_check=self._is_cancelled,
+                        progress_callback=self.progressText.emit,
+                    )
+                    result = replace(
+                        result,
+                        total_sources=len(selected),
+                        warnings=tuple(warnings) + tuple(result.warnings),
+                    )
+                    self._check_cancelled()
+                    self.finished.emit(result)
+        except SpectralOverviewCancelled:
+            self.cancelled.emit()
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 # -----------------------------
 # Download runnable
 # -----------------------------
@@ -559,6 +736,12 @@ class CallistoDownloaderApp(QDialog):
         self._event_download_success_paths: list[str] = []
         self._event_download_failures: list[str] = []
 
+        self._overview_thread: QThread | None = None
+        self._overview_worker: SpectralOverviewWorker | None = None
+        self._overview_result: SpectralOverviewResult | None = None
+        self._overview_figure: Figure | None = None
+        self._overview_close_after_finish = False
+
         self.setWindowTitle("e-CALLISTO FITS Downloader")
         self.setObjectName("CallistoDownloaderDialog")
         self.resize(1180, 760)
@@ -577,6 +760,7 @@ class CallistoDownloaderApp(QDialog):
         self.tabs.setDocumentMode(True)
         self.tabs.addTab(self._build_single_station_tab(), "Single Station")
         self.tabs.addTab(self._build_event_tab(), "Multi-Station Event")
+        self.tabs.addTab(self._build_spectral_overview_tab(), "Spectral Overview")
         layout.addWidget(self.tabs)
         self.setLayout(layout)
         self._apply_downloader_style()
@@ -929,6 +1113,95 @@ class CallistoDownloaderApp(QDialog):
         self._sync_event_actions()
         return page
 
+    def _build_spectral_overview_tab(self) -> QWidget:
+        page = QWidget(self)
+        page.setObjectName("DownloaderTabPage")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(2, 10, 2, 2)
+        layout.setSpacing(8)
+
+        controls_group = QGroupBox("Full-Day Spectral Overview")
+        controls_group.setObjectName("DownloaderSection")
+        controls_layout = QGridLayout(controls_group)
+        controls_layout.setHorizontalSpacing(8)
+        controls_layout.setVerticalSpacing(8)
+
+        self.overview_date_edit = QDateEdit(QDate.currentDate(), self)
+        self.overview_date_edit.setCalendarPopup(True)
+        self.overview_date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.overview_date_edit.setMinimumWidth(140)
+        self.overview_calendar_popup = DownloaderCalendarWidget(self._configure_calendar_popup, self)
+        self.overview_date_edit.setCalendarWidget(self.overview_calendar_popup)
+        self._configure_calendar_popup(self.overview_calendar_popup)
+
+        self.overview_station_dropdown = QComboBox(self)
+        self.overview_station_dropdown.addItems(CALLISTO_STATIONS)
+        self.overview_station_dropdown.setMinimumWidth(220)
+
+        self.overview_focus_combo = QComboBox(self)
+        self.overview_focus_combo.addItem("Auto (most coverage)", "")
+        self.overview_focus_combo.setMinimumWidth(210)
+        self.overview_date_edit.dateChanged.connect(self._reset_overview_focus_selector)
+        self.overview_station_dropdown.currentTextChanged.connect(self._reset_overview_focus_selector)
+
+        self.overview_generate_btn = QPushButton("Generate Overview", self)
+        self.overview_generate_btn.setObjectName("PrimaryDownloaderButton")
+        self.overview_cancel_btn = QPushButton("Cancel", self)
+        self.overview_export_btn = QPushButton("Export...", self)
+        self.overview_cancel_btn.setEnabled(False)
+        self.overview_export_btn.setEnabled(False)
+        self.overview_generate_btn.clicked.connect(self.generate_spectral_overview)
+        self.overview_cancel_btn.clicked.connect(self.cancel_spectral_overview)
+        self.overview_export_btn.clicked.connect(self.export_spectral_overview)
+
+        controls_layout.addWidget(QLabel("Date (UTC):", self), 0, 0)
+        controls_layout.addWidget(self.overview_date_edit, 0, 1)
+        controls_layout.addWidget(QLabel("Station:", self), 0, 2)
+        controls_layout.addWidget(self.overview_station_dropdown, 0, 3)
+        controls_layout.addWidget(QLabel("Focus code:", self), 0, 4)
+        controls_layout.addWidget(self.overview_focus_combo, 0, 5)
+        controls_layout.addWidget(self.overview_generate_btn, 0, 6)
+        controls_layout.addWidget(self.overview_cancel_btn, 0, 7)
+        controls_layout.addWidget(self.overview_export_btn, 0, 8)
+        controls_layout.setColumnStretch(3, 1)
+
+        self.overview_progress_bar = QProgressBar(self)
+        self.overview_progress_bar.setVisible(False)
+        self.overview_status_label = QLabel(
+            "Select a station and UTC date, then generate a full-day Plotutil median-dB overview.",
+            self,
+        )
+        self.overview_status_label.setObjectName("DownloaderStatusLabel")
+        self.overview_status_label.setWordWrap(True)
+        controls_layout.addWidget(self.overview_progress_bar, 1, 0, 1, 9)
+        controls_layout.addWidget(self.overview_status_label, 2, 0, 1, 9)
+
+        plot_group = QGroupBox("Overview Preview")
+        plot_group.setObjectName("DownloaderSection")
+        plot_layout = QVBoxLayout(plot_group)
+        self.overview_plot_scroll = QScrollArea(self)
+        self.overview_plot_scroll.setWidgetResizable(True)
+        self.overview_plot_scroll.setMinimumHeight(430)
+        placeholder = Figure(figsize=(12, 8), facecolor="white")
+        placeholder_ax = placeholder.add_subplot(111)
+        placeholder_ax.axis("off")
+        placeholder_ax.text(
+            0.5,
+            0.5,
+            "Generated spectral overview will appear here.",
+            ha="center",
+            va="center",
+            color="#737b84",
+        )
+        self.overview_canvas = FigureCanvas(placeholder)
+        self.overview_canvas.setMinimumSize(1050, 700)
+        self.overview_plot_scroll.setWidget(self.overview_canvas)
+        plot_layout.addWidget(self.overview_plot_scroll)
+
+        layout.addWidget(controls_group, 0)
+        layout.addWidget(plot_group, 1)
+        return page
+
     def _configure_calendar_popup(self, calendar: QCalendarWidget):
         year_edit = calendar.findChild(QSpinBox, "qt_calendar_yearedit")
         if year_edit is None:
@@ -967,6 +1240,182 @@ class CallistoDownloaderApp(QDialog):
             line_edit.setAlignment(Qt.AlignCenter)
             line_edit.setMinimumWidth(60)
             line_edit.setStyleSheet("border: none; background: transparent; padding: 0px 2px 0px 0px;")
+
+    # -----------------------------
+    # Full-day spectral overview
+    # -----------------------------
+    def _reset_overview_focus_selector(self, *_args) -> None:
+        self.overview_focus_combo.clear()
+        self.overview_focus_combo.addItem("Auto (most coverage)", "")
+
+    def _set_overview_running(self, running: bool) -> None:
+        self.tabs.setTabEnabled(0, not running)
+        self.tabs.setTabEnabled(1, not running)
+        self.overview_date_edit.setEnabled(not running)
+        self.overview_station_dropdown.setEnabled(not running)
+        self.overview_focus_combo.setEnabled(not running)
+        self.overview_generate_btn.setEnabled(not running)
+        self.overview_cancel_btn.setEnabled(running)
+        self.overview_export_btn.setEnabled((not running) and self._overview_figure is not None)
+        self.overview_progress_bar.setVisible(running)
+
+    def generate_spectral_overview(self):
+        if self._overview_thread is not None and self._overview_thread.isRunning():
+            QMessageBox.information(self, "Overview In Progress", "A spectral overview is already being generated.")
+            return
+
+        date_py = self.overview_date_edit.date().toPython()
+        station = self.overview_station_dropdown.currentText()
+        focus_code = str(self.overview_focus_combo.currentData() or "")
+        self._set_overview_running(True)
+        self.overview_progress_bar.setRange(0, 0)
+        self.overview_progress_bar.setValue(0)
+        self.overview_status_label.setText("Preparing full-day spectral overview...")
+        self.overview_status_label.setToolTip("")
+
+        self._overview_thread = QThread(self)
+        self._overview_worker = SpectralOverviewWorker(date_py, station, focus_code)
+        self._overview_worker.moveToThread(self._overview_thread)
+        self._overview_thread.started.connect(self._overview_worker.run)
+        self._overview_worker.progressRange.connect(self.overview_progress_bar.setRange)
+        self._overview_worker.progressValue.connect(self.overview_progress_bar.setValue)
+        self._overview_worker.progressText.connect(self.overview_status_label.setText)
+        self._overview_worker.focusCodesDiscovered.connect(self._update_overview_focus_codes)
+        self._overview_worker.finished.connect(self._on_spectral_overview_finished)
+        self._overview_worker.failed.connect(self._on_spectral_overview_failed)
+        self._overview_worker.cancelled.connect(self._on_spectral_overview_cancelled)
+        for terminal_signal in (
+            self._overview_worker.finished,
+            self._overview_worker.failed,
+            self._overview_worker.cancelled,
+        ):
+            terminal_signal.connect(self._overview_thread.quit)
+            terminal_signal.connect(self._overview_worker.deleteLater)
+
+        def _cleanup_overview_thread():
+            if self._overview_thread is not None:
+                self._overview_thread.deleteLater()
+            self._overview_thread = None
+            self._overview_worker = None
+            self._set_overview_running(False)
+            if self._overview_close_after_finish:
+                self._overview_close_after_finish = False
+                self.close()
+
+        self._overview_thread.finished.connect(_cleanup_overview_thread)
+        self._overview_thread.start()
+
+    @Slot()
+    def cancel_spectral_overview(self):
+        if self._overview_worker is None:
+            return
+        self.overview_status_label.setText("Cancelling spectral overview generation...")
+        self.overview_cancel_btn.setEnabled(False)
+        self._overview_worker.request_cancel()
+
+    @Slot(object, str)
+    def _update_overview_focus_codes(self, focus_codes, selected_focus: str):
+        requested = str(self.overview_focus_combo.currentData() or "")
+        codes = [str(code) for code in list(focus_codes or [])]
+        self.overview_focus_combo.clear()
+        self.overview_focus_combo.addItem(f"Auto (most coverage: {selected_focus})", "")
+        for code in codes:
+            self.overview_focus_combo.addItem(code, code)
+        if requested and requested in codes:
+            self.overview_focus_combo.setCurrentIndex(self.overview_focus_combo.findData(requested))
+
+    def _set_overview_figure(self, figure: Figure) -> None:
+        old_canvas = self.overview_plot_scroll.takeWidget()
+        if old_canvas is not None:
+            old_canvas.setParent(None)
+            old_canvas.deleteLater()
+        if self._overview_figure is not None and self._overview_figure is not figure:
+            try:
+                self._overview_figure.clear()
+            except Exception:
+                pass
+        self._overview_figure = figure
+        self.overview_canvas = FigureCanvas(figure)
+        self.overview_canvas.setMinimumSize(1050, 700)
+        self.overview_plot_scroll.setWidget(self.overview_canvas)
+        self.overview_canvas.draw_idle()
+
+    @Slot(object)
+    def _on_spectral_overview_finished(self, result):
+        if not isinstance(result, SpectralOverviewResult):
+            self._on_spectral_overview_failed("Unexpected spectral overview result.")
+            return
+        try:
+            figure = render_spectral_overview_figure(result)
+        except Exception as exc:
+            self._on_spectral_overview_failed(f"Could not render spectral overview:\n{exc}")
+            return
+
+        self._overview_result = result
+        self._set_overview_figure(figure)
+        coverage_hours = float(result.coverage_seconds) / 3600.0
+        status = (
+            f"Generated focus code {result.focus_code}: {len(result.segments)} segment(s), "
+            f"{result.loaded_sources}/{result.total_sources} FITS file(s), "
+            f"{coverage_hours:.2f} hours of UTC coverage."
+        )
+        if result.warnings:
+            status += f" {len(result.warnings)} warning(s); hover for details."
+            self.overview_status_label.setToolTip("\n".join(result.warnings))
+        else:
+            self.overview_status_label.setToolTip("")
+        self.overview_status_label.setText(status)
+        self.overview_export_btn.setEnabled(True)
+
+    @Slot(str)
+    def _on_spectral_overview_failed(self, message: str):
+        self.overview_status_label.setText("Spectral overview generation failed.")
+        QMessageBox.critical(
+            self,
+            "Spectral Overview Failed",
+            str(message or "Could not generate the spectral overview."),
+        )
+
+    @Slot()
+    def _on_spectral_overview_cancelled(self):
+        self.overview_status_label.setText("Spectral overview generation cancelled.")
+
+    def export_spectral_overview(self):
+        if self._overview_figure is None or self._overview_result is None:
+            QMessageBox.information(self, "Export Spectral Overview", "Generate a spectral overview before exporting.")
+            return
+        result = self._overview_result
+        default_name = (
+            f"{result.station}_{result.observation_date:%Y%m%d}_{result.focus_code}_spectral_overview"
+        )
+        path, ext = pick_export_path(
+            self,
+            "Export Spectral Overview",
+            default_name,
+            _OVERVIEW_EXPORT_FILTERS,
+            default_filter="PNG (*.png)",
+        )
+        if not path:
+            return
+        try:
+            current_ext = os.path.splitext(path)[1].lstrip(".").lower()
+            export_ext = current_ext or str(ext or "png").lower()
+            export_format = "tiff" if export_ext in {"tif", "tiff"} else export_ext
+            self._overview_figure.savefig(
+                path,
+                dpi=300,
+                bbox_inches="tight",
+                facecolor="white",
+                format=export_format,
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Export Spectral Overview Failed",
+                f"Could not export spectral overview:\n{exc}",
+            )
+            return
+        QMessageBox.information(self, "Export Spectral Overview", f"Spectral overview saved:\n{path}")
 
     # -----------------------------
     # Multi-station event workflow
@@ -1450,3 +1899,17 @@ class CallistoDownloaderApp(QDialog):
 
             except Exception as e:
                 QMessageBox.critical(self, "Preview Error", f"{name}\n\n{e}")
+
+    def closeEvent(self, event):
+        if self._overview_thread is not None and self._overview_thread.isRunning():
+            self._overview_close_after_finish = True
+            if self._overview_worker is not None:
+                self._overview_worker.request_cancel()
+            event.ignore()
+            return
+        if self._overview_figure is not None:
+            try:
+                self._overview_figure.clear()
+            except Exception:
+                pass
+        super().closeEvent(event)

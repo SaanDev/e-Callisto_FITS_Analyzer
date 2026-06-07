@@ -31,6 +31,7 @@ from src.Backend.view_config import normalize_view_config
 _FIT_SUFFIXES = (".fit.gz", ".fits.gz", ".fit", ".fits")
 DEFAULT_DB_SCALE = 2500.0 / 256.0 / 25.4
 PLOTUTIL_DB_SCALE = 2500.0 / 255.0 / 25.4
+PLOTUTIL_DISPLAY_LIMITS = (-1.0, 8.0)
 
 BACKGROUND_METHOD_MEAN = "mean"
 BACKGROUND_METHOD_MEDIAN = "median"
@@ -225,6 +226,7 @@ def save_background_subtracted_png(
     cold_digits: float = 0.0,
     db_scale: float = DEFAULT_DB_SCALE,
     data_units: str = "digits",
+    default_display_limits: tuple[float, float] | None = None,
     view_config: dict | None = None,
 ) -> None:
     arr = np.asarray(data, dtype=np.float32)
@@ -278,6 +280,13 @@ def save_background_subtracted_png(
             if use_db:
                 lo = (lo - float(cold_digits)) * float(db_scale)
                 hi = (hi - float(cold_digits)) * float(db_scale)
+            if hi > lo:
+                levels = (lo, hi)
+        if levels is None and default_display_limits is not None:
+            lo, hi = sorted((float(default_display_limits[0]), float(default_display_limits[1])))
+            if input_is_db and not use_db:
+                lo /= float(db_scale)
+                hi /= float(db_scale)
             if hi > lo:
                 levels = (lo, hi)
         if levels is None:

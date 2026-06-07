@@ -24,6 +24,7 @@ from src.Backend.batch_processing import (
     BACKGROUND_METHOD_PLOTUTIL,
     DEFAULT_DB_SCALE,
     PLOTUTIL_DB_SCALE,
+    PLOTUTIL_DISPLAY_LIMITS,
     background_method_label,
     build_unique_output_png_path,
     locked_view_overlaps_data,
@@ -649,12 +650,16 @@ class BatchProcessWorker(QObject):
                     title_suffix = "Raw"
                     output_data_units = "digits"
                     output_db_scale = DEFAULT_DB_SCALE
+                    default_display_limits = None
                 else:
                     out_data = subtract_background(res.data, method=self.background_method)
                     method_label = background_method_label(self.background_method)
                     title_suffix = f"Background Subtracted ({method_label})"
                     output_data_units = "db" if self.background_method == BACKGROUND_METHOD_PLOTUTIL else "digits"
                     output_db_scale = PLOTUTIL_DB_SCALE if output_data_units == "db" else DEFAULT_DB_SCALE
+                    default_display_limits = (
+                        PLOTUTIL_DISPLAY_LIMITS if self.background_method == BACKGROUND_METHOD_PLOTUTIL else None
+                    )
 
                 out_path = build_unique_output_png_path(self.output_dir, base)
 
@@ -697,6 +702,7 @@ class BatchProcessWorker(QObject):
                     cold_digits=self.cold_digits,
                     db_scale=output_db_scale,
                     data_units=output_data_units,
+                    default_display_limits=default_display_limits,
                     view_config=self.view_config,
                 )
                 results.append({"input_path": file_path, "output_path": out_path})

@@ -16,6 +16,7 @@ pytest.importorskip("matplotlib")
 
 from src.Backend.batch_processing import (
     PLOTUTIL_DB_SCALE,
+    PLOTUTIL_DISPLAY_LIMITS,
     build_unique_output_png_path,
     convert_digits_to_db,
     list_fit_files,
@@ -199,6 +200,57 @@ def test_save_background_subtracted_png_does_not_reconvert_db_input(monkeypatch,
     )
 
     assert np.allclose(captured["display_data"], data)
+
+
+def test_save_background_subtracted_png_applies_default_display_limits(monkeypatch, tmp_path: Path):
+    out = tmp_path / "default_limits.png"
+    captured = {}
+
+    def fake_savefig(fig, output_path, *args, **kwargs):
+        captured["clim"] = fig.axes[0].images[0].get_clim()
+        Path(output_path).write_bytes(b"png")
+
+    monkeypatch.setattr("matplotlib.figure.Figure.savefig", fake_savefig)
+
+    save_background_subtracted_png(
+        data=np.array([[-50.0, 0.0], [8.0, 50.0]], dtype=np.float32),
+        freqs=np.array([90.0, 80.0], dtype=float),
+        time=np.array([0.0, 1.0], dtype=float),
+        output_path=str(out),
+        title="default-limits",
+        cmap_name="magma",
+        data_units="db",
+        default_display_limits=PLOTUTIL_DISPLAY_LIMITS,
+    )
+
+    assert captured["clim"] == pytest.approx(PLOTUTIL_DISPLAY_LIMITS)
+
+
+def test_save_background_subtracted_png_converts_default_db_limits_for_digit_display(monkeypatch, tmp_path: Path):
+    out = tmp_path / "default_limits_digits.png"
+    captured = {}
+
+    def fake_savefig(fig, output_path, *args, **kwargs):
+        captured["clim"] = fig.axes[0].images[0].get_clim()
+        Path(output_path).write_bytes(b"png")
+
+    monkeypatch.setattr("matplotlib.figure.Figure.savefig", fake_savefig)
+
+    save_background_subtracted_png(
+        data=np.array([[-1.0, 0.0], [8.0, 16.0]], dtype=np.float32),
+        freqs=np.array([90.0, 80.0], dtype=float),
+        time=np.array([0.0, 1.0], dtype=float),
+        output_path=str(out),
+        title="default-limits-digits",
+        cmap_name="magma",
+        db_scale=PLOTUTIL_DB_SCALE,
+        data_units="db",
+        default_display_limits=PLOTUTIL_DISPLAY_LIMITS,
+        view_config={"visual": {"use_db": False}},
+    )
+
+    expected = tuple(value / PLOTUTIL_DB_SCALE for value in PLOTUTIL_DISPLAY_LIMITS)
+    assert captured["clim"] == pytest.approx(expected)
 
 
 def test_save_background_subtracted_png_applies_locked_axes(monkeypatch, tmp_path: Path):

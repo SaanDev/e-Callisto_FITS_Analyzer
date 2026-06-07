@@ -164,6 +164,7 @@ OPTIONS = {
         "src.UI.fits_header_viewer",
         "src.UI.goes_sgps_gui",
         "src.Backend.burst_processor",
+        "src.Backend.spectral_overview",
         "src.Backend.multi_station_comparison",
         "src.Backend.view_config",
         "src.UI.gui_main",

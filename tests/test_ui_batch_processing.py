@@ -20,7 +20,7 @@ pytest.importorskip("astropy")
 from astropy.io import fits
 from PySide6.QtWidgets import QApplication
 
-from src.Backend.batch_processing import PLOTUTIL_DB_SCALE
+from src.Backend.batch_processing import PLOTUTIL_DB_SCALE, PLOTUTIL_DISPLAY_LIMITS
 from src.Backend.fits_io import FitsLoadResult
 from src.UI.gui_workers import BatchProcessWorker
 from src.UI.main_window import MainWindow
@@ -197,6 +197,7 @@ def test_batch_worker_exports_plotutil_method_as_preconverted_db(monkeypatch, tm
     assert payloads[0]["background_method"] == "plotutil_median_db"
     assert saved[0]["data_units"] == "db"
     assert saved[0]["db_scale"] == pytest.approx(PLOTUTIL_DB_SCALE)
+    assert saved[0]["default_display_limits"] == pytest.approx(PLOTUTIL_DISPLAY_LIMITS)
     assert np.allclose(saved[0]["data"], np.array([[-0.5, 0.5], [-0.5, 0.5]]) * PLOTUTIL_DB_SCALE)
 
 

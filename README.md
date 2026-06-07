@@ -344,6 +344,9 @@ Features:
 - Import selected FITS files directly into the Analyzer
 - Automatic detection of frequency or time stitching compatibility
 - Clear error messages when selected files cannot be combined
+- Generate a station's full UTC-day spectral overview from the **Spectral Overview** tab
+- Automatically select the focus code with the most coverage, or regenerate a selected focus code
+- Apply a day-wide Plotutil median-dB background baseline and export the organized six-panel overview
 
 ### Example: Downloader
 ![Downloader](assets/screenshots/callisto_downloader.png)
@@ -431,7 +434,7 @@ Export handling improvements:
 
 This supports publication workflows across operating systems.
 
-Batch plot exports are available from **Processing → Batch Processing**. Background subtraction options include per-channel mean, per-channel median, and **Plotutil Median (dB)**, which applies the legacy Plotutil `2500 / 255 / 25.4` digit-to-dB scale before median background removal. Enable **Use current display range** or load a saved `.efaview.json` config to export multiple station spectra with identical time/frequency axes.
+Batch plot exports are available from **Processing → Batch Processing**. Background subtraction options include per-channel mean, per-channel median, and **Plotutil Median (dB)**, which applies the legacy Plotutil `2500 / 255 / 25.4` digit-to-dB scale before median background removal and defaults to the Plotutil `-1` to `8 dB` display range. Enable **Use current display range** or load a saved `.efaview.json` config to export multiple station spectra with identical time/frequency axes.
 
 For visual station-to-station comparison, open **View → Multi-Station Comparison...**. Add multiple FITS files, choose UT-clock or seconds-from-file-start alignment, select shared/per-station/manual color scaling, set a shared display range, and export the visible comparison view as PNG, PDF, EPS, SVG, or TIFF. If the selected files are time- or frequency-combinable, the workspace renders combined views automatically; mixed-station selections are combined per station before comparison. The comparison workspace follows the app mode: Modern uses hardware-accelerated panels when available, while Classic uses Matplotlib.
 
