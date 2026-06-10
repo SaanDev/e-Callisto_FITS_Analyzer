@@ -3,6 +3,33 @@ A desktop application for visualizing, processing, and analyzing e-CALLISTO sola
 
 ---
 
+## What's New in v2.6.0
+
+Compared with v2.5.0, this release adds the following capabilities:
+
+### Multi-station analysis
+- **Multi-Station Comparison workspace:** open multiple FITS files in stacked synchronized panels, align them by UT clock or seconds from file start, and automatically combine compatible time/frequency files per station.
+- **Comparison noise-reduction controls:** apply mean, median, robust, or clipping-based noise reduction to every panel or an individual panel, with live threshold previews and synchronized colormaps.
+- **Flexible comparison exports:** export the visible comparison or a compact publication-style grid with shared display ranges and configurable shared, per-station, or manual color scaling.
+- **Multi-Station Event downloader:** search selected stations across a UTC event window, download matching FITS files, and send the selected or downloaded files directly to the comparison workspace. The standard downloader also includes a direct **Compare** action.
+
+### Spectrum tools and reproducible views
+- **Ruler measurements:** click two points on the main spectrum or a comparison panel to measure duration, frequency change, and drift slope.
+- **Aligned spectrum view workflow:** enter exact time/frequency display ranges, save and reuse range presets, and export/import complete `.efaview.json` view configurations.
+- **Locked batch exports:** apply the current display range or a saved view configuration when batch-exporting spectra so multiple outputs use consistent axes and styling.
+
+### Downloader and median_dB workflows
+- **Full-day Spectral Overview:** generate and export a station's complete UTC-day spectrum as six organized four-hour panels using a day-wide median_dB background baseline.
+- **Focus-code overview tabs:** generate previews for every available receiver/focus code for the selected station and date, or regenerate one selected code.
+- **median_dB processing:** use the median_dB digit-to-dB scale and display range in batch processing, spectral overviews, and downloader previews.
+
+### Reliability and packaging
+- Fixed FITS-load default preset application so configured defaults apply without unintended intermediate replots.
+- Improved multi-station rendering, noise previews, station/date labels, automatic combination, and visible/grid export layouts.
+- Added Windows PySide6 environment repair and validation tooling, packaged the new v2.6.0 modules across platforms, and added an opt-in Linux XCB fallback for affected Wayland setups.
+
+---
+
 ## ✨ Current Feature Highlights
 
 ### Dynamic spectrum workflow
@@ -10,7 +37,7 @@ A desktop application for visualizing, processing, and analyzing e-CALLISTO sola
 - Download and analyze e-CALLISTO and Learmonth Station radio data, including Learmonth chunk conversion to FIT format for the main Analyzer.
 - Use hardware-accelerated plotting with live cursor readouts, rectangular zoom, lock/unlock navigation, and **Edit → Reset to Raw** controls.
 - Adjust intensity thresholds live with high-resolution sliders, value readouts, optional signed-log scaling, dB or Digits/ADU display modes, and graph-property controls.
-- Apply the new **Raw FITS Percentile (5-98%)** noise-clipping preset from **Processing → Presets** for a fast starting display range on raw FITS files.
+- Apply the **Raw FITS Percentile (5-98%)** noise-clipping preset from **Processing → Presets** for a fast starting display range on raw FITS files.
 - Inspect FITS headers from the **View** menu, customize titles and labels, and export publication-ready figures from the current analysis view.
 - Generate project report PDFs that summarize the loaded dataset, processing state, analysis outputs, solar-context plots, and report-ready figures.
 
@@ -33,26 +60,6 @@ A desktop application for visualizing, processing, and analyzing e-CALLISTO sola
 - Export processed FITS files, provenance reports (Markdown + JSON), and analysis logs (CSV + TXT).
 - Generate diagnostics ZIP bundles for bug reports and open a prefilled GitHub issue draft from inside the app.
 - Use the built-in citation dialog to copy the recommended citation or BibTeX entry, and check for newer GitHub releases from the app.
-
----
-
-## What's New in v2.6.0
-
-### Main features
-- **Project report PDF generation:** create a consolidated report from **File → Generate Project Report...** with raw/background-subtracted spectra, light-curve overlays, maximum-intensity analysis, Type II band-splitting output, and available GOES/SGPS/Dst/Kp context figures.
-- **Light-curve overlays:** add light curves by typed frequency or plot click, switch between single-curve and multi-curve modes, and customize line color, thickness, opacity, style, vertical scale, and labels.
-- **Raw FITS percentile noise-clipping preset:** use **Processing → Presets → Raw FITS Percentile (5-98%)** to quickly set clipping limits from the data distribution. Saved presets can also be applied manually or selected as the default preset for future FITS loads.
-- **Rendered-path lasso burst isolation:** lasso masking now follows the displayed image pixel centers, so the isolated burst region matches the path drawn on the spectrum more accurately.
-- **Corrected harmonic shock calculations:** harmonic Type II shock-parameter calculations now use the converted fundamental frequency/drift values internally while preserving observed values in saved summaries.
-- **Corrected drift summaries:** drift estimation now ignores invalid/zero-duration segments and reports start frequency, end frequency, duration, and average drift from the valid time-ordered path.
-- **Aligned spectrum view workflow:** set exact display ranges, save/apply display-range presets, export/import `.efaview.json` view configs, batch-export spectra with locked axes, and open a stacked multi-station comparison workspace.
-
-### Bug fixes and improvements
-- Removed the obsolete **Burst Isolated Dynamic Spectrum** section from generated project reports.
-- Improved project-report spectrum rendering for raw, background-subtracted, light-curve, maximum-intensity, Type II, and solar-context figures.
-- Fixed FITS-load default preset behavior so configured defaults apply cleanly without unintended intermediate replots.
-- Improved report/export packaging by bundling ReportLab/Pillow dependencies and band-splitting icon assets in packaged builds.
-- Expanded regression coverage for lasso isolation, project reports, analysis-session shock fields, preset loading, and light-curve overlays.
 
 ---
 
@@ -346,7 +353,7 @@ Features:
 - Clear error messages when selected files cannot be combined
 - Generate a station's full UTC-day spectral overview from the **Spectral Overview** tab
 - Generate separate preview tabs for every focus code available for the selected station/date, or regenerate one selected code
-- Apply a day-wide Plotutil median-dB background baseline and export the organized six-panel overview
+- Apply a day-wide median_dB background baseline and export the organized six-panel overview
 
 ### Example: Downloader
 ![Downloader](assets/screenshots/callisto_downloader.png)
@@ -434,7 +441,7 @@ Export handling improvements:
 
 This supports publication workflows across operating systems.
 
-Batch plot exports are available from **Processing → Batch Processing**. Background subtraction options include per-channel mean, per-channel median, and **Plotutil Median (dB)**, which applies the legacy Plotutil `2500 / 255 / 25.4` digit-to-dB scale before median background removal and defaults to the Plotutil `-1` to `8 dB` display range. Enable **Use current display range** or load a saved `.efaview.json` config to export multiple station spectra with identical time/frequency axes.
+Batch plot exports are available from **Processing → Batch Processing**. Background subtraction options include per-channel mean, per-channel median, and **median_dB**, which applies the `2500 / 255 / 25.4` digit-to-dB scale before median background removal and defaults to the median_dB `-1` to `8 dB` display range. Enable **Use current display range** or load a saved `.efaview.json` config to export multiple station spectra with identical time/frequency axes.
 
 For visual station-to-station comparison, open **View → Multi-Station Comparison...**. Add multiple FITS files, choose UT-clock or seconds-from-file-start alignment, select shared/per-station/manual color scaling, set a shared display range, and export the visible comparison view as PNG, PDF, EPS, SVG, or TIFF. If the selected files are time- or frequency-combinable, the workspace renders combined views automatically; mixed-station selections are combined per station before comparison. The comparison workspace follows the app mode: Modern uses hardware-accelerated panels when available, while Classic uses Matplotlib.
 
