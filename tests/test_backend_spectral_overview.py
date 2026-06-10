@@ -12,7 +12,7 @@ import pytest
 pytest.importorskip("astropy")
 pytest.importorskip("matplotlib")
 
-from src.Backend.batch_processing import PLOTUTIL_DB_SCALE, PLOTUTIL_DISPLAY_LIMITS
+from src.Backend.batch_processing import MEDIAN_DB_SCALE, MEDIAN_DB_DISPLAY_LIMITS
 from src.Backend.spectral_overview import (
     SPECTRAL_OVERVIEW_FIGURE_SIZE,
     SpectralOverviewCancelled,
@@ -66,11 +66,11 @@ def test_build_spectral_overview_uses_one_day_wide_median(tmp_path):
     assert len(result.segments) == 2
     assert np.allclose(
         result.segments[0].data_db,
-        np.array([[-15.0, -5.0], [-15.0, -5.0]], dtype=np.float32) * PLOTUTIL_DB_SCALE,
+        np.array([[-15.0, -5.0], [-15.0, -5.0]], dtype=np.float32) * MEDIAN_DB_SCALE,
     )
     assert np.allclose(
         result.segments[1].data_db,
-        np.array([[5.0, 15.0], [5.0, 15.0]], dtype=np.float32) * PLOTUTIL_DB_SCALE,
+        np.array([[5.0, 15.0], [5.0, 15.0]], dtype=np.float32) * MEDIAN_DB_SCALE,
     )
 
 
@@ -106,7 +106,7 @@ def test_build_spectral_overview_handles_frequency_changes_independently(tmp_pat
     for segment in result.segments:
         assert np.allclose(
             segment.data_db,
-            np.array([[-5.0, 5.0], [-5.0, 5.0]], dtype=np.float32) * PLOTUTIL_DB_SCALE,
+            np.array([[-5.0, 5.0], [-5.0, 5.0]], dtype=np.float32) * MEDIAN_DB_SCALE,
         )
 
 
@@ -226,7 +226,7 @@ def test_render_spectral_overview_builds_six_fixed_scale_panels(tmp_path):
     panels = figure.axes[:6]
     assert tuple(figure.get_size_inches()) == pytest.approx(SPECTRAL_OVERVIEW_FIGURE_SIZE)
     assert len(panels) == 6
-    assert panels[0].images[0].get_clim() == pytest.approx(PLOTUTIL_DISPLAY_LIMITS)
+    assert panels[0].images[0].get_clim() == pytest.approx(MEDIAN_DB_DISPLAY_LIMITS)
     assert any(text.get_text() == "No data" for text in panels[1].texts)
     assert "TEST" in figure._suptitle.get_text()
     assert "Focus 01" in figure._suptitle.get_text()

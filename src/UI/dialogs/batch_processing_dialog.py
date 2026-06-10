@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 from src.Backend.batch_processing import (
     BACKGROUND_METHOD_MEAN,
     BACKGROUND_METHOD_MEDIAN,
-    BACKGROUND_METHOD_PLOTUTIL,
+    BACKGROUND_METHOD_MEDIAN_DB,
     background_method_label,
 )
 from src.Backend.view_config import parse_view_config_json
@@ -130,7 +130,7 @@ class BatchProcessingDialog(QDialog):
         self.background_method_combo = QComboBox()
         self.background_method_combo.addItem("Mean", BACKGROUND_METHOD_MEAN)
         self.background_method_combo.addItem("Median", BACKGROUND_METHOD_MEDIAN)
-        self.background_method_combo.addItem("Plotutil Median (dB)", BACKGROUND_METHOD_PLOTUTIL)
+        self.background_method_combo.addItem("median_dB", BACKGROUND_METHOD_MEDIAN_DB)
 
         self.colormap_label = QLabel("Colormap")
         self.colormap_combo = QComboBox()

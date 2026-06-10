@@ -20,7 +20,7 @@ pytest.importorskip("astropy")
 from astropy.io import fits
 from PySide6.QtWidgets import QApplication
 
-from src.Backend.batch_processing import PLOTUTIL_DB_SCALE, PLOTUTIL_DISPLAY_LIMITS
+from src.Backend.batch_processing import MEDIAN_DB_SCALE, MEDIAN_DB_DISPLAY_LIMITS
 from src.Backend.fits_io import FitsLoadResult
 from src.UI.gui_workers import BatchProcessWorker
 from src.UI.main_window import MainWindow
@@ -169,13 +169,13 @@ def test_batch_worker_reports_selected_options_with_empty_folder(tmp_path: Path)
     assert payload["cold_digits"] == 3.5
 
 
-def test_batch_worker_exports_plotutil_method_as_preconverted_db(monkeypatch, tmp_path: Path):
+def test_batch_worker_exports_median_db_method_as_preconverted_db(monkeypatch, tmp_path: Path):
     input_dir = tmp_path / "input"
     input_dir.mkdir()
     payloads = []
     saved = []
 
-    monkeypatch.setattr("src.UI.gui_workers.list_fit_files", lambda *_a, **_k: ["/tmp/plotutil.fit"])
+    monkeypatch.setattr("src.UI.gui_workers.list_fit_files", lambda *_a, **_k: ["/tmp/median_db.fit"])
     monkeypatch.setattr("src.UI.gui_workers.load_callisto_fits", lambda *_a, **_k: _build_result())
     monkeypatch.setattr(
         "src.UI.gui_workers.build_unique_output_png_path",
@@ -189,16 +189,16 @@ def test_batch_worker_exports_plotutil_method_as_preconverted_db(monkeypatch, tm
     worker = BatchProcessWorker(
         input_dir=str(input_dir),
         output_dir=str(tmp_path),
-        background_method="plotutil_median_db",
+        background_method="median_db",
     )
     worker.finished.connect(lambda payload: payloads.append(payload))
     worker.run()
 
-    assert payloads[0]["background_method"] == "plotutil_median_db"
+    assert payloads[0]["background_method"] == "median_db"
     assert saved[0]["data_units"] == "db"
-    assert saved[0]["db_scale"] == pytest.approx(PLOTUTIL_DB_SCALE)
-    assert saved[0]["default_display_limits"] == pytest.approx(PLOTUTIL_DISPLAY_LIMITS)
-    assert np.allclose(saved[0]["data"], np.array([[-0.5, 0.5], [-0.5, 0.5]]) * PLOTUTIL_DB_SCALE)
+    assert saved[0]["db_scale"] == pytest.approx(MEDIAN_DB_SCALE)
+    assert saved[0]["default_display_limits"] == pytest.approx(MEDIAN_DB_DISPLAY_LIMITS)
+    assert np.allclose(saved[0]["data"], np.array([[-0.5, 0.5], [-0.5, 0.5]]) * MEDIAN_DB_SCALE)
 
 
 def test_batch_worker_raw_mode_does_not_call_background_subtraction(monkeypatch, tmp_path: Path):
@@ -347,7 +347,9 @@ def test_batch_dialog_background_method_combo_toggles_with_output_mode():
     assert dlg.background_output_radio.isChecked() is True
     assert dlg.background_method_combo.isEnabled() is True
     methods = [dlg.background_method_combo.itemData(i) for i in range(dlg.background_method_combo.count())]
-    assert "plotutil_median_db" in methods
+    labels = [dlg.background_method_combo.itemText(i) for i in range(dlg.background_method_combo.count())]
+    assert "median_db" in methods
+    assert "median_dB" in labels
 
     dlg.raw_output_radio.setChecked(True)
     QApplication.processEvents()

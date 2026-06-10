@@ -15,8 +15,9 @@ import pytest
 pytest.importorskip("matplotlib")
 
 from src.Backend.batch_processing import (
-    PLOTUTIL_DB_SCALE,
-    PLOTUTIL_DISPLAY_LIMITS,
+    MEDIAN_DB_SCALE,
+    MEDIAN_DB_DISPLAY_LIMITS,
+    background_method_label,
     build_unique_output_png_path,
     convert_digits_to_db,
     list_fit_files,
@@ -93,7 +94,7 @@ def test_subtract_background_preserves_robust_baseline_support():
     assert np.allclose(result, data - np.percentile(data, 25.0, axis=1, keepdims=True))
 
 
-def test_subtract_background_plotutil_matches_reference_median_db_method():
+def test_subtract_background_median_db_matches_reference_method():
     data = np.array(
         [
             [10.0, 12.0, 30.0],
@@ -106,11 +107,15 @@ def test_subtract_background_plotutil_matches_reference_median_db_method():
     db = (dref / 255.0 * 2500.0) / 25.4
     expected = db - np.median(db, axis=1, keepdims=True)
 
-    result = subtract_background(data, method="plotutil_median_db")
+    result = subtract_background(data, method="median_db")
 
     assert result.dtype == np.float32
-    assert PLOTUTIL_DB_SCALE == pytest.approx(2500.0 / 255.0 / 25.4)
+    assert MEDIAN_DB_SCALE == pytest.approx(2500.0 / 255.0 / 25.4)
     assert np.allclose(result, expected)
+
+
+def test_legacy_background_method_alias_uses_median_db_label():
+    assert background_method_label("plotutil_median_db") == "median_dB"
 
 
 def test_convert_digits_to_db_uses_cold_baseline():
@@ -195,7 +200,7 @@ def test_save_background_subtracted_png_does_not_reconvert_db_input(monkeypatch,
         title="preconverted-db",
         cmap_name="magma",
         cold_digits=100.0,
-        db_scale=PLOTUTIL_DB_SCALE,
+        db_scale=MEDIAN_DB_SCALE,
         data_units="db",
     )
 
@@ -220,10 +225,10 @@ def test_save_background_subtracted_png_applies_default_display_limits(monkeypat
         title="default-limits",
         cmap_name="magma",
         data_units="db",
-        default_display_limits=PLOTUTIL_DISPLAY_LIMITS,
+        default_display_limits=MEDIAN_DB_DISPLAY_LIMITS,
     )
 
-    assert captured["clim"] == pytest.approx(PLOTUTIL_DISPLAY_LIMITS)
+    assert captured["clim"] == pytest.approx(MEDIAN_DB_DISPLAY_LIMITS)
 
 
 def test_save_background_subtracted_png_converts_default_db_limits_for_digit_display(monkeypatch, tmp_path: Path):
@@ -243,13 +248,13 @@ def test_save_background_subtracted_png_converts_default_db_limits_for_digit_dis
         output_path=str(out),
         title="default-limits-digits",
         cmap_name="magma",
-        db_scale=PLOTUTIL_DB_SCALE,
+        db_scale=MEDIAN_DB_SCALE,
         data_units="db",
-        default_display_limits=PLOTUTIL_DISPLAY_LIMITS,
+        default_display_limits=MEDIAN_DB_DISPLAY_LIMITS,
         view_config={"visual": {"use_db": False}},
     )
 
-    expected = tuple(value / PLOTUTIL_DB_SCALE for value in PLOTUTIL_DISPLAY_LIMITS)
+    expected = tuple(value / MEDIAN_DB_SCALE for value in MEDIAN_DB_DISPLAY_LIMITS)
     assert captured["clim"] == pytest.approx(expected)
 
 

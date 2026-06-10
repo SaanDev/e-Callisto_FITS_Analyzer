@@ -21,10 +21,10 @@ import requests
 from PySide6.QtCore import QCoreApplication, QObject, QStandardPaths, Signal, Slot
 
 from src.Backend.batch_processing import (
-    BACKGROUND_METHOD_PLOTUTIL,
+    BACKGROUND_METHOD_MEDIAN_DB,
     DEFAULT_DB_SCALE,
-    PLOTUTIL_DB_SCALE,
-    PLOTUTIL_DISPLAY_LIMITS,
+    MEDIAN_DB_SCALE,
+    MEDIAN_DB_DISPLAY_LIMITS,
     background_method_label,
     build_unique_output_png_path,
     locked_view_overlaps_data,
@@ -655,10 +655,10 @@ class BatchProcessWorker(QObject):
                     out_data = subtract_background(res.data, method=self.background_method)
                     method_label = background_method_label(self.background_method)
                     title_suffix = f"Background Subtracted ({method_label})"
-                    output_data_units = "db" if self.background_method == BACKGROUND_METHOD_PLOTUTIL else "digits"
-                    output_db_scale = PLOTUTIL_DB_SCALE if output_data_units == "db" else DEFAULT_DB_SCALE
+                    output_data_units = "db" if self.background_method == BACKGROUND_METHOD_MEDIAN_DB else "digits"
+                    output_db_scale = MEDIAN_DB_SCALE if output_data_units == "db" else DEFAULT_DB_SCALE
                     default_display_limits = (
-                        PLOTUTIL_DISPLAY_LIMITS if self.background_method == BACKGROUND_METHOD_PLOTUTIL else None
+                        MEDIAN_DB_DISPLAY_LIMITS if self.background_method == BACKGROUND_METHOD_MEDIAN_DB else None
                     )
 
                 out_path = build_unique_output_png_path(self.output_dir, base)
