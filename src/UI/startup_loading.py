@@ -26,13 +26,15 @@ class StartupLoadingScreen(QWidget):
             parent,
             Qt.WindowType.SplashScreen
             | Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint,
+            | Qt.WindowType.WindowTransparentForInput,
         )
         self.setObjectName("StartupLoadingScreen")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setFixedSize(540, 280)
 
         self._status_text = "Starting application..."
+        self._dismissed = False
         self._build_ui(app_name=app_name, version=version, logo_path=logo_path or "")
 
     def _build_ui(self, app_name: str, version: str, logo_path: str) -> None:
@@ -182,17 +184,29 @@ class StartupLoadingScreen(QWidget):
         )
 
     def present(self) -> None:
+        self._dismissed = False
         self._center_on_primary_screen()
         self.show()
         self.raise_()
         QApplication.processEvents()
 
     def set_progress(self, value: int, text: str | None = None) -> None:
+        if self._dismissed:
+            return
         clamped = max(0, min(100, int(value)))
         if text is not None:
             self._status_text = str(text)
             self._status_label.setText(self._status_text)
         self._progress_bar.setValue(clamped)
+        QApplication.processEvents()
+
+    def dismiss(self) -> None:
+        """Hide the splash immediately and make repeated cleanup calls harmless."""
+        if self._dismissed:
+            return
+        self._dismissed = True
+        self.hide()
+        self.close()
         QApplication.processEvents()
 
     def progress_value(self) -> int:

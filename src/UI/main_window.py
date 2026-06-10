@@ -11897,31 +11897,18 @@ class MainWindow(QMainWindow):
                     return
         except Exception:
             pass
+        running_threads = self._request_background_thread_shutdown()
+        if running_threads:
+            names = ", ".join(running_threads)
+            self.statusBar().showMessage(
+                f"Waiting for background work to finish before closing: {names}.",
+                6000,
+            )
+            event.ignore()
+            return
         try:
             self.noise_smooth_timer.stop()
             self.noise_commit_timer.stop()
-        except Exception:
-            pass
-        try:
-            if self._update_thread is not None:
-                self._update_thread.quit()
-                self._update_thread.wait(500)
-        except Exception:
-            pass
-        try:
-            if self._update_download_thread is not None:
-                if self._update_download_worker is not None:
-                    self._update_download_worker.request_cancel()
-                self._update_download_thread.quit()
-                self._update_download_thread.wait(800)
-        except Exception:
-            pass
-        try:
-            if self._project_report_thread is not None:
-                if self._project_report_worker is not None:
-                    self._project_report_worker.request_cancel()
-                self._project_report_thread.quit()
-                self._project_report_thread.wait(800)
         except Exception:
             pass
         try:
@@ -11988,6 +11975,42 @@ class MainWindow(QMainWindow):
         self._close_update_download_progress_dialog()
         super().closeEvent(event)
 
+    def _request_background_thread_shutdown(self) -> list[str]:
+        """Request worker cancellation and report threads that are still active."""
+        for worker_name in (
+            "_update_download_worker",
+            "_project_report_worker",
+            "_goes_overlay_worker",
+        ):
+            worker = getattr(self, worker_name, None)
+            if worker is None or not hasattr(worker, "request_cancel"):
+                continue
+            try:
+                worker.request_cancel()
+            except Exception:
+                pass
+
+        active: list[str] = []
+        for label, thread_name in (
+            ("update check", "_update_thread"),
+            ("update download", "_update_download_thread"),
+            ("project report", "_project_report_thread"),
+            ("FITS import", "_import_thread"),
+            ("comparison preparation", "_comparison_thread"),
+            ("GOES overlay", "_goes_overlay_thread"),
+        ):
+            thread = getattr(self, thread_name, None)
+            if thread is None:
+                continue
+            try:
+                thread.quit()
+                if thread.isRunning() and not thread.wait(1000):
+                    active.append(label)
+            except RuntimeError:
+                continue
+            except Exception:
+                active.append(label)
+        return active
 
     def open_cme_viewer(self):
         from src.UI.soho_lasco_viewer import CMEViewer  # import here, not at top

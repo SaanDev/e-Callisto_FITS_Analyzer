@@ -32,5 +32,8 @@ def test_startup_loading_screen_tracks_progress_and_status():
     assert splash.progress_value() == 100
     assert splash.status_text() == "Preparing interface..."
     assert bool(splash.windowFlags() & Qt.WindowType.SplashScreen)
+    assert bool(splash.windowFlags() & Qt.WindowType.WindowTransparentForInput)
 
-    splash.close()
+    splash.dismiss()
+    splash.dismiss()
+    assert not splash.isVisible()

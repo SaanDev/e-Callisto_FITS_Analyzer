@@ -94,6 +94,8 @@ def test_windows_venv_repair_script_exists_and_uses_rmdir_fallback():
     assert "cmd.exe" in text
     assert "rmdir /s /q" in text
     assert "install_requirements.py" in text
+    assert 'pyExe -3 -m venv' not in text
+    assert "will not silently use another Python version" in text
     assert "throw (" not in text
 
 

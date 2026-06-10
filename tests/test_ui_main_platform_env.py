@@ -7,6 +7,7 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
 
 import pytest
+import builtins
 
 pytest.importorskip("PySide6")
 
@@ -67,3 +68,19 @@ def test_linux_wayland_can_be_opted_back_in(monkeypatch):
     main_module._configure_platform_env()
 
     assert "QT_QPA_PLATFORM" not in main_module.os.environ
+
+
+def test_windows_development_runtime_preflight_reports_hashlib_failure(monkeypatch):
+    monkeypatch.setattr(main_module.sys, "platform", "win32")
+    monkeypatch.delattr(main_module.sys, "frozen", raising=False)
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "hashlib":
+            raise ImportError("broken _hashlib")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    with pytest.raises(RuntimeError, match="repair_windows_venv.ps1"):
+        main_module._preflight_windows_development_runtime()

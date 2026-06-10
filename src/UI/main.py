@@ -192,6 +192,23 @@ def _configure_windows_dll_search_path() -> None:
             continue
 
 
+def _preflight_windows_development_runtime() -> None:
+    if not sys.platform.startswith("win") or getattr(sys, "frozen", False):
+        return
+
+    try:
+        import hashlib
+
+        hashlib.sha256(b"e-callisto-startup-check").digest()
+    except Exception as exc:
+        raise RuntimeError(
+            "The Windows Python runtime could not load hashlib/_hashlib. "
+            "Recreate the development environment with Python 3.12 by running:\n"
+            "  powershell -ExecutionPolicy Bypass -File "
+            ".\\src\\Installation\\repair_windows_venv.ps1"
+        ) from exc
+
+
 BASE_PATH = _project_base_path()
 if BASE_PATH not in sys.path:
     sys.path.insert(0, BASE_PATH)
@@ -268,6 +285,10 @@ def _run_main_mode(app: QApplication) -> int:
         app_icon = _load_app_icon()
         if not app_icon.isNull():
             app.setWindowIcon(app_icon)
+        # Matplotlib imports hashlib during startup. Check it before presenting
+        # the splash so a damaged source-development runtime cannot look like a
+        # permanently frozen splash screen.
+        _preflight_windows_development_runtime()
 
     from src.UI.startup_loading import StartupLoadingScreen
 
@@ -281,27 +302,37 @@ def _run_main_mode(app: QApplication) -> int:
     startup_loading.present()
     startup_loading.set_progress(15, "Loading analysis modules...")
 
-    from src.UI.main_window import MainWindow
-    from src.UI.mpl_style import apply_origin_style
-    from src.UI.theme_manager import AppTheme
+    try:
+        from src.UI.main_window import MainWindow
+        from src.UI.mpl_style import apply_origin_style
+        from src.UI.theme_manager import AppTheme
 
-    startup_loading.set_progress(45, "Applying interface styling...")
-    apply_origin_style()
-    theme = AppTheme(app)
-    app.setProperty("theme_manager", theme)
+        startup_loading.set_progress(45, "Applying interface styling...")
+        apply_origin_style()
+        theme = AppTheme(app)
+        app.setProperty("theme_manager", theme)
 
-    startup_loading.set_progress(80, "Preparing the main workspace...")
-    window = MainWindow(theme=theme)
-    if sys.platform.startswith("win"):
-        app_icon = app.windowIcon()
-        if not app_icon.isNull():
-            window.setWindowIcon(app_icon)
-    startup_loading.set_progress(100, "Opening analyzer...")
-    window.showMaximized()
-    app.processEvents()
-    startup_loading.close()
+        startup_loading.set_progress(80, "Preparing the main workspace...")
+        window = MainWindow(theme=theme)
+        if sys.platform.startswith("win"):
+            app_icon = app.windowIcon()
+            if not app_icon.isNull():
+                window.setWindowIcon(app_icon)
+        startup_loading.set_progress(100, "Opening analyzer...")
+
+        # Register the main window as visible before closing the splash so Qt
+        # does not treat splash dismissal as the last window closing.
+        window.showMaximized()
+        startup_loading.dismiss()
+        window.raise_()
+        window.activateWindow()
+        app.processEvents()
+    except BaseException:
+        startup_loading.dismiss()
+        raise
+
     startup_loading.deleteLater()
-    QTimer.singleShot(0, window.check_for_startup_updates)
+    QTimer.singleShot(1500, window.check_for_startup_updates)
     return app.exec()
 
 

@@ -582,7 +582,8 @@ Use **About → Check for Updates...** to query the latest release from GitHub.
 ## 🛠️ Build and Packaging
 
 ### Prerequisites
-- Python 3.12+ is recommended for local development and Windows/macOS packaging.
+- Python 3.12 is recommended for Windows local development and packaging.
+- Python 3.12+ is recommended for macOS local development and packaging.
 - Linux packaging scripts can also work with Python 3.11+ when required by the target system.
 
 ### Run from Source
@@ -594,6 +595,7 @@ Use **About → Check for Updates...** to query the latest release from GitHub.
 - Windows: if `PySide6.QtCore` fails with `ImportError: DLL load failed`, repair the venv and reinstall the pinned runtime stack:
   - `powershell -ExecutionPolicy Bypass -File .\src\Installation\repair_windows_venv.ps1`
   - `.\venv\Scripts\python.exe src\UI\main.py`
+- The Windows repair script requires Python 3.12 by default and will not silently fall back to Python 3.14 or another installed version. To explicitly use another tested version, pass `-PythonVersion`.
 - Start the standalone Kyoto Dst index plotter:
   - `python src/UI/dst_index_gui.py`
 - Start the standalone GFZ Kp index plotter:

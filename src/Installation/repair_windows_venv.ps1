@@ -75,26 +75,24 @@ if ($pyLauncher) {
     if ($LASTEXITCODE -eq 0) {
         $created = $true
     }
+}
 
-    if (-not $created) {
-        & $pyExe -3 -m venv $VenvPath
-        if ($LASTEXITCODE -eq 0) {
-            $created = $true
+if (-not $created) {
+    $python = Get-Command python.exe -ErrorAction SilentlyContinue
+    if ($python) {
+        $pythonExe = $python.Source
+        $DetectedVersion = (& $pythonExe -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')").Trim()
+        if ($LASTEXITCODE -eq 0 -and $DetectedVersion -eq $PythonVersion) {
+            & $pythonExe -m venv $VenvPath
+            if ($LASTEXITCODE -eq 0) {
+                $created = $true
+            }
         }
     }
 }
 
 if (-not $created) {
-    $python = Get-Command python.exe -ErrorAction SilentlyContinue
-    if (-not $python) {
-        throw "No Python executable found. Install Python $PythonVersion or add Python to PATH."
-    }
-
-    $pythonExe = $python.Source
-    & $pythonExe -m venv $VenvPath
-    if ($LASTEXITCODE -ne 0) {
-        throw "Virtual environment creation failed with exit code $LASTEXITCODE."
-    }
+    throw "Python $PythonVersion was not found. Install Python $PythonVersion (64-bit), then run this repair script again. The script will not silently use another Python version because that can recreate an incompatible environment."
 }
 
 $VenvPython = Join-Path $VenvPath "Scripts\python.exe"

@@ -108,6 +108,30 @@ def test_startup_update_check_delegates_to_non_interactive_path(monkeypatch):
     assert captured["interactive"] is False
 
 
+def test_shutdown_reports_still_running_update_thread():
+    _app()
+    window = MainWindow(theme=None)
+
+    class RunningThread:
+        def __init__(self):
+            self.quit_called = False
+
+        def quit(self):
+            self.quit_called = True
+
+        def isRunning(self):
+            return True
+
+        def wait(self, _timeout):
+            return False
+
+    thread = RunningThread()
+    window._update_thread = thread
+
+    assert window._request_background_thread_shutdown() == ["update check"]
+    assert thread.quit_called is True
+
+
 def test_update_available_sets_status_bar_label_without_dialog_on_startup(monkeypatch):
     _app()
     window = MainWindow(theme=None)
