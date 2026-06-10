@@ -18,7 +18,7 @@ import numpy as np
 import requests
 from requests.adapters import HTTPAdapter
 from astropy.io import fits
-from src.Backend.batch_processing import MEDIAN_DB_DISPLAY_LIMITS, subtract_background
+from src.Backend.batch_processing import PLOTUTIL_DISPLAY_LIMITS, subtract_background
 from src.Backend.fits_io import load_callisto_fits
 from src.Backend.spectral_overview import (
     SPECTRAL_OVERVIEW_FIGURE_SIZE,
@@ -690,8 +690,8 @@ class EventDownloadTask(QObject, QRunnable):
 # -----------------------------
 # Preview window
 # -----------------------------
-def _build_median_db_preview_figure(data, freqs, times):
-    data = subtract_background(data, method="median_db")
+def _build_plotutil_preview_figure(data, freqs, times):
+    data = subtract_background(data, method="plotutil_median_db")
     fig = Figure()
     ax = fig.add_subplot(111)
 
@@ -714,8 +714,8 @@ def _build_median_db_preview_figure(data, freqs, times):
             extent=extent,
             origin=origin,
             cmap="inferno",
-            vmin=MEDIAN_DB_DISPLAY_LIMITS[0],
-            vmax=MEDIAN_DB_DISPLAY_LIMITS[1],
+            vmin=PLOTUTIL_DISPLAY_LIMITS[0],
+            vmax=PLOTUTIL_DISPLAY_LIMITS[1],
         )
 
         ax.set_xlabel("Time [s]")
@@ -729,8 +729,8 @@ def _build_median_db_preview_figure(data, freqs, times):
             aspect="auto",
             origin="lower",
             cmap="inferno",
-            vmin=MEDIAN_DB_DISPLAY_LIMITS[0],
-            vmax=MEDIAN_DB_DISPLAY_LIMITS[1],
+            vmin=PLOTUTIL_DISPLAY_LIMITS[0],
+            vmax=PLOTUTIL_DISPLAY_LIMITS[1],
         )
         ax.set_xlabel("Time bin")
         ax.set_ylabel("Frequency channel")
@@ -748,7 +748,7 @@ class PreviewWindow(QDialog):
         self.setMinimumSize(900, 600)
 
         res = load_callisto_fits(file_path, memmap=False)
-        fig, ax, cbar = _build_median_db_preview_figure(res.data, res.freqs, res.time)
+        fig, ax, cbar = _build_plotutil_preview_figure(res.data, res.freqs, res.time)
         canvas = FigureCanvas(fig)
 
         theme = QApplication.instance().property("theme_manager")
@@ -1292,7 +1292,7 @@ class CallistoDownloaderApp(QDialog):
         self.overview_progress_bar = QProgressBar(self)
         self.overview_progress_bar.setVisible(False)
         self.overview_status_label = QLabel(
-            "Select a station and UTC date, then generate full-day median_dB overviews "
+            "Select a station and UTC date, then generate full-day Plotutil median-dB overviews "
             "for every available focus code.",
             self,
         )

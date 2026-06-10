@@ -15,7 +15,7 @@ import numpy as np
 from matplotlib.figure import Figure
 from matplotlib.ticker import FuncFormatter
 
-from src.Backend.batch_processing import MEDIAN_DB_SCALE, MEDIAN_DB_DISPLAY_LIMITS
+from src.Backend.batch_processing import PLOTUTIL_DB_SCALE, PLOTUTIL_DISPLAY_LIMITS
 from src.Backend.fits_io import load_callisto_fits, preview_callisto_fits
 from src.Backend.frequency_axis import (
     frequency_edges,
@@ -286,7 +286,7 @@ def build_spectral_overview(
                         result = load_callisto_fits(source.path, memmap=False)
                         data, freqs = orient_frequency_rows(result.data, result.freqs, direction=-1)
                         data_db = (
-                            (np.asarray(data, dtype=np.float32) - baseline) * np.float32(MEDIAN_DB_SCALE)
+                            (np.asarray(data, dtype=np.float32) - baseline) * np.float32(PLOTUTIL_DB_SCALE)
                         ).astype(np.float32, copy=False)
                         relative_time = np.asarray(result.time, dtype=float).ravel()
                         count = min(data_db.shape[1], relative_time.size)
@@ -353,7 +353,7 @@ def render_spectral_overview_figure(result: SpectralOverviewResult) -> Figure:
     fig, axes = Figure(figsize=SPECTRAL_OVERVIEW_FIGURE_SIZE, facecolor="white"), []
     grid = fig.add_gridspec(6, 1, left=0.065, right=0.87, bottom=0.070, top=0.915, hspace=0.30)
     cmap = transparent_bad_cmap(mpl.colormaps.get_cmap("viridis"))
-    norm = mpl.colors.Normalize(vmin=float(MEDIAN_DB_DISPLAY_LIMITS[0]), vmax=float(MEDIAN_DB_DISPLAY_LIMITS[1]))
+    norm = mpl.colors.Normalize(vmin=float(PLOTUTIL_DISPLAY_LIMITS[0]), vmax=float(PLOTUTIL_DISPLAY_LIMITS[1]))
 
     for panel_index in range(6):
         ax = fig.add_subplot(grid[panel_index, 0])
