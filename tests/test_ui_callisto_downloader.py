@@ -9,6 +9,7 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 from datetime import date, datetime
 import os
 
+import numpy as np
 import pytest
 
 pytest.importorskip("PySide6")
@@ -20,6 +21,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QDialog, QSpinBox
 from matplotlib.figure import Figure
 
+from src.Backend.batch_processing import PLOTUTIL_DB_SCALE, PLOTUTIL_DISPLAY_LIMITS
 from src.Backend.spectral_overview import SpectralOverviewResult
 from src.UI.callisto_downloader import (
     BASE_URL,
@@ -28,6 +30,7 @@ from src.UI.callisto_downloader import (
     EventFetchWorker,
     FetchWorker,
     SpectralOverviewWorker,
+    _build_plotutil_preview_figure,
     extract_fits_links,
     filter_event_candidates,
     filter_spectral_overview_candidates,
@@ -39,6 +42,36 @@ from src.UI.callisto_downloader import (
 
 def _app():
     return QApplication.instance() or QApplication([])
+
+
+def test_downloader_preview_renders_plotutil_db_with_frequency_and_time_axes():
+    raw = np.array([[10.0, 12.0, 30.0], [20.0, 25.0, 35.0]], dtype=np.float32)
+    figure, _ax, _cbar = _build_plotutil_preview_figure(
+        raw,
+        np.array([90.0, 80.0], dtype=float),
+        np.array([0.0, 1.0, 2.0], dtype=float),
+    )
+    image = figure.axes[0].images[0]
+    expected = (raw - np.median(raw, axis=1, keepdims=True)) * PLOTUTIL_DB_SCALE
+
+    assert np.allclose(np.asarray(image.get_array()), expected)
+    assert image.get_clim() == pytest.approx(PLOTUTIL_DISPLAY_LIMITS)
+    assert figure.axes[0].get_xlabel() == "Time [s]"
+    assert figure.axes[0].get_ylabel() == "Frequency [MHz]"
+    assert figure.axes[1].get_ylabel() == "Background-subtracted intensity [dB]"
+
+
+def test_downloader_preview_renders_plotutil_db_with_fallback_axes():
+    raw = np.array([[10.0, 12.0, 30.0], [20.0, 25.0, 35.0]], dtype=np.float32)
+    figure, _ax, _cbar = _build_plotutil_preview_figure(raw, None, None)
+    image = figure.axes[0].images[0]
+    expected = (raw - np.median(raw, axis=1, keepdims=True)) * PLOTUTIL_DB_SCALE
+
+    assert np.allclose(np.asarray(image.get_array()), expected)
+    assert image.get_clim() == pytest.approx(PLOTUTIL_DISPLAY_LIMITS)
+    assert figure.axes[0].get_xlabel() == "Time bin"
+    assert figure.axes[0].get_ylabel() == "Frequency channel"
+    assert figure.axes[1].get_ylabel() == "Background-subtracted intensity [dB]"
 
 
 def test_fetch_worker_day_url():

@@ -18,6 +18,7 @@ import numpy as np
 import requests
 from requests.adapters import HTTPAdapter
 from astropy.io import fits
+from src.Backend.batch_processing import PLOTUTIL_DISPLAY_LIMITS, subtract_background
 from src.Backend.fits_io import load_callisto_fits
 from src.Backend.spectral_overview import (
     SPECTRAL_OVERVIEW_FIGURE_SIZE,
@@ -689,6 +690,57 @@ class EventDownloadTask(QObject, QRunnable):
 # -----------------------------
 # Preview window
 # -----------------------------
+def _build_plotutil_preview_figure(data, freqs, times):
+    data = subtract_background(data, method="plotutil_median_db")
+    fig = Figure()
+    ax = fig.add_subplot(111)
+
+    if freqs is not None and times is not None and len(freqs) > 1 and len(times) > 1:
+        freqs = np.array(freqs, dtype=float).ravel()
+        times = np.array(times, dtype=float).ravel()
+
+        fmin = float(np.nanmin(freqs))
+        fmax = float(np.nanmax(freqs))
+        tmin = float(np.nanmin(times))
+        tmax = float(np.nanmax(times))
+
+        # If freqs are descending (high -> low), row 0 should be at the top
+        origin = "upper" if freqs[0] > freqs[-1] else "lower"
+
+        extent = [tmin, tmax, fmin, fmax]
+        im = ax.imshow(
+            data,
+            aspect="auto",
+            extent=extent,
+            origin=origin,
+            cmap="inferno",
+            vmin=PLOTUTIL_DISPLAY_LIMITS[0],
+            vmax=PLOTUTIL_DISPLAY_LIMITS[1],
+        )
+
+        ax.set_xlabel("Time [s]")
+        ax.set_ylabel("Frequency [MHz]")
+        ax.set_ylim(fmin, fmax)
+
+    else:
+        # Fallback: show channels, but keep 0 at bottom (not inverted)
+        im = ax.imshow(
+            data,
+            aspect="auto",
+            origin="lower",
+            cmap="inferno",
+            vmin=PLOTUTIL_DISPLAY_LIMITS[0],
+            vmax=PLOTUTIL_DISPLAY_LIMITS[1],
+        )
+        ax.set_xlabel("Time bin")
+        ax.set_ylabel("Frequency channel")
+        ax.set_ylim(0.0, float(data.shape[0] - 1))
+
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("Background-subtracted intensity [dB]")
+    return fig, ax, cbar
+
+
 class PreviewWindow(QDialog):
     def __init__(self, file_path: str, title: str, parent=None):
         super().__init__(parent)
@@ -696,43 +748,8 @@ class PreviewWindow(QDialog):
         self.setMinimumSize(900, 600)
 
         res = load_callisto_fits(file_path, memmap=False)
-        data = res.data
-        freqs = res.freqs
-        times = res.time
-
-        fig = Figure()
+        fig, ax, cbar = _build_plotutil_preview_figure(res.data, res.freqs, res.time)
         canvas = FigureCanvas(fig)
-        ax = fig.add_subplot(111)
-
-        if freqs is not None and times is not None and len(freqs) > 1 and len(times) > 1:
-            freqs = np.array(freqs, dtype=float).ravel()
-            times = np.array(times, dtype=float).ravel()
-
-            fmin = float(np.nanmin(freqs))
-            fmax = float(np.nanmax(freqs))
-            tmin = float(np.nanmin(times))
-            tmax = float(np.nanmax(times))
-
-            # If freqs are descending (high -> low), row 0 should be at the top
-            origin = "upper" if freqs[0] > freqs[-1] else "lower"
-
-            extent = [tmin, tmax, fmin, fmax]
-            im = ax.imshow(data, aspect="auto", extent=extent, origin=origin, cmap="inferno")
-
-            ax.set_xlabel("Time [s]")
-            ax.set_ylabel("Frequency [MHz]")
-
-            # Force visible y-axis to start at 0 MHz
-            ax.set_ylim(fmin, fmax)
-
-        else:
-            # Fallback: show channels, but keep 0 at bottom (not inverted)
-            im = ax.imshow(data, aspect="auto", origin="lower", cmap="inferno")
-            ax.set_xlabel("Time bin")
-            ax.set_ylabel("Frequency channel")
-            ax.set_ylim(0.0, float(data.shape[0] - 1))
-
-        cbar = fig.colorbar(im, ax=ax)
 
         theme = QApplication.instance().property("theme_manager")
         if theme:
