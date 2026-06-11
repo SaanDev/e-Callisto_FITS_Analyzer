@@ -8,6 +8,7 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
 import argparse
 import faulthandler
+import importlib
 import os
 import platform
 import site
@@ -196,17 +197,34 @@ def _preflight_windows_development_runtime() -> None:
     if not sys.platform.startswith("win") or getattr(sys, "frozen", False):
         return
 
+    print(
+        "Preparing plotting runtime for Windows source startup. "
+        "The first run after installation may take longer...",
+        flush=True,
+    )
     try:
         import hashlib
+        import uuid
 
         hashlib.sha256(b"e-callisto-startup-check").digest()
+        uuid.UUID(int=0)
+        for module_name in (
+            "matplotlib.backends.backend_qtagg",
+            "matplotlib.figure",
+            "matplotlib.path",
+            "matplotlib.ticker",
+            "matplotlib.widgets",
+            "mpl_toolkits.axes_grid1",
+        ):
+            importlib.import_module(module_name)
     except Exception as exc:
         raise RuntimeError(
-            "The Windows Python runtime could not load hashlib/_hashlib. "
+            "The Windows Python plotting runtime could not be prepared. "
             "Recreate the development environment with Python 3.12 by running:\n"
             "  powershell -ExecutionPolicy Bypass -File "
             ".\\src\\Installation\\repair_windows_venv.ps1"
         ) from exc
+    print("Plotting runtime ready.", flush=True)
 
 
 BASE_PATH = _project_base_path()
@@ -285,10 +303,6 @@ def _run_main_mode(app: QApplication) -> int:
         app_icon = _load_app_icon()
         if not app_icon.isNull():
             app.setWindowIcon(app_icon)
-        # Matplotlib imports hashlib during startup. Check it before presenting
-        # the splash so a damaged source-development runtime cannot look like a
-        # permanently frozen splash screen.
-        _preflight_windows_development_runtime()
 
     from src.UI.startup_loading import StartupLoadingScreen
 
@@ -385,6 +399,12 @@ def main(argv: list[str] | None = None) -> int:
             request_file=str(args.request_file or ""),
             response_file=str(args.response_file or ""),
         )
+
+    if args.mode == "main":
+        # Warm the slow first-run plotting imports before QApplication and before
+        # showing the splash. Windows may spend noticeable time generating Python
+        # bytecode and Matplotlib caches immediately after dependencies install.
+        _preflight_windows_development_runtime()
 
     qt_argv = [argv[0], *qt_args]
     app = QApplication(qt_argv)

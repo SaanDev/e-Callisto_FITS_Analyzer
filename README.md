@@ -599,6 +599,7 @@ Use **About → Check for Updates...** to query the latest release from GitHub.
   - `python src/Installation/install_requirements.py`
 - Start the app:
   - `python src/UI/main.py`
+- On Windows source runs, plotting imports are prepared before the splash appears. The first run after a dependency change may briefly print `Preparing plotting runtime...`; allow it to finish.
 - Windows: if `PySide6.QtCore` fails with `ImportError: DLL load failed`, repair the venv and reinstall the pinned runtime stack:
   - `powershell -ExecutionPolicy Bypass -File .\src\Installation\repair_windows_venv.ps1`
   - `.\venv\Scripts\python.exe src\UI\main.py`

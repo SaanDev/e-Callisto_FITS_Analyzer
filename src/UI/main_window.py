@@ -19,9 +19,9 @@ from datetime import date, datetime, timedelta, timezone
 from urllib.parse import unquote, urlparse
 
 import matplotlib.colors as mcolors
-import matplotlib.pyplot as plt
 import numpy as np
 from astropy.io import fits
+from matplotlib import colormaps
 from matplotlib.figure import Figure
 from matplotlib.path import Path
 from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter, ScalarFormatter
@@ -3725,7 +3725,7 @@ class MainWindow(QMainWindow):
             colors = [(0.0, "blue"), (0.5, "red"), (1.0, "yellow")]
             cmap = mcolors.LinearSegmentedColormap.from_list("custom_RdYlBu", colors)
         else:
-            cmap = plt.get_cmap(self.current_cmap_name)
+            cmap = colormaps.get_cmap(self.current_cmap_name)
         return transparent_bad_cmap(cmap)
 
     def _has_light_curve_dataset(self) -> bool:
@@ -5487,7 +5487,7 @@ class MainWindow(QMainWindow):
             colors = [(0.0, 'blue'), (0.5, 'red'), (1.0, 'yellow')]
             return mcolors.LinearSegmentedColormap.from_list('custom_RdYlBu', colors)
         else:
-            return plt.get_cmap(self.current_cmap_name)
+            return colormaps.get_cmap(self.current_cmap_name)
 
     def _on_accel_view_interaction_finished(self, prev_view, new_view):
         if not self._hardware_mode_enabled():

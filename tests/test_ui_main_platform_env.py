@@ -8,6 +8,8 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
 import pytest
 import builtins
+import subprocess
+import sys
 
 pytest.importorskip("PySide6")
 
@@ -84,3 +86,29 @@ def test_windows_development_runtime_preflight_reports_hashlib_failure(monkeypat
 
     with pytest.raises(RuntimeError, match="repair_windows_venv.ps1"):
         main_module._preflight_windows_development_runtime()
+
+
+def test_windows_development_runtime_preflight_warms_plotting_imports(monkeypatch):
+    monkeypatch.setattr(main_module.sys, "platform", "win32")
+    monkeypatch.delattr(main_module.sys, "frozen", raising=False)
+    imported = []
+
+    monkeypatch.setattr(
+        main_module.importlib,
+        "import_module",
+        lambda name: imported.append(name),
+    )
+
+    main_module._preflight_windows_development_runtime()
+
+    assert "matplotlib.backends.backend_qtagg" in imported
+    assert "matplotlib.widgets" in imported
+
+
+def test_main_window_does_not_eagerly_import_pyplot():
+    code = (
+        "import sys; "
+        "import src.UI.main_window; "
+        "assert 'matplotlib.pyplot' not in sys.modules"
+    )
+    subprocess.check_call([sys.executable, "-c", code])

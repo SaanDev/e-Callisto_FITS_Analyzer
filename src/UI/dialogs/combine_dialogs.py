@@ -12,8 +12,8 @@ import os
 import tempfile
 
 import matplotlib.colors as mcolors
-import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.figure import Figure
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
@@ -344,7 +344,8 @@ class CombineFrequencyDialog(QDialog):
             QApplication.processEvents()
 
             # Plot image
-            fig, ax = plt.subplots(figsize=(6, 4))
+            fig = Figure(figsize=(6, 4))
+            ax = fig.subplots()
             style_axes(ax)
             cmap = transparent_bad_cmap(
                 mcolors.LinearSegmentedColormap.from_list("custom", [(0.0, 'blue'), (0.5, 'red'), (1.0, 'yellow')])
@@ -403,7 +404,7 @@ class CombineFrequencyDialog(QDialog):
             img.loadFromData(buf.read())
             self.image_label.setPixmap(QPixmap.fromImage(img).scaledToWidth(550))
             buf.close()
-            plt.close(fig)
+            fig.clear()
 
             self.progress_bar.setValue(100)
             QApplication.processEvents()
@@ -568,7 +569,8 @@ class CombineTimeDialog(QDialog):
             self.progress_bar.setValue(80)
 
             # Plot preview
-            fig, ax = plt.subplots(figsize=(6, 4))
+            fig = Figure(figsize=(6, 4))
+            ax = fig.subplots()
             style_axes(ax)
             extent = [combined_time[0], combined_time[-1], reference_freqs[-1], reference_freqs[0]]
             cmap = LinearSegmentedColormap.from_list('custom_cmap', [(0, 'darkblue'), (1, 'orange')])
@@ -581,7 +583,7 @@ class CombineTimeDialog(QDialog):
             temp_dir = tempfile.gettempdir()
             preview_path = os.path.join(temp_dir, "preview_combined_time.png")
             fig.savefig(preview_path, dpi=100)
-            plt.close(fig)
+            fig.clear()
 
             self.image_label.setPixmap(QPixmap(preview_path).scaled(550, 350, Qt.KeepAspectRatio))
             self.progress_bar.setValue(100)

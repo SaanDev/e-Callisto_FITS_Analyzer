@@ -111,6 +111,30 @@ def validate_qtcore_import() -> None:
         ) from exc
 
 
+def warm_runtime_imports() -> None:
+    code = (
+        "import hashlib, uuid; "
+        "hashlib.sha256(b'e-callisto-install-check').digest(); "
+        "uuid.UUID(int=0); "
+        "import matplotlib; matplotlib.use('Agg'); "
+        "import matplotlib.pyplot; "
+        "from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg; "
+        "from matplotlib.figure import Figure; "
+        "print(f'Matplotlib {matplotlib.__version__} plotting runtime ready')"
+    )
+    print("Preparing plotting runtime and first-run caches ...", flush=True)
+    try:
+        subprocess.check_call([sys.executable, "-c", code])
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(
+            "The plotting runtime could not be prepared after installation.\n"
+            "On Windows, recreate the environment with:\n"
+            "  powershell -ExecutionPolicy Bypass -File "
+            ".\\src\\Installation\\repair_windows_venv.ps1\n"
+            f"Plotting runtime check failed with exit code {exc.returncode}."
+        ) from exc
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Install pinned dependencies for e-CALLISTO FITS Analyzer."
@@ -126,6 +150,7 @@ def main() -> None:
     refresh_qt_bindings_for_windows()
     install_requirements_file(RUNTIME_REQUIREMENTS)
     validate_qtcore_import()
+    warm_runtime_imports()
 
     if args.with_build:
         print("\n=== Installing build requirements ===")

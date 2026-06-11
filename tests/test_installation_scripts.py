@@ -81,6 +81,8 @@ def test_install_requirements_bootstraps_pip_or_shows_linux_hint():
     assert "ensurepip" in text
     assert "python3-venv python3-pip" in text
     assert "validate_qtcore_import" in text
+    assert "warm_runtime_imports" in text
+    assert "matplotlib.pyplot" in text
     assert "repair_windows_venv.ps1" in text
     assert "Microsoft Visual C++ 2015-2022" in text
     assert "Redistributable (x64)" in text
