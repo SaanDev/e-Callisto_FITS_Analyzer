@@ -128,6 +128,24 @@ class SunPyPlotCanvas(QWidget):
         self._aia_limb_curve.hide()
         self.map_plot.addItem(self._aia_limb_curve)
 
+        # Interactive region-of-interest selector (hidden until enabled). The
+        # rectangle lives in data (arcsec) coordinates; bounds are converted to
+        # pixel indices and pushed through the ROI callback.
+        self._roi_active = False
+        self._roi_rect = pg.RectROI(
+            [0.0, 0.0],
+            [1.0, 1.0],
+            pen=pg.mkPen((0, 200, 255), width=1.6),
+            handlePen=pg.mkPen((0, 200, 255), width=1.6),
+            movable=True,
+            rotatable=False,
+            resizable=True,
+        )
+        self._roi_rect.setZValue(30)
+        self._roi_rect.hide()
+        self.map_plot.addItem(self._roi_rect)
+        self._roi_rect.sigRegionChangeFinished.connect(self._on_roi_region_changed)
+
         self.ts_plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(utcOffset=0)})
         self.ts_plot.setMenuEnabled(False)
         self.ts_plot.hideButtons()
@@ -165,14 +183,81 @@ class SunPyPlotCanvas(QWidget):
         self._last_map_bounds = None
 
     def enable_roi_selector(self):
-        # Reserved for future ROI-drawing UX in the OpenGL path.
-        return
+        """Show an interactive ROI box (default: central quarter) and emit its
+        pixel bounds through the ROI callback."""
+        img = self.map_image.image
+        if img is None:
+            return
+        ny = int(img.shape[0])
+        nx = int(img.shape[1]) if img.ndim >= 2 else 1
+        x0, y0, width, height = self._map_rect_from_transform(img.shape)
+
+        # Default ROI covers the central half of the field of view.
+        roi_x = x0 + width * 0.25
+        roi_y = y0 + height * 0.25
+        roi_w = width * 0.5
+        roi_h = height * 0.5
+
+        self._roi_active = True
+        self._roi_rect.blockSignals(True)
+        self._roi_rect.setPos([roi_x, roi_y])
+        self._roi_rect.setSize([roi_w, roi_h])
+        self._roi_rect.blockSignals(False)
+        self._roi_rect.show()
+        self._on_roi_region_changed()
 
     def disable_roi_selector(self):
-        return
+        self._roi_active = False
+        self._roi_rect.hide()
 
     def reset_roi(self):
         self._roi_bounds = None
+        self._roi_active = False
+        self._roi_rect.hide()
+
+    def _on_roi_region_changed(self):
+        if not self._roi_active:
+            return
+        bounds = self._roi_pixel_bounds()
+        self._roi_bounds = bounds
+        if self._roi_callback is not None and bounds is not None:
+            self._roi_callback(bounds)
+
+    def _roi_pixel_bounds(self) -> tuple[int, int, int, int] | None:
+        img = self.map_image.image
+        if img is None or img.ndim < 2:
+            return None
+        ny = int(img.shape[0])
+        nx = int(img.shape[1])
+        try:
+            pos = self._roi_rect.pos()
+            size = self._roi_rect.size()
+            ax0 = float(pos.x())
+            ay0 = float(pos.y())
+            ax1 = ax0 + float(size.x())
+            ay1 = ay0 + float(size.y())
+        except Exception:
+            return None
+
+        x0, y0, _width, _height = self._map_rect_from_transform(img.shape)
+        tx = self._axis_transform
+        x_scale = float(tx.get("x_scale_arcsec_per_pix", 1.0)) or 1.0
+        y_scale = float(tx.get("y_scale_arcsec_per_pix", 1.0)) or 1.0
+
+        px0 = (ax0 - x0) / x_scale
+        px1 = (ax1 - x0) / x_scale
+        py0 = (ay0 - y0) / y_scale
+        py1 = (ay1 - y0) / y_scale
+
+        x_lo, x_hi = sorted((px0, px1))
+        y_lo, y_hi = sorted((py0, py1))
+        x_lo = max(0, int(np.floor(x_lo)))
+        x_hi = min(nx, int(np.ceil(x_hi)))
+        y_lo = max(0, int(np.floor(y_lo)))
+        y_hi = min(ny, int(np.ceil(y_hi)))
+        if x_hi <= x_lo or y_hi <= y_lo:
+            return None
+        return (x_lo, x_hi, y_lo, y_hi)
 
     def set_aia_limb_overlay(
         self,
@@ -465,6 +550,9 @@ class SunPyPlotWindow(QMainWindow):
         self.fps_spin.setDecimals(0)
         self.fps_spin.setValue(4.0)
         self.fps_spin.setSuffix(" FPS")
+        self.roi_select_check = QCheckBox("Select ROI")
+        self.roi_select_check.setEnabled(False)
+        self.roi_select_check.setToolTip("Draw a rectangle on the map to analyse a region of interest.")
         self.reset_roi_btn = QPushButton("Reset ROI")
         self.reset_roi_btn.setEnabled(False)
 
@@ -477,6 +565,7 @@ class SunPyPlotWindow(QMainWindow):
         bottom_row.addWidget(self.pause_btn)
         bottom_row.addWidget(self.rewind_btn)
         bottom_row.addWidget(self.fps_spin)
+        bottom_row.addWidget(self.roi_select_check)
         bottom_row.addWidget(self.reset_roi_btn)
         bottom_row.addStretch(1)
 
@@ -494,6 +583,7 @@ class SunPyPlotWindow(QMainWindow):
         self.pause_btn.clicked.connect(self._on_pause_clicked)
         self.rewind_btn.clicked.connect(self._on_rewind_clicked)
         self.fps_spin.valueChanged.connect(self._on_fps_changed)
+        self.roi_select_check.toggled.connect(self._on_roi_select_toggled)
         self.reset_roi_btn.clicked.connect(self.reset_roi)
 
     def apply_theme(self):
@@ -534,6 +624,10 @@ class SunPyPlotWindow(QMainWindow):
         self.pause_btn.setEnabled(False)
         self.rewind_btn.setEnabled(False)
         self.reset_roi_btn.setEnabled(True)
+        self.roi_select_check.blockSignals(True)
+        self.roi_select_check.setChecked(False)
+        self.roi_select_check.setEnabled(True)
+        self.roi_select_check.blockSignals(False)
 
         self.canvas.clear_plot()
         self.canvas.reset_roi()
@@ -576,6 +670,11 @@ class SunPyPlotWindow(QMainWindow):
         self.pause_btn.setEnabled(False)
         self.rewind_btn.setEnabled(False)
         self.reset_roi_btn.setEnabled(False)
+        self.roi_select_check.blockSignals(True)
+        self.roi_select_check.setChecked(False)
+        self.roi_select_check.setEnabled(False)
+        self.roi_select_check.blockSignals(False)
+        self.canvas.disable_roi_selector()
 
         self.canvas.plot_timeseries(times, short_flux=short_flux, long_flux=long_flux)
         self.mapRoiChanged.emit(None)
@@ -801,9 +900,23 @@ class SunPyPlotWindow(QMainWindow):
         self._roi_bounds = bounds
         self.mapRoiChanged.emit(bounds)
 
+    def _on_roi_select_toggled(self, checked: bool):
+        if self._mode != "map":
+            return
+        if checked:
+            self.canvas.enable_roi_selector()
+        else:
+            self.canvas.disable_roi_selector()
+            self._roi_bounds = None
+            self.mapRoiChanged.emit(None)
+
     def reset_roi(self):
         self._roi_bounds = None
         self.canvas.reset_roi()
+        if self.roi_select_check.isChecked():
+            self.roi_select_check.blockSignals(True)
+            self.roi_select_check.setChecked(False)
+            self.roi_select_check.blockSignals(False)
         self.mapRoiChanged.emit(None)
 
     def closeEvent(self, event):

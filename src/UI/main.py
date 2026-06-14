@@ -227,11 +227,43 @@ def _preflight_windows_development_runtime() -> None:
     print("Plotting runtime ready.", flush=True)
 
 
+def _configure_network_env() -> None:
+    """Point TLS verification at certifi's CA bundle for packaged builds.
+
+    ``requests`` (Fido search), ``aiohttp``/``parfive`` (SunPy download), and
+    ``urllib`` (the fallback downloader) all need a CA bundle to verify HTTPS.
+    In frozen builds — notably on Windows — the bundled interpreter may not
+    locate a usable system CA store, which silently breaks downloads while the
+    same code works from source and on Linux/macOS. Pointing the standard
+    OpenSSL/requests environment variables at certifi (which is bundled) makes
+    every HTTPS client share one trusted bundle.
+
+    Must run before sunpy/aiohttp/requests are imported. Only acts when frozen,
+    never overrides values the user/system already set, and is a no-op if
+    certifi is unavailable.
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        import certifi
+
+        ca_bundle = certifi.where()
+    except Exception:
+        return
+    if not ca_bundle or not os.path.exists(ca_bundle):
+        return
+
+    os.environ.setdefault("SSL_CERT_FILE", ca_bundle)
+    os.environ.setdefault("REQUESTS_CA_BUNDLE", ca_bundle)
+    os.environ.setdefault("SSL_CERT_DIR", os.path.dirname(ca_bundle))
+
+
 BASE_PATH = _project_base_path()
 if BASE_PATH not in sys.path:
     sys.path.insert(0, BASE_PATH)
 
 _configure_platform_env()
+_configure_network_env()
 _configure_windows_dll_search_path()
 _install_macos_stderr_filter()
 

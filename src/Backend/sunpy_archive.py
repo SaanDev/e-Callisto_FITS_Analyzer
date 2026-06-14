@@ -7,11 +7,15 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import logging
+from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import re
+import sys
 import time
 from typing import Any, Callable, Iterable, Sequence
 from urllib.parse import parse_qs, urlparse
@@ -24,6 +28,93 @@ DATA_KIND_TIMESERIES = "timeseries"
 SUNPY_INSTALL_HINT = (
     'python3 -m pip install --upgrade "sunpy[map,net,timeseries]==7.1.0" lxml drms zeep reproject mpl-animators'
 )
+
+# ---------------------------------------------------------------------------
+# Diagnostics logging
+#
+# The download path is async (parfive/aiohttp) and several failure modes are
+# normally swallowed, which makes packaged builds (notably frozen Windows)
+# impossible to diagnose. A dedicated file logger captures the real exceptions
+# and the path actually taken (parfive vs urllib fallback). The UI configures
+# the log directory at startup via configure_fetch_logging(); until then the
+# logger is a no-op so importing this module stays side-effect free.
+# ---------------------------------------------------------------------------
+
+_LOGGER_NAME = "ecallisto.sunpy"
+_FETCH_LOG_FILENAME = "sunpy_fetch.log"
+_logger = logging.getLogger(_LOGGER_NAME)
+_logger.setLevel(logging.INFO)
+_logger.propagate = False
+_logger.addHandler(logging.NullHandler())
+_configured_log_path: Path | None = None
+
+
+def get_sunpy_logger() -> logging.Logger:
+    return _logger
+
+
+_sunpy_logging_configured = False
+
+
+def _configure_sunpy_logging() -> None:
+    """Quiet SunPy's own logger so routine INFO messages (e.g. the very common
+    'Missing metadata for solar radius...') do not flood the console when many
+    maps are loaded. Runs once; the threshold can be overridden via
+    ECALLISTO_SUNPY_LOG_LEVEL (e.g. INFO/DEBUG)."""
+    global _sunpy_logging_configured
+    if _sunpy_logging_configured:
+        return
+    level_name = str(os.environ.get("ECALLISTO_SUNPY_LOG_LEVEL", "WARNING")).strip().upper()
+    level = getattr(logging, level_name, logging.WARNING)
+    try:
+        logging.getLogger("sunpy").setLevel(level)
+        _sunpy_logging_configured = True
+    except Exception:
+        pass
+
+
+def get_fetch_log_path() -> Path | None:
+    return _configured_log_path
+
+
+def configure_fetch_logging(log_dir: str | Path | None) -> Path | None:
+    """Attach a rotating file handler for fetch diagnostics. Idempotent."""
+    global _configured_log_path
+    if not log_dir:
+        return _configured_log_path
+    try:
+        directory = Path(log_dir).expanduser()
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / _FETCH_LOG_FILENAME
+    except Exception:
+        return _configured_log_path
+
+    if _configured_log_path is not None and _configured_log_path == path:
+        return _configured_log_path
+
+    for handler in list(_logger.handlers):
+        if isinstance(handler, RotatingFileHandler):
+            _logger.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:
+                pass
+
+    try:
+        handler = RotatingFileHandler(path, maxBytes=512 * 1024, backupCount=2, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(threadName)s] %(message)s"))
+        _logger.addHandler(handler)
+        _configured_log_path = path
+        _logger.info("SunPy fetch logging initialised at %s", path)
+        _logger.info(
+            "TLS config: frozen=%s SSL_CERT_FILE=%s REQUESTS_CA_BUNDLE=%s",
+            bool(getattr(sys, "frozen", False)),
+            os.environ.get("SSL_CERT_FILE", "<unset>"),
+            os.environ.get("REQUESTS_CA_BUNDLE", "<unset>"),
+        )
+    except Exception:
+        pass
+    return _configured_log_path
 
 
 @dataclass(frozen=True)
@@ -74,6 +165,8 @@ class SunPyFetchResult:
     requested_count: int
     failed_count: int
     errors: list[str]
+    failed_rows: list[int] = field(default_factory=list)
+    cancelled: bool = False
 
 
 @dataclass(frozen=True)
@@ -169,11 +262,78 @@ INSTRUMENT_REGISTRY: tuple[InstrumentRegistryEntry, ...] = (
         default_satellite=16,
         wavelengths=(),
     ),
+    InstrumentRegistryEntry(
+        key="proba2_swap",
+        label="PROBA2/SWAP",
+        spacecraft="PROBA2",
+        instrument="SWAP",
+        detector=None,
+        data_kind=DATA_KIND_MAP,
+        supports_wavelength=False,
+        supports_detector=False,
+        supports_satellite=False,
+        default_wavelength=None,
+        default_detector=None,
+        default_satellite=None,
+        wavelengths=(),
+    ),
 )
 
 
 def list_instrument_registry() -> list[InstrumentRegistryEntry]:
     return list(INSTRUMENT_REGISTRY)
+
+
+def registry_spacecraft_list() -> list[str]:
+    """Ordered, de-duplicated spacecraft names from the registry."""
+    out: list[str] = []
+    for entry in INSTRUMENT_REGISTRY:
+        if entry.spacecraft not in out:
+            out.append(entry.spacecraft)
+    return out
+
+
+def registry_instruments_for(spacecraft: str) -> list[str]:
+    """Ordered, de-duplicated instruments available for a spacecraft."""
+    sc = str(spacecraft or "").strip().upper()
+    out: list[str] = []
+    for entry in INSTRUMENT_REGISTRY:
+        if entry.spacecraft == sc and entry.instrument not in out:
+            out.append(entry.instrument)
+    return out
+
+
+def registry_detectors_for(spacecraft: str, instrument: str) -> list[str]:
+    """Ordered detector names for a spacecraft/instrument (empty if none)."""
+    sc = str(spacecraft or "").strip().upper()
+    inst = str(instrument or "").strip().upper()
+    out: list[str] = []
+    for entry in INSTRUMENT_REGISTRY:
+        if entry.spacecraft == sc and entry.instrument == inst and entry.detector:
+            if entry.detector not in out:
+                out.append(entry.detector)
+    return out
+
+
+def registry_lookup(
+    spacecraft: str,
+    instrument: str,
+    detector: str | None = None,
+) -> InstrumentRegistryEntry | None:
+    """Find the registry entry for a target, or None if unsupported."""
+    sc = str(spacecraft or "").strip().upper()
+    inst = str(instrument or "").strip().upper()
+    det = str(detector or "").strip().upper()
+    for entry in INSTRUMENT_REGISTRY:
+        if entry.spacecraft != sc or entry.instrument != inst:
+            continue
+        if entry.detector and det and entry.detector != det:
+            continue
+        return entry
+    for entry in INSTRUMENT_REGISTRY:
+        if entry.spacecraft == sc and entry.instrument == inst:
+            return entry
+    return None
 
 
 def build_attrs(
@@ -245,6 +405,7 @@ def fetch(
     selected_rows: Sequence[int] | None = None,
     *,
     progress_cb: Callable[[int, str], None] | None = None,
+    cancel_cb: Callable[[], bool] | None = None,
     fido_client: Any | None = None,
 ) -> SunPyFetchResult:
     if search_result.raw_response is None:
@@ -255,6 +416,10 @@ def fetch(
 
     cache_root = Path(cache_dir).expanduser().resolve()
     cache_root.mkdir(parents=True, exist_ok=True)
+    # Safety net: ensure diagnostics are captured even if the UI did not
+    # configure logging (cache lives at <app_data>/sunpy_cache, log alongside).
+    configure_fetch_logging(cache_root.parent)
+    _ensure_event_loop()
 
     requested = _normalize_selected_rows(selected_rows, len(search_result.rows))
     if not requested:
@@ -267,6 +432,13 @@ def fetch(
     row_template = str(cache_root / "{file}")
     max_conn = _resolve_fetch_max_conn()
     max_batch_size = _resolve_fetch_batch_size()
+    _logger.info(
+        "fetch start: requested=%d cache=%s max_conn=%d batch_size=%d",
+        total,
+        cache_root,
+        max_conn,
+        max_batch_size,
+    )
 
     def _mark_processed(delta: int):
         nonlocal processed_rows
@@ -277,8 +449,13 @@ def fetch(
                 f"Fetched {processed_rows}/{total} selections",
             )
 
+    cancelled = False
     batches = _build_row_batches(search_result, requested, max_batch_size=max_batch_size)
     for batch_idx, batch in enumerate(batches, start=1):
+        if _is_cancelled(cancel_cb):
+            cancelled = True
+            _logger.info("fetch cancelled before batch %d/%d", batch_idx, len(batches))
+            break
         if progress_cb is not None:
             progress_cb(
                 int(processed_rows * 100 / max(total, 1)),
@@ -293,13 +470,31 @@ def fetch(
             errors=errors,
             max_conn=max_conn,
             processed_cb=_mark_processed,
+            cancel_cb=cancel_cb,
         )
 
+    deduped_paths = _dedupe_preserve_order(downloaded_paths)
+    failed_rows = _failed_rows_from_errors(errors)
+    if cancelled:
+        _logger.info("fetch cancelled: downloaded=%d/%d", len(deduped_paths), total)
+    elif errors:
+        _logger.warning(
+            "fetch done: downloaded=%d/%d failed=%d first_error=%s",
+            len(deduped_paths),
+            total,
+            len(errors),
+            errors[0],
+        )
+    else:
+        _logger.info("fetch done: downloaded=%d/%d failed=0", len(deduped_paths), total)
+
     return SunPyFetchResult(
-        paths=_dedupe_preserve_order(downloaded_paths),
+        paths=deduped_paths,
         requested_count=total,
         failed_count=len(errors),
         errors=errors,
+        failed_rows=failed_rows,
+        cancelled=cancelled,
     )
 
 
@@ -503,7 +698,10 @@ def _fetch_single_row(
     downloaded_paths: list[str],
     errors: list[str],
     max_conn: int,
+    cancel_cb: Callable[[], bool] | None = None,
 ):
+    if _is_cancelled(cancel_cb):
+        return
     query_slice = _query_slice_for_row(search_result, row_index)
     try:
         fetched = _fetch_row_with_runtime_guards(
@@ -520,6 +718,13 @@ def _fetch_single_row(
                 fetched,
                 row_template=row_template,
             )
+            if not manual_paths:
+                # Final fallback: synchronous urllib download from the record URL.
+                manual_paths = _download_from_row_record(
+                    search_result,
+                    row_index,
+                    row_template=row_template,
+                )
             if manual_paths:
                 downloaded_paths.extend(manual_paths)
                 return
@@ -544,8 +749,11 @@ def _fetch_rows_batch_adaptive(
     errors: list[str],
     max_conn: int,
     processed_cb: Callable[[int], None],
+    cancel_cb: Callable[[], bool] | None = None,
 ):
     if not batch:
+        return
+    if _is_cancelled(cancel_cb):
         return
 
     if len(batch) <= 1:
@@ -558,6 +766,7 @@ def _fetch_rows_batch_adaptive(
             downloaded_paths=downloaded_paths,
             errors=errors,
             max_conn=max_conn,
+            cancel_cb=cancel_cb,
         )
         processed_cb(1)
         return
@@ -565,6 +774,8 @@ def _fetch_rows_batch_adaptive(
     query_slice = _query_slice_for_rows(search_result, batch)
     if query_slice is None:
         for row_index in batch:
+            if _is_cancelled(cancel_cb):
+                return
             _fetch_single_row(
                 search_result,
                 int(row_index),
@@ -573,6 +784,7 @@ def _fetch_rows_batch_adaptive(
                 downloaded_paths=downloaded_paths,
                 errors=errors,
                 max_conn=max_conn,
+                cancel_cb=cancel_cb,
             )
             processed_cb(1)
         return
@@ -609,6 +821,8 @@ def _fetch_rows_batch_adaptive(
     midpoint = len(batch) // 2
     if midpoint <= 0 or midpoint >= len(batch):
         for row_index in batch:
+            if _is_cancelled(cancel_cb):
+                return
             _fetch_single_row(
                 search_result,
                 int(row_index),
@@ -617,6 +831,7 @@ def _fetch_rows_batch_adaptive(
                 downloaded_paths=downloaded_paths,
                 errors=errors,
                 max_conn=max_conn,
+                cancel_cb=cancel_cb,
             )
             processed_cb(1)
         return
@@ -632,6 +847,7 @@ def _fetch_rows_batch_adaptive(
         errors=errors,
         max_conn=max_conn,
         processed_cb=processed_cb,
+        cancel_cb=cancel_cb,
     )
     _fetch_rows_batch_adaptive(
         search_result,
@@ -642,7 +858,37 @@ def _fetch_rows_batch_adaptive(
         errors=errors,
         max_conn=max_conn,
         processed_cb=processed_cb,
+        cancel_cb=cancel_cb,
     )
+
+
+def _is_cancelled(cancel_cb: Callable[[], bool] | None) -> bool:
+    if cancel_cb is None:
+        return False
+    try:
+        return bool(cancel_cb())
+    except Exception:
+        return False
+
+
+def _failed_rows_from_errors(errors: Sequence[str]) -> list[int]:
+    """Recover the 0-based indices of failed rows from the error messages.
+
+    Every failure is recorded with a consistent ``"Row N: ..."`` (1-based)
+    prefix, so the failed rows can be derived without threading extra state
+    through the recursive fetch helpers.
+    """
+    out: list[int] = []
+    seen: set[int] = set()
+    for message in errors:
+        match = re.match(r"\s*Row\s+(\d+)\s*:", str(message))
+        if not match:
+            continue
+        idx = int(match.group(1)) - 1
+        if idx >= 0 and idx not in seen:
+            seen.add(idx)
+            out.append(idx)
+    return sorted(out)
 
 
 def _is_contiguous(values: Sequence[int]) -> bool:
@@ -761,7 +1007,9 @@ def _resolve_attr_and_units(attrs_module: Any | None, units_module: Any | None) 
         from sunpy.net import attrs as sunpy_attrs
         import astropy.units as astro_units
     except Exception as exc:
+        _logger.error("Failed to import sunpy.net.attrs / astropy.units", exc_info=True)
         raise RuntimeError(_format_sunpy_dependency_error(exc)) from exc
+    _configure_sunpy_logging()
     return sunpy_attrs, astro_units
 
 
@@ -769,7 +1017,9 @@ def _import_fido() -> Any:
     try:
         from sunpy.net import Fido
     except Exception as exc:
+        _logger.error("Failed to import sunpy.net.Fido", exc_info=True)
         raise RuntimeError(_format_sunpy_dependency_error(exc)) from exc
+    _configure_sunpy_logging()
     return Fido
 
 
@@ -777,7 +1027,9 @@ def _import_map_loader() -> Callable[..., Any]:
     try:
         from sunpy.map import Map
     except Exception as exc:
+        _logger.error("Failed to import sunpy.map.Map", exc_info=True)
         raise RuntimeError(_format_sunpy_dependency_error(exc)) from exc
+    _configure_sunpy_logging()
     return Map
 
 
@@ -785,7 +1037,9 @@ def _import_timeseries_loader() -> Callable[..., Any]:
     try:
         from sunpy.timeseries import TimeSeries
     except Exception as exc:
+        _logger.error("Failed to import sunpy.timeseries.TimeSeries", exc_info=True)
         raise RuntimeError(_format_sunpy_dependency_error(exc)) from exc
+    _configure_sunpy_logging()
     return TimeSeries
 
 
@@ -912,12 +1166,55 @@ def _fetch_once(
     return fido_client.fetch(query_slice, path=path_template)
 
 
+def _ensure_event_loop() -> None:
+    """Guarantee the current thread has a usable asyncio event loop.
+
+    parfive runs downloads via asyncio. When ``fetch`` executes inside a
+    ``QThread`` (a non-main thread) there may be no current event loop, which
+    is fragile and has been observed to break downloads in frozen Windows
+    builds. Creating one here is harmless when parfive manages its own loop.
+    """
+    # A loop already running in this thread is fine.
+    try:
+        asyncio.get_running_loop()
+        return
+    except RuntimeError:
+        pass
+
+    # Inspect any existing (non-running) loop without surfacing the Py3.12
+    # get_event_loop() DeprecationWarning.
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            loop = asyncio.get_event_loop_policy().get_event_loop()
+        if loop is not None and not loop.is_closed():
+            return
+    except Exception:
+        pass
+
+    try:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+        _logger.info("Created asyncio event loop for thread %s", _current_thread_name())
+    except Exception:
+        _logger.warning("Could not create asyncio event loop for this thread", exc_info=True)
+
+
+def _current_thread_name() -> str:
+    try:
+        import threading
+
+        return threading.current_thread().name
+    except Exception:
+        return "?"
+
+
 def _build_parfive_downloader(*, max_conn: int | None) -> Any | None:
     try:
         from aiohttp import ClientTimeout
         from parfive import Downloader
         from parfive.config import SessionConfig
     except Exception:
+        _logger.warning("parfive/aiohttp import failed; using Fido default downloader", exc_info=True)
         return None
 
     timeout_seconds = _resolve_fetch_timeout_seconds()
@@ -932,6 +1229,7 @@ def _build_parfive_downloader(*, max_conn: int | None) -> Any | None:
             config=config,
         )
     except Exception:
+        _logger.warning("Failed to build custom parfive Downloader; using Fido default", exc_info=True)
         return None
 
 
@@ -1121,6 +1419,75 @@ def _download_from_fetch_errors(fetch_result: Any, *, row_template: str) -> list
             downloaded.append(path)
             break
     return downloaded
+
+
+def _download_from_row_record(
+    search_result: SunPySearchResult,
+    row_index: int,
+    *,
+    row_template: str,
+) -> list[str]:
+    """Last-resort fallback: download a row directly from any URL present in
+    its raw search record, using synchronous urllib (no aiohttp/asyncio).
+
+    This guarantees a working path on frozen Windows even when the parfive
+    async downloader is fundamentally broken, provided the record exposes a
+    direct http(s) URL (true for several providers).
+    """
+    record = _raw_record_for_row(search_result, row_index)
+    if record is None:
+        return []
+    urls = _extract_record_urls(record)
+    if not urls:
+        return []
+
+    target_dir = _resolve_cache_dir_from_row_template(row_template)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    retries = _resolve_manual_fetch_retries()
+    timeout_seconds = _resolve_manual_fetch_timeout_seconds()
+    backoff_seconds = _resolve_manual_fetch_backoff_seconds()
+
+    for url in urls:
+        path = _download_url_with_retries(
+            url,
+            target_dir=target_dir,
+            retries=retries,
+            timeout_seconds=timeout_seconds,
+            backoff_seconds=backoff_seconds,
+        )
+        if path:
+            _logger.info("Row %d recovered via urllib record URL: %s", row_index + 1, url)
+            return [path]
+    return []
+
+
+def _raw_record_for_row(search_result: SunPySearchResult, row_index: int) -> Any | None:
+    try:
+        block_idx, local_idx = search_result.row_index_map[row_index]
+        return search_result.raw_response[block_idx][local_idx]
+    except Exception:
+        return None
+
+
+def _extract_record_urls(record: Any) -> list[str]:
+    urls: list[str] = []
+
+    for key in ("url", "URL", "fileid", "FileID", "file_id", "Record", "record"):
+        text = _safe_str(_row_get(record, key)).strip()
+        if text.startswith(("http://", "https://")):
+            urls.append(text)
+
+    keys_attr = getattr(record, "keys", None)
+    if callable(keys_attr):
+        try:
+            for key in keys_attr():
+                text = _safe_str(record[key]).strip()
+                if text.startswith(("http://", "https://")):
+                    urls.append(text)
+        except Exception:
+            pass
+
+    return _dedupe_preserve_order(urls)
 
 
 def _download_url_with_retries(

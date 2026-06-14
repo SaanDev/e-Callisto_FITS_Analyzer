@@ -7,8 +7,10 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from pathlib import Path
+import threading
 import warnings
 
 from src.Backend import sunpy_archive as sa
@@ -601,3 +603,246 @@ def test_load_downloaded_map_and_timeseries_metadata(tmp_path: Path):
     assert ts_out.metadata["n_files"] == 2
     assert ts_out.metadata["columns"] == ["xrsa", "xrsb"]
     assert ts_out.metadata["n_samples"] == 42
+
+
+# ---------------------------------------------------------------------------
+# Packaged-Windows download fix: diagnostics, urllib record fallback, asyncio
+# ---------------------------------------------------------------------------
+
+
+def test_configure_fetch_logging_writes_to_file(tmp_path: Path):
+    log_path = sa.configure_fetch_logging(tmp_path)
+    assert log_path == tmp_path / "sunpy_fetch.log"
+    assert sa.get_fetch_log_path() == log_path
+    sa.get_sunpy_logger().info("unit-test-marker-line")
+    contents = log_path.read_text(encoding="utf-8")
+    assert "unit-test-marker-line" in contents
+
+
+def test_extract_record_urls_finds_http_values():
+    record = {"fileid": "aia_1.fits", "url": "https://example.test/aia_1.fits"}
+    urls = sa._extract_record_urls(record)
+    assert "https://example.test/aia_1.fits" in urls
+
+
+def test_extract_record_urls_empty_for_non_url_record():
+    assert sa._extract_record_urls({"fileid": "aia_1.fits", "Size": "1 MB"}) == []
+
+
+def test_download_from_row_record_uses_urllib_with_record_url(tmp_path: Path, monkeypatch):
+    search_result = sa.SunPySearchResult(
+        spec=_mk_query(),
+        data_kind=sa.DATA_KIND_MAP,
+        rows=[
+            sa.SunPySearchRow(
+                start=datetime(2026, 2, 10, 1, 0, 0),
+                end=datetime(2026, 2, 10, 1, 2, 0),
+                source="SDO",
+                instrument="AIA",
+                provider="VSO",
+                fileid="https://example.test/x.fits",
+                size="1 MB",
+            )
+        ],
+        raw_response=[[{"fileid": "x", "url": "https://example.test/x.fits"}]],
+        row_index_map=[(0, 0)],
+    )
+
+    captured = {}
+
+    def fake_dl(url, *, target_dir, retries, timeout_seconds, backoff_seconds):
+        captured["url"] = url
+        return str((tmp_path / "x.fits").resolve())
+
+    monkeypatch.setattr(sa, "_download_url_with_retries", fake_dl)
+    out = sa._download_from_row_record(search_result, 0, row_template=str(tmp_path / "{file}"))
+    assert out == [str((tmp_path / "x.fits").resolve())]
+    assert captured["url"] == "https://example.test/x.fits"
+
+
+def test_fetch_recovers_via_record_url_when_parfive_returns_nothing(tmp_path: Path, monkeypatch):
+    search_result = sa.SunPySearchResult(
+        spec=_mk_query(),
+        data_kind=sa.DATA_KIND_MAP,
+        rows=[
+            sa.SunPySearchRow(
+                start=datetime(2026, 2, 10, 1, 0, 0),
+                end=datetime(2026, 2, 10, 1, 2, 0),
+                source="SDO",
+                instrument="AIA",
+                provider="VSO",
+                fileid="https://example.test/x.fits",
+                size="1 MB",
+            )
+        ],
+        raw_response=[[{"fileid": "x", "url": "https://example.test/x.fits"}]],
+        row_index_map=[(0, 0)],
+    )
+
+    class FakeFido:
+        @staticmethod
+        def fetch(_query_slice, path, progress=False, max_conn=None):
+            assert path.endswith("{file}")
+            return []  # parfive yields nothing and exposes no error URLs
+
+    def fake_dl(url, *, target_dir, retries, timeout_seconds, backoff_seconds):
+        out_path = (tmp_path / "x.fits").resolve()
+        out_path.write_text("ok", encoding="utf-8")
+        return str(out_path)
+
+    monkeypatch.setattr(sa, "_download_url_with_retries", fake_dl)
+    out = sa.fetch(search_result, tmp_path, selected_rows=[0], fido_client=FakeFido())
+    assert out.requested_count == 1
+    assert out.failed_count == 0
+    assert out.paths == [str((tmp_path / "x.fits").resolve())]
+
+
+def test_registry_spacecraft_and_instrument_helpers():
+    spacecraft = sa.registry_spacecraft_list()
+    assert spacecraft[0] == "SDO"
+    assert "PROBA2" in spacecraft
+    assert spacecraft.count("GOES") == 1
+    assert sa.registry_instruments_for("GOES") == ["XRS"]
+    assert sa.registry_instruments_for("SOHO") == ["LASCO"]
+    assert sa.registry_instruments_for("PROBA2") == ["SWAP"]
+
+
+def test_registry_detectors_and_lookup():
+    assert sa.registry_detectors_for("SOHO", "LASCO") == ["C2", "C3"]
+    assert sa.registry_detectors_for("SDO", "AIA") == []
+    swap = sa.registry_lookup("PROBA2", "SWAP")
+    assert swap is not None
+    assert swap.data_kind == sa.DATA_KIND_MAP
+    assert not swap.supports_wavelength and not swap.supports_satellite
+    assert sa.registry_lookup("NOPE", "NOPE") is None
+
+
+def test_build_attrs_for_new_missions():
+    swap_spec = _mk_query(spacecraft="PROBA2", instrument="SWAP")
+    swap = sa.build_attrs(swap_spec, attrs_module=_FakeAttrs, units_module=_FakeUnits)
+    assert ("Source", "PROBA2") in swap
+    assert ("Instrument", "SWAP") in swap
+    assert not any(isinstance(x, tuple) and x[0] == "Wavelength" for x in swap)
+
+
+def test_configure_sunpy_logging_quiets_logger(monkeypatch):
+    import logging
+
+    monkeypatch.setattr(sa, "_sunpy_logging_configured", False)
+    monkeypatch.delenv("ECALLISTO_SUNPY_LOG_LEVEL", raising=False)
+    sa._configure_sunpy_logging()
+    assert logging.getLogger("sunpy").level == logging.WARNING
+
+
+def test_configure_sunpy_logging_respects_env_override(monkeypatch):
+    import logging
+
+    monkeypatch.setattr(sa, "_sunpy_logging_configured", False)
+    monkeypatch.setenv("ECALLISTO_SUNPY_LOG_LEVEL", "ERROR")
+    sa._configure_sunpy_logging()
+    assert logging.getLogger("sunpy").level == logging.ERROR
+
+
+def test_failed_rows_from_errors_parses_indices():
+    errors = ["Row 1: boom", "Row 3: timeout", "not a row line", "Row 3: dup"]
+    assert sa._failed_rows_from_errors(errors) == [0, 2]
+
+
+def test_fetch_populates_failed_rows(tmp_path: Path):
+    rows = [
+        sa.SunPySearchRow(
+            start=datetime(2026, 2, 10, 1, 0, 0),
+            end=datetime(2026, 2, 10, 1, 2, 0),
+            source="SDO",
+            instrument="AIA",
+            provider="VSO",
+            fileid=f"aia_{i + 1}.fits",
+            size="1 MB",
+        )
+        for i in range(2)
+    ]
+    search_result = sa.SunPySearchResult(
+        spec=_mk_query(),
+        data_kind=sa.DATA_KIND_MAP,
+        rows=rows,
+        raw_response=[[{"fileid": "aia_1.fits"}, {"fileid": "aia_2.fits"}]],
+        row_index_map=[(0, 0), (0, 1)],
+    )
+
+    class FakeFido:
+        def fetch(self, query_slice, path):
+            if len(query_slice) > 1:
+                raise RuntimeError("batch unsupported in fake client")
+            fileid = query_slice[0]["fileid"]
+            if fileid == "aia_2.fits":
+                raise RuntimeError("download failed")
+            return [tmp_path / "aia_1.fits"]
+
+    out = sa.fetch(search_result, tmp_path, selected_rows=[0, 1], fido_client=FakeFido())
+    assert out.failed_count == 1
+    assert out.failed_rows == [1]
+    assert out.cancelled is False
+
+
+def test_fetch_cancel_stops_before_any_download(tmp_path: Path):
+    rows = [
+        sa.SunPySearchRow(
+            start=datetime(2026, 2, 10, 1, 0, 0),
+            end=datetime(2026, 2, 10, 1, 2, 0),
+            source="SDO",
+            instrument="AIA",
+            provider="VSO",
+            fileid=f"aia_{i + 1}.fits",
+            size="1 MB",
+        )
+        for i in range(3)
+    ]
+    search_result = sa.SunPySearchResult(
+        spec=_mk_query(),
+        data_kind=sa.DATA_KIND_MAP,
+        rows=rows,
+        raw_response=[[{"fileid": f"aia_{i + 1}.fits"} for i in range(3)]],
+        row_index_map=[(0, 0), (0, 1), (0, 2)],
+    )
+
+    class FakeFido:
+        def __init__(self):
+            self.calls = 0
+
+        def fetch(self, *_args, **_kwargs):
+            self.calls += 1
+            return []
+
+    fido = FakeFido()
+    out = sa.fetch(
+        search_result,
+        tmp_path,
+        selected_rows=[0, 1, 2],
+        cancel_cb=lambda: True,
+        fido_client=fido,
+    )
+    assert out.cancelled is True
+    assert out.paths == []
+    assert fido.calls == 0
+
+
+def test_ensure_event_loop_creates_loop_in_worker_thread():
+    result = {}
+
+    def worker():
+        sa._ensure_event_loop()
+        try:
+            loop = asyncio.get_event_loop_policy().get_event_loop()
+            result["ok"] = loop is not None and not loop.is_closed()
+        except Exception as exc:  # pragma: no cover - failure path
+            result["err"] = repr(exc)
+        finally:
+            try:
+                asyncio.get_event_loop_policy().get_event_loop().close()
+            except Exception:
+                pass
+
+    thread = threading.Thread(target=worker, name="loop-ensure-test")
+    thread.start()
+    thread.join()
+    assert result.get("ok") is True, result

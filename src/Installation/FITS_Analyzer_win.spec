@@ -85,6 +85,19 @@ a = Analysis(
         "mpl_animators",
         "sunpy",
         "parfive",
+
+        # SunPy async download stack (parfive -> aiohttp) + TLS trust store.
+        # Required for Fido.fetch to work in the frozen build (Windows in
+        # particular silently failed downloads without these bundled).
+        "aiohttp",
+        "aiohttp.client",
+        "aiohttp.resolver",
+        "certifi",
+        "multidict",
+        "yarl",
+        "frozenlist",
+        "aiosignal",
+        "aiohappyeyeballs",
         'src',
         'src.UI',
         'src.Backend',

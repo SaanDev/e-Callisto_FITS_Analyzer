@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import shutil
+import threading
 import traceback
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -16,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PySide6.QtCore import QDateTime, QObject, QStandardPaths, Qt, QThread, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import QDateTime, QObject, QSettings, QStandardPaths, Qt, QThread, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
@@ -48,11 +49,19 @@ from src.Backend.sunpy_archive import (
     SunPyLoadResult,
     SunPyQuerySpec,
     SunPySearchResult,
+    configure_fetch_logging,
     fetch,
+    get_fetch_log_path,
     load_downloaded,
+    registry_detectors_for,
+    registry_instruments_for,
+    registry_lookup,
+    registry_spacecraft_list,
     search,
 )
+from src.UI.gui_shared import pick_export_path
 from src.UI.sunpy_plot_window import SunPyPlotWindow
+from src.version import APP_NAME, APP_ORG
 
 
 def _get_theme():
@@ -60,6 +69,16 @@ def _get_theme():
     if not app:
         return None
     return app.property("theme_manager")
+
+
+def _make_settings() -> QSettings:
+    """Return the persistent settings store for the viewer.
+
+    Wrapped in a module-level factory so tests can redirect it to an isolated
+    location (the two-arg QSettings(org, app) constructor always uses the
+    native backend, e.g. the Windows registry, which cannot be redirected).
+    """
+    return QSettings(APP_ORG, APP_NAME)
 
 
 def _default_cache_dir() -> Path:
@@ -76,6 +95,7 @@ class SunPyWorker(QObject):
     search_finished = Signal(object)
     load_finished = Signal(object, object)
     partial_warning = Signal(str)
+    cancelled = Signal()
     failed = Signal(str)
 
     def __init__(
@@ -93,6 +113,10 @@ class SunPyWorker(QObject):
         self.search_result = search_result
         self.selected_rows = list(selected_rows or [])
         self.cache_dir = Path(cache_dir).expanduser().resolve() if cache_dir else _default_cache_dir()
+        self._cancel_event = threading.Event()
+
+    def cancel(self):
+        self._cancel_event.set()
 
     @Slot()
     def run(self):
@@ -118,7 +142,11 @@ class SunPyWorker(QObject):
                         5 + int(max(0, min(100, int(v))) * 0.80),
                         t,
                     ),
+                    cancel_cb=self._cancel_event.is_set,
                 )
+                if getattr(fetch_result, "cancelled", False) and not fetch_result.paths:
+                    self.cancelled.emit()
+                    return
                 if fetch_result.failed_count > 0:
                     details = "\n".join(fetch_result.errors[:8])
                     more = "" if fetch_result.failed_count <= 8 else f"\n...and {fetch_result.failed_count - 8} more."
@@ -153,7 +181,7 @@ class SunPyWorker(QObject):
 class SunPySolarViewer(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("SunPy Multi-Mission Solar Explorer v1.0-beta")
+        self.setWindowTitle("SunPy Multi-Mission Solar Explorer v1.0")
         self.resize(1220, 900)
 
         self.theme = _get_theme()
@@ -161,10 +189,15 @@ class SunPySolarViewer(QMainWindow):
             self.theme.themeChanged.connect(self._on_theme_changed)
 
         self.cache_dir = _default_cache_dir()
+        # Diagnostics log lives next to the cache root (<app_data>/sunpy_fetch.log).
+        configure_fetch_logging(self.cache_dir.parent)
+        self.settings = _make_settings()
 
         self._search_result: SunPySearchResult | None = None
         self._last_query_spec: SunPyQuerySpec | None = None
         self._loaded_result: SunPyLoadResult | None = None
+        self._loaded_paths: list[str] = []
+        self._failed_rows: list[int] = []
         self._map_frames: list[Any] = []
         self._current_map_data: np.ndarray | None = None
         self._map_roi_bounds: tuple[int, int, int, int] | None = None
@@ -184,6 +217,9 @@ class SunPySolarViewer(QMainWindow):
         self._build_ui()
         self._connect_signals()
         self._on_spacecraft_changed()
+        self._restore_settings()
+        self._update_cache_size_label()
+        self.use_analyzer_btn.setEnabled(self._analyzer_main_window() is not None)
 
     def _build_ui(self):
         central = QWidget(self)
@@ -195,14 +231,13 @@ class SunPySolarViewer(QMainWindow):
         root.addWidget(query_group)
 
         self.spacecraft_combo = QComboBox()
-        for item in ("SDO", "SOHO", "STEREO_A", "GOES"):
+        for item in registry_spacecraft_list():
             self.spacecraft_combo.addItem(item)
 
         self.instrument_combo = QComboBox()
 
         self.detector_label = QLabel("Detector")
         self.detector_combo = QComboBox()
-        self.detector_combo.addItems(["C2", "C3"])
 
         self.wavelength_label = QLabel("Wavelength (A)")
         self.wavelength_combo = QComboBox()
@@ -235,6 +270,13 @@ class SunPySolarViewer(QMainWindow):
         self.retry_btn = QPushButton("Retry Last Query")
         self.retry_btn.setEnabled(False)
         self.open_cache_btn = QPushButton("Open Cache Folder")
+        self.clear_cache_btn = QPushButton("Clear Cache")
+        self.cache_size_label = QLabel("Cache: 0 B")
+        self.cache_size_label.setToolTip("Total size of downloaded files kept in the cache folder.")
+        self.use_analyzer_btn = QPushButton("Use Analyzer Time Window")
+        self.use_analyzer_btn.setToolTip(
+            "Set the query time range from the spectrogram currently open in the main analyzer and search."
+        )
 
         row = 0
         qlayout.addWidget(QLabel("Spacecraft"), row, 0)
@@ -265,6 +307,11 @@ class SunPySolarViewer(QMainWindow):
         qlayout.addWidget(self.retry_btn, row, 3)
         qlayout.addWidget(self.open_cache_btn, row, 4, 1, 2)
 
+        row += 1
+        qlayout.addWidget(self.cache_size_label, row, 0, 1, 2)
+        qlayout.addWidget(self.use_analyzer_btn, row, 2, 1, 2)
+        qlayout.addWidget(self.clear_cache_btn, row, 4, 1, 2)
+
         self.progress = QProgressBar()
         self.progress.setVisible(False)
         root.addWidget(self.progress)
@@ -292,11 +339,19 @@ class SunPySolarViewer(QMainWindow):
         results_actions = QHBoxLayout()
         self.select_all_btn = QPushButton("Select All")
         self.clear_selection_btn = QPushButton("Clear Selection")
+        self.retry_failed_btn = QPushButton("Retry Failed")
+        self.retry_failed_btn.setEnabled(False)
+        self.retry_failed_btn.setToolTip("Re-download only the rows that failed in the last download.")
+        self.stop_btn = QPushButton("Stop")
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.setToolTip("Cancel the running search or download.")
         self.download_load_btn = QPushButton("Download && Load Selected")
         self.download_load_btn.setEnabled(False)
         results_actions.addWidget(self.select_all_btn)
         results_actions.addWidget(self.clear_selection_btn)
+        results_actions.addWidget(self.retry_failed_btn)
         results_actions.addStretch(1)
+        results_actions.addWidget(self.stop_btn)
         results_actions.addWidget(self.download_load_btn)
         results_layout.addLayout(results_actions)
 
@@ -307,11 +362,15 @@ class SunPySolarViewer(QMainWindow):
         actions_row = QHBoxLayout()
         self.open_plot_btn = QPushButton("Open Plot Window")
         self.open_plot_btn.setEnabled(False)
+        self.save_files_btn = QPushButton("Save Files As...")
+        self.save_files_btn.setEnabled(False)
+        self.save_files_btn.setToolTip("Copy the downloaded data files to a folder of your choice.")
         self.export_plot_btn = QPushButton("Export Plot")
         self.export_plot_btn.setEnabled(False)
         self.export_analysis_btn = QPushButton("Export Analysis CSV")
         self.export_analysis_btn.setEnabled(False)
         actions_row.addWidget(self.open_plot_btn)
+        actions_row.addWidget(self.save_files_btn)
         actions_row.addStretch(1)
         actions_row.addWidget(self.export_plot_btn)
         actions_row.addWidget(self.export_analysis_btn)
@@ -330,10 +389,15 @@ class SunPySolarViewer(QMainWindow):
         self.search_btn.clicked.connect(self.search_archives)
         self.retry_btn.clicked.connect(self.retry_last_query)
         self.open_cache_btn.clicked.connect(self.open_cache_folder)
+        self.clear_cache_btn.clicked.connect(self.clear_cache)
+        self.use_analyzer_btn.clicked.connect(self.use_analyzer_time_window)
         self.select_all_btn.clicked.connect(self.select_all_rows)
         self.clear_selection_btn.clicked.connect(self.clear_all_rows)
+        self.retry_failed_btn.clicked.connect(self.retry_failed_rows)
+        self.stop_btn.clicked.connect(self.stop_active_operation)
         self.download_load_btn.clicked.connect(self.download_and_load_selected)
         self.open_plot_btn.clicked.connect(self.open_plot_window)
+        self.save_files_btn.clicked.connect(self.save_files_as)
         self.export_plot_btn.clicked.connect(self.export_plot)
         self.export_analysis_btn.clicked.connect(self.export_analysis_csv)
 
@@ -347,6 +411,9 @@ class SunPySolarViewer(QMainWindow):
         self.search_btn.setEnabled(not busy)
         self.download_load_btn.setEnabled((not busy) and bool(self._search_result and self._search_result.rows))
         self.retry_btn.setEnabled((not busy) and self._last_query_spec is not None)
+        self.retry_failed_btn.setEnabled((not busy) and bool(self._failed_rows))
+        self.clear_cache_btn.setEnabled(not busy)
+        self.stop_btn.setEnabled(bool(busy))
         self.progress.setVisible(bool(busy))
         if busy:
             self.progress.setRange(0, 100)
@@ -377,14 +444,8 @@ class SunPySolarViewer(QMainWindow):
         spacecraft = self.spacecraft_combo.currentText().strip().upper()
         self.instrument_combo.blockSignals(True)
         self.instrument_combo.clear()
-        if spacecraft == "SDO":
-            self.instrument_combo.addItem("AIA")
-        elif spacecraft == "SOHO":
-            self.instrument_combo.addItem("LASCO")
-        elif spacecraft == "STEREO_A":
-            self.instrument_combo.addItem("EUVI")
-        elif spacecraft == "GOES":
-            self.instrument_combo.addItem("XRS")
+        for instrument in registry_instruments_for(spacecraft):
+            self.instrument_combo.addItem(instrument)
         self.instrument_combo.blockSignals(False)
         self._on_instrument_changed()
 
@@ -398,21 +459,39 @@ class SunPySolarViewer(QMainWindow):
         spacecraft = self.spacecraft_combo.currentText().strip().upper()
         instrument = self.instrument_combo.currentText().strip().upper()
 
-        is_lasco = spacecraft == "SOHO" and instrument == "LASCO"
-        is_wave = (spacecraft == "SDO" and instrument == "AIA") or (spacecraft == "STEREO_A" and instrument == "EUVI")
-        is_goes = spacecraft == "GOES" and instrument == "XRS"
+        detectors = registry_detectors_for(spacecraft, instrument)
+        prev_detector = self.detector_combo.currentText().strip().upper()
+        self.detector_combo.blockSignals(True)
+        self.detector_combo.clear()
+        for detector in detectors:
+            self.detector_combo.addItem(detector)
+        if detectors:
+            if prev_detector in detectors:
+                self.detector_combo.setCurrentText(prev_detector)
+            else:
+                self.detector_combo.setCurrentIndex(0)
+        self.detector_combo.blockSignals(False)
 
-        self.detector_label.setVisible(is_lasco)
-        self.detector_combo.setVisible(is_lasco)
-        self.wavelength_label.setVisible(is_wave)
-        self.wavelength_combo.setVisible(is_wave)
-        self.satellite_label.setVisible(is_goes)
-        self.satellite_combo.setVisible(is_goes)
+        current_detector = self.detector_combo.currentText().strip().upper() if detectors else None
+        entry = registry_lookup(spacecraft, instrument, current_detector)
 
-        if spacecraft == "SDO" and instrument == "AIA":
-            self._set_wavelength_values([94, 131, 171, 193, 211, 304, 335, 1600, 1700], default_value=193)
-        elif spacecraft == "STEREO_A" and instrument == "EUVI":
-            self._set_wavelength_values([171, 195, 284, 304], default_value=195)
+        has_detector = bool(detectors)
+        has_wavelength = bool(entry and entry.supports_wavelength)
+        has_satellite = bool(entry and entry.supports_satellite)
+
+        self.detector_label.setVisible(has_detector)
+        self.detector_combo.setVisible(has_detector)
+        self.wavelength_label.setVisible(has_wavelength)
+        self.wavelength_combo.setVisible(has_wavelength)
+        self.satellite_label.setVisible(has_satellite)
+        self.satellite_combo.setVisible(has_satellite)
+
+        if has_wavelength and entry is not None:
+            values = [int(w) for w in entry.wavelengths]
+            default = int(entry.default_wavelength) if entry.default_wavelength else (values[0] if values else 0)
+            self._set_wavelength_values(values, default)
+        if has_satellite and entry is not None and entry.default_satellite:
+            self.satellite_combo.setCurrentText(str(int(entry.default_satellite)))
 
     def _build_query_spec(self) -> SunPyQuerySpec:
         start_dt = self.start_dt_edit.dateTime().toPython().replace(tzinfo=None)
@@ -459,10 +538,12 @@ class SunPySolarViewer(QMainWindow):
         worker.progress.connect(self._on_worker_progress)
         worker.failed.connect(self._on_worker_failed)
         worker.partial_warning.connect(self._on_partial_warning)
+        worker.cancelled.connect(self._on_worker_cancelled)
         worker.search_finished.connect(self._on_search_finished)
         worker.load_finished.connect(self._on_load_finished)
 
         worker.failed.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
         worker.search_finished.connect(thread.quit)
         worker.load_finished.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
@@ -507,17 +588,24 @@ class SunPySolarViewer(QMainWindow):
     def _on_worker_failed(self, tb_text: str):
         self.statusBar().showMessage("SunPy operation failed.", 5000)
         short = str(tb_text).strip().splitlines()[-1] if tb_text else "Unknown error"
-        self.analysis_text.setPlainText("Operation failed.\n\n" + short)
+        log_path = get_fetch_log_path()
+        log_hint = f"\n\nDiagnostics log: {log_path}" if log_path else ""
+        self.analysis_text.setPlainText("Operation failed.\n\n" + short + log_hint)
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Critical)
         msg.setWindowTitle("SunPy Error")
         msg.setText(short)
-        msg.setDetailedText(tb_text)
+        msg.setDetailedText((tb_text or "") + log_hint)
         msg.exec()
 
     @Slot(str)
     def _on_partial_warning(self, message: str):
         QMessageBox.warning(self, "Partial Download", message)
+
+    @Slot()
+    def _on_worker_cancelled(self):
+        self.statusBar().showMessage("Operation cancelled.", 5000)
+        self.analysis_text.setPlainText("Operation cancelled by user.")
 
     @Slot(object)
     def _on_search_finished(self, result_obj: object):
@@ -527,6 +615,8 @@ class SunPySolarViewer(QMainWindow):
             return
 
         self._search_result = result
+        self._failed_rows = []
+        self.retry_failed_btn.setEnabled(False)
         self._populate_results_table(result)
         self.download_load_btn.setEnabled(bool(result.rows))
         self.export_plot_btn.setEnabled(False)
@@ -550,6 +640,8 @@ class SunPySolarViewer(QMainWindow):
                 return
 
             self._loaded_result = load_result
+            self._loaded_paths = list(fetch_result.paths)
+            self._failed_rows = list(getattr(fetch_result, "failed_rows", []))
             if load_result.data_kind == DATA_KIND_MAP:
                 self._apply_loaded_map_result(load_result)
             elif load_result.data_kind == DATA_KIND_TIMESERIES:
@@ -565,8 +657,11 @@ class SunPySolarViewer(QMainWindow):
             )
             self.statusBar().showMessage(msg, 6000)
             self.open_plot_btn.setEnabled(True)
+            self.save_files_btn.setEnabled(bool(self._loaded_paths))
             self.export_plot_btn.setEnabled(True)
             self.export_analysis_btn.setEnabled(bool(self._analysis_payload))
+            self.retry_failed_btn.setEnabled(bool(self._failed_rows))
+            self._update_cache_size_label()
             self.open_plot_window()
         except Exception:
             self._on_worker_failed(traceback.format_exc())
@@ -650,6 +745,35 @@ class SunPySolarViewer(QMainWindow):
                 cache_dir=self.cache_dir,
             )
         )
+
+    def retry_failed_rows(self):
+        if self._search_result is None or not self._failed_rows:
+            QMessageBox.information(self, "SunPy", "There are no failed rows to retry.")
+            return
+        rows = [r for r in self._failed_rows if 0 <= r < len(self._search_result.rows)]
+        if not rows:
+            QMessageBox.information(self, "SunPy", "There are no failed rows to retry.")
+            return
+        self._set_busy(True, f"Retrying {len(rows)} failed row(s)...")
+        self._start_worker(
+            SunPyWorker(
+                "fetch_load",
+                search_result=self._search_result,
+                selected_rows=rows,
+                cache_dir=self.cache_dir,
+            )
+        )
+
+    def stop_active_operation(self):
+        worker = self._active_worker
+        if worker is None or not self.is_operation_running():
+            return
+        try:
+            worker.cancel()
+        except Exception:
+            return
+        self.stop_btn.setEnabled(False)
+        self.statusBar().showMessage("Cancelling... (finishing the current item)", 5000)
 
     def _ensure_plot_window(self) -> SunPyPlotWindow:
         if self._plot_window is None:
@@ -855,7 +979,7 @@ class SunPySolarViewer(QMainWindow):
             QMessageBox.information(self, "Export Plot", "No plot is available yet.")
             return
 
-        path, _ = QFileDialog.getSaveFileName(
+        path, _ = pick_export_path(
             self,
             "Export Plot",
             "sunpy_plot.png",
@@ -873,7 +997,7 @@ class SunPySolarViewer(QMainWindow):
         if not self._analysis_payload:
             QMessageBox.information(self, "Export Analysis", "No analysis is available yet.")
             return
-        path, _ = QFileDialog.getSaveFileName(
+        path, _ = pick_export_path(
             self,
             "Export Analysis",
             "sunpy_analysis.csv",
@@ -894,18 +1018,171 @@ class SunPySolarViewer(QMainWindow):
     def open_cache_folder(self):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.cache_dir)))
 
-    def _cleanup_cache_dir(self):
+    def _cache_size_bytes(self) -> int:
+        total = 0
         try:
-            cache_path = Path(self.cache_dir).expanduser().resolve()
+            for path in Path(self.cache_dir).rglob("*"):
+                if path.is_file():
+                    try:
+                        total += path.stat().st_size
+                    except OSError:
+                        continue
         except Exception:
+            return 0
+        return total
+
+    @staticmethod
+    def _format_size(num_bytes: int) -> str:
+        size = float(max(0, int(num_bytes)))
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if size < 1024.0 or unit == "TB":
+                return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+            size /= 1024.0
+        return f"{size:.1f} TB"
+
+    def _update_cache_size_label(self):
+        self.cache_size_label.setText(f"Cache: {self._format_size(self._cache_size_bytes())}")
+
+    def clear_cache(self):
+        if self._busy:
+            QMessageBox.information(self, "SunPy", "Cannot clear the cache while an operation is running.")
             return
-        if not cache_path.exists():
+        size_text = self._format_size(self._cache_size_bytes())
+        reply = QMessageBox.question(
+            self,
+            "Clear Cache",
+            f"Delete all downloaded files in the cache folder?\n\n{self.cache_dir}\n({size_text})",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
             return
+        cache_path = Path(self.cache_dir)
+        removed_errors = 0
         try:
-            shutil.rmtree(cache_path)
+            for child in cache_path.iterdir():
+                try:
+                    if child.is_dir():
+                        shutil.rmtree(child, ignore_errors=True)
+                    else:
+                        child.unlink(missing_ok=True)
+                except Exception:
+                    removed_errors += 1
         except Exception:
-            # Cleanup is best-effort; failures should not block app shutdown.
             pass
+        cache_path.mkdir(parents=True, exist_ok=True)
+        self._update_cache_size_label()
+        if removed_errors:
+            self.statusBar().showMessage(
+                f"Cache cleared with {removed_errors} item(s) skipped (in use).", 6000
+            )
+        else:
+            self.statusBar().showMessage("Cache cleared.", 4000)
+
+    def save_files_as(self):
+        if not self._loaded_paths:
+            QMessageBox.information(self, "Save Files", "No downloaded files are available yet.")
+            return
+        target_dir = QFileDialog.getExistingDirectory(self, "Save Downloaded Files To Folder")
+        if not target_dir:
+            return
+        target = Path(target_dir)
+        copied = 0
+        errors = 0
+        for src in self._loaded_paths:
+            try:
+                src_path = Path(src)
+                if not src_path.is_file():
+                    continue
+                shutil.copy2(src_path, target / src_path.name)
+                copied += 1
+            except Exception:
+                errors += 1
+        if errors:
+            self.statusBar().showMessage(f"Copied {copied} file(s); {errors} failed.", 6000)
+        else:
+            self.statusBar().showMessage(f"Copied {copied} file(s) to {target_dir}", 6000)
+
+    def _save_settings(self):
+        s = self.settings
+        try:
+            s.setValue("sunpy/spacecraft", self.spacecraft_combo.currentText())
+            s.setValue("sunpy/instrument", self.instrument_combo.currentText())
+            s.setValue("sunpy/detector", self.detector_combo.currentText())
+            s.setValue("sunpy/wavelength", self.wavelength_combo.currentText())
+            s.setValue("sunpy/satellite", self.satellite_combo.currentText())
+            s.setValue("sunpy/sample_seconds", int(self.sample_seconds_spin.value()))
+            s.setValue("sunpy/max_records", int(self.max_records_spin.value()))
+            s.setValue("sunpy/geometry", self.saveGeometry())
+        except Exception:
+            pass
+
+    def _restore_settings(self):
+        s = self.settings
+        try:
+            spacecraft = s.value("sunpy/spacecraft", "")
+            if spacecraft:
+                idx = self.spacecraft_combo.findText(str(spacecraft))
+                if idx >= 0:
+                    self.spacecraft_combo.setCurrentIndex(idx)  # fires _on_spacecraft_changed
+            instrument = s.value("sunpy/instrument", "")
+            if instrument:
+                idx = self.instrument_combo.findText(str(instrument))
+                if idx >= 0:
+                    self.instrument_combo.setCurrentIndex(idx)  # fires _on_instrument_changed
+            detector = s.value("sunpy/detector", "")
+            if detector:
+                di = self.detector_combo.findText(str(detector))
+                if di >= 0:
+                    self.detector_combo.setCurrentIndex(di)
+            wavelength = s.value("sunpy/wavelength", "")
+            if wavelength:
+                self.wavelength_combo.setCurrentText(str(wavelength))
+            satellite = s.value("sunpy/satellite", "")
+            if satellite:
+                si = self.satellite_combo.findText(str(satellite))
+                if si >= 0:
+                    self.satellite_combo.setCurrentIndex(si)
+            sample = s.value("sunpy/sample_seconds", None)
+            if sample is not None:
+                self.sample_seconds_spin.setValue(int(sample))
+            maxrec = s.value("sunpy/max_records", None)
+            if maxrec is not None:
+                self.max_records_spin.setValue(int(maxrec))
+            geometry = s.value("sunpy/geometry", None)
+            if geometry is not None:
+                self.restoreGeometry(geometry)
+        except Exception:
+            pass
+
+    def _analyzer_main_window(self):
+        """Return the parent analyzer window if it can supply a time window."""
+        candidate = self.parent()
+        if candidate is not None and hasattr(candidate, "_current_time_window_utc"):
+            return candidate
+        return None
+
+    def use_analyzer_time_window(self):
+        main_window = self._analyzer_main_window()
+        if main_window is None:
+            QMessageBox.information(
+                self,
+                "SunPy",
+                "Open this window from the main analyzer to use its time window.",
+            )
+            return
+        try:
+            window = main_window._current_time_window_utc()
+        except Exception:
+            window = None
+        if not window:
+            QMessageBox.information(
+                self,
+                "SunPy",
+                "No spectrogram time range is available. Load a file in the main analyzer first.",
+            )
+            return
+        self.set_time_window(window[0], window[1], auto_query=True)
 
     def set_time_window(self, start_dt: datetime, end_dt: datetime, auto_query: bool = True) -> bool:
         try:
@@ -948,5 +1225,7 @@ class SunPySolarViewer(QMainWindow):
                 self._plot_window = None
         except Exception:
             pass
-        self._cleanup_cache_dir()
+        # Cache is intentionally preserved between sessions; use "Clear Cache"
+        # to remove downloaded files on demand.
+        self._save_settings()
         super().closeEvent(event)

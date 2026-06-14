@@ -87,6 +87,19 @@ a = Analysis(
         "sunpy",
         "parfive",
 
+        # SunPy async download stack (parfive -> aiohttp) + TLS trust store.
+        # Kept in parity with the Windows spec so Fido.fetch behaves the same
+        # across packaged platforms.
+        "aiohttp",
+        "aiohttp.client",
+        "aiohttp.resolver",
+        "certifi",
+        "multidict",
+        "yarl",
+        "frozenlist",
+        "aiosignal",
+        "aiohappyeyeballs",
+
         # Your packages and modules
         "src",
         "src.UI",

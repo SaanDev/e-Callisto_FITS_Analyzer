@@ -92,6 +92,19 @@ a = Analysis(
         "mpl_animators",
         "sunpy",
         "parfive",
+
+        # SunPy async download stack (parfive -> aiohttp) + TLS trust store.
+        # Required for Fido.fetch in frozen builds (kept in sync with
+        # FITS_Analyzer_win.spec / FITS_Analyzer_linux.spec).
+        "aiohttp",
+        "aiohttp.client",
+        "aiohttp.resolver",
+        "certifi",
+        "multidict",
+        "yarl",
+        "frozenlist",
+        "aiosignal",
+        "aiohappyeyeballs",
         'src',
         'src.UI',
         'src.Backend',

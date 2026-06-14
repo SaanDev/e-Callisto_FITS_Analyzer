@@ -125,6 +125,37 @@ def test_set_time_window_validation():
     win.close()
 
 
+def test_use_analyzer_button_disabled_without_parent():
+    _app()
+    win = SunPySolarViewer()
+    assert win.use_analyzer_btn.isEnabled() is False
+    win.close()
+
+
+def test_use_analyzer_time_window_pulls_from_parent(monkeypatch):
+    from PySide6.QtWidgets import QMainWindow
+
+    _app()
+
+    class FakeMain(QMainWindow):
+        def _current_time_window_utc(self):
+            return (datetime(2024, 5, 10, 6, 0, 0), datetime(2024, 5, 10, 7, 0, 0))
+
+    parent = FakeMain()
+    win = SunPySolarViewer(parent=parent)
+    assert win.use_analyzer_btn.isEnabled() is True
+
+    searched = []
+    monkeypatch.setattr(win, "search_archives", lambda: searched.append(True))
+    win.use_analyzer_time_window()
+
+    assert searched == [True]
+    assert win.start_dt_edit.dateTime().toPython().hour == 6
+    assert win.end_dt_edit.dateTime().toPython().hour == 7
+    win.close()
+    parent.close()
+
+
 def test_search_results_population_and_selection():
     _app()
     win = SunPySolarViewer()
@@ -548,6 +579,46 @@ def test_roi_signal_updates_controller_analysis_text():
     win.close()
 
 
+def test_interactive_roi_selector_emits_pixel_bounds():
+    _app()
+    win = SunPySolarViewer()
+    load_result = SunPyLoadResult(
+        data_kind=DATA_KIND_MAP,
+        paths=["/tmp/a.fits"],
+        maps_or_timeseries=_fake_map_sequence([1.0]),
+        metadata={},
+    )
+    win._apply_loaded_map_result(load_result)
+    QApplication.processEvents()
+
+    pw = win._plot_window
+    assert pw is not None
+    canvas = pw.canvas
+    emitted: list = []
+    pw.mapRoiChanged.connect(lambda b: emitted.append(b))
+
+    # Enabling the selector drops a default ROI over the central half (8x8 map).
+    pw.roi_select_check.setChecked(True)
+    QApplication.processEvents()
+    assert pw.current_roi_bounds() == (2, 6, 2, 6)
+    assert emitted and emitted[-1] == (2, 6, 2, 6)
+    assert "ROI: x=[2,6], y=[2,6]" in win.analysis_text.toPlainText()
+
+    # Dragging the ROI to cover the whole image yields full-frame pixel bounds.
+    img = canvas.map_image.image
+    x0, y0, width, height = canvas._map_rect_from_transform(img.shape)
+    canvas._roi_rect.setPos([x0, y0])
+    canvas._roi_rect.setSize([width, height])
+    canvas._on_roi_region_changed()
+    assert canvas._roi_bounds == (0, img.shape[1], 0, img.shape[0])
+
+    # Turning the selector off clears the ROI and reverts to full-frame analysis.
+    pw.roi_select_check.setChecked(False)
+    QApplication.processEvents()
+    assert pw.current_roi_bounds() is None
+    win.close()
+
+
 def test_plot_canvas_not_using_tight_layout():
     _app()
     plot = SunPyPlotWindow()
@@ -596,7 +667,7 @@ def test_worker_no_download_paths_includes_fetch_error_details(monkeypatch, tmp_
         row_index_map=[],
     )
 
-    def fake_fetch(_search_result, _cache_dir, selected_rows=None, progress_cb=None):
+    def fake_fetch(_search_result, _cache_dir, selected_rows=None, progress_cb=None, cancel_cb=None):
         return SunPyFetchResult(
             paths=[],
             requested_count=len(selected_rows or []),
@@ -640,7 +711,7 @@ def test_map_load_does_not_emit_tight_layout_warning():
     win.close()
 
 
-def test_sunpy_viewer_close_removes_cache_folder(tmp_path):
+def test_sunpy_viewer_close_keeps_cache_folder(tmp_path):
     _app()
     win = SunPySolarViewer()
     cache_dir = tmp_path / "sunpy_cache"
@@ -650,7 +721,36 @@ def test_sunpy_viewer_close_removes_cache_folder(tmp_path):
     win.close()
     QApplication.processEvents()
 
-    assert cache_dir.exists() is False
+    # Cache now persists between sessions (use "Clear Cache" to remove).
+    assert cache_dir.exists() is True
+    assert (cache_dir / "payload.tmp").exists() is True
+
+
+def test_sunpy_viewer_clear_cache_empties_folder(tmp_path):
+    _app()
+    win = SunPySolarViewer()
+    cache_dir = tmp_path / "sunpy_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    (cache_dir / "payload.tmp").write_text("cache", encoding="utf-8")
+    win.cache_dir = cache_dir
+
+    import src.UI.sunpy_solar_viewer as viewer_mod
+
+    monkeypatch_box = {}
+
+    def fake_question(*_args, **_kwargs):
+        return viewer_mod.QMessageBox.Yes
+
+    orig_question = viewer_mod.QMessageBox.question
+    viewer_mod.QMessageBox.question = staticmethod(fake_question)
+    try:
+        win.clear_cache()
+    finally:
+        viewer_mod.QMessageBox.question = orig_question
+
+    assert cache_dir.exists() is True
+    assert (cache_dir / "payload.tmp").exists() is False
+    win.close()
 
 
 def test_sunpy_viewer_close_ignored_while_worker_thread_running(monkeypatch):
@@ -675,16 +775,105 @@ def test_sunpy_viewer_close_ignored_while_worker_thread_running(monkeypatch):
     fake_thread = _FakeRunningThread()
     win._active_thread = fake_thread  # type: ignore[assignment]
 
-    cleanup_called = {"value": False}
-    monkeypatch.setattr(win, "_cleanup_cache_dir", lambda: cleanup_called.__setitem__("value", True))
-
     closed = win.close()
     QApplication.processEvents()
 
     assert closed is False
     assert fake_thread.quit_calls == 1
     assert fake_thread.wait_calls
-    assert cleanup_called["value"] is False
 
     win._active_thread = None
+    win.close()
+
+
+def _row(fileid: str) -> SunPySearchRow:
+    return SunPySearchRow(
+        start=datetime(2026, 2, 10, 1, 0, 0),
+        end=datetime(2026, 2, 10, 1, 1, 0),
+        source="SDO",
+        instrument="AIA",
+        provider="VSO",
+        fileid=fileid,
+        size="1 MB",
+    )
+
+
+def test_sunpy_settings_persist_across_instances():
+    _app()
+    win = SunPySolarViewer()
+    win.spacecraft_combo.setCurrentText("GOES")
+    win.sample_seconds_spin.setValue(123)
+    win.max_records_spin.setValue(42)
+    win._save_settings()
+    win.close()
+
+    win2 = SunPySolarViewer()
+    assert win2.spacecraft_combo.currentText() == "GOES"
+    assert win2.sample_seconds_spin.value() == 123
+    assert win2.max_records_spin.value() == 42
+    win2.close()
+
+
+def test_retry_failed_rows_starts_worker_with_failed_indices(monkeypatch):
+    _app()
+    win = SunPySolarViewer()
+    rows = [_row("a.fits"), _row("b.fits"), _row("c.fits")]
+    win._search_result = SunPySearchResult(
+        spec=_sample_query(),
+        data_kind=DATA_KIND_MAP,
+        rows=rows,
+        raw_response=[[{"fileid": r.fileid} for r in rows]],
+        row_index_map=[(0, 0), (0, 1), (0, 2)],
+    )
+    win._failed_rows = [1, 2]
+
+    captured = {}
+    monkeypatch.setattr(win, "_start_worker", lambda worker: captured.setdefault("worker", worker))
+    win.retry_failed_rows()
+
+    assert captured["worker"].mode == "fetch_load"
+    assert captured["worker"].selected_rows == [1, 2]
+    win.close()
+
+
+def test_stop_active_operation_calls_worker_cancel(monkeypatch):
+    _app()
+    win = SunPySolarViewer()
+
+    class FakeWorker:
+        def __init__(self):
+            self.cancelled = False
+
+        def cancel(self):
+            self.cancelled = True
+
+    fake_worker = FakeWorker()
+    win._active_worker = fake_worker  # type: ignore[assignment]
+    monkeypatch.setattr(win, "is_operation_running", lambda: True)
+    win.stop_active_operation()
+
+    assert fake_worker.cancelled is True
+    win.close()
+
+
+def test_save_files_as_copies_loaded_files(tmp_path, monkeypatch):
+    _app()
+    win = SunPySolarViewer()
+    src_a = tmp_path / "a.fits"
+    src_b = tmp_path / "b.fits"
+    src_a.write_text("x", encoding="utf-8")
+    src_b.write_text("y", encoding="utf-8")
+    win._loaded_paths = [str(src_a), str(src_b)]
+
+    dest = tmp_path / "out"
+    dest.mkdir()
+    monkeypatch.setattr(
+        viewer_mod.QFileDialog,
+        "getExistingDirectory",
+        staticmethod(lambda *a, **k: str(dest)),
+    )
+    win.save_files_as()
+
+    assert (dest / "a.fits").exists()
+    assert (dest / "b.fits").exists()
     win.close()
