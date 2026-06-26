@@ -836,6 +836,166 @@ def test_fetch_cancel_stops_before_any_download(tmp_path: Path):
     assert fido.calls == 0
 
 
+class _FakeVsoBlock(list):
+    def __init__(self, rows, client):
+        super().__init__(rows)
+        self.client = client
+
+    def __getitem__(self, item):
+        value = super().__getitem__(item)
+        if isinstance(item, slice):
+            return _FakeVsoBlock(value, self.client)
+        return value
+
+
+class _Obj:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
+class _FakeVsoClient:
+    def __init__(self, url_by_fileid):
+        self.url_by_fileid = dict(url_by_fileid)
+        self.api = _Obj(
+            get_type=lambda _name: (lambda value: value),
+            service=_Obj(GetData=self._get_data),
+        )
+
+    def make_getdatarequest(self, query_slice, methods=None, info=None):
+        return list(query_slice)
+
+    def by_fileid(self, query_slice):
+        return {row["fileid"]: row for row in query_slice}
+
+    def mk_filename(self, pattern, query_row, _response, _url):
+        return str(pattern).format(file=f"{query_row['fileid']}.fits")
+
+    def _get_data(self, request):
+        data_items = [
+            _Obj(url=self.url_by_fileid[row["fileid"]], fileiditem=_Obj(fileid=[row["fileid"]]))
+            for row in request
+        ]
+        return _Obj(
+            getdataresponseitem=[
+                _Obj(
+                    status=None,
+                    method=_Obj(methodtype=["URL-FILE_Rice"]),
+                    getdataitem=_Obj(dataitem=data_items),
+                )
+            ]
+        )
+
+
+def _fake_vso_search_result(row_count=2):
+    rows = [
+        sa.SunPySearchRow(
+            start=datetime(2026, 2, 10, 1, i, 0),
+            end=datetime(2026, 2, 10, 1, i, 30),
+            source="SDO",
+            instrument="AIA",
+            provider="JSOC",
+            fileid=f"aia__lev1:193:{1000 + i}",
+            size="64 Mibyte",
+        )
+        for i in range(row_count)
+    ]
+    url_by_fileid = {
+        row.fileid: f"https://example.test/drms_export.cgi?record=193_{1000 + i}"
+        for i, row in enumerate(rows)
+    }
+    client = _FakeVsoClient(url_by_fileid)
+    raw_rows = [{"fileid": row.fileid, "Provider": "JSOC"} for row in rows]
+    return sa.SunPySearchResult(
+        spec=_mk_query(resolution=1.0),
+        data_kind=sa.DATA_KIND_MAP,
+        rows=rows,
+        raw_response=[_FakeVsoBlock(raw_rows, client)],
+        row_index_map=[(0, i) for i in range(row_count)],
+    )
+
+
+def test_resolve_vso_direct_downloads_maps_urls_to_rows(tmp_path: Path):
+    search_result = _fake_vso_search_result(row_count=2)
+
+    items, unresolved = sa._resolve_vso_direct_downloads(
+        search_result,
+        [0, 1],
+        row_template=str(tmp_path / "{file}"),
+    )
+
+    assert unresolved == []
+    assert [item.row_index for item in items] == [0, 1]
+    assert items[0].url.endswith("record=193_1000")
+    assert items[0].expected_bytes == 64 * 1024 * 1024
+    assert items[0].path_hint.endswith("aia__lev1:193:1000.fits")
+
+
+def test_fetch_uses_direct_vso_downloads_before_fido(tmp_path: Path, monkeypatch):
+    search_result = _fake_vso_search_result(row_count=2)
+    progress_messages = []
+
+    def fake_download_direct_item(item, cache_root, *, priority=False, cancel_cb=None, progress_cb=None):
+        if progress_cb is not None:
+            progress_cb(0.5, f"half {item.fileid}")
+            progress_cb(1.0, f"done {item.fileid}")
+        path = tmp_path / f"direct_{item.row_index}.fits"
+        path.write_text("ok", encoding="utf-8")
+        return str(path.resolve())
+
+    class FidoMustNotFetch:
+        def fetch(self, *_args, **_kwargs):
+            raise AssertionError("direct VSO downloads should bypass Fido.fetch")
+
+    monkeypatch.setattr(sa, "_download_direct_item", fake_download_direct_item)
+
+    out = sa.fetch(
+        search_result,
+        tmp_path,
+        selected_rows=[0, 1],
+        progress_cb=lambda value, text: progress_messages.append((value, text)),
+        fido_client=FidoMustNotFetch(),
+    )
+
+    assert out.failed_count == 0
+    assert out.requested_count == 2
+    assert len(out.paths) == 2
+    assert any("Resolving direct VSO" in message for _value, message in progress_messages)
+    assert any("Direct download finished" in message for _value, message in progress_messages)
+
+
+def test_direct_download_item_fails_over_to_next_mirror(tmp_path: Path, monkeypatch):
+    calls = []
+    item = sa._DirectDownloadItem(
+        row_index=0,
+        url="https://fallback.example/a.fits",
+        fileid="aia__lev1:193:1000",
+        path_hint=str(tmp_path / "aia_direct.fits"),
+        urls=("https://slow.example/a.fits", "https://fast.example/a.fits"),
+    )
+
+    def fake_download_url(url, target, _item, *, priority=False, cancel_cb=None, progress_cb=None):
+        calls.append(url)
+        if "slow" in url:
+            raise TimeoutError("slow mirror")
+        target.write_text("ok", encoding="utf-8")
+        return str(target.resolve())
+
+    monkeypatch.setattr(sa, "_download_direct_url_to_path", fake_download_url)
+
+    path = sa._download_direct_item(item, tmp_path, priority=True)
+
+    assert Path(path).name == "aia_direct.fits"
+    assert calls == ["https://slow.example/a.fits", "https://fast.example/a.fits"]
+
+
+def test_direct_vso_sites_prioritize_nso_for_high_resolution(monkeypatch):
+    monkeypatch.delenv("ECALLISTO_SUNPY_DIRECT_VSO_SITES", raising=False)
+
+    assert sa._resolve_direct_vso_sites(priority=True)[0] == "NSO"
+    assert None in sa._resolve_direct_vso_sites(priority=True)
+    assert sa._resolve_direct_vso_sites(priority=False) == (None,)
+
+
 def test_fetch_high_resolution_defaults_to_row_paced_downloads(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("ECALLISTO_SUNPY_HIGH_RES_BATCH_SIZE", raising=False)
     monkeypatch.delenv("ECALLISTO_SUNPY_HIGH_RES_MAX_CONN", raising=False)
