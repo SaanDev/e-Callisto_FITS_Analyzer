@@ -395,30 +395,58 @@ def export_movie(frames: Sequence[Any], spec: AiaMovieExportSpec) -> None:
     if not rendered:
         raise ValueError("No frames are available for movie export.")
 
+    suffix = out_path.suffix.lower()
+    fps = max(0.1, float(spec.fps or 4.0))
+    if suffix == ".gif":
+        _write_gif_movie(out_path, rendered, fps)
+        return
+    if suffix == ".mp4":
+        _write_mp4_movie(out_path, rendered, fps)
+        return
+    raise ValueError("Movie export supports only .gif and .mp4 files.")
+
+
+def _import_imageio_v2() -> Any:
     try:
         import imageio.v2 as imageio
     except Exception as exc:
         raise RuntimeError("Movie export requires imageio. Install the pinned runtime dependencies.") from exc
+    return imageio
 
-    suffix = out_path.suffix.lower()
-    fps = max(0.1, float(spec.fps or 4.0))
-    if suffix == ".gif":
-        imageio.mimsave(str(out_path), rendered, duration=1.0 / fps)
-        return
-    if suffix == ".mp4":
-        try:
-            writer = imageio.get_writer(str(out_path), fps=fps, codec="libx264", macro_block_size=16)
-        except Exception as exc:
-            raise RuntimeError(
-                "MP4 export requires imageio-ffmpeg or a working ffmpeg backend."
-            ) from exc
-        try:
-            for frame in rendered:
-                writer.append_data(frame)
-        finally:
-            writer.close()
-        return
-    raise ValueError("Movie export supports only .gif and .mp4 files.")
+
+def _ensure_imageio_ffmpeg_available() -> None:
+    try:
+        import imageio_ffmpeg  # noqa: F401
+    except Exception as exc:
+        raise RuntimeError(
+            "MP4 export requires imageio-ffmpeg. Install imageio-ffmpeg==0.6.0 with the runtime dependencies."
+        ) from exc
+
+
+def _write_gif_movie(out_path: Path, rendered: Sequence[np.ndarray], fps: float) -> None:
+    imageio = _import_imageio_v2()
+    imageio.mimsave(str(out_path), list(rendered), duration=1.0 / max(0.1, float(fps)))
+
+
+def _write_mp4_movie(out_path: Path, rendered: Sequence[np.ndarray], fps: float) -> None:
+    _ensure_imageio_ffmpeg_available()
+    imageio = _import_imageio_v2()
+    try:
+        writer = imageio.get_writer(
+            str(out_path),
+            format="FFMPEG",
+            mode="I",
+            fps=max(0.1, float(fps)),
+            codec="libx264",
+            macro_block_size=16,
+        )
+    except Exception as exc:
+        raise RuntimeError("MP4 export requires a working FFmpeg writer backend.") from exc
+    try:
+        for frame in rendered:
+            writer.append_data(np.asarray(frame, dtype=np.uint8))
+    finally:
+        writer.close()
 
 
 def write_cropped_fits(frame: Any, bounds: CropBounds | None, path: str | Path) -> None:

@@ -10,16 +10,20 @@ from __future__ import annotations
 from datetime import datetime
 
 import numpy as np
+import pytest
 
+from src.Backend import solar_data_analysis as solar_mod
 from src.Backend.solar_data_analysis import (
     AiaArrayMap,
     AiaCompositeSpec,
     AiaMetadataRegion,
+    AiaMovieExportSpec,
     clip_crop_bounds,
     crop_array,
     crop_maps,
     detect_active_regions,
     difference_sequence,
+    export_movie,
     label_regions_with_metadata,
     make_composite,
     render_movie_frames,
@@ -140,3 +144,73 @@ def test_render_movie_frames_accepts_aia_colormap_name():
     rendered = render_movie_frames(frames, mode="raw", colormap_name="sdoaia304")
     assert rendered[0].shape == (5, 5, 3)
     assert rendered[0].dtype == np.uint8
+
+
+def test_export_movie_gif_uses_duration_not_fps(monkeypatch, tmp_path):
+    captured = {}
+
+    class FakeImageIO:
+        @staticmethod
+        def mimsave(path, frames, **kwargs):
+            captured["path"] = path
+            captured["frames"] = frames
+            captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(solar_mod, "_import_imageio_v2", lambda: FakeImageIO)
+
+    out_path = tmp_path / "aia.gif"
+    export_movie([FakeMap(np.arange(16).reshape(4, 4))], AiaMovieExportSpec(path=str(out_path), fps=5.0))
+
+    assert captured["path"] == str(out_path)
+    assert len(captured["frames"]) == 1
+    assert captured["kwargs"] == {"duration": 0.2}
+
+
+def test_export_movie_mp4_forces_ffmpeg_writer(monkeypatch, tmp_path):
+    captured = {}
+
+    class FakeWriter:
+        def __init__(self):
+            self.frames = []
+            self.closed = False
+
+        def append_data(self, frame):
+            self.frames.append(np.asarray(frame))
+
+        def close(self):
+            self.closed = True
+
+    writer = FakeWriter()
+
+    class FakeImageIO:
+        @staticmethod
+        def get_writer(path, **kwargs):
+            captured["path"] = path
+            captured["kwargs"] = kwargs
+            return writer
+
+    monkeypatch.setattr(solar_mod, "_ensure_imageio_ffmpeg_available", lambda: None)
+    monkeypatch.setattr(solar_mod, "_import_imageio_v2", lambda: FakeImageIO)
+
+    out_path = tmp_path / "aia.mp4"
+    frames = [FakeMap(np.ones((4, 4))), FakeMap(np.full((4, 4), 2.0))]
+    export_movie(frames, AiaMovieExportSpec(path=str(out_path), fps=8.0))
+
+    assert captured["path"] == str(out_path)
+    assert captured["kwargs"]["format"] == "FFMPEG"
+    assert captured["kwargs"]["mode"] == "I"
+    assert captured["kwargs"]["fps"] == 8.0
+    assert captured["kwargs"]["codec"] == "libx264"
+    assert writer.closed is True
+    assert len(writer.frames) == 2
+    assert writer.frames[0].dtype == np.uint8
+
+
+def test_export_movie_mp4_reports_missing_ffmpeg(monkeypatch, tmp_path):
+    def fail_ffmpeg_import():
+        raise RuntimeError("MP4 export requires imageio-ffmpeg.")
+
+    monkeypatch.setattr(solar_mod, "_ensure_imageio_ffmpeg_available", fail_ffmpeg_import)
+
+    with pytest.raises(RuntimeError, match="imageio-ffmpeg"):
+        export_movie([FakeMap(np.ones((4, 4)))], AiaMovieExportSpec(path=str(tmp_path / "aia.mp4")))

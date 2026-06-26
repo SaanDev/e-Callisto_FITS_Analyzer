@@ -70,6 +70,29 @@ def test_solar_data_window_sidebar_keeps_plot_action_visible():
     win.close()
 
 
+def test_solar_data_window_menu_bar_exposes_secondary_actions():
+    _app()
+    win = SolarDataAnalysisWindow()
+    menu_titles = [action.text() for action in win.menuBar().actions()]
+
+    assert "Data" in menu_titles
+    assert "Analysis" in menu_titles
+    assert "Movie" in menu_titles
+    assert "Export" in menu_titles
+    assert win.export_regions_action.isEnabled() is False
+
+    data = np.zeros((20, 20), dtype=float)
+    data[8:12, 8:12] = 50.0
+    win._apply_loaded_frames([FakeMap(data)], paths=["a.fits"], metadata={})
+    win.threshold_spin.setValue(90)
+    win.min_area_spin.setValue(4)
+    win.detect_active_regions()
+    QApplication.processEvents()
+
+    assert win.export_regions_action.isEnabled() is True
+    win.close()
+
+
 def test_solar_data_window_archive_results_are_readable():
     _app()
     start = datetime(2026, 2, 10, 1, 0, 0)
@@ -105,20 +128,148 @@ def test_solar_data_window_archive_results_are_readable():
     assert win.results_table.item(0, 1).text() == "2026-02-10 01:00:00"
     assert win.results_table.item(0, 4).text() == "aia.lev1_euv_12s[0]"
     assert win._checked_rows() == [0, 1, 2]
+    assert win.select_all_results_btn.isEnabled() is True
+    assert win.deselect_all_results_btn.isEnabled() is True
+
+    win.deselect_all_results()
+    assert win._checked_rows() == []
+    win.select_all_results()
+    assert win._checked_rows() == [0, 1, 2]
     win.close()
 
 
-def test_solar_data_window_requests_high_resolution_by_default():
+def test_solar_data_window_high_resolution_is_opt_in():
     _app()
     win = SolarDataAnalysisWindow()
 
     spec = win._build_query_spec()
-    assert spec.resolution == 1.0
-    assert win.high_resolution_check.isChecked() is True
-
-    win.high_resolution_check.setChecked(False)
-    spec = win._build_query_spec()
     assert spec.resolution is None
+    assert win.high_resolution_check.isChecked() is False
+
+    win.high_resolution_check.setChecked(True)
+    spec = win._build_query_spec()
+    assert spec.resolution == 1.0
+    win.close()
+
+
+def test_solar_data_window_warns_before_large_high_resolution_download(monkeypatch):
+    _app()
+    start = datetime(2026, 2, 10, 1, 0, 0)
+    rows = [
+        SunPySearchRow(
+            start=start + timedelta(minutes=i),
+            end=start + timedelta(minutes=i + 1),
+            source="SDO",
+            instrument="AIA",
+            provider="JSOC",
+            fileid=f"aia.lev1_euv_12s[{i}]",
+            size="12 MB",
+            selected=True,
+        )
+        for i in range(10)
+    ]
+    result = SunPySearchResult(
+        spec=SunPyQuerySpec(start, start + timedelta(minutes=10), "SDO", "AIA", 193.0, resolution=1.0),
+        data_kind=DATA_KIND_MAP,
+        rows=rows,
+        raw_response=object(),
+        row_index_map=[(0, i) for i in range(10)],
+    )
+
+    win = SolarDataAnalysisWindow()
+    win._on_search_finished(result)
+    win.high_resolution_check.setChecked(True)
+
+    monkeypatch.setattr(solar_mod.QMessageBox, "question", staticmethod(lambda *_a, **_k: solar_mod.QMessageBox.No))
+    started = []
+    monkeypatch.setattr(win, "_start_worker", lambda worker: started.append(worker))
+    win.download_and_load_selected()
+    assert started == []
+
+    monkeypatch.setattr(solar_mod.QMessageBox, "question", staticmethod(lambda *_a, **_k: solar_mod.QMessageBox.Yes))
+    win.download_and_load_selected()
+    assert started and started[-1].mode == "fetch_load"
+    win.close()
+
+
+def test_solar_data_window_progress_moves_smoothly():
+    _app()
+    win = SolarDataAnalysisWindow()
+
+    win._set_busy(True, "Test")
+    win._on_worker_progress(None, "Searching...")
+    assert win.progress.maximum() == 0
+
+    win._on_worker_progress(60, "Fetched")
+    QApplication.processEvents()
+    assert win.progress.maximum() == 100
+    assert win._progress_target == 60
+    assert win._progress_timer.isActive() is True
+    win.close()
+
+
+def test_solar_data_window_progress_pulses_during_long_download(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    clock = {"now": 10.0}
+    monkeypatch.setattr(solar_mod.time, "monotonic", lambda: clock["now"])
+
+    win._set_busy(True, "Downloading")
+    win._on_worker_progress(5, "Downloading high-resolution batch 1/2...")
+    win._progress_value = 5
+    win.progress.setValue(5)
+    clock["now"] = 11.0
+    win._tick_progress()
+
+    assert win.progress.value() == 6
+    assert win._progress_activity is True
+    win._set_busy(False)
+    win.close()
+
+
+def test_solar_data_window_progress_enters_busy_mode_at_soft_cap(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    clock = {"now": 10.0}
+    monkeypatch.setattr(solar_mod.time, "monotonic", lambda: clock["now"])
+
+    win._set_busy(True, "Downloading")
+    win._on_worker_progress(5, "Downloading high-resolution batch 1/2...")
+    win._progress_value = 86
+    win._progress_target = 5
+    win._progress_soft_cap = 86
+    win.progress.setValue(86)
+    clock["now"] = 11.0
+    win._tick_progress()
+
+    assert win.progress.maximum() == 0
+    win._set_busy(False)
+    win.close()
+
+
+def test_solar_data_stop_active_operation_calls_worker_cancel(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+
+    class FakeWorker:
+        def __init__(self):
+            self.cancelled = False
+
+        def cancel(self):
+            self.cancelled = True
+
+    fake_worker = FakeWorker()
+    win._active_worker = fake_worker  # type: ignore[assignment]
+    monkeypatch.setattr(win, "is_operation_running", lambda: True)
+    win.stop_btn.setEnabled(True)
+    win.stop_action.setEnabled(True)
+
+    win.stop_active_operation()
+
+    assert fake_worker.cancelled is True
+    assert win.stop_btn.isEnabled() is False
+    assert win.stop_action.isEnabled() is False
+    monkeypatch.setattr(win, "is_operation_running", lambda: False)
     win.close()
 
 

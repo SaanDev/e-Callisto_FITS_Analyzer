@@ -12,6 +12,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import re
+import time
 import traceback
 from typing import Any
 
@@ -23,7 +24,7 @@ from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 from pyqtgraph.exporters import SVGExporter
 from PySide6.QtCore import QDateTime, QObject, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QPainter, QPdfWriter
+from PySide6.QtGui import QAction, QPainter, QPdfWriter
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -84,6 +85,7 @@ from src.version import APP_VERSION
 AIA_WAVELENGTHS = (94, 131, 171, 193, 211, 304, 335, 1600, 1700)
 AIA_COLORMAPS = tuple(f"sdoaia{value}" for value in AIA_WAVELENGTHS)
 AIA_FULL_RESOLUTION = 1.0
+AIA_HIGH_RES_WARN_ROWS = 8
 
 
 class SolarMetadataWorker(QObject):
@@ -425,11 +427,21 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._current_axis_transform: dict[str, float] = self._default_axis_transform()
         self._active_thread: QThread | None = None
         self._active_worker: QObject | None = None
+        self._busy = False
+        self._progress_target = 0
+        self._progress_value = 0
+        self._progress_activity = False
+        self._progress_soft_cap = 0
+        self._progress_last_pulse = 0.0
+        self._progress_timer = QTimer(self)
+        self._progress_timer.setInterval(24)
+        self._progress_timer.timeout.connect(self._tick_progress)
 
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self.next_frame)
 
         self._build_ui()
+        self._build_menu_bar()
         self._connect_signals()
         if self.theme is not None and hasattr(self.theme, "themeChanged"):
             try:
@@ -510,6 +522,70 @@ class SolarDataAnalysisWindow(QMainWindow):
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([560, 1040])
         self._apply_sidebar_style()
+
+    def _build_menu_bar(self) -> None:
+        self.data_menu = self.menuBar().addMenu("Data")
+        self.fetch_action = QAction("Fetch Archive Records", self)
+        self.load_selected_action = QAction("Load Selected", self)
+        self.upload_action = QAction("Upload FITS Files", self)
+        self.use_analyzer_action = QAction("Use Analyzer Window", self)
+        self.stop_action = QAction("Stop Download/Search", self)
+        for action in (
+            self.fetch_action,
+            self.load_selected_action,
+            self.upload_action,
+            self.use_analyzer_action,
+            self.stop_action,
+        ):
+            self.data_menu.addAction(action)
+
+        self.analysis_menu = self.menuBar().addMenu("Analysis")
+        self.plot_action = QAction("Plot Frames", self)
+        self.running_diff_action = QAction("Running Difference", self)
+        self.composite_action = QAction("Composite", self)
+        self.detect_regions_action = QAction("Identify Active Regions", self)
+        self.labels_action = QAction("Fetch NOAA/HEK Labels", self)
+        self.reset_frames_action = QAction("Reset Loaded Frames", self)
+        for action in (
+            self.plot_action,
+            self.running_diff_action,
+            self.composite_action,
+            self.detect_regions_action,
+            self.labels_action,
+            self.reset_frames_action,
+        ):
+            self.analysis_menu.addAction(action)
+
+        self.movie_menu = self.menuBar().addMenu("Movie")
+        self.rewind_action = QAction("Rewind", self)
+        self.previous_action = QAction("Back", self)
+        self.play_action = QAction("Play", self)
+        self.pause_action = QAction("Pause", self)
+        self.next_action = QAction("Forward", self)
+        self.build_movie_action = QAction("Build Movie", self)
+        for action in (
+            self.rewind_action,
+            self.previous_action,
+            self.play_action,
+            self.pause_action,
+            self.next_action,
+            self.build_movie_action,
+        ):
+            self.movie_menu.addAction(action)
+
+        self.export_menu = self.menuBar().addMenu("Export")
+        self.export_plot_action = QAction("Export Plot", self)
+        self.export_crop_action = QAction("Export Cropped FITS", self)
+        self.export_regions_action = QAction("Export Regions CSV", self)
+        self.quick_mp4_action = QAction("Export MP4", self)
+        for action in (
+            self.export_plot_action,
+            self.export_crop_action,
+            self.export_regions_action,
+            self.quick_mp4_action,
+        ):
+            self.export_menu.addAction(action)
+        self._sync_menu_action_state(loaded=False)
 
     def _apply_sidebar_style(self) -> None:
         if not hasattr(self, "controls_scroll"):
@@ -684,7 +760,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.max_records_spin.setRange(1, 5000)
         self.max_records_spin.setValue(120)
         self.high_resolution_check = QCheckBox("High resolution AIA (best crop)")
-        self.high_resolution_check.setChecked(True)
+        self.high_resolution_check.setChecked(False)
         self.high_resolution_check.setToolTip(
             "Request SunPy/VSO full-resolution AIA products. Files are larger, but cropped views preserve more detail."
         )
@@ -734,6 +810,17 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.archive_results_status_label.setObjectName("SolarResultsStatus")
         self.archive_results_status_label.setWordWrap(True)
         layout.addWidget(self.archive_results_status_label)
+
+        table_controls = QHBoxLayout()
+        table_controls.setContentsMargins(0, 0, 0, 0)
+        self.select_all_results_btn = QPushButton("Select All")
+        self.deselect_all_results_btn = QPushButton("Deselect All")
+        self.select_all_results_btn.setEnabled(False)
+        self.deselect_all_results_btn.setEnabled(False)
+        table_controls.addWidget(self.select_all_results_btn)
+        table_controls.addWidget(self.deselect_all_results_btn)
+        table_controls.addStretch(1)
+        layout.addLayout(table_controls)
 
         self.results_table = QTableWidget(0, 5)
         self.results_table.setObjectName("SolarArchiveResultsTable")
@@ -896,8 +983,6 @@ class SolarDataAnalysisWindow(QMainWindow):
         layout.addWidget(self.grid_check, 9, 1)
         layout.addWidget(self.colorbar_check, 10, 0)
         layout.addWidget(self.region_overlay_check, 10, 1)
-        layout.addWidget(self.export_plot_btn, 11, 0)
-        layout.addWidget(self.export_regions_btn, 11, 1)
 
     def _build_region_group(self, parent_layout: QVBoxLayout) -> None:
         group = QGroupBox("Active Regions")
@@ -949,6 +1034,8 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.load_local_btn.clicked.connect(self.load_local_files)
         self.use_analyzer_btn.clicked.connect(lambda: self.use_analyzer_time_window(auto_query=False))
         self.stop_btn.clicked.connect(self.stop_active_operation)
+        self.select_all_results_btn.clicked.connect(self.select_all_results)
+        self.deselect_all_results_btn.clicked.connect(self.deselect_all_results)
         self.wavelength_combo.currentIndexChanged.connect(self._on_query_wavelength_changed)
         self.plot_mode_btn.clicked.connect(lambda: self._set_difference_mode("raw"))
         self.difference_mode_btn.clicked.connect(lambda: self._set_difference_mode("running"))
@@ -980,6 +1067,27 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.export_regions_btn.clicked.connect(self.export_regions_csv)
         self.export_movie_btn.clicked.connect(self.export_movie)
         self.quick_mp4_btn.clicked.connect(lambda: self.export_movie(default_suffix=".mp4"))
+        self.fetch_action.triggered.connect(self.search_archives)
+        self.load_selected_action.triggered.connect(self.download_and_load_selected)
+        self.upload_action.triggered.connect(self.load_local_files)
+        self.use_analyzer_action.triggered.connect(lambda: self.use_analyzer_time_window(auto_query=False))
+        self.stop_action.triggered.connect(self.stop_active_operation)
+        self.plot_action.triggered.connect(lambda: self._set_difference_mode("raw"))
+        self.running_diff_action.triggered.connect(lambda: self._set_difference_mode("running"))
+        self.composite_action.triggered.connect(self.show_composite_plot)
+        self.detect_regions_action.triggered.connect(self.detect_active_regions)
+        self.labels_action.triggered.connect(self.fetch_active_region_labels)
+        self.reset_frames_action.triggered.connect(self.reset_loaded_frames)
+        self.rewind_action.triggered.connect(self.rewind_frames)
+        self.previous_action.triggered.connect(self.previous_frame)
+        self.play_action.triggered.connect(self.play_frames)
+        self.pause_action.triggered.connect(self.pause_frames)
+        self.next_action.triggered.connect(self.next_frame)
+        self.build_movie_action.triggered.connect(self.export_movie)
+        self.export_plot_action.triggered.connect(self.export_plot)
+        self.export_crop_action.triggered.connect(self.export_cropped_fits)
+        self.export_regions_action.triggered.connect(self.export_regions_csv)
+        self.quick_mp4_action.triggered.connect(lambda: self.export_movie(default_suffix=".mp4"))
 
     def _active_canvas(self):
         if hasattr(self, "renderer_combo") and self.renderer_combo.currentText().lower().startswith("matplotlib"):
@@ -1028,21 +1136,111 @@ class SolarDataAnalysisWindow(QMainWindow):
         if not loaded:
             self._set_crop_mode_checked(False)
         self.export_regions_btn.setEnabled(bool(self._regions))
+        self._sync_menu_action_state(loaded=bool(loaded))
 
     def _set_busy(self, busy: bool, text: str = ""):
+        self._busy = bool(busy)
         self.search_btn.setEnabled(not busy)
         self.download_load_btn.setEnabled((not busy) and bool(self._search_result and self._search_result.rows))
         self.load_local_btn.setEnabled(not busy)
         self.high_resolution_check.setEnabled(not busy)
+        self.select_all_results_btn.setEnabled((not busy) and bool(self._search_result and self._search_result.rows))
+        self.deselect_all_results_btn.setEnabled((not busy) and bool(self._search_result and self._search_result.rows))
         self.stop_btn.setEnabled(bool(busy))
         self.progress.setVisible(bool(busy))
         if busy:
-            self.progress.setRange(0, 0)
+            self.progress.setRange(0, 100)
+            self._progress_value = 0
+            self._progress_target = 0
+            self._progress_activity = False
+            self._progress_soft_cap = 0
+            self._progress_last_pulse = time.monotonic()
+            self.progress.setValue(0)
             if text:
                 self.statusBar().showMessage(text)
         else:
+            self._progress_timer.stop()
+            self._progress_activity = False
+            self._progress_soft_cap = 0
             self.progress.setRange(0, 100)
             self.progress.setValue(0)
+        self._sync_menu_action_state(loaded=bool(self._map_frames))
+
+    def _sync_menu_action_state(self, *, loaded: bool) -> None:
+        if not hasattr(self, "fetch_action"):
+            return
+        busy = bool(getattr(self, "_busy", False))
+        has_results = bool(self._search_result and self._search_result.rows)
+        has_regions = bool(self._regions)
+        for action in (self.fetch_action, self.upload_action, self.use_analyzer_action):
+            action.setEnabled(not busy)
+        self.load_selected_action.setEnabled((not busy) and has_results)
+        self.stop_action.setEnabled(busy)
+        for action in (
+            self.running_diff_action,
+            self.composite_action,
+            self.detect_regions_action,
+            self.labels_action,
+            self.reset_frames_action,
+            self.rewind_action,
+            self.previous_action,
+            self.play_action,
+            self.pause_action,
+            self.next_action,
+            self.build_movie_action,
+            self.export_plot_action,
+            self.export_crop_action,
+            self.quick_mp4_action,
+        ):
+            action.setEnabled((not busy) and bool(loaded))
+        self.plot_action.setEnabled(not busy)
+        self.export_regions_action.setEnabled((not busy) and has_regions)
+
+    def _tick_progress(self) -> None:
+        if self.progress.maximum() <= 0:
+            return
+        target = int(max(0, min(100, self._progress_target)))
+        current = int(max(0, min(100, self._progress_value)))
+        if current >= target:
+            if self._progress_activity and current < int(self._progress_soft_cap):
+                now = time.monotonic()
+                if now - float(self._progress_last_pulse) >= 0.7:
+                    self._progress_last_pulse = now
+                    current = min(int(self._progress_soft_cap), current + 1)
+                    self._progress_value = current
+                    self.progress.setValue(current)
+                return
+            if self._progress_activity and current >= int(self._progress_soft_cap):
+                self.progress.setRange(0, 0)
+                self._progress_timer.stop()
+                return
+            self._progress_timer.stop()
+            return
+        delta = target - current
+        step = max(1, min(10, int(round(delta * 0.35))))
+        current = min(target, current + step)
+        self._progress_value = current
+        self.progress.setValue(current)
+
+    def _update_progress_activity(self, value: object, text: object) -> None:
+        message = str(text or "").lower()
+        active = any(word in message for word in ("downloading", "downloaded", "fetched", "fetching"))
+        loading = any(word in message for word in ("loading", "finalizing", "finalising"))
+        if value is None:
+            self._progress_activity = False
+            self._progress_soft_cap = 0
+            return
+        if active:
+            self._progress_activity = True
+            self._progress_soft_cap = 86
+            return
+        if loading:
+            self._progress_activity = True
+            self._progress_soft_cap = 96
+            return
+        if self._progress_target >= 95:
+            self._progress_activity = False
+            self._progress_soft_cap = 0
 
     def _build_query_spec(self) -> SunPyQuerySpec:
         start_dt = self.start_dt_edit.dateTime().toPython().replace(tzinfo=None)
@@ -1097,7 +1295,10 @@ class SolarDataAnalysisWindow(QMainWindow):
         if not selected_rows:
             QMessageBox.information(self, "Solar Data Analysis", "Select at least one result row.")
             return
-        self._set_busy(True, "Downloading selected AIA files...")
+        if not self._confirm_high_resolution_download(selected_rows):
+            return
+        text = "Downloading high-resolution AIA sequence..." if self._search_result_is_high_resolution() else "Downloading selected AIA files..."
+        self._set_busy(True, text)
         self._start_worker(
             SunPyWorker(
                 "fetch_load",
@@ -1106,6 +1307,29 @@ class SolarDataAnalysisWindow(QMainWindow):
                 cache_dir=self.cache_dir,
             )
         )
+
+    def _confirm_high_resolution_download(self, selected_rows: list[int]) -> bool:
+        if not self._search_result_is_high_resolution():
+            return True
+        if len(selected_rows) <= AIA_HIGH_RES_WARN_ROWS:
+            return True
+        response = QMessageBox.question(
+            self,
+            "High Resolution AIA Download",
+            (
+                f"You selected {len(selected_rows)} high-resolution AIA frame(s).\n\n"
+                "This can be slow because full-resolution files are large. The downloader will prioritize "
+                "the request and update progress continuously. If you press Stop, files already downloaded "
+                "will stay in the cache and will be loaded if possible.\n\n"
+                "Continue?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return response == QMessageBox.Yes
+
+    def _search_result_is_high_resolution(self) -> bool:
+        return bool(self._search_result is not None and getattr(self._search_result.spec, "resolution", None) is not None)
 
     def _start_worker(self, worker: QObject):
         if self._active_thread is not None:
@@ -1156,9 +1380,17 @@ class SolarDataAnalysisWindow(QMainWindow):
     def _on_worker_progress(self, value, text):
         if value is None:
             self.progress.setRange(0, 0)
+            self._progress_timer.stop()
         else:
-            self.progress.setRange(0, 100)
-            self.progress.setValue(max(0, min(100, int(value))))
+            if self.progress.maximum() <= 0:
+                self.progress.setRange(0, 100)
+                self.progress.setValue(max(0, min(100, int(self._progress_value))))
+            self._progress_target = max(0, min(100, int(value)))
+            if not self._progress_timer.isActive():
+                self._progress_timer.start()
+        self._update_progress_activity(value, text)
+        if self._progress_activity and not self._progress_timer.isActive() and self.progress.maximum() > 0:
+            self._progress_timer.start()
         if text:
             self.statusBar().showMessage(str(text))
 
@@ -1192,6 +1424,8 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._search_result = result
         self._populate_results_table(result)
         self.download_load_btn.setEnabled(bool(result.rows))
+        self._set_results_selection_controls_enabled(bool(result.rows))
+        self._sync_menu_action_state(loaded=bool(self._map_frames))
         if not result.rows:
             self.archive_results_status_label.setText("No SDO/AIA archive records found for this query.")
             self.analysis_text.setPlainText("No SDO/AIA records found for the selected time range.")
@@ -1248,6 +1482,23 @@ class SolarDataAnalysisWindow(QMainWindow):
                 item.setFlags(item.flags() | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 self.results_table.setItem(row_index, col, item)
         self.results_table.resizeRowsToContents()
+        self._set_results_selection_controls_enabled(bool(result.rows))
+
+    def _set_results_selection_controls_enabled(self, enabled: bool) -> None:
+        self.select_all_results_btn.setEnabled(bool(enabled))
+        self.deselect_all_results_btn.setEnabled(bool(enabled))
+
+    def select_all_results(self) -> None:
+        self._set_all_result_check_states(Qt.Checked)
+
+    def deselect_all_results(self) -> None:
+        self._set_all_result_check_states(Qt.Unchecked)
+
+    def _set_all_result_check_states(self, state: Qt.CheckState) -> None:
+        for i in range(self.results_table.rowCount()):
+            item = self.results_table.item(i, 0)
+            if item is not None:
+                item.setCheckState(state)
 
     def _checked_rows(self) -> list[int]:
         checked: list[int] = []
@@ -1692,6 +1943,7 @@ class SolarDataAnalysisWindow(QMainWindow):
             self._refresh_region_overlays()
             self.analysis_text.setPlainText(f"Detected {len(self._regions)} active-region candidate(s) in the current frame.")
             self.export_regions_btn.setEnabled(bool(self._regions))
+            self._sync_menu_action_state(loaded=bool(self._map_frames))
         except Exception as exc:
             QMessageBox.critical(self, "Active Regions", str(exc))
 
@@ -1879,13 +2131,20 @@ class SolarDataAnalysisWindow(QMainWindow):
 
     def stop_active_operation(self):
         worker = self._active_worker
-        if isinstance(worker, SunPyWorker):
+        if worker is not None and hasattr(worker, "cancel"):
             try:
                 worker.cancel()
             except Exception:
                 pass
+        if worker is None or not self.is_operation_running():
+            return
         self.stop_btn.setEnabled(False)
-        self.statusBar().showMessage("Stopping operation...", 5000)
+        if hasattr(self, "stop_action"):
+            self.stop_action.setEnabled(False)
+        self.statusBar().showMessage(
+            "Cancelling... completed downloads stay in cache and will load if available.",
+            7000,
+        )
 
     def closeEvent(self, event):
         if self.is_operation_running():

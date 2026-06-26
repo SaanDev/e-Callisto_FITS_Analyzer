@@ -411,7 +411,7 @@ def test_fetch_splits_batch_when_fetch_returns_only_errors(tmp_path: Path):
 def test_fetch_fast_fails_large_timeout_only_nascom_batch(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("ECALLISTO_SUNPY_FAST_FAIL_TIMEOUT_BATCH", "1")
     monkeypatch.setenv("ECALLISTO_SUNPY_FAST_FAIL_MIN_BATCH", "8")
-    monkeypatch.setattr(sa, "_download_from_fetch_errors", lambda _fetch_result, row_template: [])
+    monkeypatch.setattr(sa, "_download_from_fetch_errors", lambda _fetch_result, row_template, **_kwargs: [])
 
     rows = [
         sa.SunPySearchRow(
@@ -547,7 +547,7 @@ def test_fetch_single_row_uses_manual_error_url_fallback(tmp_path: Path, monkeyp
     monkeypatch.setattr(
         sa,
         "_download_from_fetch_errors",
-        lambda _fetch_result, row_template: [str(manual_path)],
+        lambda _fetch_result, row_template, **_kwargs: [str(manual_path)],
     )
 
     out = sa.fetch(search_result, tmp_path, selected_rows=[0], fido_client=FakeFido())
@@ -660,7 +660,7 @@ def test_download_from_row_record_uses_urllib_with_record_url(tmp_path: Path, mo
 
     captured = {}
 
-    def fake_dl(url, *, target_dir, retries, timeout_seconds, backoff_seconds):
+    def fake_dl(url, *, target_dir, retries, timeout_seconds, backoff_seconds, **_kwargs):
         captured["url"] = url
         return str((tmp_path / "x.fits").resolve())
 
@@ -695,7 +695,7 @@ def test_fetch_recovers_via_record_url_when_parfive_returns_nothing(tmp_path: Pa
             assert path.endswith("{file}")
             return []  # parfive yields nothing and exposes no error URLs
 
-    def fake_dl(url, *, target_dir, retries, timeout_seconds, backoff_seconds):
+    def fake_dl(url, *, target_dir, retries, timeout_seconds, backoff_seconds, **_kwargs):
         out_path = (tmp_path / "x.fits").resolve()
         out_path.write_text("ok", encoding="utf-8")
         return str(out_path)
@@ -834,6 +834,175 @@ def test_fetch_cancel_stops_before_any_download(tmp_path: Path):
     assert out.cancelled is True
     assert out.paths == []
     assert fido.calls == 0
+
+
+def test_fetch_high_resolution_defaults_to_row_paced_downloads(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("ECALLISTO_SUNPY_HIGH_RES_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("ECALLISTO_SUNPY_HIGH_RES_MAX_CONN", raising=False)
+    rows = [
+        sa.SunPySearchRow(
+            start=datetime(2026, 2, 10, 1, 0, 0),
+            end=datetime(2026, 2, 10, 1, 2, 0),
+            source="SDO",
+            instrument="AIA",
+            provider="VSO",
+            fileid=f"aia_{i + 1}.fits",
+            size="12 MB",
+        )
+        for i in range(5)
+    ]
+    search_result = sa.SunPySearchResult(
+        spec=_mk_query(resolution=1.0),
+        data_kind=sa.DATA_KIND_MAP,
+        rows=rows,
+        raw_response=[[{"fileid": row.fileid} for row in rows]],
+        row_index_map=[(0, i) for i in range(5)],
+    )
+
+    class FakeFido:
+        def __init__(self):
+            self.calls = []
+
+        def fetch(self, query_slice, path, progress=False, max_conn=None):
+            self.calls.append((len(query_slice), max_conn))
+            return [tmp_path / f"batch_{len(self.calls)}.fits"]
+
+    fido = FakeFido()
+    out = sa.fetch(search_result, tmp_path, selected_rows=list(range(5)), fido_client=fido)
+
+    assert out.failed_count == 0
+    assert [call[0] for call in fido.calls] == [1, 1, 1, 1, 1]
+    assert fido.calls[0][1] == 8
+    assert all(call[1] == 8 for call in fido.calls)
+
+
+def test_fetch_high_resolution_batch_size_can_be_overridden(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("ECALLISTO_SUNPY_HIGH_RES_BATCH_SIZE", "2")
+    rows = [
+        sa.SunPySearchRow(
+            start=datetime(2026, 2, 10, 1, 0, 0),
+            end=datetime(2026, 2, 10, 1, 2, 0),
+            source="SDO",
+            instrument="AIA",
+            provider="VSO",
+            fileid=f"aia_{i + 1}.fits",
+            size="12 MB",
+        )
+        for i in range(5)
+    ]
+    search_result = sa.SunPySearchResult(
+        spec=_mk_query(resolution=1.0),
+        data_kind=sa.DATA_KIND_MAP,
+        rows=rows,
+        raw_response=[[{"fileid": row.fileid} for row in rows]],
+        row_index_map=[(0, i) for i in range(5)],
+    )
+
+    class FakeFido:
+        def __init__(self):
+            self.calls = []
+
+        def fetch(self, query_slice, path, progress=False, max_conn=None):
+            self.calls.append((len(query_slice), max_conn))
+            return [tmp_path / f"batch_{len(self.calls)}.fits"]
+
+    fido = FakeFido()
+    out = sa.fetch(search_result, tmp_path, selected_rows=list(range(5)), fido_client=fido)
+
+    assert out.failed_count == 0
+    assert [call[0] for call in fido.calls] == [2, 2, 1]
+
+
+def test_high_resolution_download_defaults_are_stall_resistant(monkeypatch):
+    for key in (
+        "ECALLISTO_SUNPY_HIGH_RES_BATCH_SIZE",
+        "ECALLISTO_SUNPY_HIGH_RES_FETCH_RETRIES",
+        "ECALLISTO_SUNPY_HIGH_RES_FETCH_TIMEOUT",
+        "ECALLISTO_SUNPY_HIGH_RES_FETCH_READ_TIMEOUT",
+        "ECALLISTO_SUNPY_HIGH_RES_MANUAL_FETCH_RETRIES",
+        "ECALLISTO_SUNPY_HIGH_RES_MANUAL_FETCH_TIMEOUT",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    assert sa._resolve_fetch_batch_size(priority=True) == 1
+    assert sa._resolve_fetch_retry_count(priority=True) == 1
+    assert sa._row_fetch_connection_candidates(8, priority=True) == [8, 1]
+    assert sa._resolve_fetch_timeout_seconds(priority=True) < sa._resolve_fetch_timeout_seconds(priority=False)
+    assert sa._resolve_fetch_read_timeout_seconds(priority=True) < sa._resolve_fetch_read_timeout_seconds(priority=False)
+    assert sa._resolve_manual_fetch_retries(priority=True) == 1
+    assert sa._resolve_manual_fetch_timeout_seconds(priority=True) < sa._resolve_manual_fetch_timeout_seconds(priority=False)
+
+
+def test_priority_fetch_runtime_guards_skip_unbounded_default_attempt(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(sa, "_build_parfive_downloader", lambda *, max_conn, priority=False: None)
+
+    class FakeResult(list):
+        errors = [("https://example.test/aia.fits", "Timeout on reading data from socket")]
+
+    class FakeFido:
+        def __init__(self):
+            self.calls = []
+
+        def fetch(self, _query_slice, path=None, progress=False, max_conn=None):
+            self.calls.append(max_conn)
+            return FakeResult()
+
+    fido = FakeFido()
+    result = sa._fetch_row_with_runtime_guards(
+        fido,
+        [{"fileid": "aia_1.fits"}],
+        path_template=str(tmp_path / "{file}"),
+        max_conn=8,
+        priority=True,
+        retry_count=1,
+        conn_candidates=[8, 1],
+    )
+
+    assert isinstance(result, FakeResult)
+    assert fido.calls == [8, 1]
+
+
+def test_fetch_cancel_after_completed_batch_keeps_cached_paths(tmp_path: Path):
+    rows = [
+        sa.SunPySearchRow(
+            start=datetime(2026, 2, 10, 1, 0, 0),
+            end=datetime(2026, 2, 10, 1, 2, 0),
+            source="SDO",
+            instrument="AIA",
+            provider="VSO",
+            fileid=f"aia_{i + 1}.fits",
+            size="12 MB",
+        )
+        for i in range(4)
+    ]
+    search_result = sa.SunPySearchResult(
+        spec=_mk_query(resolution=1.0),
+        data_kind=sa.DATA_KIND_MAP,
+        rows=rows,
+        raw_response=[[{"fileid": row.fileid} for row in rows]],
+        row_index_map=[(0, i) for i in range(4)],
+    )
+
+    class FakeFido:
+        def __init__(self):
+            self.calls = 0
+
+        def fetch(self, query_slice, path, progress=False, max_conn=None):
+            self.calls += 1
+            return [tmp_path / f"done_{self.calls}.fits"]
+
+    fido = FakeFido()
+    cancel_state = {"calls": 0}
+
+    def cancel_after_first_batch():
+        cancel_state["calls"] += 1
+        return fido.calls >= 1
+
+    out = sa.fetch(search_result, tmp_path, selected_rows=list(range(4)), cancel_cb=cancel_after_first_batch, fido_client=fido)
+
+    assert out.cancelled is True
+    assert out.paths == [str((tmp_path / "done_1.fits").resolve())]
+    assert fido.calls == 1
 
 
 def test_ensure_event_loop_creates_loop_in_worker_thread():

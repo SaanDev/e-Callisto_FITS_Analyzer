@@ -147,6 +147,10 @@ class SunPyWorker(QObject):
                 if getattr(fetch_result, "cancelled", False) and not fetch_result.paths:
                     self.cancelled.emit()
                     return
+                if getattr(fetch_result, "cancelled", False) and fetch_result.paths:
+                    self.partial_warning.emit(
+                        "Download was cancelled. Already downloaded files were kept in the cache and will be loaded."
+                    )
                 if fetch_result.failed_count > 0:
                     details = "\n".join(fetch_result.errors[:8])
                     more = "" if fetch_result.failed_count <= 8 else f"\n...and {fetch_result.failed_count - 8} more."

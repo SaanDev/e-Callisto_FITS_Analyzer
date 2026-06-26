@@ -434,23 +434,26 @@ def fetch(
     total = len(requested)
     processed_rows = 0
     row_template = str(cache_root / "{file}")
-    max_conn = _resolve_fetch_max_conn()
-    max_batch_size = _resolve_fetch_batch_size()
+    priority = _is_priority_fetch(search_result)
+    max_conn = _resolve_fetch_max_conn(priority=priority)
+    max_batch_size = _resolve_fetch_batch_size(priority=priority)
     _logger.info(
-        "fetch start: requested=%d cache=%s max_conn=%d batch_size=%d",
+        "fetch start: requested=%d cache=%s max_conn=%d batch_size=%d priority=%s",
         total,
         cache_root,
         max_conn,
         max_batch_size,
+        priority,
     )
 
     def _mark_processed(delta: int):
         nonlocal processed_rows
         processed_rows += int(max(0, delta))
         if progress_cb is not None:
+            label = "high-resolution frame" if priority else "selection"
             progress_cb(
                 int(processed_rows * 100 / max(total, 1)),
-                f"Fetched {processed_rows}/{total} selections",
+                f"Downloaded {processed_rows}/{total} {label}(s)",
             )
 
     cancelled = False
@@ -461,9 +464,13 @@ def fetch(
             _logger.info("fetch cancelled before batch %d/%d", batch_idx, len(batches))
             break
         if progress_cb is not None:
+            label = "high-resolution batch" if priority else "batch"
             progress_cb(
                 int(processed_rows * 100 / max(total, 1)),
-                f"Downloading batch {batch_idx}/{len(batches)}...",
+                (
+                    f"Downloading {label} {batch_idx}/{len(batches)} "
+                    f"({processed_rows}/{total} complete, up to {max_conn} connections)..."
+                ),
             )
         _fetch_rows_batch_adaptive(
             search_result,
@@ -473,9 +480,15 @@ def fetch(
             downloaded_paths=downloaded_paths,
             errors=errors,
             max_conn=max_conn,
+            batch_max_conn=(max_conn if priority else 1),
+            priority=priority,
             processed_cb=_mark_processed,
             cancel_cb=cancel_cb,
         )
+        if _is_cancelled(cancel_cb):
+            cancelled = True
+            _logger.info("fetch cancelled after batch %d/%d", batch_idx, len(batches))
+            break
 
     deduped_paths = _dedupe_preserve_order(downloaded_paths)
     failed_rows = _failed_rows_from_errors(errors)
@@ -720,25 +733,31 @@ def _fetch_single_row(
     downloaded_paths: list[str],
     errors: list[str],
     max_conn: int,
+    priority: bool = False,
     cancel_cb: Callable[[], bool] | None = None,
 ):
     if _is_cancelled(cancel_cb):
         return
     query_slice = _query_slice_for_row(search_result, row_index)
+    row_label = _row_log_label(search_result, row_index)
+    _logger.info("fetch row start: row=%d %s priority=%s", row_index + 1, row_label, priority)
     try:
         fetched = _fetch_row_with_runtime_guards(
             fido_client,
             query_slice,
             path_template=row_template,
             max_conn=max_conn,
-            retry_count=_resolve_fetch_retry_count(),
-            conn_candidates=[min(4, max_conn), 2, 1],
+            priority=priority,
+            retry_count=_resolve_fetch_retry_count(priority=priority),
+            conn_candidates=_row_fetch_connection_candidates(max_conn, priority=priority),
         )
         row_paths = _extract_fetch_paths(fetched)
         if not row_paths:
             manual_paths = _download_from_fetch_errors(
                 fetched,
                 row_template=row_template,
+                priority=priority,
+                cancel_cb=cancel_cb,
             )
             if not manual_paths:
                 # Final fallback: synchronous urllib download from the record URL.
@@ -746,9 +765,12 @@ def _fetch_single_row(
                     search_result,
                     row_index,
                     row_template=row_template,
+                    priority=priority,
+                    cancel_cb=cancel_cb,
                 )
             if manual_paths:
                 downloaded_paths.extend(manual_paths)
+                _logger.info("fetch row recovered: row=%d paths=%d", row_index + 1, len(manual_paths))
                 return
             fetch_errors = _extract_fetch_errors(fetched)
             if fetch_errors:
@@ -757,7 +779,9 @@ def _fetch_single_row(
                 errors.append(f"Row {row_index + 1}: fetch returned no files.")
         else:
             downloaded_paths.extend(row_paths)
+            _logger.info("fetch row done: row=%d paths=%d", row_index + 1, len(row_paths))
     except Exception as exc:
+        _logger.warning("fetch row failed: row=%d %s error=%s", row_index + 1, row_label, exc)
         errors.append(f"Row {row_index + 1}: {exc}")
 
 
@@ -770,6 +794,8 @@ def _fetch_rows_batch_adaptive(
     downloaded_paths: list[str],
     errors: list[str],
     max_conn: int,
+    batch_max_conn: int,
+    priority: bool,
     processed_cb: Callable[[int], None],
     cancel_cb: Callable[[], bool] | None = None,
 ):
@@ -788,6 +814,7 @@ def _fetch_rows_batch_adaptive(
             downloaded_paths=downloaded_paths,
             errors=errors,
             max_conn=max_conn,
+            priority=priority,
             cancel_cb=cancel_cb,
         )
         processed_cb(1)
@@ -806,23 +833,33 @@ def _fetch_rows_batch_adaptive(
                 downloaded_paths=downloaded_paths,
                 errors=errors,
                 max_conn=max_conn,
+                priority=priority,
                 cancel_cb=cancel_cb,
             )
             processed_cb(1)
         return
 
+    _logger.info(
+        "fetch batch start: rows=%s size=%d max_conn=%d priority=%s",
+        ",".join(str(int(row_index) + 1) for row_index in batch),
+        len(batch),
+        max(1, int(batch_max_conn)),
+        priority,
+    )
     try:
         fetched = _fetch_row_with_runtime_guards(
             fido_client,
             query_slice,
             path_template=row_template,
-            max_conn=1,
+            max_conn=max(1, int(batch_max_conn)),
+            priority=priority,
             retry_count=1,
-            conn_candidates=[1],
+            conn_candidates=[max(1, int(batch_max_conn))],
         )
         row_paths = _extract_fetch_paths(fetched)
         if row_paths:
             downloaded_paths.extend(row_paths)
+            _logger.info("fetch batch done: size=%d paths=%d", len(batch), len(row_paths))
             processed_cb(len(batch))
             return
         fetch_errors = _extract_fetch_errors(fetched)
@@ -834,10 +871,11 @@ def _fetch_rows_batch_adaptive(
             reason = _format_fast_fail_timeout_reason(fetch_errors)
             for row_index in batch:
                 errors.append(f"Row {int(row_index) + 1}: {reason}")
+            _logger.warning("fetch batch fast-failed: size=%d reason=%s", len(batch), reason)
             processed_cb(len(batch))
             return
-    except Exception:
-        pass
+    except Exception as exc:
+        _logger.warning("fetch batch failed, splitting: size=%d error=%s", len(batch), exc)
 
     # Adaptive fallback: split failed batch into halves before trying per-row.
     midpoint = len(batch) // 2
@@ -853,6 +891,7 @@ def _fetch_rows_batch_adaptive(
                 downloaded_paths=downloaded_paths,
                 errors=errors,
                 max_conn=max_conn,
+                priority=priority,
                 cancel_cb=cancel_cb,
             )
             processed_cb(1)
@@ -868,6 +907,8 @@ def _fetch_rows_batch_adaptive(
         downloaded_paths=downloaded_paths,
         errors=errors,
         max_conn=max_conn,
+        batch_max_conn=max(1, int(batch_max_conn) // 2),
+        priority=priority,
         processed_cb=processed_cb,
         cancel_cb=cancel_cb,
     )
@@ -879,6 +920,8 @@ def _fetch_rows_batch_adaptive(
         downloaded_paths=downloaded_paths,
         errors=errors,
         max_conn=max_conn,
+        batch_max_conn=max(1, int(batch_max_conn) // 2),
+        priority=priority,
         processed_cb=processed_cb,
         cancel_cb=cancel_cb,
     )
@@ -891,6 +934,37 @@ def _is_cancelled(cancel_cb: Callable[[], bool] | None) -> bool:
         return bool(cancel_cb())
     except Exception:
         return False
+
+
+def _is_priority_fetch(search_result: SunPySearchResult) -> bool:
+    spec = getattr(search_result, "spec", None)
+    if spec is None:
+        return False
+    return bool(
+        str(getattr(spec, "spacecraft", "") or "").upper() == "SDO"
+        and str(getattr(spec, "instrument", "") or "").upper() == "AIA"
+        and getattr(spec, "resolution", None) is not None
+    )
+
+
+def _row_log_label(search_result: SunPySearchResult, row_index: int) -> str:
+    try:
+        row = search_result.rows[row_index]
+    except Exception:
+        return ""
+    return (
+        f"start={getattr(row, 'start', '')} "
+        f"source={getattr(row, 'source', '')} "
+        f"instrument={getattr(row, 'instrument', '')} "
+        f"fileid={getattr(row, 'fileid', '')}"
+    )
+
+
+def _row_fetch_connection_candidates(max_conn: int, *, priority: bool = False) -> list[int]:
+    max_conn = max(1, int(max_conn))
+    if priority:
+        return _dedupe_ints([max_conn, 1])
+    return _dedupe_ints([min(4, max_conn), 2, 1])
 
 
 def _failed_rows_from_errors(errors: Sequence[str]) -> list[int]:
@@ -1071,6 +1145,7 @@ def _fetch_row_with_runtime_guards(
     path_template: str,
     *,
     max_conn: int,
+    priority: bool = False,
     retry_count: int = 1,
     conn_candidates: Sequence[int] | None = None,
 ):
@@ -1098,6 +1173,7 @@ def _fetch_row_with_runtime_guards(
                         query_slice,
                         path_template=path_template,
                         max_conn=conn,
+                        priority=priority,
                     )
                     last_result = result
                     if _extract_fetch_paths(result):
@@ -1116,30 +1192,32 @@ def _fetch_row_with_runtime_guards(
                         continue
                     break
 
-        for attempt_idx in range(retries):
-            try:
-                result = _fetch_once(
-                    fido_client,
-                    query_slice,
-                    path_template=path_template,
-                    max_conn=None,
-                )
-                last_result = result
-                if _extract_fetch_paths(result):
-                    return result
-                fetch_errors = _extract_fetch_errors(result)
-                if not fetch_errors:
-                    return result
-                if attempt_idx + 1 < retries and _is_retryable_fetch_errors(fetch_errors):
-                    time.sleep(backoff_seconds * (attempt_idx + 1))
-                    continue
-                break
-            except Exception as exc:
-                last_exception = exc
-                if attempt_idx + 1 < retries:
-                    time.sleep(backoff_seconds * (attempt_idx + 1))
-                    continue
-                break
+        if not priority:
+            for attempt_idx in range(retries):
+                try:
+                    result = _fetch_once(
+                        fido_client,
+                        query_slice,
+                        path_template=path_template,
+                        max_conn=None,
+                        priority=priority,
+                    )
+                    last_result = result
+                    if _extract_fetch_paths(result):
+                        return result
+                    fetch_errors = _extract_fetch_errors(result)
+                    if not fetch_errors:
+                        return result
+                    if attempt_idx + 1 < retries and _is_retryable_fetch_errors(fetch_errors):
+                        time.sleep(backoff_seconds * (attempt_idx + 1))
+                        continue
+                    break
+                except Exception as exc:
+                    last_exception = exc
+                    if attempt_idx + 1 < retries:
+                        time.sleep(backoff_seconds * (attempt_idx + 1))
+                        continue
+                    break
 
     if last_result is not None:
         return last_result
@@ -1154,8 +1232,9 @@ def _fetch_once(
     *,
     path_template: str,
     max_conn: int | None,
+    priority: bool = False,
 ):
-    downloader = _build_parfive_downloader(max_conn=max_conn)
+    downloader = _build_parfive_downloader(max_conn=max_conn, priority=priority)
     kwargs_candidates: list[dict[str, Any]] = []
 
     if max_conn is not None:
@@ -1169,6 +1248,8 @@ def _fetch_once(
                 }
             )
         kwargs_candidates.append({"path": path_template, "progress": False, "max_conn": int(max_conn)})
+    if max_conn is None and downloader is not None:
+        kwargs_candidates.append({"path": path_template, "progress": False, "downloader": downloader})
     kwargs_candidates.append({"path": path_template, "progress": False})
     kwargs_candidates.append({"path": path_template})
 
@@ -1230,7 +1311,7 @@ def _current_thread_name() -> str:
         return "?"
 
 
-def _build_parfive_downloader(*, max_conn: int | None) -> Any | None:
+def _build_parfive_downloader(*, max_conn: int | None, priority: bool = False) -> Any | None:
     try:
         from aiohttp import ClientTimeout
         from parfive import Downloader
@@ -1239,8 +1320,8 @@ def _build_parfive_downloader(*, max_conn: int | None) -> Any | None:
         _logger.warning("parfive/aiohttp import failed; using Fido default downloader", exc_info=True)
         return None
 
-    timeout_seconds = _resolve_fetch_timeout_seconds()
-    read_timeout_seconds = _resolve_fetch_read_timeout_seconds()
+    timeout_seconds = _resolve_fetch_timeout_seconds(priority=priority)
+    read_timeout_seconds = _resolve_fetch_read_timeout_seconds(priority=priority)
 
     try:
         timeout = ClientTimeout(total=timeout_seconds, sock_read=read_timeout_seconds)
@@ -1255,8 +1336,10 @@ def _build_parfive_downloader(*, max_conn: int | None) -> Any | None:
         return None
 
 
-def _resolve_fetch_max_conn() -> int:
-    raw = str(os.environ.get("ECALLISTO_SUNPY_MAX_CONN", "")).strip()
+def _resolve_fetch_max_conn(*, priority: bool = False) -> int:
+    raw = str(
+        os.environ.get("ECALLISTO_SUNPY_HIGH_RES_MAX_CONN" if priority else "ECALLISTO_SUNPY_MAX_CONN", "")
+    ).strip()
     if raw:
         try:
             value = int(raw)
@@ -1264,11 +1347,13 @@ def _resolve_fetch_max_conn() -> int:
                 return min(value, 64)
         except Exception:
             pass
-    return 6
+    return 8 if priority else 6
 
 
-def _resolve_fetch_batch_size() -> int:
-    raw = str(os.environ.get("ECALLISTO_SUNPY_BATCH_SIZE", "")).strip()
+def _resolve_fetch_batch_size(*, priority: bool = False) -> int:
+    raw = str(
+        os.environ.get("ECALLISTO_SUNPY_HIGH_RES_BATCH_SIZE" if priority else "ECALLISTO_SUNPY_BATCH_SIZE", "")
+    ).strip()
     if raw:
         try:
             value = int(raw)
@@ -1276,11 +1361,13 @@ def _resolve_fetch_batch_size() -> int:
                 return min(value, 100)
         except Exception:
             pass
-    return 12
+    return 1 if priority else 12
 
 
-def _resolve_fetch_retry_count() -> int:
-    raw = str(os.environ.get("ECALLISTO_SUNPY_FETCH_RETRIES", "")).strip()
+def _resolve_fetch_retry_count(*, priority: bool = False) -> int:
+    raw = str(
+        os.environ.get("ECALLISTO_SUNPY_HIGH_RES_FETCH_RETRIES" if priority else "ECALLISTO_SUNPY_FETCH_RETRIES", "")
+    ).strip()
     if raw:
         try:
             value = int(raw)
@@ -1288,7 +1375,7 @@ def _resolve_fetch_retry_count() -> int:
                 return min(value, 6)
         except Exception:
             pass
-    return 2
+    return 1 if priority else 2
 
 
 def _resolve_fetch_retry_backoff_seconds() -> float:
@@ -1324,8 +1411,10 @@ def _resolve_fast_fail_min_batch_size() -> int:
     return 8
 
 
-def _resolve_fetch_timeout_seconds() -> float:
-    raw = str(os.environ.get("ECALLISTO_SUNPY_FETCH_TIMEOUT", "")).strip()
+def _resolve_fetch_timeout_seconds(*, priority: bool = False) -> float:
+    raw = str(
+        os.environ.get("ECALLISTO_SUNPY_HIGH_RES_FETCH_TIMEOUT" if priority else "ECALLISTO_SUNPY_FETCH_TIMEOUT", "")
+    ).strip()
     if raw:
         try:
             value = float(raw)
@@ -1333,11 +1422,16 @@ def _resolve_fetch_timeout_seconds() -> float:
                 return min(value, 7200.0)
         except Exception:
             pass
-    return 180.0
+    return 45.0 if priority else 180.0
 
 
-def _resolve_fetch_read_timeout_seconds() -> float:
-    raw = str(os.environ.get("ECALLISTO_SUNPY_FETCH_READ_TIMEOUT", "")).strip()
+def _resolve_fetch_read_timeout_seconds(*, priority: bool = False) -> float:
+    raw = str(
+        os.environ.get(
+            "ECALLISTO_SUNPY_HIGH_RES_FETCH_READ_TIMEOUT" if priority else "ECALLISTO_SUNPY_FETCH_READ_TIMEOUT",
+            "",
+        )
+    ).strip()
     if raw:
         try:
             value = float(raw)
@@ -1345,11 +1439,16 @@ def _resolve_fetch_read_timeout_seconds() -> float:
                 return min(value, 3600.0)
         except Exception:
             pass
-    return 40.0
+    return 12.0 if priority else 40.0
 
 
-def _resolve_manual_fetch_retries() -> int:
-    raw = str(os.environ.get("ECALLISTO_SUNPY_MANUAL_FETCH_RETRIES", "")).strip()
+def _resolve_manual_fetch_retries(*, priority: bool = False) -> int:
+    raw = str(
+        os.environ.get(
+            "ECALLISTO_SUNPY_HIGH_RES_MANUAL_FETCH_RETRIES" if priority else "ECALLISTO_SUNPY_MANUAL_FETCH_RETRIES",
+            "",
+        )
+    ).strip()
     if raw:
         try:
             value = int(raw)
@@ -1357,11 +1456,16 @@ def _resolve_manual_fetch_retries() -> int:
                 return min(value, 6)
         except Exception:
             pass
-    return 2
+    return 1 if priority else 2
 
 
-def _resolve_manual_fetch_timeout_seconds() -> float:
-    raw = str(os.environ.get("ECALLISTO_SUNPY_MANUAL_FETCH_TIMEOUT", "")).strip()
+def _resolve_manual_fetch_timeout_seconds(*, priority: bool = False) -> float:
+    raw = str(
+        os.environ.get(
+            "ECALLISTO_SUNPY_HIGH_RES_MANUAL_FETCH_TIMEOUT" if priority else "ECALLISTO_SUNPY_MANUAL_FETCH_TIMEOUT",
+            "",
+        )
+    ).strip()
     if raw:
         try:
             value = float(raw)
@@ -1369,7 +1473,7 @@ def _resolve_manual_fetch_timeout_seconds() -> float:
                 return min(value, 7200.0)
         except Exception:
             pass
-    return 90.0
+    return 30.0 if priority else 90.0
 
 
 def _resolve_manual_fetch_backoff_seconds() -> float:
@@ -1417,25 +1521,34 @@ def _extract_fetch_paths(fetch_result: Any) -> list[str]:
     return out
 
 
-def _download_from_fetch_errors(fetch_result: Any, *, row_template: str) -> list[str]:
+def _download_from_fetch_errors(
+    fetch_result: Any,
+    *,
+    row_template: str,
+    priority: bool = False,
+    cancel_cb: Callable[[], bool] | None = None,
+) -> list[str]:
     urls = _extract_fetch_error_urls(fetch_result)
     if not urls:
         return []
 
     target_dir = _resolve_cache_dir_from_row_template(row_template)
     target_dir.mkdir(parents=True, exist_ok=True)
-    retries = _resolve_manual_fetch_retries()
-    timeout_seconds = _resolve_manual_fetch_timeout_seconds()
+    retries = _resolve_manual_fetch_retries(priority=priority)
+    timeout_seconds = _resolve_manual_fetch_timeout_seconds(priority=priority)
     backoff_seconds = _resolve_manual_fetch_backoff_seconds()
 
     downloaded: list[str] = []
     for url in urls:
+        if _is_cancelled(cancel_cb):
+            break
         path = _download_url_with_retries(
             url,
             target_dir=target_dir,
             retries=retries,
             timeout_seconds=timeout_seconds,
             backoff_seconds=backoff_seconds,
+            cancel_cb=cancel_cb,
         )
         if path:
             downloaded.append(path)
@@ -1448,6 +1561,8 @@ def _download_from_row_record(
     row_index: int,
     *,
     row_template: str,
+    priority: bool = False,
+    cancel_cb: Callable[[], bool] | None = None,
 ) -> list[str]:
     """Last-resort fallback: download a row directly from any URL present in
     its raw search record, using synchronous urllib (no aiohttp/asyncio).
@@ -1465,17 +1580,20 @@ def _download_from_row_record(
 
     target_dir = _resolve_cache_dir_from_row_template(row_template)
     target_dir.mkdir(parents=True, exist_ok=True)
-    retries = _resolve_manual_fetch_retries()
-    timeout_seconds = _resolve_manual_fetch_timeout_seconds()
+    retries = _resolve_manual_fetch_retries(priority=priority)
+    timeout_seconds = _resolve_manual_fetch_timeout_seconds(priority=priority)
     backoff_seconds = _resolve_manual_fetch_backoff_seconds()
 
     for url in urls:
+        if _is_cancelled(cancel_cb):
+            break
         path = _download_url_with_retries(
             url,
             target_dir=target_dir,
             retries=retries,
             timeout_seconds=timeout_seconds,
             backoff_seconds=backoff_seconds,
+            cancel_cb=cancel_cb,
         )
         if path:
             _logger.info("Row %d recovered via urllib record URL: %s", row_index + 1, url)
@@ -1519,10 +1637,13 @@ def _download_url_with_retries(
     retries: int,
     timeout_seconds: float,
     backoff_seconds: float,
+    cancel_cb: Callable[[], bool] | None = None,
 ) -> str | None:
     last_error: Exception | None = None
     attempts = max(1, int(retries))
     for attempt_idx in range(attempts):
+        if _is_cancelled(cancel_cb):
+            return None
         try:
             request = Request(url, headers={"User-Agent": "eCallisto-SunPy/1.0"})
             with urlopen(request, timeout=float(timeout_seconds)) as response:
@@ -1530,6 +1651,8 @@ def _download_url_with_retries(
                 out_path = _allocate_unique_path(target_dir / filename)
                 with open(out_path, "wb") as handle:
                     while True:
+                        if _is_cancelled(cancel_cb):
+                            raise RuntimeError("Download cancelled.")
                         chunk = response.read(1024 * 512)
                         if not chunk:
                             break
@@ -1542,7 +1665,7 @@ def _download_url_with_retries(
                 pass
         except Exception as exc:
             last_error = exc
-        if attempt_idx + 1 < attempts:
+        if attempt_idx + 1 < attempts and not _is_cancelled(cancel_cb):
             time.sleep(backoff_seconds * (attempt_idx + 1))
     if last_error is not None:
         return None
