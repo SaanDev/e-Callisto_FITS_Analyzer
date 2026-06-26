@@ -120,6 +120,10 @@ def test_specs_include_sunpy_modules_and_hook_path():
         text = path.read_text(encoding="utf-8")
         assert "sunpy" in text
         assert "src.UI.sunpy_solar_viewer" in text
+        assert "src.UI.solar_data_analysis_window" in text
+        assert "src.Backend.solar_data_analysis" in text
+        assert "imageio" in text
+        assert "imageio_ffmpeg" in text
 
     hook_path = ROOT / "src" / "Installation" / "pyinstaller_hooks" / "hook-sunpy.py"
     assert hook_path.exists()
@@ -178,3 +182,5 @@ def test_runtime_requirements_include_sunpy_network_stack():
     assert "zeep==" in text
     assert "reproject==" in text
     assert "mpl-animators==" in text
+    assert "imageio==" in text
+    assert "imageio-ffmpeg==" in text

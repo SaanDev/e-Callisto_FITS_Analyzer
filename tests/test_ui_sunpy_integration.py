@@ -41,6 +41,21 @@ def test_main_window_exposes_sunpy_archive_action_and_opens_window():
     win.close()
 
 
+def test_main_window_exposes_solar_data_analysis_action_and_opens_window():
+    _app()
+    win = MainWindow(theme=None)
+    assert hasattr(win, "open_solar_data_analysis_action")
+    assert win.open_solar_data_analysis_action.text() == "Solar Data Analysis"
+
+    win.open_solar_data_analysis_action.trigger()
+    QApplication.processEvents()
+    assert win._solar_data_analysis_window is not None
+    assert win._solar_data_analysis_window.isVisible() is True
+
+    win._solar_data_analysis_window.close()
+    win.close()
+
+
 def test_main_window_exposes_dst_action_and_opens_window():
     _app()
     win = MainWindow(theme=None)

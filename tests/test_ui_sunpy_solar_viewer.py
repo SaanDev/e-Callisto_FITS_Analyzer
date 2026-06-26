@@ -31,13 +31,21 @@ from src.Backend.sunpy_archive import (
     SunPySearchResult,
     SunPySearchRow,
 )
-from src.UI.sunpy_plot_window import SunPyPlotWindow
+from src.UI.sunpy_plot_window import SunPyPlotCanvas, SunPyPlotWindow
 from src.UI import sunpy_solar_viewer as viewer_mod
 from src.UI.sunpy_solar_viewer import SunPySolarViewer
 
 
 def _app():
     return QApplication.instance() or QApplication([])
+
+
+class _ThemeStub:
+    def __init__(self, dark: bool):
+        self._dark = bool(dark)
+
+    def is_dark(self) -> bool:
+        return self._dark
 
 
 def _sample_query():
@@ -498,7 +506,8 @@ def test_plot_window_map_is_equal_aspect_and_timeseries_is_auto():
 
     plot.resize(1100, 760)
     QApplication.processEvents()
-    assert abs(plot.canvas.map_plot.width() - plot.canvas.map_plot.height()) <= 1
+    view_w, view_h = plot.canvas.map_viewbox_size()
+    assert abs(view_w - view_h) <= 1
 
     assert plot.canvas.map_aspect_locked() is True
     assert plot.canvas.map_axis_labels() == ("Solar X (arcsec)", "Solar Y (arcsec)")
@@ -518,6 +527,31 @@ def test_plot_window_map_is_equal_aspect_and_timeseries_is_auto():
     QApplication.processEvents()
     assert abs(plot.width() - plot.height()) >= 20
     plot.close()
+
+
+def test_sunpy_canvas_background_follows_light_and_dark_theme():
+    _app()
+    light_canvas = SunPyPlotCanvas(theme=_ThemeStub(False))
+    light_canvas.resize(640, 420)
+    light_canvas.show()
+    light_canvas.set_colormap_name("sdoaia171")
+    light_canvas.plot_map_data(np.ones((8, 8), dtype=float), title="AIA")
+    QApplication.processEvents()
+    assert light_canvas.map_background_lightness() > 180
+    assert light_canvas.map_low_color_lightness() < 80
+    view_w, view_h = light_canvas.map_viewbox_size()
+    assert abs(view_w - view_h) <= 1
+    light_canvas.close()
+
+    dark_canvas = SunPyPlotCanvas(theme=_ThemeStub(True))
+    dark_canvas.resize(640, 420)
+    dark_canvas.show()
+    dark_canvas.set_colormap_name("sdoaia171")
+    dark_canvas.plot_map_data(np.ones((8, 8), dtype=float), title="AIA")
+    QApplication.processEvents()
+    assert dark_canvas.map_background_lightness() < 80
+    assert dark_canvas.map_low_color_lightness() < 80
+    dark_canvas.close()
 
 
 def test_plot_window_map_frame_updates_keep_axes_layout_stable():

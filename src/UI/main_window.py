@@ -253,6 +253,7 @@ class MainWindow(QMainWindow):
         self._cme_helper_client = CMEHelperClient(theme_manager=self.theme, parent=self)
         self._cme_viewer = None
         self._sunpy_window = None
+        self._solar_data_analysis_window = None
         self._goes_window = None
         self._sep_window = None
         self._dst_window = None
@@ -1048,6 +1049,10 @@ class MainWindow(QMainWindow):
             mode_menu.addAction(a)
 
         analysis_menu = menubar.addMenu("Analysis")
+        self.open_solar_data_analysis_action = QAction("Solar Data Analysis", self)
+        self.open_solar_data_analysis_action.triggered.connect(self.open_solar_data_analysis_window)
+        analysis_menu.addAction(self.open_solar_data_analysis_action)
+        analysis_menu.addSeparator()
         self.maximum_intensities_menu = analysis_menu.addMenu("Maximum Intensities")
         self.open_maximum_intensities_action = QAction("Open Maximum Intensities", self)
         self.open_maximum_intensities_action.setEnabled(False)
@@ -8194,6 +8199,27 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+    def open_solar_data_analysis_window(self):
+        from src.UI.solar_data_analysis_window import SolarDataAnalysisWindow  # import here, not at top
+        try:
+            alive = self._solar_data_analysis_window is not None
+            if alive:
+                _ = self._solar_data_analysis_window.windowTitle()
+        except Exception:
+            alive = False
+        if not alive:
+            self._solar_data_analysis_window = SolarDataAnalysisWindow(parent=self)
+        self._solar_data_analysis_window.show()
+        self._solar_data_analysis_window.raise_()
+        self._solar_data_analysis_window.activateWindow()
+
+        window = self._current_time_window_utc()
+        if window and hasattr(self._solar_data_analysis_window, "set_time_window"):
+            try:
+                self._solar_data_analysis_window.set_time_window(window[0], window[1], auto_query=False)
+            except Exception:
+                pass
+
     def _capture_state(self):
         """Capture the current application state for Undo/Redo."""
         state = {
@@ -11897,6 +11923,20 @@ class MainWindow(QMainWindow):
                     return
         except Exception:
             pass
+        try:
+            if self._solar_data_analysis_window is not None and hasattr(
+                self._solar_data_analysis_window,
+                "is_operation_running",
+            ):
+                if bool(self._solar_data_analysis_window.is_operation_running()):
+                    self.statusBar().showMessage(
+                        "Solar Data Analysis is still running. Wait for completion before closing the app.",
+                        6000,
+                    )
+                    event.ignore()
+                    return
+        except Exception:
+            pass
         running_threads = self._request_background_thread_shutdown()
         if running_threads:
             names = ", ".join(running_threads)
@@ -11966,6 +12006,20 @@ class MainWindow(QMainWindow):
                     return
                 self._sunpy_window.deleteLater()
                 self._sunpy_window = None
+        except Exception:
+            pass
+        try:
+            if self._solar_data_analysis_window is not None:
+                closed = bool(self._solar_data_analysis_window.close())
+                if not closed:
+                    self.statusBar().showMessage(
+                        "Solar Data Analysis window is busy and cannot be closed yet.",
+                        6000,
+                    )
+                    event.ignore()
+                    return
+                self._solar_data_analysis_window.deleteLater()
+                self._solar_data_analysis_window = None
         except Exception:
             pass
         try:

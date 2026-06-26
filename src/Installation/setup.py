@@ -99,6 +99,8 @@ OPTIONS = {
         "cftime",
         "reportlab",
         "PIL",
+        "imageio",
+        "imageio_ffmpeg",
     ],
 
     "includes": [
@@ -139,6 +141,8 @@ OPTIONS = {
         "reportlab.platypus",
         "PIL",
         "PIL.Image",
+        "imageio",
+        "imageio_ffmpeg",
         "matplotlib.figure",
         "matplotlib.ticker",
         "matplotlib.colors",
@@ -188,6 +192,7 @@ OPTIONS = {
         "src.UI.goes_xrs_gui",
         "src.UI.kp_index_gui",
         "src.UI.sunpy_solar_viewer",
+        "src.UI.solar_data_analysis_window",
         "src.UI.utils.cme_launcher",
         "src.UI.utils.url_opener",
         "src.Backend.dst_index",
@@ -195,6 +200,7 @@ OPTIONS = {
         "src.Backend.sep_proton",
         "src.Backend.sunpy_archive",
         "src.Backend.sunpy_analysis",
+        "src.Backend.solar_data_analysis",
         "sunpy.map",
         "sunpy.net",
         "sunpy.timeseries",

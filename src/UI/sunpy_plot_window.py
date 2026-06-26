@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.6.0
+Version 2.7.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -12,13 +12,13 @@ import os
 from pathlib import Path
 import re
 import sys
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.exporters import SVGExporter
 from PySide6.QtCore import QTimer, Qt, QRectF, Signal
-from PySide6.QtGui import QGuiApplication, QPainter, QPdfWriter
+from PySide6.QtGui import QAction, QGuiApplication, QPainter, QPalette, QPdfWriter
 from PySide6.QtWidgets import (
     QCheckBox,
     QDoubleSpinBox,
@@ -61,38 +61,81 @@ def _safe_text(value: Any) -> str:
 
 
 def _configure_pyqtgraph_once():
-    if getattr(_configure_pyqtgraph_once, "_configured", False):
-        return
-    pg.setConfigOptions(imageAxisOrder="row-major", antialias=False)
     raw = str(os.environ.get("ECALLISTO_SUNPY_OPENGL", "") or "").strip().lower()
+    in_pytest = bool(os.environ.get("PYTEST_CURRENT_TEST")) or ("pytest" in sys.modules)
     if raw in {"1", "true", "yes", "on"}:
-        use_gl = True
+        desired_use_gl = True
     elif raw in {"0", "false", "no", "off"}:
-        use_gl = False
+        desired_use_gl = False
     else:
         # Avoid known crashes in headless/pytest contexts; default to OpenGL in app runs.
-        in_pytest = bool(os.environ.get("PYTEST_CURRENT_TEST")) or ("pytest" in sys.modules)
-        use_gl = not in_pytest
+        desired_use_gl = not in_pytest
+
+    if getattr(_configure_pyqtgraph_once, "_configured", False):
+        try:
+            if bool(pg.getConfigOption("useOpenGL")) != bool(desired_use_gl):
+                pg.setConfigOptions(useOpenGL=bool(desired_use_gl))
+        except Exception:
+            desired_use_gl = False
+            try:
+                pg.setConfigOptions(useOpenGL=False)
+            except Exception:
+                pass
+        setattr(_configure_pyqtgraph_once, "_opengl_enabled", bool(desired_use_gl))
+        return
+    pg.setConfigOptions(imageAxisOrder="row-major", antialias=False)
 
     try:
-        pg.setConfigOptions(useOpenGL=bool(use_gl))
+        pg.setConfigOptions(useOpenGL=bool(desired_use_gl))
     except Exception:
         pg.setConfigOptions(useOpenGL=False)
-        use_gl = False
-    setattr(_configure_pyqtgraph_once, "_opengl_enabled", bool(use_gl))
+        desired_use_gl = False
+    setattr(_configure_pyqtgraph_once, "_opengl_enabled", bool(desired_use_gl))
     setattr(_configure_pyqtgraph_once, "_configured", True)
 
 
+def _fallback_colormap_lut(name: str) -> np.ndarray | None:
+    cmap = _fallback_colormap(name)
+    if cmap is None:
+        return None
+    return cmap.getLookupTable(nPts=256)
+
+
+def _fallback_colormap(name: str) -> pg.ColorMap | None:
+    palettes = {
+        "sdoaia94": ((0, 0, 0), (16, 91, 64), (64, 142, 128), (145, 196, 192), (255, 255, 255)),
+        "sdoaia131": ((0, 0, 0), (0, 92, 92), (15, 185, 185), (136, 255, 255), (255, 255, 255)),
+        "sdoaia171": ((0, 0, 0), (92, 64, 0), (185, 128, 0), (255, 192, 7), (255, 255, 255)),
+        "sdoaia193": ((0, 0, 0), (128, 64, 16), (181, 128, 64), (221, 192, 145), (255, 255, 255)),
+        "sdoaia211": ((0, 0, 0), (128, 64, 91), (181, 128, 142), (221, 192, 196), (255, 255, 255)),
+        "sdoaia304": ((0, 0, 0), (70, 0, 18), (170, 28, 20), (255, 128, 34), (255, 244, 180)),
+        "sdoaia335": ((0, 0, 0), (16, 64, 128), (64, 128, 181), (145, 192, 221), (255, 255, 255)),
+        "sdoaia1600": ((0, 0, 0), (91, 91, 16), (142, 142, 64), (196, 196, 145), (255, 255, 255)),
+        "sdoaia1700": ((0, 0, 0), (128, 64, 64), (181, 128, 128), (221, 192, 192), (255, 255, 255)),
+    }
+    colors = palettes.get(str(name or "").lower())
+    if not colors:
+        return None
+    stops = np.linspace(0.0, 1.0, len(colors))
+    return pg.ColorMap(stops, np.asarray(colors, dtype=np.ubyte))
+
+
 class SunPyPlotCanvas(QWidget):
-    def __init__(self, parent: QWidget | None = None, theme: Any | None = None):
+    def __init__(self, parent: QWidget | None = None, theme: Any | None = None, *, enable_colorbar: bool = False):
         super().__init__(parent)
         _configure_pyqtgraph_once()
 
         self.theme = theme
+        self._colorbar_enabled = bool(enable_colorbar)
         self._roi_bounds: tuple[int, int, int, int] | None = None
         self._roi_callback = None
         self._axis_transform: dict[str, float] = self._default_axis_transform()
         self._last_map_bounds: tuple[float, float, float, float] | None = None
+        self._region_overlay_items: list[Any] = []
+        self._map_square_enabled = True
+        self._colorbar_visible = True
+        self._last_map_levels: tuple[float, float] | None = None
+        self._square_reflow_pending = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -107,11 +150,15 @@ class SunPyPlotCanvas(QWidget):
         map_vb.setAspectLocked(True, ratio=1.0)
         map_vb.enableAutoRange(x=False, y=False)
         map_vb.setMouseEnabled(x=False, y=False)
-        self.map_plot.setLabel("bottom", "Solar X", units="arcsec")
-        self.map_plot.setLabel("left", "Solar Y", units="arcsec")
+        self._set_map_axis_labels()
         self.map_plot.setTitle("")
         map_left_axis = self.map_plot.getAxis("left")
         map_bottom_axis = self.map_plot.getAxis("bottom")
+        for axis in (map_left_axis, map_bottom_axis):
+            try:
+                axis.enableAutoSIPrefix(False)
+            except Exception:
+                pass
         map_left_axis.setStyle(autoExpandTextSpace=False, tickTextWidth=60)
         map_left_axis.setWidth(72)
         map_bottom_axis.setStyle(autoExpandTextSpace=False, tickTextHeight=18)
@@ -119,7 +166,23 @@ class SunPyPlotCanvas(QWidget):
 
         self.map_image = pg.ImageItem(axisOrder="row-major")
         self.map_plot.addItem(self.map_image)
-        self._inferno_lut = pg.colormap.get("inferno", source="matplotlib").getLookupTable(nPts=256)
+        self._base_map_colormap = pg.colormap.get("inferno", source="matplotlib")
+        self._base_map_lut = self._base_map_colormap.getLookupTable(nPts=256)
+        self._map_colormap = self._base_map_colormap
+        self._inferno_lut = self._base_map_lut
+        self._map_lut = self._base_map_lut
+        self._colormap_name = "inferno"
+        self._colorbar = None
+        if self._colorbar_enabled:
+            self._colorbar = pg.ColorBarItem(
+                values=(0.0, 1.0),
+                width=20,
+                colorMap=self._map_colormap,
+                label="Intensity",
+                interactive=False,
+                colorMapMenu=False,
+            )
+            self._colorbar.setImageItem(self.map_image, insert_in=self.map_plot.getPlotItem())
         self._aia_limb_curve = pg.PlotCurveItem(
             pen=pg.mkPen((120, 255, 160), width=1.8),
             antialias=True,
@@ -156,31 +219,209 @@ class SunPyPlotCanvas(QWidget):
 
         self._stack.addWidget(self.map_plot)
         self._stack.addWidget(self.ts_plot)
+        self._stack.setAlignment(self.map_plot, Qt.AlignCenter)
         self._stack.setCurrentWidget(self.map_plot)
 
         self.apply_theme()
+        self._update_colorbar_visibility(is_rgb=False)
 
     def set_roi_callback(self, callback):
         self._roi_callback = callback
 
-    def apply_theme(self):
-        theme = self.theme
-        if theme is None:
-            self.map_plot.setBackground((12, 12, 12))
-            self.ts_plot.setBackground((12, 12, 12))
-            return
+    def set_colormap_name(self, name: str) -> None:
+        text = str(name or "").strip() or "inferno"
+        try:
+            try:
+                import sunpy.visualization.colormaps  # noqa: F401
+            except Exception:
+                pass
+            cmap = pg.colormap.get(text, source="matplotlib")
+            lut = cmap.getLookupTable(nPts=256)
+        except Exception:
+            cmap = _fallback_colormap(text)
+            if cmap is None:
+                try:
+                    cmap = pg.colormap.get(text)
+                    lut = cmap.getLookupTable(nPts=256)
+                except Exception:
+                    cmap = pg.colormap.get("inferno", source="matplotlib")
+                    lut = cmap.getLookupTable(nPts=256)
+                    text = "inferno"
+            else:
+                lut = cmap.getLookupTable(nPts=256)
+        self._base_map_lut = lut
+        self._base_map_colormap = cmap
+        self._colormap_name = text
+        self._refresh_effective_colormap()
+        if self.map_image.image is not None and not (
+            self.map_image.image.ndim == 3 and self.map_image.image.shape[-1] in (3, 4)
+        ):
+            self._apply_image_colormap()
+        if self._colorbar is not None:
+            self._colorbar.setColorMap(self._map_colormap)
 
-        dark = bool(getattr(theme, "_is_dark", True))
-        bg = (12, 12, 12) if dark else (245, 245, 245)
+    def colormap_name(self) -> str:
+        return self._colormap_name
+
+    def apply_theme(self):
+        dark = self._is_dark_ui()
+        bg = (12, 12, 12) if dark else (250, 252, 255)
         self.map_plot.setBackground(bg)
         self.ts_plot.setBackground(bg)
+        self.map_plot.getViewBox().setBackgroundColor(bg)
+        self.ts_plot.getViewBox().setBackgroundColor(bg)
+
+        fg = (225, 232, 240) if dark else (30, 42, 56)
+        grid = (95, 110, 128) if dark else (176, 190, 208)
+        for plot in (self.map_plot, self.ts_plot):
+            plot.getAxis("left").setPen(pg.mkPen(fg))
+            plot.getAxis("left").setTextPen(pg.mkPen(fg))
+            plot.getAxis("bottom").setPen(pg.mkPen(fg))
+            plot.getAxis("bottom").setTextPen(pg.mkPen(fg))
+            plot.getPlotItem().titleLabel.item.setDefaultTextColor(pg.mkColor(fg))
+        self.map_plot.showGrid(x=True, y=True, alpha=0.22)
+        try:
+            self.map_plot.getPlotItem().ctrl.xGridCheck.setChecked(True)
+            self.map_plot.getPlotItem().ctrl.yGridCheck.setChecked(True)
+            self.map_plot.getPlotItem().ctrl.gridAlphaSlider.setValue(22)
+            self.map_plot.getViewBox().setBorder(pg.mkPen(grid, width=1))
+        except Exception:
+            pass
+        try:
+            if self._colorbar is not None:
+                self._colorbar.setPen(pg.mkPen(fg))
+                self._colorbar.axis.setTextPen(pg.mkPen(fg))
+        except Exception:
+            pass
+        self._refresh_effective_colormap()
+
+    def _set_map_axis_labels(self) -> None:
+        self.map_plot.setLabel("bottom", "Solar X (arcsec)")
+        self.map_plot.setLabel("left", "Solar Y (arcsec)")
+
+    def _is_dark_ui(self) -> bool:
+        theme = getattr(self, "theme", None)
+        if theme is not None and hasattr(theme, "is_dark"):
+            try:
+                return bool(theme.is_dark())
+            except Exception:
+                pass
+        if theme is not None and hasattr(theme, "_dark"):
+            try:
+                return bool(getattr(theme, "_dark"))
+            except Exception:
+                pass
+        app = QGuiApplication.instance()
+        palette = app.palette() if app is not None else self.palette()
+        return palette.color(QPalette.Window).lightness() < 128
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._enforce_square_map_plot()
+
+    def _enforce_square_map_plot(self) -> None:
+        if not self._map_square_enabled or not self.is_map_visible():
+            return
+        available = self.contentsRect()
+        available_w = int(available.width())
+        available_h = int(available.height())
+        if available_w <= 0 or available_h <= 0:
+            return
+        chrome_w = 0
+        chrome_h = 0
+        try:
+            view_geom = self.map_plot.getViewBox().screenGeometry()
+            view_w = int(view_geom.width())
+            view_h = int(view_geom.height())
+            widget_w = int(self.map_plot.width())
+            widget_h = int(self.map_plot.height())
+            if view_w > 0 and view_h > 0 and widget_w > 0 and widget_h > 0:
+                chrome_w = max(0, widget_w - view_w)
+                chrome_h = max(0, widget_h - view_h)
+        except Exception:
+            chrome_w = 0
+            chrome_h = 0
+        side = min(max(1, available_w - chrome_w), max(1, available_h - chrome_h))
+        target_w = side + chrome_w
+        target_h = side + chrome_h
+        if abs(int(self.map_plot.width()) - target_w) > 1 or abs(int(self.map_plot.height()) - target_h) > 1:
+            self.map_plot.setFixedSize(target_w, target_h)
+            if not self._square_reflow_pending:
+                self._square_reflow_pending = True
+                QTimer.singleShot(0, self._finish_square_reflow)
+
+    def _finish_square_reflow(self) -> None:
+        self._square_reflow_pending = False
+        self._enforce_square_map_plot()
+
+    def map_background_lightness(self) -> int:
+        return int(self.map_plot.backgroundBrush().color().lightness())
+
+    def map_low_color_lightness(self) -> int:
+        if self._map_lut is None or len(self._map_lut) == 0:
+            return 0
+        rgb = np.asarray(self._map_lut[0][:3], dtype=float)
+        return int(round(float(np.mean(rgb))))
+
+    def set_colorbar_visible(self, visible: bool) -> None:
+        self._colorbar_visible = bool(visible)
+        self._update_colorbar_visibility()
+
+    def has_visible_colorbar(self) -> bool:
+        return bool(self._colorbar is not None and self._colorbar_visible and self._colorbar.isVisible())
+
+    def _update_colorbar_visibility(self, *, is_rgb: bool | None = None) -> None:
+        if is_rgb is None:
+            img = self.map_image.image
+            is_rgb = bool(img is not None and img.ndim == 3 and img.shape[-1] in (3, 4))
+        if self._colorbar is None:
+            self._enforce_square_map_plot()
+            return
+        if self._colorbar_visible and not is_rgb and self.map_image.image is not None:
+            self._colorbar.show()
+        else:
+            self._colorbar.hide()
+        self._enforce_square_map_plot()
+
+    def map_viewbox_size(self) -> tuple[int, int]:
+        try:
+            rect = self.map_plot.getViewBox().screenGeometry()
+            return int(rect.width()), int(rect.height())
+        except Exception:
+            return int(self.map_plot.width()), int(self.map_plot.height())
+
+    def _apply_image_colormap(self) -> None:
+        try:
+            self.map_image.setColorMap(self._map_colormap)
+        except Exception:
+            self.map_image.setLookupTable(self._map_lut)
+
+    def _refresh_effective_colormap(self) -> None:
+        lut = np.asarray(self._base_map_lut, dtype=np.ubyte).copy()
+        if lut.ndim != 2 or lut.shape[0] == 0:
+            return
+        self._map_lut = lut
+        self._map_colormap = pg.ColorMap(np.linspace(0.0, 1.0, int(lut.shape[0])), lut)
+        if getattr(self, "map_image", None) is not None and self.map_image.image is not None:
+            self._apply_image_colormap()
+        if getattr(self, "_colorbar", None) is not None:
+            self._colorbar.setColorMap(self._map_colormap)
 
     def clear_plot(self):
         self.map_image.clear()
         self.set_aia_limb_overlay(None, None, visible=False)
+        self.clear_region_overlays()
+        self._last_map_levels = None
+        self._update_colorbar_visibility(is_rgb=False)
         self.ts_plot.clear()
         self._axis_transform = self._default_axis_transform()
         self._last_map_bounds = None
+
+    def has_plot_content(self) -> bool:
+        return self.map_image.image is not None
+
+    def set_grid_visible(self, visible: bool) -> None:
+        self.map_plot.showGrid(x=bool(visible), y=bool(visible), alpha=0.25 if visible else 0.0)
 
     def enable_roi_selector(self):
         """Show an interactive ROI box (default: central quarter) and emit its
@@ -210,10 +451,49 @@ class SunPyPlotCanvas(QWidget):
         self._roi_active = False
         self._roi_rect.hide()
 
+    def roi_selector_active(self) -> bool:
+        return bool(self._roi_active and self._roi_rect.isVisible())
+
     def reset_roi(self):
         self._roi_bounds = None
         self._roi_active = False
         self._roi_rect.hide()
+
+    def set_roi_arcsec_bounds(
+        self,
+        x0_arcsec: float,
+        x1_arcsec: float,
+        y0_arcsec: float,
+        y1_arcsec: float,
+        *,
+        emit: bool = True,
+    ) -> None:
+        """Position the interactive ROI rectangle in map/arcsec coordinates."""
+        img = self.map_image.image
+        if img is None or img.ndim < 2:
+            return
+        map_x0, map_y0, width, height = self._map_rect_from_transform(img.shape)
+        map_x1 = map_x0 + width
+        map_y1 = map_y0 + height
+        x_low, x_high = sorted((float(x0_arcsec), float(x1_arcsec)))
+        y_low, y_high = sorted((float(y0_arcsec), float(y1_arcsec)))
+        x_low = max(min(map_x0, map_x1), min(max(map_x0, map_x1), x_low))
+        x_high = max(min(map_x0, map_x1), min(max(map_x0, map_x1), x_high))
+        y_low = max(min(map_y0, map_y1), min(max(map_y0, map_y1), y_low))
+        y_high = max(min(map_y0, map_y1), min(max(map_y0, map_y1), y_high))
+        if x_high <= x_low or y_high <= y_low:
+            return
+
+        self._roi_active = True
+        self._roi_rect.blockSignals(True)
+        self._roi_rect.setPos([x_low, y_low])
+        self._roi_rect.setSize([x_high - x_low, y_high - y_low])
+        self._roi_rect.blockSignals(False)
+        self._roi_rect.show()
+        if emit:
+            self._on_roi_region_changed()
+        else:
+            self._roi_bounds = self._roi_pixel_bounds()
 
     def _on_roi_region_changed(self):
         if not self._roi_active:
@@ -295,8 +575,54 @@ class SunPyPlotCanvas(QWidget):
         finite = np.isfinite(np.asarray(x_data, dtype=float)) & np.isfinite(np.asarray(y_data, dtype=float))
         return bool(int(np.count_nonzero(finite)) >= 3)
 
+    def clear_region_overlays(self) -> None:
+        for item in list(self._region_overlay_items):
+            try:
+                self.map_plot.removeItem(item)
+            except Exception:
+                pass
+        self._region_overlay_items = []
+
+    def set_region_overlays(self, regions: Sequence[Any] | None, *, visible: bool = True) -> None:
+        self.clear_region_overlays()
+        if not visible:
+            return
+        for region in list(regions or []):
+            bbox = getattr(region, "bbox", None)
+            if not bbox or len(bbox) != 4:
+                continue
+            try:
+                x0, x1, y0, y1 = [float(v) for v in bbox]
+            except Exception:
+                continue
+            ax0, ay0 = self.map_arcsec_from_pixel(x0, y0)
+            ax1, ay1 = self.map_arcsec_from_pixel(x1, y1)
+            x_low, x_high = sorted((ax0, ax1))
+            y_low, y_high = sorted((ay0, ay1))
+            curve = pg.PlotCurveItem(
+                [x_low, x_high, x_high, x_low, x_low],
+                [y_low, y_low, y_high, y_high, y_low],
+                pen=pg.mkPen((0, 220, 255), width=1.4),
+                antialias=True,
+            )
+            curve.setZValue(35)
+            self.map_plot.addItem(curve)
+            self._region_overlay_items.append(curve)
+
+            label = str(getattr(region, "label", "") or f"R{getattr(region, 'region_id', '')}").strip()
+            if label:
+                text_item = pg.TextItem(label, color=(0, 220, 255), anchor=(0, 1))
+                text_item.setZValue(36)
+                text_item.setPos(x_low, y_high)
+                self.map_plot.addItem(text_item)
+                self._region_overlay_items.append(text_item)
+
+    def region_overlay_count(self) -> int:
+        return len(self._region_overlay_items)
+
     def show_map(self):
         self._stack.setCurrentWidget(self.map_plot)
+        self._enforce_square_map_plot()
 
     def show_timeseries(self):
         self._stack.setCurrentWidget(self.ts_plot)
@@ -327,7 +653,10 @@ class SunPyPlotCanvas(QWidget):
         return "pyqtgraph"
 
     def opengl_enabled(self) -> bool:
-        return bool(getattr(_configure_pyqtgraph_once, "_opengl_enabled", False))
+        try:
+            return bool(pg.getConfigOption("useOpenGL"))
+        except Exception:
+            return bool(getattr(_configure_pyqtgraph_once, "_opengl_enabled", False))
 
     def _default_axis_transform(self) -> dict[str, float]:
         return {
@@ -360,27 +689,34 @@ class SunPyPlotCanvas(QWidget):
         if is_rgb:
             self.map_image.setLookupTable(None)
             self.map_image.setImage(arr, autoLevels=False)
+            self._last_map_levels = None
         else:
             data = np.asarray(arr, dtype=np.float32)
-            self.map_image.setLookupTable(self._inferno_lut)
+            self._apply_image_colormap()
             self.map_image.setImage(data, autoLevels=False)
 
             finite = data[np.isfinite(data)]
             if vmin is not None and vmax is not None and float(vmax) > float(vmin):
-                self.map_image.setLevels([float(vmin), float(vmax)])
+                levels = (float(vmin), float(vmax))
             elif finite.size > 0:
                 lo = float(np.nanmin(finite))
                 hi = float(np.nanmax(finite))
                 if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
-                    self.map_image.setLevels([lo, hi])
+                    levels = (lo, hi)
                 else:
-                    self.map_image.setLevels([lo - 1.0, lo + 1.0])
+                    levels = (lo - 1.0, lo + 1.0)
             else:
-                self.map_image.setLevels([0.0, 1.0])
+                levels = (0.0, 1.0)
+            self.map_image.setLevels(list(levels))
+            self._last_map_levels = levels
+            if self._colorbar is not None:
+                self._colorbar.setLevels(levels)
+                self._colorbar.setColorMap(self._map_colormap)
+            self._update_colorbar_visibility(is_rgb=False)
 
         self.map_plot.setTitle(title)
-        self.map_plot.setLabel("bottom", "Solar X", units="arcsec")
-        self.map_plot.setLabel("left", "Solar Y", units="arcsec")
+        self._set_map_axis_labels()
+        self._update_colorbar_visibility(is_rgb=is_rgb)
 
         x1 = x0 + width
         y1 = y0 + height
@@ -407,6 +743,7 @@ class SunPyPlotCanvas(QWidget):
                 disableAutoRange=True,
             )
             self._last_map_bounds = bounds
+        self._enforce_square_map_plot()
 
     def _map_rect_from_transform(self, shape: tuple[int, ...]) -> tuple[float, float, float, float]:
         ny = int(shape[0]) if len(shape) >= 1 else 1
@@ -495,6 +832,7 @@ class SunPyPlotWindow(QMainWindow):
         self._current_frame_index = 0
         self._roi_bounds: tuple[int, int, int, int] | None = None
         self._aia_limb_cache: dict[int, tuple[np.ndarray, np.ndarray] | None] = {}
+        self._region_overlays: list[Any] = []
         self._square_window_mode = False
         self._resize_guard = False
 
@@ -536,6 +874,9 @@ class SunPyPlotWindow(QMainWindow):
         self.frame_slider.setEnabled(False)
         self.running_diff_check = QCheckBox("Run Diff")
         self.running_diff_check.setEnabled(False)
+        self.base_diff_check = QCheckBox("Base Diff")
+        self.base_diff_check.setEnabled(False)
+        self.base_diff_check.setVisible(False)
         self.aia_limb_check = QCheckBox("AIA Limb (EUVI)")
         self.aia_limb_check.setEnabled(False)
         self.play_btn = QPushButton("Play")
@@ -575,9 +916,17 @@ class SunPyPlotWindow(QMainWindow):
 
         self.map_controls.setVisible(False)
 
+        difference_menu = self.menuBar().addMenu("Difference")
+        self.base_diff_action = QAction("Base Difference", self)
+        self.base_diff_action.setCheckable(True)
+        self.base_diff_action.setEnabled(False)
+        difference_menu.addAction(self.base_diff_action)
+
     def _connect_signals(self):
         self.frame_slider.valueChanged.connect(self._on_frame_slider_changed)
         self.running_diff_check.toggled.connect(self._on_running_diff_toggled)
+        self.base_diff_check.toggled.connect(self._on_base_diff_toggled)
+        self.base_diff_action.toggled.connect(self._on_base_diff_action_toggled)
         self.aia_limb_check.toggled.connect(self._on_aia_limb_toggled)
         self.play_btn.clicked.connect(self._on_play_clicked)
         self.pause_btn.clicked.connect(self._on_pause_clicked)
@@ -601,6 +950,7 @@ class SunPyPlotWindow(QMainWindow):
         self._timeseries_metadata = {}
         self._current_frame_index = 0
         self._aia_limb_cache = {}
+        self._region_overlays = []
 
         self._play_timer.stop()
         self._roi_bounds = None
@@ -616,6 +966,10 @@ class SunPyPlotWindow(QMainWindow):
         has_multiple = len(values) > 1
         self.running_diff_check.setEnabled(has_multiple)
         self.running_diff_check.setChecked(False)
+        self.base_diff_check.setEnabled(has_multiple)
+        self.base_diff_check.setChecked(False)
+        self.base_diff_action.setEnabled(has_multiple)
+        self.base_diff_action.setChecked(False)
         has_euvi = any(self._is_stereo_euvi_frame(frame) for frame in values)
         has_euvi = bool(has_euvi or self._metadata_indicates_stereo_euvi(self._map_metadata))
         self.aia_limb_check.setEnabled(has_euvi)
@@ -631,6 +985,7 @@ class SunPyPlotWindow(QMainWindow):
 
         self.canvas.clear_plot()
         self.canvas.reset_roi()
+        self.canvas.clear_region_overlays()
         self.show_map_mode()
         self._render_current_map_frame(emit_signal=True)
         self._refresh_playback_buttons()
@@ -655,6 +1010,7 @@ class SunPyPlotWindow(QMainWindow):
         self._roi_bounds = None
         self._current_frame_index = 0
         self._aia_limb_cache = {}
+        self._region_overlays = []
 
         self._play_timer.stop()
         self.frame_slider.blockSignals(True)
@@ -664,6 +1020,10 @@ class SunPyPlotWindow(QMainWindow):
         self.frame_slider.setEnabled(False)
         self.running_diff_check.setEnabled(False)
         self.running_diff_check.setChecked(False)
+        self.base_diff_check.setEnabled(False)
+        self.base_diff_check.setChecked(False)
+        self.base_diff_action.setEnabled(False)
+        self.base_diff_action.setChecked(False)
         self.aia_limb_check.setEnabled(False)
         self.aia_limb_check.setChecked(False)
         self.play_btn.setEnabled(False)
@@ -700,6 +1060,20 @@ class SunPyPlotWindow(QMainWindow):
 
     def current_frame_index(self) -> int:
         return self._current_frame_index
+
+    def current_axis_transform(self) -> dict[str, float]:
+        return dict(getattr(self.canvas, "_axis_transform", {}) or {})
+
+    def set_region_overlays(self, regions: Sequence[Any] | None) -> None:
+        self._region_overlays = list(regions or [])
+        self.canvas.set_region_overlays(self._region_overlays)
+
+    def clear_region_overlays(self) -> None:
+        self._region_overlays = []
+        self.canvas.clear_region_overlays()
+
+    def region_overlay_count(self) -> int:
+        return self.canvas.region_overlay_count()
 
     def has_plot_content(self) -> bool:
         return self._mode in {"map", "timeseries"}
@@ -809,7 +1183,35 @@ class SunPyPlotWindow(QMainWindow):
     def _on_running_diff_toggled(self, _checked: bool):
         if self._mode != "map":
             return
+        if self.running_diff_check.isChecked() and self.base_diff_check.isChecked():
+            self.base_diff_check.blockSignals(True)
+            self.base_diff_check.setChecked(False)
+            self.base_diff_check.blockSignals(False)
+        if self.running_diff_check.isChecked() and self.base_diff_action.isChecked():
+            self.base_diff_action.blockSignals(True)
+            self.base_diff_action.setChecked(False)
+            self.base_diff_action.blockSignals(False)
         self._render_current_map_frame(emit_signal=True)
+
+    def _on_base_diff_toggled(self, _checked: bool):
+        if self._mode != "map":
+            return
+        if self.base_diff_check.isChecked() and self.running_diff_check.isChecked():
+            self.running_diff_check.blockSignals(True)
+            self.running_diff_check.setChecked(False)
+            self.running_diff_check.blockSignals(False)
+        if self.base_diff_action.isChecked() != self.base_diff_check.isChecked():
+            self.base_diff_action.blockSignals(True)
+            self.base_diff_action.setChecked(self.base_diff_check.isChecked())
+            self.base_diff_action.blockSignals(False)
+        self._render_current_map_frame(emit_signal=True)
+
+    def _on_base_diff_action_toggled(self, checked: bool):
+        if self._mode != "map":
+            return
+        if self.base_diff_check.isChecked() == bool(checked):
+            return
+        self.base_diff_check.setChecked(bool(checked))
 
     def _on_aia_limb_toggled(self, _checked: bool):
         if self._mode != "map":
@@ -827,7 +1229,12 @@ class SunPyPlotWindow(QMainWindow):
         current = self._prepare_map_array(getattr(frame, "data"), "current frame")
         title = self._frame_title(frame, idx)
 
-        if self.running_diff_check.isChecked() and len(self._map_frames) > 1:
+        if self.base_diff_check.isChecked() and len(self._map_frames) > 1:
+            base = self._prepare_map_array(getattr(self._map_frames[0], "data"), "base frame")
+            if base.shape == current.shape:
+                current = current - base
+                title += " (Base Difference)"
+        elif self.running_diff_check.isChecked() and len(self._map_frames) > 1:
             if idx > 0:
                 prev = self._prepare_map_array(getattr(self._map_frames[idx - 1], "data"), "previous frame")
                 if prev.shape == current.shape:
@@ -858,6 +1265,7 @@ class SunPyPlotWindow(QMainWindow):
         self.frame_label.setText(f"Frame {idx + 1}/{len(self._map_frames)}")
         axis_transform = self._axis_transform_for_arcsec(frame=frame, data_shape=current.shape)
         self.canvas.plot_map_data(current, title=title, vmin=vmin, vmax=vmax, axis_transform=axis_transform)
+        self.canvas.set_region_overlays(self._region_overlays)
         self._update_aia_limb_overlay(frame=frame, frame_index=idx, data_shape=current.shape)
 
         if emit_signal:
@@ -943,6 +1351,13 @@ class SunPyPlotWindow(QMainWindow):
         if self._square_window_mode:
             self._apply_square_window_geometry()
         else:
+            map_plot = getattr(getattr(self, "canvas", None), "map_plot", None)
+            if map_plot is not None:
+                try:
+                    map_plot.setMinimumSize(0, 0)
+                    map_plot.setMaximumSize(16777215, 16777215)
+                except Exception:
+                    pass
             self._ensure_window_in_screen(self._available_screen_geometry())
 
     def _available_screen_geometry(self):
@@ -996,6 +1411,10 @@ class SunPyPlotWindow(QMainWindow):
         map_plot = getattr(getattr(self, "canvas", None), "map_plot", None)
         if map_plot is None:
             return
+        try:
+            self.canvas._enforce_square_map_plot()
+        except Exception:
+            pass
 
         for _ in range(4):
             map_w = int(map_plot.width())
@@ -1016,7 +1435,7 @@ class SunPyPlotWindow(QMainWindow):
                 next_h = min(next_h, max(220, int(available.height()) - 8))
 
             if next_w == int(self.width()) and next_h == int(self.height()):
-                return
+                break
 
             self._resize_guard = True
             try:
@@ -1024,6 +1443,16 @@ class SunPyPlotWindow(QMainWindow):
             finally:
                 self._resize_guard = False
             self._ensure_window_in_screen(available)
+
+        map_w = int(map_plot.width())
+        map_h = int(map_plot.height())
+        if map_w > 0 and map_h > 0 and abs(map_w - map_h) > 1:
+            side = max(220, min(map_w, map_h))
+            try:
+                map_plot.setFixedSize(side, side)
+                self.canvas._enforce_square_map_plot()
+            except Exception:
+                pass
 
     def _ensure_window_in_screen(self, available) -> None:
         if available is None:

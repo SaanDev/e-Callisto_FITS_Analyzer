@@ -127,6 +127,7 @@ class SunPyQuerySpec:
     detector: str | None = None
     satellite_number: int | None = None
     sample_seconds: float | None = None
+    resolution: float | str | None = None
     max_records: int = 200
 
 
@@ -362,6 +363,9 @@ def build_attrs(
     if spec.sample_seconds and float(spec.sample_seconds) > 0 and hasattr(attrs_module, "Sample"):
         out.append(attrs_module.Sample(float(spec.sample_seconds) * units_module.second))
 
+    if spec.resolution is not None and hasattr(attrs_module, "Resolution"):
+        out.append(attrs_module.Resolution(spec.resolution))
+
     if entry.supports_satellite:
         sat_number = int(spec.satellite_number or entry.default_satellite or 0)
         if sat_number > 0:
@@ -567,8 +571,26 @@ def normalize_query_spec(spec: SunPyQuerySpec) -> SunPyQuerySpec:
         detector=(str(spec.detector).strip().upper() if spec.detector else None),
         satellite_number=(int(spec.satellite_number) if spec.satellite_number is not None else None),
         sample_seconds=(float(spec.sample_seconds) if spec.sample_seconds is not None else None),
+        resolution=_normalize_resolution_value(spec.resolution),
         max_records=max(1, int(spec.max_records or 1)),
     )
+
+
+def _normalize_resolution_value(value: float | str | None) -> float | str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return text
+    try:
+        return float(value)
+    except Exception:
+        return value
 
 
 def resolve_registry_entry(spec: SunPyQuerySpec) -> InstrumentRegistryEntry:

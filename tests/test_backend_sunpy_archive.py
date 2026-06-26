@@ -59,6 +59,10 @@ class _FakeAttrs:
     def Sample(value):
         return ("Sample", value)
 
+    @staticmethod
+    def Resolution(value):
+        return ("Resolution", value)
+
 
 def _mk_query(**kwargs):
     defaults = dict(
@@ -78,6 +82,12 @@ def test_build_attrs_for_aia_includes_wavelength():
     assert attrs[1] == ("Source", "SDO")
     assert attrs[2] == ("Instrument", "AIA")
     assert any(item[0] == "Wavelength" for item in attrs if isinstance(item, tuple))
+
+
+def test_build_attrs_for_aia_can_request_full_resolution():
+    spec = _mk_query(wavelength_angstrom=193.0, resolution=1.0)
+    attrs = sa.build_attrs(spec, attrs_module=_FakeAttrs, units_module=_FakeUnits)
+    assert ("Resolution", 1.0) in attrs
 
 
 def test_build_attrs_for_goes_includes_satellite():

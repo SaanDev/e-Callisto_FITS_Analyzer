@@ -1,11 +1,17 @@
-# e-CALLISTO FITS Analyzer (v2.6.0)
+# e-CALLISTO FITS Analyzer (v2.7.0)
 A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data.
 
 ---
 
-## What's New in v2.6.0
+## What's New in v2.7.0
 
-Compared with v2.5.0, this release adds the following capabilities:
+Compared with v2.6.0, this release adds the following capabilities:
+
+### Solar Data Analysis
+- **Dedicated SDO/AIA workspace:** open **Analysis -> Solar Data Analysis** to search/load AIA image sequences without changing the existing SunPy Multi-Mission Explorer.
+- **Image analysis tools:** plot AIA frames, crop by ROI, render running/base differences, detect bright active-region candidates, and optionally fetch NOAA/HEK active-region labels.
+- **Composite and movie exports:** create simple AIA RGB composites, export plot/cropped FITS/region CSV outputs, and save AIA movies as GIF or MP4.
+- **Local and archive inputs:** load local AIA FITS/FITS.GZ files or reuse the existing SunPy archive search/download/cache pipeline.
 
 ### Multi-station analysis
 - **Multi-Station Comparison workspace:** open multiple FITS files in stacked synchronized panels, align them by UT clock or seconds from file start, and automatically combine compatible time/frequency files per station.
@@ -26,7 +32,7 @@ Compared with v2.5.0, this release adds the following capabilities:
 ### Reliability and packaging
 - Fixed FITS-load default preset application so configured defaults apply without unintended intermediate replots.
 - Improved multi-station rendering, noise previews, station/date labels, automatic combination, and visible/grid export layouts.
-- Added Windows PySide6 environment repair and validation tooling, packaged the new v2.6.0 modules across platforms, and added an opt-in Linux XCB fallback for affected Wayland setups.
+- Added Windows PySide6 environment repair and validation tooling, packaged the new v2.7.0 modules across platforms, and added an opt-in Linux XCB fallback for affected Wayland setups.
 
 ---
 
@@ -52,6 +58,7 @@ Compared with v2.5.0, this release adds the following capabilities:
 ### Solar-event context tools
 - Open standalone viewers for GOES X-ray flux, GOES SEP proton flux, SOHO/LASCO CME catalog data, Kyoto Dst, and GFZ Kp.
 - Overlay GOES XRS curves directly on the main spectrum with automatic legacy/modern GOES fallback and flare-class guides.
+- Analyze SDO/AIA images from **Analysis -> Solar Data Analysis** with crop, difference, active-region, composite, and movie export tools.
 - Explore external archives with the SunPy Multi-Mission Explorer for SDO, SOHO, STEREO-A, and GOES products.
 - Sync the current analyzer time window across supported solar-event windows for faster cross-comparison.
 
@@ -529,7 +536,31 @@ Features:
 
 ---
 
-# 22. SunPy Multi-Mission Explorer
+# 22. Solar Data Analysis
+
+Path:
+
+- **Analysis -> Solar Data Analysis**
+
+Features:
+
+- Search and download SDO/AIA image records using the existing SunPy cache workflow
+- Load local AIA `.fit`, `.fits`, `.fit.gz`, and `.fits.gz` files
+- Plot image sequences with frame stepping, playback, running-difference, and base-difference modes
+- Crop image sequences using the plot-window ROI selector
+- Detect bright active-region candidates and export centroid/bounding-box/intensity summaries as CSV
+- Optionally fetch NOAA/HEK active-region labels and overlay them on detected regions
+- Create simple RGB composites from loaded AIA frames
+- Export the current plot, cropped FITS products, animated GIFs, and MP4 movies
+
+Notes:
+
+- JSOC server-side cutout requests are not part of v2.7.0; cropping is performed locally after files are loaded.
+- Metadata overlays require network access, but image-based region detection works on local files.
+
+---
+
+# 23. SunPy Multi-Mission Explorer
 
 Path:
 
@@ -558,7 +589,7 @@ Known limitations:
 
 ---
 
-# 23. Support and Research Tools
+# 24. Support and Research Tools
 
 ### Report a Bug
 
@@ -639,8 +670,8 @@ Use **About → Check for Updates...** to query the latest release from GitHub.
 - Recommended `.deb` packaging workflow:
   - `bash src/Installation/build_deb_linux.sh`
 - Install the generated local package using a path, not a bare filename:
-  - `sudo apt install -y ./dist/e-callisto-fits-analyzer_2.6.0_amd64.deb`
-  - If you are already inside `dist`, use `sudo apt install -y ./e-callisto-fits-analyzer_2.6.0_amd64.deb`
+  - `sudo apt install -y ./dist/e-callisto-fits-analyzer_2.7.0_amd64.deb`
+  - If you are already inside `dist`, use `sudo apt install -y ./e-callisto-fits-analyzer_2.7.0_amd64.deb`
 - Manual PyInstaller build:
   - `pyinstaller src/Installation/FITS_Analyzer_linux.spec`
 
