@@ -410,7 +410,6 @@ def fetch(
     *,
     progress_cb: Callable[[int, str], None] | None = None,
     cancel_cb: Callable[[], bool] | None = None,
-    byte_progress_cb: Callable[[Any], None] | None = None,
     fido_client: Any | None = None,
 ) -> SunPyFetchResult:
     if search_result.raw_response is None:
@@ -457,54 +456,39 @@ def fetch(
                 f"Downloaded {processed_rows}/{total} {label}(s)",
             )
 
-    # Honest byte-level progress for the parfive/VSO path (which exposes no
-    # socket callback): watch the cache directory grow against a total summed
-    # from the archive size column. See download_manager.CacheByteMonitor.
-    byte_poller_stop = _start_byte_progress_poller(
-        byte_progress_cb,
-        cache_root=cache_root,
-        search_result=search_result,
-        requested=requested,
-        total=total,
-        processed_getter=lambda: processed_rows,
-    )
-
     cancelled = False
-    try:
-        batches = _build_row_batches(search_result, requested, max_batch_size=max_batch_size)
-        for batch_idx, batch in enumerate(batches, start=1):
-            if _is_cancelled(cancel_cb):
-                cancelled = True
-                _logger.info("fetch cancelled before batch %d/%d", batch_idx, len(batches))
-                break
-            if progress_cb is not None:
-                label = "high-resolution batch" if priority else "batch"
-                progress_cb(
-                    int(processed_rows * 100 / max(total, 1)),
-                    (
-                        f"Downloading {label} {batch_idx}/{len(batches)} "
-                        f"({processed_rows}/{total} complete, up to {max_conn} connections)..."
-                    ),
-                )
-            _fetch_rows_batch_adaptive(
-                search_result,
-                batch,
-                fido_client=fido_client,
-                row_template=row_template,
-                downloaded_paths=downloaded_paths,
-                errors=errors,
-                max_conn=max_conn,
-                batch_max_conn=(max_conn if priority else 1),
-                priority=priority,
-                processed_cb=_mark_processed,
-                cancel_cb=cancel_cb,
+    batches = _build_row_batches(search_result, requested, max_batch_size=max_batch_size)
+    for batch_idx, batch in enumerate(batches, start=1):
+        if _is_cancelled(cancel_cb):
+            cancelled = True
+            _logger.info("fetch cancelled before batch %d/%d", batch_idx, len(batches))
+            break
+        if progress_cb is not None:
+            label = "high-resolution batch" if priority else "batch"
+            progress_cb(
+                int(processed_rows * 100 / max(total, 1)),
+                (
+                    f"Downloading {label} {batch_idx}/{len(batches)} "
+                    f"({processed_rows}/{total} complete, up to {max_conn} connections)..."
+                ),
             )
-            if _is_cancelled(cancel_cb):
-                cancelled = True
-                _logger.info("fetch cancelled after batch %d/%d", batch_idx, len(batches))
-                break
-    finally:
-        _stop_byte_progress_poller(byte_poller_stop)
+        _fetch_rows_batch_adaptive(
+            search_result,
+            batch,
+            fido_client=fido_client,
+            row_template=row_template,
+            downloaded_paths=downloaded_paths,
+            errors=errors,
+            max_conn=max_conn,
+            batch_max_conn=(max_conn if priority else 1),
+            priority=priority,
+            processed_cb=_mark_processed,
+            cancel_cb=cancel_cb,
+        )
+        if _is_cancelled(cancel_cb):
+            cancelled = True
+            _logger.info("fetch cancelled after batch %d/%d", batch_idx, len(batches))
+            break
 
     deduped_paths = _dedupe_preserve_order(downloaded_paths)
     failed_rows = _failed_rows_from_errors(errors)
@@ -529,110 +513,6 @@ def fetch(
         failed_rows=failed_rows,
         cancelled=cancelled,
     )
-
-
-def fetch_via_jsoc(
-    search_result: SunPySearchResult,
-    cache_dir: str | Path,
-    selected_rows: Sequence[int] | None = None,
-    *,
-    email: str,
-    cadence_seconds: float | int | None = None,
-    process: dict[str, Any] | None = None,
-    max_conn: int | None = None,
-    progress_cb: Callable[[int, str], None] | None = None,
-    byte_progress_cb: Callable[[Any], None] | None = None,
-    cancel_cb: Callable[[], bool] | None = None,
-    jsoc_client: Any | None = None,
-    download_manager: Any | None = None,
-) -> SunPyFetchResult:
-    """Download SDO/AIA frames through the JSOC fast path.
-
-    Resolves direct, compressed segment URLs from JSOC (built from the selected
-    rows' time window + the query's wavelength/cadence) and transfers them with
-    the shared byte-accurate :class:`DownloadManager`. This is the fast,
-    fallback-capable alternative to the VSO :func:`fetch`; on any JSOC failure
-    the caller should fall back to ``fetch`` so the user is never stranded.
-
-    The download engine skips files already complete in ``cache_dir`` (JSOC
-    filenames are deterministic per record), which is the persistent cross-
-    session cache.
-    """
-    from src.Backend.download_manager import DownloadItem, DownloadManager
-    from src.Backend.jsoc_client import export_urls
-
-    spec = search_result.spec
-    rows = search_result.rows
-    requested = _normalize_selected_rows(selected_rows, len(rows))
-    if requested:
-        start = min(rows[i].start for i in requested)
-        end = max(rows[i].end for i in requested)
-    else:
-        start, end = spec.start_dt, spec.end_dt
-    if end <= start:
-        end = start + _min_window_delta()
-
-    wavelength = spec.wavelength_angstrom or 193.0
-    cadence = cadence_seconds if cadence_seconds is not None else spec.sample_seconds
-
-    export = export_urls(
-        start=start,
-        end=end,
-        wavelength_angstrom=wavelength,
-        email=str(email),
-        cadence_seconds=cadence,
-        process=process,
-        client=jsoc_client,
-    )
-
-    cache_root = Path(cache_dir).expanduser().resolve()
-    cache_root.mkdir(parents=True, exist_ok=True)
-    configure_fetch_logging(cache_root.parent)
-
-    items = [
-        DownloadItem(
-            url=entry.url,
-            dest=cache_root / _sanitize_filename(entry.filename),
-            expected_size=entry.size,
-            record_id=entry.record,
-            label=entry.filename,
-        )
-        for entry in export.urls
-    ]
-    _logger.info("JSOC fetch: %d url(s) resolved from %s", len(items), export.recordset)
-
-    manager = download_manager or DownloadManager(
-        max_concurrent=int(max_conn) if max_conn else _resolve_fetch_max_conn(priority=True),
-        progress_interval=0.2,
-    )
-
-    def _on_aggregate(agg: Any) -> None:
-        if byte_progress_cb is not None:
-            byte_progress_cb(agg)
-        if progress_cb is not None:
-            done = int(getattr(agg, "files_done", 0) or 0)
-            total = int(getattr(agg, "files_total", 0) or 0) or len(items)
-            try:
-                percent = int(agg.percent())
-            except Exception:
-                percent = 0
-            progress_cb(percent, f"Downloaded {done}/{total} frame(s) via JSOC (fast path)")
-
-    download = manager.download(items, progress_cb=_on_aggregate, cancel_cb=cancel_cb)
-    return SunPyFetchResult(
-        paths=list(download.paths),
-        requested_count=len(items),
-        failed_count=len(download.errors),
-        errors=list(download.errors),
-        failed_rows=[],
-        cancelled=bool(download.cancelled),
-    )
-
-
-def _min_window_delta():
-    from datetime import timedelta
-
-    return timedelta(seconds=12)
 
 
 def load_downloaded(
@@ -1054,101 +934,6 @@ def _is_cancelled(cancel_cb: Callable[[], bool] | None) -> bool:
         return bool(cancel_cb())
     except Exception:
         return False
-
-
-def _expected_bytes_for_rows(search_result: SunPySearchResult, requested: Sequence[int]) -> int | None:
-    """Sum the archive-reported sizes of the requested rows into a byte total.
-
-    Used purely as the denominator for the byte progress bar. When some rows do
-    not report a size we extrapolate from the known ones so the bar still has a
-    sensible scale rather than collapsing to indeterminate.
-    """
-    try:
-        from src.Backend.download_manager import parse_size_text
-    except Exception:
-        return None
-
-    total = 0
-    known = 0
-    for idx in requested:
-        try:
-            row = search_result.rows[idx]
-        except Exception:
-            continue
-        size_bytes = parse_size_text(getattr(row, "size", ""))
-        if size_bytes:
-            total += size_bytes
-            known += 1
-    if known == 0:
-        return None
-    if known < len(requested):
-        total = int((total / known) * len(requested))
-    return total or None
-
-
-def _start_byte_progress_poller(
-    byte_progress_cb: Callable[[Any], None] | None,
-    *,
-    cache_root: Path,
-    search_result: SunPySearchResult,
-    requested: Sequence[int],
-    total: int,
-    processed_getter: Callable[[], int],
-):
-    """Spawn a daemon thread that reports byte-level progress while parfive runs.
-
-    Returns a ``threading.Event`` used to stop it (or ``None`` if disabled). The
-    thread samples a CacheByteMonitor every 250 ms and folds in the file-count
-    progress maintained by the main fetch loop.
-    """
-    if byte_progress_cb is None:
-        return None
-    try:
-        import threading
-
-        from src.Backend.download_manager import CacheByteMonitor
-    except Exception:
-        return None
-
-    expected = _expected_bytes_for_rows(search_result, requested)
-    try:
-        monitor = CacheByteMonitor(cache_root, expected_total=expected)
-    except Exception:
-        return None
-
-    stop_event = threading.Event()
-
-    def _poll() -> None:
-        while not stop_event.is_set():
-            try:
-                snapshot = monitor.sample()
-                snapshot.files_total = int(total)
-                snapshot.files_done = int(processed_getter())
-                byte_progress_cb(snapshot)
-            except Exception:
-                pass
-            stop_event.wait(0.25)
-        # Final, settled sample so the bar lands on the true completed size.
-        try:
-            snapshot = monitor.sample()
-            snapshot.files_total = int(total)
-            snapshot.files_done = int(processed_getter())
-            byte_progress_cb(snapshot)
-        except Exception:
-            pass
-
-    thread = threading.Thread(target=_poll, name="sunpy-byte-poller", daemon=True)
-    thread.start()
-    return stop_event
-
-
-def _stop_byte_progress_poller(stop_event: Any) -> None:
-    if stop_event is None:
-        return
-    try:
-        stop_event.set()
-    except Exception:
-        pass
 
 
 def _is_priority_fetch(search_result: SunPySearchResult) -> bool:
