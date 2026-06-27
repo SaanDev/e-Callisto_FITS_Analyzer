@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.6.0
+Version 2.7.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -8,6 +8,7 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import logging
@@ -17,6 +18,7 @@ from pathlib import Path
 import re
 import sys
 import time
+from threading import Lock
 from typing import Any, Callable, Iterable, Sequence
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
@@ -185,6 +187,16 @@ class InstrumentRegistryEntry:
     default_detector: str | None
     default_satellite: int | None
     wavelengths: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class _DirectDownloadItem:
+    row_index: int
+    url: str
+    fileid: str
+    path_hint: str
+    expected_bytes: int | None = None
+    urls: tuple[str, ...] = ()
 
 
 INSTRUMENT_REGISTRY: tuple[InstrumentRegistryEntry, ...] = (
@@ -415,9 +427,6 @@ def fetch(
     if search_result.raw_response is None:
         raise ValueError("Search result does not contain a raw response object for fetching.")
 
-    if fido_client is None:
-        fido_client = _import_fido()
-
     cache_root = Path(cache_dir).expanduser().resolve()
     cache_root.mkdir(parents=True, exist_ok=True)
     # Safety net: ensure diagnostics are captured even if the UI did not
@@ -457,7 +466,58 @@ def fetch(
             )
 
     cancelled = False
-    batches = _build_row_batches(search_result, requested, max_batch_size=max_batch_size)
+    remaining_requested = list(requested)
+
+    if _direct_vso_download_enabled(search_result):
+        if progress_cb is not None:
+            progress_cb(0, "Resolving direct VSO download URLs...")
+        direct_items, unresolved_rows = _resolve_vso_direct_downloads(
+            search_result,
+            requested,
+            row_template=row_template,
+            progress_cb=progress_cb,
+            cancel_cb=cancel_cb,
+        )
+        if _is_cancelled(cancel_cb):
+            cancelled = True
+            _logger.info("fetch cancelled while resolving direct URLs")
+        elif direct_items:
+            direct_row_indexes = {item.row_index for item in direct_items}
+            _logger.info(
+                "direct VSO download path: resolved=%d unresolved=%d workers=%d",
+                len(direct_items),
+                len(unresolved_rows),
+                _resolve_direct_download_workers(priority=priority),
+            )
+            direct_paths, direct_errors, direct_cancelled = _download_vso_direct_items(
+                direct_items,
+                cache_root,
+                total_requested=total,
+                base_completed=processed_rows,
+                progress_cb=progress_cb,
+                cancel_cb=cancel_cb,
+                priority=priority,
+            )
+            downloaded_paths.extend(direct_paths)
+            errors.extend(direct_errors)
+            processed_rows += len(direct_items)
+            remaining_requested = [row_index for row_index in requested if row_index not in direct_row_indexes]
+            cancelled = bool(direct_cancelled or _is_cancelled(cancel_cb))
+            if progress_cb is not None:
+                progress_cb(
+                    int(processed_rows * 100 / max(total, 1)),
+                    f"Direct download finished for {len(direct_items)}/{total} record(s).",
+                )
+        else:
+            _logger.info("direct VSO download path unavailable; falling back to SunPy fetch")
+
+    if cancelled:
+        remaining_requested = []
+
+    if remaining_requested and fido_client is None:
+        fido_client = _import_fido()
+
+    batches = _build_row_batches(search_result, remaining_requested, max_batch_size=max_batch_size)
     for batch_idx, batch in enumerate(batches, start=1):
         if _is_cancelled(cancel_cb):
             cancelled = True
@@ -513,6 +573,110 @@ def fetch(
         failed_rows=failed_rows,
         cancelled=cancelled,
     )
+
+
+def fetch_via_jsoc(
+    search_result: SunPySearchResult,
+    cache_dir: str | Path,
+    selected_rows: Sequence[int] | None = None,
+    *,
+    email: str,
+    cadence_seconds: float | int | None = None,
+    process: dict[str, Any] | None = None,
+    max_conn: int | None = None,
+    progress_cb: Callable[[int, str], None] | None = None,
+    byte_progress_cb: Callable[[Any], None] | None = None,
+    cancel_cb: Callable[[], bool] | None = None,
+    jsoc_client: Any | None = None,
+    download_manager: Any | None = None,
+) -> SunPyFetchResult:
+    """Download SDO/AIA frames through the JSOC fast path.
+
+    Resolves direct, compressed segment URLs from JSOC (built from the selected
+    rows' time window + the query's wavelength/cadence) and transfers them with
+    the shared byte-accurate :class:`DownloadManager`. This is the fast,
+    fallback-capable alternative to the VSO :func:`fetch`; on any JSOC failure
+    the caller should fall back to ``fetch`` so the user is never stranded.
+
+    The download engine skips files already complete in ``cache_dir`` (JSOC
+    filenames are deterministic per record), which is the persistent cross-
+    session cache.
+    """
+    from src.Backend.download_manager import DownloadItem, DownloadManager
+    from src.Backend.jsoc_client import export_urls
+
+    spec = search_result.spec
+    rows = search_result.rows
+    requested = _normalize_selected_rows(selected_rows, len(rows))
+    if requested:
+        start = min(rows[i].start for i in requested)
+        end = max(rows[i].end for i in requested)
+    else:
+        start, end = spec.start_dt, spec.end_dt
+    if end <= start:
+        end = start + _min_window_delta()
+
+    wavelength = spec.wavelength_angstrom or 193.0
+    cadence = cadence_seconds if cadence_seconds is not None else spec.sample_seconds
+
+    export = export_urls(
+        start=start,
+        end=end,
+        wavelength_angstrom=wavelength,
+        email=str(email),
+        cadence_seconds=cadence,
+        process=process,
+        client=jsoc_client,
+    )
+
+    cache_root = Path(cache_dir).expanduser().resolve()
+    cache_root.mkdir(parents=True, exist_ok=True)
+    configure_fetch_logging(cache_root.parent)
+
+    items = [
+        DownloadItem(
+            url=entry.url,
+            dest=cache_root / _sanitize_filename(entry.filename),
+            expected_size=entry.size,
+            record_id=entry.record,
+            label=entry.filename,
+        )
+        for entry in export.urls
+    ]
+    _logger.info("JSOC fetch: %d url(s) resolved from %s", len(items), export.recordset)
+
+    manager = download_manager or DownloadManager(
+        max_concurrent=int(max_conn) if max_conn else _resolve_fetch_max_conn(priority=True),
+        progress_interval=0.2,
+    )
+
+    def _on_aggregate(agg: Any) -> None:
+        if byte_progress_cb is not None:
+            byte_progress_cb(agg)
+        if progress_cb is not None:
+            done = int(getattr(agg, "files_done", 0) or 0)
+            total = int(getattr(agg, "files_total", 0) or 0) or len(items)
+            try:
+                percent = int(agg.percent())
+            except Exception:
+                percent = 0
+            progress_cb(percent, f"Downloaded {done}/{total} frame(s) via JSOC (fast path)")
+
+    download = manager.download(items, progress_cb=_on_aggregate, cancel_cb=cancel_cb)
+    return SunPyFetchResult(
+        paths=list(download.paths),
+        requested_count=len(items),
+        failed_count=len(download.errors),
+        errors=list(download.errors),
+        failed_rows=[],
+        cancelled=bool(download.cancelled),
+    )
+
+
+def _min_window_delta():
+    from datetime import timedelta
+
+    return timedelta(seconds=12)
 
 
 def load_downloaded(
@@ -967,6 +1131,431 @@ def _row_fetch_connection_candidates(max_conn: int, *, priority: bool = False) -
     return _dedupe_ints([min(4, max_conn), 2, 1])
 
 
+def _direct_vso_download_enabled(search_result: SunPySearchResult) -> bool:
+    raw = str(os.environ.get("ECALLISTO_SUNPY_DIRECT_DOWNLOAD", "")).strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    if search_result.data_kind != DATA_KIND_MAP:
+        return False
+    try:
+        for block in search_result.raw_response:
+            if getattr(block, "client", None) is not None:
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _resolve_vso_direct_downloads(
+    search_result: SunPySearchResult,
+    row_indexes: Sequence[int],
+    *,
+    row_template: str,
+    progress_cb: Callable[[int, str], None] | None = None,
+    cancel_cb: Callable[[], bool] | None = None,
+) -> tuple[list[_DirectDownloadItem], list[int]]:
+    requested = _normalize_selected_rows(row_indexes, len(search_result.rows))
+    if not requested:
+        return [], []
+
+    fileid_to_rows: dict[str, list[int]] = {}
+    for row_index in requested:
+        try:
+            fileid = str(search_result.rows[row_index].fileid)
+        except Exception:
+            fileid = ""
+        if fileid:
+            fileid_to_rows.setdefault(fileid, []).append(row_index)
+
+    resolved: list[_DirectDownloadItem] = []
+    resolved_rows: set[int] = set()
+    priority = _is_priority_fetch(search_result)
+    site_order = _resolve_direct_vso_sites(priority=priority)
+    batches = _build_row_batches(
+        search_result,
+        requested,
+        max_batch_size=_resolve_direct_url_batch_size(),
+    )
+    for batch_idx, batch in enumerate(batches, start=1):
+        if _is_cancelled(cancel_cb):
+            break
+        if progress_cb is not None:
+            progress_cb(
+                int((len(resolved_rows) * 100) / max(len(requested), 1)),
+                f"Resolving direct download URLs {batch_idx}/{len(batches)}...",
+            )
+        query_slice = _query_slice_for_rows(search_result, batch)
+        if query_slice is None:
+            continue
+        records_by_fileid: dict[str, dict[str, Any]] = {}
+        try:
+            for site in site_order:
+                try:
+                    records = _resolve_vso_url_records(query_slice, row_template=row_template, site=site)
+                except Exception as exc:
+                    _logger.warning(
+                        "direct VSO URL resolution failed for site=%s batch size=%d: %s",
+                        site or "<default>",
+                        len(batch),
+                        exc,
+                    )
+                    continue
+                for fileid, url, path_hint in records:
+                    if not fileid:
+                        fileid = url
+                    entry = records_by_fileid.setdefault(
+                        str(fileid),
+                        {"fileid": str(fileid), "path_hint": str(path_hint or ""), "urls": []},
+                    )
+                    if path_hint and not entry.get("path_hint"):
+                        entry["path_hint"] = str(path_hint)
+                    if url and url not in entry["urls"]:
+                        entry["urls"].append(str(url))
+        except Exception as exc:
+            _logger.warning("direct VSO URL resolution failed for batch size=%d: %s", len(batch), exc)
+            continue
+
+        batch_unassigned = [int(row_index) for row_index in batch if int(row_index) not in resolved_rows]
+        for entry in records_by_fileid.values():
+            if _is_cancelled(cancel_cb):
+                break
+            fileid = str(entry.get("fileid", ""))
+            urls = tuple(str(url) for url in entry.get("urls", []) if str(url).strip())
+            if not urls:
+                continue
+            row_index: int | None = None
+            candidates = fileid_to_rows.get(str(fileid), [])
+            while candidates:
+                candidate = int(candidates.pop(0))
+                if candidate not in resolved_rows:
+                    row_index = candidate
+                    break
+            if row_index is None and batch_unassigned:
+                row_index = int(batch_unassigned.pop(0))
+            if row_index is None:
+                continue
+            try:
+                expected_bytes = _parse_size_bytes(search_result.rows[row_index].size)
+            except Exception:
+                expected_bytes = None
+            resolved.append(
+                _DirectDownloadItem(
+                    row_index=row_index,
+                    url=str(urls[0]),
+                    fileid=str(fileid or search_result.rows[row_index].fileid),
+                    path_hint=str(entry.get("path_hint", "") or ""),
+                    expected_bytes=expected_bytes,
+                    urls=urls,
+                )
+            )
+            resolved_rows.add(row_index)
+
+    unresolved = [row_index for row_index in requested if row_index not in resolved_rows]
+    return resolved, unresolved
+
+
+def _resolve_vso_url_records(query_slice: Any, *, row_template: str, site: str | None = None) -> list[tuple[str, str, str]]:
+    client = getattr(query_slice, "client", None)
+    if client is None:
+        return []
+    info: dict[str, Any] = {}
+    if site:
+        info["site"] = str(site)
+    data_request = client.make_getdatarequest(query_slice, None, info)
+    response_type = client.api.get_type("VSO:VSOGetDataResponse")
+    response = response_type(client.api.service.GetData(data_request))
+    by_fileid = client.by_fileid(query_slice)
+
+    out: list[tuple[str, str, str]] = []
+    for data_response in getattr(response, "getdataresponseitem", []) or []:
+        status_code = _vso_response_status_code(data_response)
+        if status_code != "200":
+            raise RuntimeError(f"VSO returned status {status_code or '?'} while resolving download URLs.")
+        method_types = list(getattr(getattr(data_response, "method", None), "methodtype", []) or [])
+        method = str(method_types[0] if method_types else "")
+        if method and not method.upper().startswith("URL"):
+            raise RuntimeError(f"VSO returned unsupported download method '{method}'.")
+        data_items = getattr(getattr(data_response, "getdataitem", None), "dataitem", []) or []
+        for data_item in data_items:
+            url = str(getattr(data_item, "url", "") or "").strip()
+            if not url:
+                continue
+            fileids = list(getattr(getattr(data_item, "fileiditem", None), "fileid", []) or [])
+            fileid = str(fileids[0] if fileids else "").strip()
+            path_hint = ""
+            query_row = by_fileid.get(fileid) if fileid else None
+            if query_row is not None:
+                try:
+                    path_hint = str(client.mk_filename(str(row_template), query_row, None, url))
+                except Exception:
+                    path_hint = ""
+            out.append((fileid, url, path_hint))
+    return out
+
+
+def _vso_response_status_code(data_response: Any) -> str:
+    version_ranges = (
+        ("0.8", (5, 8)),
+        ("0.7", (1, 4)),
+        ("0.6", (0, 3)),
+    )
+    status = str(getattr(data_response, "status", "") or "")
+    if not status:
+        return "200"
+    for version, (start, stop) in version_ranges:
+        try:
+            if str(getattr(data_response, version, "0.6")) >= version:
+                return status[start:stop] or "200"
+        except Exception:
+            continue
+    return status
+
+
+def _download_vso_direct_items(
+    items: Sequence[_DirectDownloadItem],
+    cache_root: Path,
+    *,
+    total_requested: int,
+    base_completed: int,
+    progress_cb: Callable[[int, str], None] | None = None,
+    cancel_cb: Callable[[], bool] | None = None,
+    priority: bool = False,
+) -> tuple[list[str], list[str], bool]:
+    if not items:
+        return [], [], False
+
+    workers = _resolve_direct_download_workers(priority=priority)
+    paths: list[str] = []
+    errors: list[str] = []
+    fractions: dict[int, float] = {int(item.row_index): 0.0 for item in items}
+    lock = Lock()
+
+    def report(item: _DirectDownloadItem, fraction: float, message: str) -> None:
+        if progress_cb is None:
+            return
+        with lock:
+            fractions[int(item.row_index)] = max(0.0, min(1.0, float(fraction)))
+            done_equivalent = base_completed + sum(fractions.values())
+            value = int(done_equivalent * 100 / max(total_requested, 1))
+        progress_cb(max(0, min(100, value)), message)
+
+    def worker(item: _DirectDownloadItem) -> tuple[_DirectDownloadItem, str | None, str | None]:
+        if _is_cancelled(cancel_cb):
+            return item, None, "cancelled"
+        try:
+            path = _download_direct_item(
+                item,
+                cache_root,
+                priority=priority,
+                cancel_cb=cancel_cb,
+                progress_cb=lambda fraction, text: report(item, fraction, text),
+            )
+            return item, path, None
+        except Exception as exc:
+            return item, None, str(exc)
+
+    cancelled = False
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="aia-direct-download") as executor:
+        futures = [executor.submit(worker, item) for item in items]
+        for future in as_completed(futures):
+            item, path, error = future.result()
+            if path:
+                paths.append(path)
+                report(item, 1.0, f"Downloaded {len(paths)}/{len(items)} direct AIA file(s).")
+                _logger.info("direct VSO download done: row=%d path=%s", item.row_index + 1, path)
+            elif error == "cancelled" or _is_cancelled(cancel_cb):
+                cancelled = True
+                report(item, 1.0, "Direct download cancelled.")
+                _logger.info("direct VSO download cancelled: row=%d", item.row_index + 1)
+            else:
+                errors.append(f"Row {item.row_index + 1}: direct download failed: {error}")
+                report(item, 1.0, f"Direct download failed for row {item.row_index + 1}; continuing...")
+                _logger.warning("direct VSO download failed: row=%d error=%s", item.row_index + 1, error)
+            if _is_cancelled(cancel_cb):
+                cancelled = True
+    return _dedupe_preserve_order(paths), errors, cancelled
+
+
+def _download_direct_item(
+    item: _DirectDownloadItem,
+    cache_root: Path,
+    *,
+    priority: bool = False,
+    cancel_cb: Callable[[], bool] | None = None,
+    progress_cb: Callable[[float, str], None] | None = None,
+) -> str:
+    target = _direct_download_target_path(item, cache_root)
+    if target.exists() and target.stat().st_size > 0:
+        if progress_cb is not None:
+            progress_cb(1.0, f"Using cached AIA file {target.name}")
+        return str(target.resolve())
+
+    candidate_urls = tuple(_dedupe_preserve_order([*(item.urls or ()), item.url]))
+    if not candidate_urls:
+        raise RuntimeError("No direct download URLs were resolved for this record.")
+    last_error: Exception | None = None
+    for url_index, url in enumerate(candidate_urls, start=1):
+        if _is_cancelled(cancel_cb):
+            raise RuntimeError("Download cancelled.")
+        try:
+            if progress_cb is not None and len(candidate_urls) > 1:
+                progress_cb(0.01, f"Trying mirror {url_index}/{len(candidate_urls)} for {target.name}")
+            return _download_direct_url_to_path(
+                str(url),
+                target,
+                item,
+                priority=priority,
+                cancel_cb=cancel_cb,
+                progress_cb=progress_cb,
+            )
+        except Exception as exc:
+            last_error = exc
+            _logger.warning(
+                "direct VSO mirror failed: row=%d mirror=%d/%d url=%s error=%s",
+                item.row_index + 1,
+                url_index,
+                len(candidate_urls),
+                url,
+                exc,
+            )
+            if progress_cb is not None and url_index < len(candidate_urls):
+                progress_cb(0.01, f"Mirror {url_index}/{len(candidate_urls)} failed for {target.name}; retrying...")
+    raise RuntimeError(str(last_error or "direct download failed"))
+
+
+def _download_direct_url_to_path(
+    url: str,
+    target: Path,
+    item: _DirectDownloadItem,
+    *,
+    priority: bool = False,
+    cancel_cb: Callable[[], bool] | None = None,
+    progress_cb: Callable[[float, str], None] | None = None,
+) -> str:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = target.with_name(f"{target.name}.part")
+    timeout_seconds = _resolve_manual_fetch_timeout_seconds(priority=priority)
+    expected_bytes = int(item.expected_bytes or 0)
+    last_report = 0.0
+    downloaded = 0
+
+    if progress_cb is not None:
+        progress_cb(0.01, f"Starting {target.name}")
+    try:
+        request = Request(url, headers={"User-Agent": "eCallisto-SunPy/1.0"})
+        with urlopen(request, timeout=float(timeout_seconds)) as response:
+            content_length = _response_content_length(response)
+            if content_length:
+                expected_bytes = content_length
+            with open(tmp_path, "wb") as handle:
+                while True:
+                    if _is_cancelled(cancel_cb):
+                        raise RuntimeError("Download cancelled.")
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                    downloaded += len(chunk)
+                    now = time.monotonic()
+                    if progress_cb is not None and (now - last_report >= 0.35 or downloaded >= expected_bytes > 0):
+                        last_report = now
+                        if expected_bytes > 0:
+                            fraction = min(0.98, max(0.01, downloaded / expected_bytes))
+                            progress_cb(fraction, f"Downloading {target.name}: {_format_bytes(downloaded)} / {_format_bytes(expected_bytes)}")
+                        else:
+                            fraction = min(0.95, 0.01 + downloaded / max(64 * 1024 * 1024, downloaded + 1))
+                            progress_cb(fraction, f"Downloading {target.name}: {_format_bytes(downloaded)}")
+        if not tmp_path.exists() or tmp_path.stat().st_size <= 0:
+            raise RuntimeError("download produced an empty file")
+        tmp_path.replace(target)
+        if progress_cb is not None:
+            progress_cb(1.0, f"Finished {target.name}")
+        return str(target.resolve())
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+
+def _direct_download_target_path(item: _DirectDownloadItem, cache_root: Path) -> Path:
+    hint = str(item.path_hint or "").strip()
+    if hint:
+        try:
+            path = Path(hint).expanduser()
+            if not path.is_absolute():
+                path = cache_root / path
+        except Exception:
+            path = cache_root / _guess_filename_from_url(item.url)
+    else:
+        path = cache_root / _guess_filename_from_url(item.url)
+    if not path.suffix:
+        path = path.with_suffix(".fits")
+    return path.resolve()
+
+
+def _response_content_length(response: Any) -> int | None:
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    try:
+        raw = headers.get("Content-Length") or headers.get("content-length")
+        value = int(raw)
+        return value if value > 0 else None
+    except Exception:
+        return None
+
+
+def _parse_size_bytes(value: Any) -> int | None:
+    text = _safe_str(value).strip()
+    if not text:
+        return None
+    match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*([kmgt]?i?b(?:yte)?|bytes?)?", text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    number = float(match.group(1))
+    unit = (match.group(2) or "B").lower()
+    scale = 1
+    if unit.startswith("k"):
+        scale = 1024
+    elif unit.startswith("m"):
+        scale = 1024**2
+    elif unit.startswith("g"):
+        scale = 1024**3
+    elif unit.startswith("t"):
+        scale = 1024**4
+    return int(number * scale)
+
+
+def _format_bytes(value: int | float) -> str:
+    size = float(max(0, value))
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024.0 or unit == "GB":
+            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
+        size /= 1024.0
+    return f"{size:.1f} GB"
+
+
+def _guess_filename_from_url(url: str) -> str:
+    parsed_url = urlparse(str(url or ""))
+    query = parse_qs(parsed_url.query)
+    for key in ("record", "Record", "file", "filename"):
+        values = query.get(key) or []
+        if values:
+            name = _sanitize_filename(values[0].replace(";", "_"))
+            if name:
+                if not name.lower().endswith((".fits", ".fit", ".fts", ".fits.gz", ".fit.gz", ".fts.gz")):
+                    name = f"{name}.fits"
+                return name
+    basename = _sanitize_filename(Path(parsed_url.path).name)
+    if not basename:
+        basename = "sunpy_download.fits"
+    if "." not in basename:
+        basename = f"{basename}.fits"
+    return basename
+
+
 def _failed_rows_from_errors(errors: Sequence[str]) -> list[int]:
     """Recover the 0-based indices of failed rows from the error messages.
 
@@ -1348,6 +1937,70 @@ def _resolve_fetch_max_conn(*, priority: bool = False) -> int:
         except Exception:
             pass
     return 8 if priority else 6
+
+
+def _resolve_direct_download_workers(*, priority: bool = False) -> int:
+    raw = str(
+        os.environ.get(
+            "ECALLISTO_SUNPY_DIRECT_DOWNLOAD_WORKERS"
+            if priority
+            else "ECALLISTO_SUNPY_DIRECT_DOWNLOAD_WORKERS_NORMAL",
+            "",
+        )
+    ).strip()
+    if raw:
+        try:
+            value = int(raw)
+            if value > 0:
+                return min(value, 12)
+        except Exception:
+            pass
+    return 4 if priority else 3
+
+
+def _resolve_direct_url_batch_size() -> int:
+    raw = str(os.environ.get("ECALLISTO_SUNPY_DIRECT_URL_BATCH_SIZE", "")).strip()
+    if raw:
+        try:
+            value = int(raw)
+            if value > 0:
+                return min(value, 200)
+        except Exception:
+            pass
+    return 40
+
+
+def _resolve_direct_vso_sites(*, priority: bool = False) -> tuple[str | None, ...]:
+    raw = str(os.environ.get("ECALLISTO_SUNPY_DIRECT_VSO_SITES", "")).strip()
+    if raw:
+        lowered = raw.lower()
+        if lowered in {"0", "false", "no", "off", "none"}:
+            return (None,)
+        sites: list[str | None] = []
+        for chunk in re.split(r"[,;]\s*", raw):
+            item = chunk.strip()
+            if not item:
+                continue
+            if item.lower() in {"default", "primary", "vso"}:
+                sites.append(None)
+            else:
+                sites.append(item)
+        return tuple(_dedupe_site_order(sites)) or (None,)
+    if priority:
+        return ("NSO", None, "ROB", "MPS")
+    return (None,)
+
+
+def _dedupe_site_order(values: Sequence[str | None]) -> list[str | None]:
+    out: list[str | None] = []
+    seen: set[str] = set()
+    for value in values:
+        key = "<default>" if value is None else str(value).strip().upper()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(value)
+    return out
 
 
 def _resolve_fetch_batch_size(*, priority: bool = False) -> int:

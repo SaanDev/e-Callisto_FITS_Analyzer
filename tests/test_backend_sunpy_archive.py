@@ -1210,51 +1210,6 @@ def _byte_progress_rows(sizes):
     )
 
 
-def test_expected_bytes_for_rows_sums_known_sizes():
-    result = _byte_progress_rows(["1 MB", "3 MB"])
-    assert sa._expected_bytes_for_rows(result, [0, 1]) == 4 * 1024**2
-
-
-def test_expected_bytes_for_rows_extrapolates_unknowns():
-    # Two rows, only one reports a size -> scale the known average over both.
-    result = _byte_progress_rows(["2 MB", ""])
-    assert sa._expected_bytes_for_rows(result, [0, 1]) == 4 * 1024**2
-
-
-def test_expected_bytes_for_rows_returns_none_without_sizes():
-    result = _byte_progress_rows(["", ""])
-    assert sa._expected_bytes_for_rows(result, [0, 1]) is None
-
-
-def test_fetch_emits_byte_progress(tmp_path: Path):
-    result = _byte_progress_rows(["1 MB", "1 MB"])
-
-    class FakeFido:
-        def fetch(self, query_slice, path):
-            if len(query_slice) > 1:
-                raise RuntimeError("batch unsupported in fake client")
-            fileid = query_slice[0]["fileid"]
-            out = tmp_path / fileid
-            out.write_bytes(b"x" * 4096)
-            return [out]
-
-    snapshots = []
-    out = sa.fetch(
-        result,
-        tmp_path,
-        selected_rows=[0, 1],
-        fido_client=FakeFido(),
-        byte_progress_cb=snapshots.append,
-    )
-    assert out.failed_count == 0
-    # The poller always emits at least a final settled sample carrying the
-    # file-count totals folded in by the fetch loop.
-    assert snapshots, "expected at least one byte-progress snapshot"
-    last = snapshots[-1]
-    assert last.files_total == 2
-    assert last.bytes_done >= 0
-
-
 def test_fetch_via_jsoc_orchestrates_export_and_download(tmp_path: Path):
     search_result = _byte_progress_rows(["1 MB", "1 MB"])
 

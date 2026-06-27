@@ -433,6 +433,34 @@ def test_solar_data_window_jsoc_settings_round_trip():
     win2.close()
 
 
+def test_solar_data_window_close_during_download_cancels_and_defers():
+    from PySide6.QtGui import QCloseEvent
+
+    _app()
+    win = SolarDataAnalysisWindow()
+    worker = solar_mod.SunPyWorker("fetch_load")
+
+    class _FakeRunningThread:
+        def isRunning(self):
+            return True
+
+    win._active_thread = _FakeRunningThread()
+    win._active_worker = worker
+
+    event = QCloseEvent()
+    win.closeEvent(event)
+
+    # The download is cancelled and the close is deferred (not destroyed).
+    assert worker._cancel_event.is_set() is True
+    assert win._pending_close is True
+    assert event.isAccepted() is False
+
+    # When the worker thread actually stops, the deferred close completes.
+    win._active_thread = None
+    win._on_worker_stopped()
+    assert win._pending_close is False
+
+
 def test_solar_data_window_byte_progress_drives_bar_and_defers_ticks():
     from src.Backend.download_manager import AggregateProgress
 

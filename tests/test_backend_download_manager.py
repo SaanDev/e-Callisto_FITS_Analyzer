@@ -154,6 +154,70 @@ def http_server():
         _RangeHandler.payloads.clear()
 
 
+class _SlowHandler(BaseHTTPRequestHandler):
+    """Streams a payload slowly so cancellation can be observed mid-transfer."""
+
+    payload = b"S" * (400 * 1024)
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        import time as _time
+
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(self.payload)))
+        self.end_headers()
+        step = 16 * 1024
+        for i in range(0, len(self.payload), step):
+            try:
+                self.wfile.write(self.payload[i:i + step])
+                self.wfile.flush()
+            except Exception:
+                return
+            _time.sleep(0.03)
+
+
+@pytest.fixture()
+def slow_server():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _SlowHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    try:
+        yield f"http://{host}:{port}"
+    finally:
+        server.shutdown()
+
+
+def test_download_cancels_mid_stream_promptly(slow_server, tmp_path):
+    import time as _time
+
+    flag = {"cancel": False}
+    ticks = {"n": 0}
+
+    def progress(_agg):
+        ticks["n"] += 1
+        if ticks["n"] >= 2:  # let a little data flow, then ask to stop
+            flag["cancel"] = True
+
+    mgr = DownloadManager(chunk_size=8192, progress_interval=0.0)
+    started = _time.monotonic()
+    result = mgr.download(
+        [DownloadItem(url=f"{slow_server}/slow", dest=tmp_path / "slow.fits", expected_size=400 * 1024)],
+        progress_cb=progress,
+        cancel_cb=lambda: flag["cancel"],
+    )
+    elapsed = _time.monotonic() - started
+
+    assert result.cancelled is True
+    assert result.paths == []
+    # Partial data is never promoted to the final destination on cancel.
+    assert not (tmp_path / "slow.fits").exists()
+    # The whole slow transfer would take ~0.75s; cancellation stops it early.
+    assert elapsed < 0.6
+
+
 def test_download_full_file_with_byte_progress(http_server, tmp_path):
     base, payloads = http_server
     payloads["/big.fits"] = b"A" * (256 * 1024)

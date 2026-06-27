@@ -491,6 +491,22 @@ class DownloadManager:
                     emit=emit, cancelled=_cancelled, is_paused=is_paused,
                 )
 
+        async def cancel_watcher(tasks: list) -> None:
+            # Stop promptly even when a transfer is stalled: per-chunk checks
+            # only fire when bytes arrive, so a hung socket would otherwise wait
+            # for the read timeout. This actively cancels the in-flight tasks
+            # (breaking the awaited read) within a fraction of a second.
+            try:
+                while True:
+                    if _cancelled():
+                        for task in tasks:
+                            if not task.done():
+                                task.cancel()
+                        return
+                    await asyncio.sleep(0.15)
+            except asyncio.CancelledError:
+                return
+
         try:
             async with aiohttp.ClientSession(
                 connector=connector,
@@ -498,7 +514,15 @@ class DownloadManager:
                 headers={"User-Agent": self.user_agent},
             ) as session:
                 tasks = [asyncio.create_task(worker(idx, item, session)) for idx, item in enumerate(items)]
-                await asyncio.gather(*tasks, return_exceptions=True)
+                watcher = asyncio.create_task(cancel_watcher(tasks))
+                try:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                finally:
+                    watcher.cancel()
+                    try:
+                        await watcher
+                    except (asyncio.CancelledError, Exception):
+                        pass
         finally:
             await emit(force=True)
 

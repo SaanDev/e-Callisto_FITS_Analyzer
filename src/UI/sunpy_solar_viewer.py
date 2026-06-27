@@ -209,12 +209,14 @@ class SunPyWorker(QObject):
             except Exception as exc:  # noqa: BLE001 - never strand the user on JSOC
                 self.progress.emit(5, f"JSOC fast path failed ({exc}); using VSO...")
 
+        # VSO path: origin's fetch() reports byte-accurate progress through
+        # progress_cb itself (its direct-download path streams with real byte
+        # fractions), so there is no separate byte_progress channel here.
         return fetch(
             self.search_result,
             self.cache_dir,
             selected_rows=self.selected_rows,
             progress_cb=_coarse,
-            byte_progress_cb=self.byte_progress.emit,
             cancel_cb=self._cancel_event.is_set,
         )
 

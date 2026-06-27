@@ -513,6 +513,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._progress_last_pulse = 0.0
         self._byte_active = False
         self._byte_bar_value = 0
+        self._pending_close = False
         self._progress_timer = QTimer(self)
         self._progress_timer.setInterval(24)
         self._progress_timer.timeout.connect(self._tick_progress)
@@ -1670,6 +1671,11 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._active_thread = None
         self._active_worker = None
         self._set_busy(False)
+        # A close requested mid-download was deferred until the worker stopped;
+        # complete it now that nothing is running.
+        if self._pending_close:
+            self._pending_close = False
+            self.close()
 
     def is_operation_running(self) -> bool:
         thread = self._active_thread
@@ -2542,17 +2548,26 @@ class SolarDataAnalysisWindow(QMainWindow):
 
     def closeEvent(self, event):
         if self.is_operation_running():
+            # Don't trap the user behind a running download: cancel it, hide the
+            # window so it visually closes at once, and finish closing for real
+            # in _on_worker_stopped once the worker thread has actually stopped.
+            self._pending_close = True
             worker = self._active_worker
             if isinstance(worker, SunPyWorker):
                 try:
                     worker.cancel()
                 except Exception:
                     pass
-            QMessageBox.information(
-                self,
-                "SDO Data Analysis",
-                "A solar data operation is still running. Wait for it to finish before closing this window.",
+            self.stop_btn.setEnabled(False)
+            if hasattr(self, "stop_action"):
+                self.stop_action.setEnabled(False)
+            self.statusBar().showMessage(
+                "Cancelling download… the window will close once it stops. "
+                "Completed files stay in the cache.",
+                7000,
             )
+            self._play_timer.stop()
+            self.hide()
             event.ignore()
             return
         self._play_timer.stop()
