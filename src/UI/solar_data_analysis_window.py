@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDateTimeEdit,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QGridLayout,
@@ -36,9 +37,9 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
-    QProgressBar,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -63,11 +64,23 @@ from src.Backend.solar_data_analysis import (
     detect_active_regions,
     export_movie,
     extract_map_frames,
+    extract_region_lightcurve,
     fetch_active_region_metadata,
     label_regions_with_metadata,
     load_aia_maps,
     make_composite,
+    radio_euv_lag,
     write_cropped_fits,
+)
+from src.Backend.download_manager import format_bytes, format_eta
+from src.Backend.jsoc_client import (
+    SIZE_BIN2,
+    SIZE_BIN4,
+    SIZE_CUTOUT,
+    SIZE_FULL,
+    JsocError,
+    estimate_download,
+    size_process,
 )
 from src.Backend.sunpy_archive import (
     DATA_KIND_MAP,
@@ -76,10 +89,10 @@ from src.Backend.sunpy_archive import (
     SunPyQuerySpec,
     SunPySearchResult,
 )
+from src.UI.download_queue_panel import DownloadProgressPanel
 from src.UI.gui_shared import pick_export_path
 from src.UI.sunpy_plot_window import SunPyPlotCanvas
 from src.UI.sunpy_solar_viewer import SunPyWorker, _default_cache_dir, _get_theme
-from src.version import APP_VERSION
 
 
 AIA_WAVELENGTHS = (94, 131, 171, 193, 211, 304, 335, 1600, 1700)
@@ -406,10 +419,75 @@ class SolarMatplotlibCanvas(QWidget):
         }
 
 
+class RegionLightcurveDialog(QDialog):
+    """Plots an AIA region light curve (DN/s vs time) with optional radio overlay.
+
+    This is the cross-instrument view: the EUV intensity time profile over a
+    region, with the e-Callisto radio burst window shaded so the timing of the
+    EUV brightening relative to the radio burst onset can be read directly.
+    """
+
+    def __init__(self, lightcurve: Any, *, radio_window: tuple[datetime, datetime] | None = None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Region Light Curve")
+        self.resize(760, 460)
+        layout = QVBoxLayout(self)
+        self._figure = Figure(figsize=(6.5, 3.8))
+        self.canvas = FigureCanvas(self._figure)
+        layout.addWidget(self.canvas)
+        self._plot(lightcurve, radio_window)
+
+    def _plot(self, lc: Any, radio_window: tuple[datetime, datetime] | None) -> None:
+        ax = self._figure.add_subplot(111)
+        pairs = [
+            (t, v)
+            for t, v in zip(lc.times, np.asarray(lc.values, dtype=float))
+            if t is not None and np.isfinite(v)
+        ]
+        if not pairs:
+            ax.text(0.5, 0.5, "No time-stamped frames to plot.", ha="center", va="center",
+                    transform=ax.transAxes)
+            self.canvas.draw_idle()
+            return
+
+        times = [p[0] for p in pairs]
+        values = [p[1] for p in pairs]
+        label = f"AIA {lc.wavelength}".strip() + f" · {lc.statistic} {lc.unit}"
+        ax.plot(times, values, marker="o", markersize=3, linewidth=1.3, color="#e8a33d", label=label)
+
+        peak_time = lc.peak_time()
+        title = f"AIA {lc.wavelength} region light curve ({lc.unit})".replace("  ", " ").strip()
+        if peak_time is not None and peak_time in times:
+            peak_val = values[times.index(peak_time)]
+            ax.axvline(peak_time, color="#d04545", linestyle="--", linewidth=1.0, alpha=0.8)
+            ax.annotate("EUV peak", xy=(peak_time, peak_val), xytext=(4, 4),
+                        textcoords="offset points", fontsize=8, color="#d04545")
+
+        if radio_window:
+            r_start, r_end = radio_window
+            ax.axvspan(r_start, r_end, color="#5a8fd6", alpha=0.15, label="Radio burst window")
+            ax.axvline(r_start, color="#5a8fd6", linewidth=1.0)
+            lag = radio_euv_lag(r_start, peak_time)
+            if lag is not None:
+                title += f"  ·  EUV peak {lag:+.0f}s vs radio onset"
+
+        ax.set_xlabel("Time (UTC)")
+        ax.set_ylabel(lc.unit)
+        ax.set_title(title, fontsize=10)
+        ax.grid(alpha=0.25)
+        ax.legend(fontsize=8, loc="best")
+        try:
+            self._figure.autofmt_xdate()
+        except Exception:
+            pass
+        self._figure.tight_layout()
+        self.canvas.draw_idle()
+
+
 class SolarDataAnalysisWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(f"Solar Data Analysis v{APP_VERSION}")
+        self.setWindowTitle("SDO Data Analysis")
         self.resize(1440, 900)
 
         self.theme = _get_theme()
@@ -433,6 +511,8 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._progress_activity = False
         self._progress_soft_cap = 0
         self._progress_last_pulse = 0.0
+        self._byte_active = False
+        self._byte_bar_value = 0
         self._progress_timer = QTimer(self)
         self._progress_timer.setInterval(24)
         self._progress_timer.timeout.connect(self._tick_progress)
@@ -443,6 +523,9 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._build_ui()
         self._build_menu_bar()
         self._connect_signals()
+        self._restore_jsoc_settings()
+        self.jsoc_email_edit.editingFinished.connect(self._save_jsoc_settings)
+        self.source_combo.currentIndexChanged.connect(lambda _i: self._save_jsoc_settings())
         if self.theme is not None and hasattr(self.theme, "themeChanged"):
             try:
                 self.theme.themeChanged.connect(lambda _dark: self._apply_sidebar_style())
@@ -450,6 +533,7 @@ class SolarDataAnalysisWindow(QMainWindow):
                 pass
         self.use_analyzer_time_window(auto_query=False)
         self._set_loaded_state(False)
+        self._update_size_estimate()
         self.statusBar().showMessage("Ready.")
 
     def _build_ui(self):
@@ -507,9 +591,12 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.plot_canvas_stack.addWidget(self.matplotlib_canvas)
         plot_layout.addWidget(self.plot_canvas_stack, 1)
 
-        self.progress = QProgressBar()
-        self.progress.setVisible(False)
-        plot_layout.addWidget(self.progress)
+        self.progress_panel = DownloadProgressPanel(self)
+        self.progress_panel.setVisible(False)
+        # Existing progress logic drives the bar directly; keep a reference for
+        # back-compat while the panel adds the honest byte-level read-out.
+        self.progress = self.progress_panel.bar
+        plot_layout.addWidget(self.progress_panel)
 
         self.analysis_text = QTextEdit()
         self.analysis_text.setReadOnly(True)
@@ -765,6 +852,59 @@ class SolarDataAnalysisWindow(QMainWindow):
             "Request SunPy/VSO full-resolution AIA products. Files are larger, but cropped views preserve more detail."
         )
 
+        self.source_combo = QComboBox()
+        self.source_combo.addItem("Auto (JSOC → VSO)", userData="auto")
+        self.source_combo.addItem("JSOC (fast)", userData="jsoc")
+        self.source_combo.addItem("VSO (classic)", userData="vso")
+        self.source_combo.setToolTip(
+            "JSOC returns direct, compressed AIA files and is usually much faster than VSO.\n"
+            "Auto tries JSOC first and falls back to VSO automatically.\n"
+            "JSOC requires a one-time registered notify e-mail (set at right)."
+        )
+        self.jsoc_email_edit = QLineEdit()
+        self.jsoc_email_edit.setPlaceholderText("you@example.org (register at JSOC)")
+        self.jsoc_email_edit.setToolTip(
+            "Your JSOC export e-mail. Register once (free) at:\n"
+            "https://jsoc.stanford.edu/ajax/register_email.html"
+        )
+
+        self.frame_size_combo = QComboBox()
+        self.frame_size_combo.addItem("Full disk (4096²)", userData=SIZE_FULL)
+        self.frame_size_combo.addItem("Binned ½ (2048²)", userData=SIZE_BIN2)
+        self.frame_size_combo.addItem("Binned ¼ (1024²)", userData=SIZE_BIN4)
+        self.frame_size_combo.addItem("Cutout (region)", userData=SIZE_CUTOUT)
+        self.frame_size_combo.setToolTip(
+            "Smaller frames download much faster. Binned and cutout frames are\n"
+            "produced server-side by JSOC, so only the reduced data is transferred\n"
+            "(these modes require the JSOC source + e-mail)."
+        )
+
+        # Cutout centre/box (arcsec from disk centre), shown only for Cutout mode.
+        self.cutout_widget = QWidget()
+        cutout_layout = QGridLayout(self.cutout_widget)
+        cutout_layout.setContentsMargins(0, 0, 0, 0)
+        cutout_layout.setHorizontalSpacing(6)
+        cutout_layout.setVerticalSpacing(4)
+        self.cutout_x_spin = self._make_arcsec_spin(0.0)
+        self.cutout_y_spin = self._make_arcsec_spin(0.0)
+        self.cutout_w_spin = self._make_arcsec_spin(500.0)
+        self.cutout_h_spin = self._make_arcsec_spin(500.0)
+        for spin in (self.cutout_w_spin, self.cutout_h_spin):
+            spin.setRange(20.0, 2400.0)
+        cutout_layout.addWidget(QLabel("Centre X″"), 0, 0)
+        cutout_layout.addWidget(QLabel("Centre Y″"), 0, 1)
+        cutout_layout.addWidget(self.cutout_x_spin, 1, 0)
+        cutout_layout.addWidget(self.cutout_y_spin, 1, 1)
+        cutout_layout.addWidget(QLabel("Width″"), 2, 0)
+        cutout_layout.addWidget(QLabel("Height″"), 2, 1)
+        cutout_layout.addWidget(self.cutout_w_spin, 3, 0)
+        cutout_layout.addWidget(self.cutout_h_spin, 3, 1)
+        self.cutout_widget.setVisible(False)
+
+        self.size_estimate_label = QLabel("")
+        self.size_estimate_label.setWordWrap(True)
+        self.size_estimate_label.setObjectName("SizeEstimateLabel")
+
         row = 0
         layout.addWidget(self.search_btn, row, 0)
         layout.addWidget(self.download_load_btn, row, 1)
@@ -790,6 +930,22 @@ class SolarDataAnalysisWindow(QMainWindow):
         row += 1
         layout.addWidget(self.sample_seconds_spin, row, 0)
         layout.addWidget(self.max_records_spin, row, 1)
+
+        row += 1
+        layout.addWidget(QLabel("Download Source"), row, 0)
+        layout.addWidget(QLabel("JSOC Notify E-mail"), row, 1)
+        row += 1
+        layout.addWidget(self.source_combo, row, 0)
+        layout.addWidget(self.jsoc_email_edit, row, 1)
+
+        row += 1
+        layout.addWidget(QLabel("Frame Size"), row, 0, 1, 2)
+        row += 1
+        layout.addWidget(self.frame_size_combo, row, 0, 1, 2)
+        row += 1
+        layout.addWidget(self.cutout_widget, row, 0, 1, 2)
+        row += 1
+        layout.addWidget(self.size_estimate_label, row, 0, 1, 2)
 
         row += 1
         layout.addWidget(self.high_resolution_check, row, 0, 1, 2)
@@ -853,17 +1009,26 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.plot_mode_btn = QPushButton("Plot")
         self.plot_mode_btn.setObjectName("SolarPrimaryAction")
         self.plot_mode_btn.setToolTip("Render the loaded AIA frame sequence in the embedded plot area.")
-        self.difference_mode_btn = QPushButton("Difference")
+        self.difference_mode_btn = QPushButton("Running Diff")
+        self.base_diff_btn = QPushButton("Base Diff")
+        self.base_diff_btn.setToolTip("Show each frame minus the first frame (eruptions, dimmings, EUV waves).")
         self.composite_btn = QPushButton("Composite")
+        self.lightcurve_btn = QPushButton("Light Curve")
+        self.lightcurve_btn.setToolTip(
+            "Plot region intensity (DN/s) vs time, with the e-Callisto radio burst window overlaid\n"
+            "so the EUV brightening can be timed against the radio burst."
+        )
         self.detect_regions_btn = QPushButton("Active Regions")
         self.fetch_labels_btn = QPushButton("NOAA/HEK Labels")
         self.reset_loaded_btn = QPushButton("Reset Frames")
         layout.addWidget(self.plot_mode_btn, 0, 0, 1, 2)
         layout.addWidget(self.difference_mode_btn, 1, 0)
-        layout.addWidget(self.composite_btn, 1, 1)
-        layout.addWidget(self.detect_regions_btn, 2, 0)
-        layout.addWidget(self.fetch_labels_btn, 2, 1)
-        layout.addWidget(self.reset_loaded_btn, 3, 0, 1, 2)
+        layout.addWidget(self.base_diff_btn, 1, 1)
+        layout.addWidget(self.composite_btn, 2, 0)
+        layout.addWidget(self.lightcurve_btn, 2, 1)
+        layout.addWidget(self.detect_regions_btn, 3, 0)
+        layout.addWidget(self.fetch_labels_btn, 3, 1)
+        layout.addWidget(self.reset_loaded_btn, 4, 0, 1, 2)
 
     def _build_timeline_group(self, parent_layout: QVBoxLayout) -> None:
         group = QGroupBox("Timeline")
@@ -1037,8 +1202,14 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.select_all_results_btn.clicked.connect(self.select_all_results)
         self.deselect_all_results_btn.clicked.connect(self.deselect_all_results)
         self.wavelength_combo.currentIndexChanged.connect(self._on_query_wavelength_changed)
+        self.frame_size_combo.currentIndexChanged.connect(lambda _i: self._on_frame_size_changed())
+        for _spin in (self.cutout_w_spin, self.cutout_h_spin):
+            _spin.valueChanged.connect(lambda _v: self._update_size_estimate())
+        self.results_table.itemChanged.connect(lambda _item: self._update_size_estimate())
         self.plot_mode_btn.clicked.connect(lambda: self._set_difference_mode("raw"))
         self.difference_mode_btn.clicked.connect(lambda: self._set_difference_mode("running"))
+        self.base_diff_btn.clicked.connect(lambda: self._set_difference_mode("base"))
+        self.lightcurve_btn.clicked.connect(self.show_region_lightcurve)
         self.composite_btn.clicked.connect(self.show_composite_plot)
         self.detect_regions_btn.clicked.connect(self.detect_active_regions)
         self.fetch_labels_btn.clicked.connect(self.fetch_active_region_labels)
@@ -1111,6 +1282,8 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.plot_mode_btn.setEnabled(True)
         for widget in (
             self.difference_mode_btn,
+            self.base_diff_btn,
+            self.lightcurve_btn,
             self.composite_btn,
             self.detect_regions_btn,
             self.fetch_labels_btn,
@@ -1144,17 +1317,24 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.download_load_btn.setEnabled((not busy) and bool(self._search_result and self._search_result.rows))
         self.load_local_btn.setEnabled(not busy)
         self.high_resolution_check.setEnabled(not busy)
+        self.source_combo.setEnabled(not busy)
+        self.jsoc_email_edit.setEnabled(not busy)
+        self.frame_size_combo.setEnabled(not busy)
+        self.cutout_widget.setEnabled(not busy)
         self.select_all_results_btn.setEnabled((not busy) and bool(self._search_result and self._search_result.rows))
         self.deselect_all_results_btn.setEnabled((not busy) and bool(self._search_result and self._search_result.rows))
         self.stop_btn.setEnabled(bool(busy))
-        self.progress.setVisible(bool(busy))
+        self.progress_panel.setVisible(bool(busy))
         if busy:
+            self.progress_panel.reset()
             self.progress.setRange(0, 100)
             self._progress_value = 0
             self._progress_target = 0
             self._progress_activity = False
             self._progress_soft_cap = 0
             self._progress_last_pulse = time.monotonic()
+            self._byte_active = False
+            self._byte_bar_value = 0
             self.progress.setValue(0)
             if text:
                 self.statusBar().showMessage(text)
@@ -1162,8 +1342,8 @@ class SolarDataAnalysisWindow(QMainWindow):
             self._progress_timer.stop()
             self._progress_activity = False
             self._progress_soft_cap = 0
-            self.progress.setRange(0, 100)
-            self.progress.setValue(0)
+            self._byte_active = False
+            self.progress_panel.reset()
         self._sync_menu_action_state(loaded=bool(self._map_frames))
 
     def _sync_menu_action_state(self, *, loaded: bool) -> None:
@@ -1282,22 +1462,66 @@ class SolarDataAnalysisWindow(QMainWindow):
         try:
             spec = self._build_query_spec()
         except Exception as exc:
-            QMessageBox.warning(self, "Solar Data Analysis", f"Invalid query inputs: {exc}")
+            QMessageBox.warning(self, "SDO Data Analysis", f"Invalid query inputs: {exc}")
             return
         self._set_busy(True, "Searching SDO/AIA archives...")
         self._start_worker(SunPyWorker("search", query_spec=spec))
 
     def download_and_load_selected(self):
         if self._search_result is None:
-            QMessageBox.information(self, "Solar Data Analysis", "Run an archive search first.")
+            QMessageBox.information(self, "SDO Data Analysis", "Run an archive search first.")
             return
         selected_rows = self._checked_rows()
         if not selected_rows:
-            QMessageBox.information(self, "Solar Data Analysis", "Select at least one result row.")
+            QMessageBox.information(self, "SDO Data Analysis", "Select at least one result row.")
             return
         if not self._confirm_high_resolution_download(selected_rows):
             return
-        text = "Downloading high-resolution AIA sequence..." if self._search_result_is_high_resolution() else "Downloading selected AIA files..."
+        email, prefer_jsoc = self._jsoc_params()
+        size_mode = self._frame_size_mode()
+        needs_jsoc = size_mode != SIZE_FULL
+
+        if (str(self.source_combo.currentData() or "") == "jsoc" or needs_jsoc) and not email:
+            reason = (
+                f"The '{self.frame_size_combo.currentText()}' frame size is produced server-side by JSOC"
+                if needs_jsoc
+                else "The JSOC source"
+            )
+            QMessageBox.information(
+                self,
+                "SDO Data Analysis",
+                f"{reason}, which needs a registered notify e-mail.\n"
+                "Enter it in the JSOC Notify E-mail field, switch Frame Size to Full disk, "
+                "or switch the source to VSO.\n\n"
+                "Register once (free) at https://jsoc.stanford.edu/ajax/register_email.html",
+            )
+            return
+
+        # Binned/cutout require JSOC; force it on (with email present).
+        if needs_jsoc:
+            prefer_jsoc = True
+
+        # Reference time for cutout tracking: the start of the selection.
+        t_ref = None
+        try:
+            rows = self._search_result.rows
+            t_ref = min(rows[i].start for i in selected_rows).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except Exception:
+            t_ref = None
+        try:
+            process = self._frame_size_process(t_ref=t_ref) if prefer_jsoc else None
+        except JsocError as exc:
+            QMessageBox.warning(self, "SDO Data Analysis", f"Invalid cutout settings: {exc}")
+            return
+
+        if process is not None:
+            text = "Downloading reduced AIA frames via JSOC..."
+        elif prefer_jsoc:
+            text = "Downloading AIA frames via JSOC (fast path)..."
+        elif self._search_result_is_high_resolution():
+            text = "Downloading high-resolution AIA sequence..."
+        else:
+            text = "Downloading selected AIA files..."
         self._set_busy(True, text)
         self._start_worker(
             SunPyWorker(
@@ -1305,8 +1529,87 @@ class SolarDataAnalysisWindow(QMainWindow):
                 search_result=self._search_result,
                 selected_rows=selected_rows,
                 cache_dir=self.cache_dir,
+                jsoc_email=email,
+                prefer_jsoc=prefer_jsoc,
+                jsoc_process=process,
             )
         )
+
+    def _jsoc_params(self) -> tuple[str, bool]:
+        """Return (email, prefer_jsoc) from the Data Source controls."""
+        source = str(self.source_combo.currentData() or "auto")
+        email = str(self.jsoc_email_edit.text() or "").strip()
+        prefer = source in ("auto", "jsoc") and bool(email)
+        return email, prefer
+
+    def _app_settings(self):
+        # Reuse the viewer's QSettings factory; accessed through the module so
+        # the test suite's settings isolation (conftest) takes effect.
+        from src.UI import sunpy_solar_viewer
+
+        return sunpy_solar_viewer._make_settings()
+
+    def _restore_jsoc_settings(self) -> None:
+        try:
+            settings = self._app_settings()
+            email = str(settings.value("sdo/jsoc_email", "") or "")
+            source = str(settings.value("sdo/source", "auto") or "auto")
+        except Exception:
+            return
+        if email:
+            self.jsoc_email_edit.setText(email)
+        idx = self.source_combo.findData(source)
+        if idx >= 0:
+            self.source_combo.setCurrentIndex(idx)
+
+    def _save_jsoc_settings(self) -> None:
+        try:
+            settings = self._app_settings()
+            settings.setValue("sdo/jsoc_email", str(self.jsoc_email_edit.text() or "").strip())
+            settings.setValue("sdo/source", str(self.source_combo.currentData() or "auto"))
+        except Exception:
+            pass
+
+    # -- Frame size (Phase 3) ---------------------------------------------
+    def _frame_size_mode(self) -> str:
+        return str(self.frame_size_combo.currentData() or SIZE_FULL)
+
+    def _on_frame_size_changed(self) -> None:
+        is_cutout = self._frame_size_mode() == SIZE_CUTOUT
+        self.cutout_widget.setVisible(is_cutout)
+        self._update_size_estimate()
+
+    def _estimated_frame_count(self) -> int:
+        try:
+            return len(self._checked_rows())
+        except Exception:
+            return 0
+
+    def _update_size_estimate(self) -> None:
+        mode = self._frame_size_mode()
+        n_frames = self._estimated_frame_count()
+        total_bytes, seconds = estimate_download(n_frames, mode)
+        if n_frames <= 0:
+            self.size_estimate_label.setText("Select frames to see a size estimate.")
+            return
+        needs_jsoc = mode != SIZE_FULL
+        suffix = "  (JSOC only)" if needs_jsoc else ""
+        self.size_estimate_label.setText(
+            f"≈ {n_frames} frame(s) · ~{format_bytes(total_bytes)} · ~{format_eta(seconds)}{suffix}"
+        )
+
+    def _frame_size_process(self, *, t_ref: str | None = None) -> dict | None:
+        """Build the JSOC process dict for the chosen frame size (or None)."""
+        mode = self._frame_size_mode()
+        if mode == SIZE_CUTOUT:
+            cutout = (
+                float(self.cutout_x_spin.value()),
+                float(self.cutout_y_spin.value()),
+                float(self.cutout_w_spin.value()),
+                float(self.cutout_h_spin.value()),
+            )
+            return size_process(mode, cutout=cutout, t_ref=t_ref)
+        return size_process(mode)
 
     def _confirm_high_resolution_download(self, selected_rows: list[int]) -> bool:
         if not self._search_result_is_high_resolution():
@@ -1333,7 +1636,7 @@ class SolarDataAnalysisWindow(QMainWindow):
 
     def _start_worker(self, worker: QObject):
         if self._active_thread is not None:
-            QMessageBox.information(self, "Solar Data Analysis", "Another operation is still running.")
+            QMessageBox.information(self, "SDO Data Analysis", "Another operation is still running.")
             return
         thread = QThread(self)
         worker.moveToThread(thread)
@@ -1342,6 +1645,7 @@ class SolarDataAnalysisWindow(QMainWindow):
             worker.progress.connect(self._on_worker_progress)
         if isinstance(worker, SunPyWorker):
             worker.failed.connect(self._on_worker_failed)
+            worker.byte_progress.connect(self._on_byte_progress)
             worker.partial_warning.connect(self._on_partial_warning)
             worker.cancelled.connect(self._on_worker_cancelled)
             worker.search_finished.connect(self._on_search_finished)
@@ -1378,6 +1682,17 @@ class SolarDataAnalysisWindow(QMainWindow):
 
     @Slot(object, object)
     def _on_worker_progress(self, value, text):
+        # While real byte-level progress is driving the download window
+        # (worker maps downloading to the 5..85 band), ignore the coarse
+        # file-count ticks so the honest byte bar is not overwritten. Search
+        # (<5) and the post-download loading phase (>85) still flow through.
+        if self._byte_active and value is not None and 5 <= int(value) <= 85:
+            if text:
+                self.statusBar().showMessage(str(text))
+            return
+        if value is not None and int(value) > 85:
+            self._byte_active = False
+
         if value is None:
             self.progress.setRange(0, 0)
             self._progress_timer.stop()
@@ -1394,6 +1709,35 @@ class SolarDataAnalysisWindow(QMainWindow):
         if text:
             self.statusBar().showMessage(str(text))
 
+    @Slot(object)
+    def _on_byte_progress(self, agg: object):
+        """Render honest byte-level download progress from the fetch poller.
+
+        Drives the bar within the worker's 5..85 download band (search and
+        loading own the head/tail), stops the simulated creep timer, and feeds
+        the detailed MB / MB·s / ETA read-out in the panel.
+        """
+        if agg is None:
+            return
+        self._byte_active = True
+        self._progress_timer.stop()
+        try:
+            fraction = float(getattr(agg, "fraction", 0.0) or 0.0)
+        except Exception:
+            fraction = 0.0
+        bar_value = 5 + int(round(max(0.0, min(1.0, fraction)) * 80))
+        # Monotonic: never let a transient cache re-read drag the bar backwards.
+        bar_value = max(self._byte_bar_value, bar_value)
+        self._byte_bar_value = bar_value
+        self._progress_value = bar_value
+        if self.progress.maximum() <= 0:
+            self.progress.setRange(0, 100)
+        self.progress.setValue(max(0, min(100, bar_value)))
+        try:
+            self.progress_panel.update_aggregate(agg, drive_bar=False)
+        except Exception:
+            pass
+
     @Slot(str)
     def _on_worker_failed(self, tb_text: str):
         short = str(tb_text).strip().splitlines()[-1] if tb_text else "Unknown error"
@@ -1401,7 +1745,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.analysis_text.setPlainText("Operation failed.\n\n" + short)
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Critical)
-        msg.setWindowTitle("Solar Data Analysis")
+        msg.setWindowTitle("SDO Data Analysis")
         msg.setText(short)
         msg.setDetailedText(tb_text or "")
         msg.exec()
@@ -1527,7 +1871,7 @@ class SolarDataAnalysisWindow(QMainWindow):
 
     def _apply_loaded_frames(self, frames: list[Any], *, paths: list[str], metadata: dict[str, Any]):
         if not frames:
-            QMessageBox.information(self, "Solar Data Analysis", "No AIA map frames were loaded.")
+            QMessageBox.information(self, "SDO Data Analysis", "No AIA map frames were loaded.")
             return
         self._loaded_paths = list(paths or [])
         self._original_frames = list(frames)
@@ -1572,6 +1916,56 @@ class SolarDataAnalysisWindow(QMainWindow):
         elif max(width, height) <= 1200:
             quality += ", reduced-size frame"
         return f"Resolution: {width} x {height} px ({quality})."
+
+    def _radio_reference_window(self) -> tuple[datetime, datetime] | None:
+        """The e-Callisto radio burst time window from the parent analyzer."""
+        parent = self.parent()
+        if parent is None or not hasattr(parent, "_current_time_window_utc"):
+            return None
+        try:
+            window = parent._current_time_window_utc()
+        except Exception:
+            return None
+        if not window or len(window) < 2:
+            return None
+        try:
+            start = window[0].replace(tzinfo=None)
+            end = window[1].replace(tzinfo=None)
+        except Exception:
+            return None
+        return (start, end)
+
+    def show_region_lightcurve(self) -> None:
+        if not self._map_frames:
+            QMessageBox.information(
+                self,
+                "Region Light Curve",
+                "Load or upload AIA frames first. The light curve needs the time sequence.",
+            )
+            return
+        if len(self._map_frames) < 2:
+            QMessageBox.information(
+                self,
+                "Region Light Curve",
+                "A light curve needs at least two frames over time. Download a longer sequence.",
+            )
+            return
+        bounds = None
+        if self.crop_check.isChecked() and self._current_map_data is not None:
+            bounds = self._crop_bounds_from_axis_fields(self._current_map_data.shape)
+        try:
+            lightcurve = extract_region_lightcurve(self._map_frames, bounds, normalize=True)
+        except Exception as exc:
+            QMessageBox.critical(self, "Region Light Curve", f"Could not build the light curve:\n{exc}")
+            return
+        dialog = RegionLightcurveDialog(
+            lightcurve,
+            radio_window=self._radio_reference_window(),
+            parent=self,
+        )
+        dialog.show()
+        # Keep a reference so the non-modal dialog is not garbage collected.
+        self._lightcurve_dialog = dialog
 
     def _set_difference_mode(self, mode: str) -> None:
         if not self._map_frames:
@@ -2156,7 +2550,7 @@ class SolarDataAnalysisWindow(QMainWindow):
                     pass
             QMessageBox.information(
                 self,
-                "Solar Data Analysis",
+                "SDO Data Analysis",
                 "A solar data operation is still running. Wait for it to finish before closing this window.",
             )
             event.ignore()

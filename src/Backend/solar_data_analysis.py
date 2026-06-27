@@ -215,6 +215,169 @@ def difference_sequence(frames: Sequence[Any], *, mode: str = "running", crop_bo
     return out
 
 
+@dataclass(frozen=True)
+class AiaLightcurve:
+    """Intensity-vs-time profile extracted over a region of interest."""
+
+    times: list[datetime]
+    values: np.ndarray
+    bounds: CropBounds | None
+    unit: str = "DN/s"
+    statistic: str = "mean"
+    wavelength: str = ""
+
+    def peak_index(self) -> int:
+        if self.values is None or len(self.values) == 0:
+            return -1
+        return int(np.nanargmax(self.values))
+
+    def peak_time(self) -> datetime | None:
+        idx = self.peak_index()
+        if idx < 0 or idx >= len(self.times):
+            return None
+        return self.times[idx]
+
+
+def frame_exposure_time(frame: Any) -> float | None:
+    """Exposure time (seconds) from a map's header, or None if unavailable."""
+    value = _frame_meta_get(frame, "exptime", "exptimeu", "exposure")
+    seconds = _as_float(value)
+    if seconds is not None and seconds > 0:
+        return seconds
+    # sunpy maps expose exposure_time as an astropy Quantity.
+    quantity = getattr(frame, "exposure_time", None)
+    if quantity is not None:
+        try:
+            return float(quantity.to("s").value)
+        except Exception:
+            seconds = _as_float(getattr(quantity, "value", quantity))
+            if seconds is not None and seconds > 0:
+                return seconds
+    return None
+
+
+def frame_observation_time(frame: Any) -> datetime | None:
+    """Best-effort observation time for a frame as a naive UTC datetime."""
+    date_attr = getattr(frame, "date", None)
+    parsed = _coerce_datetime(date_attr)
+    if parsed is not None:
+        return parsed
+    for key in ("date-obs", "date_obs", "t_obs", "t_rec", "date"):
+        parsed = _coerce_datetime(_frame_meta_get(frame, key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def normalize_exposure(frames: Sequence[Any]) -> list[AiaArrayMap]:
+    """Divide each frame by its exposure time to give calibrated DN/s.
+
+    Comparing AIA frames (composites, differences, light curves) is only
+    physically meaningful in rate units: raw DN scales with how long the shutter
+    was open, which varies frame to frame (especially across flares via AEC).
+    Frames without a usable EXPTIME are passed through unchanged so the call is
+    always safe.
+    """
+    out: list[AiaArrayMap] = []
+    for frame in frames:
+        data = np.asarray(getattr(frame, "data"), dtype=float)
+        exptime = frame_exposure_time(frame)
+        if exptime and exptime > 0:
+            data = data / exptime
+        wrapped = AiaArrayMap(data, frame, nickname=_safe_text(getattr(frame, "nickname", "")))
+        wrapped.meta["exptime"] = 1.0  # data is now per-second
+        wrapped.meta["bunit"] = "DN/s"
+        out.append(wrapped)
+    return out
+
+
+def register_aia_maps(frames: Sequence[Any], *, aiapy_register: Any | None = None) -> list[Any]:
+    """Co-register AIA frames to a common 0.6\"/pix grid and pointing (aiapy).
+
+    This is what makes multi-wavelength composites and difference images
+    pixel-aligned and quantitatively correct. Requires the optional ``aiapy``
+    package; when it is missing we raise a clear, actionable error rather than
+    silently returning misaligned data.
+    """
+    if aiapy_register is None:
+        try:
+            from aiapy.calibrate import register as aiapy_register
+        except Exception as exc:  # pragma: no cover - exercised only without aiapy
+            raise RuntimeError(
+                "AIA registration needs the optional 'aiapy' package.\n"
+                "Install it with: python3 -m pip install aiapy"
+            ) from exc
+    out: list[Any] = []
+    for frame in frames:
+        try:
+            out.append(aiapy_register(frame))
+        except Exception:
+            out.append(frame)
+    return out
+
+
+def extract_region_lightcurve(
+    frames: Sequence[Any],
+    bounds: CropBounds | None = None,
+    *,
+    normalize: bool = True,
+    statistic: str = "mean",
+) -> AiaLightcurve:
+    """Build an intensity-vs-time light curve over a region of interest.
+
+    Sums or averages the pixels inside ``bounds`` for every frame, giving the
+    time profile used to time flares/EUV brightenings against radio bursts. With
+    ``normalize`` the data is converted to DN/s first so the curve is physical.
+    """
+    if not frames:
+        raise ValueError("At least one frame is required for a light curve.")
+    work = normalize_exposure(frames) if normalize else list(frames)
+
+    times: list[datetime] = []
+    values: list[float] = []
+    reducer = np.nansum if str(statistic).lower() in {"sum", "total"} else np.nanmean
+    for original, frame in zip(frames, work):
+        region = crop_array(getattr(frame, "data"), bounds)
+        region = np.asarray(region, dtype=float)
+        values.append(float(reducer(region)) if region.size else float("nan"))
+        # Times come from the original frame headers (DN/s wrapper preserves them).
+        times.append(frame_observation_time(original) or frame_observation_time(frame))
+
+    return AiaLightcurve(
+        times=times,
+        values=np.asarray(values, dtype=float),
+        bounds=bounds,
+        unit="DN/s" if normalize else "DN",
+        statistic="sum" if reducer is np.nansum else "mean",
+        wavelength=_safe_text(getattr(frames[0], "wavelength", "")),
+    )
+
+
+def nearest_frame_index(times: Sequence[datetime | None], target: datetime) -> int:
+    """Index of the frame whose time is closest to ``target`` (ignores Nones)."""
+    best_idx = -1
+    best_delta: float | None = None
+    for idx, when in enumerate(times):
+        if when is None:
+            continue
+        delta = abs((when - target).total_seconds())
+        if best_delta is None or delta < best_delta:
+            best_delta = delta
+            best_idx = idx
+    return best_idx
+
+
+def radio_euv_lag(radio_onset: datetime | None, euv_peak: datetime | None) -> float | None:
+    """Seconds between a radio burst onset and an EUV brightening peak.
+
+    Positive means the EUV peak follows the radio onset. Used to quantify the
+    e-Callisto ↔ SDO timing relationship for a selected burst.
+    """
+    if radio_onset is None or euv_peak is None:
+        return None
+    return (euv_peak - radio_onset).total_seconds()
+
+
 def make_composite(frames: Sequence[Any], spec: AiaCompositeSpec | None = None) -> AiaArrayMap:
     if not frames:
         raise ValueError("At least one AIA frame is required for a composite.")
@@ -508,6 +671,65 @@ def _safe_text(value: Any) -> str:
         return str(value).strip()
     except Exception:
         return repr(value)
+
+
+def _frame_meta_get(frame: Any, *keys: str) -> Any:
+    """Case-insensitive lookup in a frame's FITS-style metadata dict."""
+    meta = getattr(frame, "meta", None)
+    if not meta:
+        return None
+    try:
+        items = dict(meta)
+    except Exception:
+        return None
+    lowered = {str(k).strip().lower(): v for k, v in items.items()}
+    for key in keys:
+        value = lowered.get(str(key).strip().lower())
+        if value is not None:
+            return value
+    return None
+
+
+def _coerce_datetime(value: Any) -> datetime | None:
+    """Coerce a header value or astropy Time into a naive UTC datetime."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None)
+
+    # astropy Time exposes .to_datetime() and .isot.
+    to_datetime = getattr(value, "to_datetime", None)
+    if callable(to_datetime):
+        try:
+            result = to_datetime()
+            if isinstance(result, datetime):
+                return result.replace(tzinfo=None)
+        except Exception:
+            pass
+    isot = getattr(value, "isot", None)
+    if isinstance(isot, str) and isot.strip():
+        parsed = _parse_datetime_text(isot.strip())
+        if parsed is not None:
+            return parsed
+    if isinstance(value, str):
+        return _parse_datetime_text(value.strip())
+    return None
+
+
+def _parse_datetime_text(text: str) -> datetime | None:
+    if not text:
+        return None
+    candidate = text.strip().replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(candidate).replace(tzinfo=None)
+    except Exception:
+        pass
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y.%m.%d_%H:%M:%S"):
+        try:
+            return datetime.strptime(text, fmt)
+        except Exception:
+            continue
+    return None
 
 
 def _prepare_image_array(data: Any) -> np.ndarray:

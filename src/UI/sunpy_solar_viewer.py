@@ -51,6 +51,7 @@ from src.Backend.sunpy_archive import (
     SunPySearchResult,
     configure_fetch_logging,
     fetch,
+    fetch_via_jsoc,
     get_fetch_log_path,
     load_downloaded,
     registry_detectors_for,
@@ -92,6 +93,7 @@ def _default_cache_dir() -> Path:
 
 class SunPyWorker(QObject):
     progress = Signal(object, object)
+    byte_progress = Signal(object)
     search_finished = Signal(object)
     load_finished = Signal(object, object)
     partial_warning = Signal(str)
@@ -106,6 +108,9 @@ class SunPyWorker(QObject):
         search_result: SunPySearchResult | None = None,
         selected_rows: list[int] | None = None,
         cache_dir: str | Path | None = None,
+        jsoc_email: str | None = None,
+        prefer_jsoc: bool = False,
+        jsoc_process: dict | None = None,
     ):
         super().__init__()
         self.mode = str(mode or "").strip().lower()
@@ -113,6 +118,9 @@ class SunPyWorker(QObject):
         self.search_result = search_result
         self.selected_rows = list(selected_rows or [])
         self.cache_dir = Path(cache_dir).expanduser().resolve() if cache_dir else _default_cache_dir()
+        self.jsoc_email = str(jsoc_email or "").strip()
+        self.prefer_jsoc = bool(prefer_jsoc)
+        self.jsoc_process = jsoc_process or None
         self._cancel_event = threading.Event()
 
     def cancel(self):
@@ -134,16 +142,7 @@ class SunPyWorker(QObject):
                 if self.search_result is None:
                     raise ValueError("Fetch/load mode requires a search result.")
                 self.progress.emit(2, "Preparing download session...")
-                fetch_result = fetch(
-                    self.search_result,
-                    self.cache_dir,
-                    selected_rows=self.selected_rows,
-                    progress_cb=lambda v, t: self.progress.emit(
-                        5 + int(max(0, min(100, int(v))) * 0.80),
-                        t,
-                    ),
-                    cancel_cb=self._cancel_event.is_set,
-                )
+                fetch_result = self._run_fetch_load()
                 if getattr(fetch_result, "cancelled", False) and not fetch_result.paths:
                     self.cancelled.emit()
                     return
@@ -180,6 +179,55 @@ class SunPyWorker(QObject):
             raise ValueError(f"Unknown worker mode '{self.mode}'.")
         except Exception:
             self.failed.emit(traceback.format_exc())
+
+    def _run_fetch_load(self) -> SunPyFetchResult:
+        """Download the selection, preferring the JSOC fast path with an
+        automatic VSO fallback (fastest-source-first / racing)."""
+
+        def _coarse(value, text):
+            self.progress.emit(5 + int(max(0, min(100, int(value))) * 0.80), text)
+
+        if self._should_try_jsoc():
+            from src.Backend.jsoc_client import JsocError
+
+            try:
+                result = fetch_via_jsoc(
+                    self.search_result,
+                    self.cache_dir,
+                    selected_rows=self.selected_rows,
+                    email=self.jsoc_email,
+                    process=self.jsoc_process,
+                    progress_cb=_coarse,
+                    byte_progress_cb=self.byte_progress.emit,
+                    cancel_cb=self._cancel_event.is_set,
+                )
+                if result.paths or getattr(result, "cancelled", False):
+                    return result
+                self.progress.emit(5, "JSOC returned no files; falling back to VSO...")
+            except JsocError as exc:
+                self.progress.emit(5, f"JSOC fast path unavailable ({exc}); using VSO...")
+            except Exception as exc:  # noqa: BLE001 - never strand the user on JSOC
+                self.progress.emit(5, f"JSOC fast path failed ({exc}); using VSO...")
+
+        return fetch(
+            self.search_result,
+            self.cache_dir,
+            selected_rows=self.selected_rows,
+            progress_cb=_coarse,
+            byte_progress_cb=self.byte_progress.emit,
+            cancel_cb=self._cancel_event.is_set,
+        )
+
+    def _should_try_jsoc(self) -> bool:
+        if not (self.prefer_jsoc and self.jsoc_email):
+            return False
+        spec = getattr(self.search_result, "spec", None)
+        if spec is None or getattr(self.search_result, "data_kind", "") != DATA_KIND_MAP:
+            return False
+        return (
+            str(getattr(spec, "spacecraft", "")).upper() == "SDO"
+            and str(getattr(spec, "instrument", "")).upper() == "AIA"
+        )
 
 
 class SunPySolarViewer(QMainWindow):

@@ -701,7 +701,14 @@ def test_worker_no_download_paths_includes_fetch_error_details(monkeypatch, tmp_
         row_index_map=[],
     )
 
-    def fake_fetch(_search_result, _cache_dir, selected_rows=None, progress_cb=None, cancel_cb=None):
+    def fake_fetch(
+        _search_result,
+        _cache_dir,
+        selected_rows=None,
+        progress_cb=None,
+        cancel_cb=None,
+        byte_progress_cb=None,
+    ):
         return SunPyFetchResult(
             paths=[],
             requested_count=len(selected_rows or []),
@@ -723,6 +730,105 @@ def test_worker_no_download_paths_includes_fetch_error_details(monkeypatch, tmp_
     assert failures
     assert "No files could be downloaded from the selected records." in failures[0]
     assert "Timeout on reading data from socket" in failures[0]
+
+
+def _aia_search_result():
+    rows = [
+        SunPySearchRow(
+            start=datetime(2026, 2, 10, 1, 0, 0),
+            end=datetime(2026, 2, 10, 1, 1, 0),
+            source="SDO",
+            instrument="AIA",
+            provider="VSO",
+            fileid="a.fits",
+            size="1 MB",
+        )
+    ]
+    return SunPySearchResult(
+        spec=_sample_query(),
+        data_kind=DATA_KIND_MAP,
+        rows=rows,
+        raw_response=[[{"fileid": "a.fits"}]],
+        row_index_map=[(0, 0)],
+    )
+
+
+def test_worker_uses_jsoc_fast_path_when_configured(monkeypatch, tmp_path):
+    _app()
+    calls = []
+
+    def fake_jsoc(*_a, **_k):
+        calls.append("jsoc")
+        return SunPyFetchResult(paths=["/x.fits"], requested_count=1, failed_count=0, errors=[])
+
+    def fake_fetch(*_a, **_k):
+        calls.append("vso")
+        return SunPyFetchResult(paths=[], requested_count=0, failed_count=0, errors=[])
+
+    monkeypatch.setattr(viewer_mod, "fetch_via_jsoc", fake_jsoc)
+    monkeypatch.setattr(viewer_mod, "fetch", fake_fetch)
+
+    worker = viewer_mod.SunPyWorker(
+        "fetch_load",
+        search_result=_aia_search_result(),
+        selected_rows=[0],
+        cache_dir=tmp_path,
+        jsoc_email="sci@example.org",
+        prefer_jsoc=True,
+    )
+    result = worker._run_fetch_load()
+    assert calls == ["jsoc"]  # VSO never touched
+    assert result.paths == ["/x.fits"]
+
+
+def test_worker_falls_back_to_vso_on_jsoc_error(monkeypatch, tmp_path):
+    _app()
+    from src.Backend.jsoc_client import JsocError
+
+    calls = []
+
+    def fake_jsoc(*_a, **_k):
+        calls.append("jsoc")
+        raise JsocError("no registered email")
+
+    def fake_fetch(*_a, **_k):
+        calls.append("vso")
+        return SunPyFetchResult(paths=["/vso.fits"], requested_count=1, failed_count=0, errors=[])
+
+    monkeypatch.setattr(viewer_mod, "fetch_via_jsoc", fake_jsoc)
+    monkeypatch.setattr(viewer_mod, "fetch", fake_fetch)
+
+    worker = viewer_mod.SunPyWorker(
+        "fetch_load",
+        search_result=_aia_search_result(),
+        selected_rows=[0],
+        cache_dir=tmp_path,
+        jsoc_email="sci@example.org",
+        prefer_jsoc=True,
+    )
+    result = worker._run_fetch_load()
+    assert calls == ["jsoc", "vso"]  # fell through after JSOC failed
+    assert result.paths == ["/vso.fits"]
+
+
+def test_worker_skips_jsoc_without_email(monkeypatch, tmp_path):
+    _app()
+    calls = []
+    monkeypatch.setattr(viewer_mod, "fetch_via_jsoc", lambda *a, **k: calls.append("jsoc"))
+    monkeypatch.setattr(
+        viewer_mod, "fetch",
+        lambda *a, **k: (calls.append("vso"), SunPyFetchResult(paths=["/v.fits"], requested_count=1, failed_count=0, errors=[]))[1],
+    )
+    worker = viewer_mod.SunPyWorker(
+        "fetch_load",
+        search_result=_aia_search_result(),
+        selected_rows=[0],
+        cache_dir=tmp_path,
+        jsoc_email="",          # no email -> JSOC disabled even if preferred
+        prefer_jsoc=True,
+    )
+    worker._run_fetch_load()
+    assert calls == ["vso"]
 
 
 def test_map_load_does_not_emit_tight_layout_warning():

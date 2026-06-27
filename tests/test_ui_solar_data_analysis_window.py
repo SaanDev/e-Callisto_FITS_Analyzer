@@ -18,6 +18,7 @@ pytest.importorskip("pyqtgraph")
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
+from src.Backend.jsoc_client import SIZE_BIN2, SIZE_CUTOUT, SIZE_FULL
 from src.Backend.solar_data_analysis import AiaFrameSet, AiaMetadataRegion
 from src.Backend.sunpy_archive import DATA_KIND_MAP, SunPyQuerySpec, SunPySearchResult, SunPySearchRow
 from src.UI import solar_data_analysis_window as solar_mod
@@ -205,6 +206,265 @@ def test_solar_data_window_progress_moves_smoothly():
     assert win.progress.maximum() == 100
     assert win._progress_target == 60
     assert win._progress_timer.isActive() is True
+    win.close()
+
+
+def test_solar_data_window_download_passes_jsoc_params(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+
+    # Pretend a search produced one selectable SDO/AIA row.
+    rows = [
+        SunPySearchRow(
+            start=datetime(2026, 2, 10, 1, 0, 0),
+            end=datetime(2026, 2, 10, 1, 1, 0),
+            source="SDO",
+            instrument="AIA",
+            provider="VSO",
+            fileid="a.fits",
+            size="1 MB",
+        )
+    ]
+    win._search_result = SunPySearchResult(
+        spec=SunPyQuerySpec(
+            start_dt=datetime(2026, 2, 10, 1, 0, 0),
+            end_dt=datetime(2026, 2, 10, 2, 0, 0),
+            spacecraft="SDO",
+            instrument="AIA",
+            wavelength_angstrom=193.0,
+        ),
+        data_kind=DATA_KIND_MAP,
+        rows=rows,
+        raw_response=[[{"fileid": "a.fits"}]],
+        row_index_map=[(0, 0)],
+    )
+    monkeypatch.setattr(win, "_checked_rows", lambda: [0])
+
+    captured = {}
+
+    def fake_start_worker(worker):
+        captured["worker"] = worker
+
+    monkeypatch.setattr(win, "_start_worker", fake_start_worker)
+
+    win.source_combo.setCurrentIndex(win.source_combo.findData("jsoc"))
+    win.jsoc_email_edit.setText("sci@example.org")
+    win.download_and_load_selected()
+
+    worker = captured.get("worker")
+    assert worker is not None
+    assert worker.jsoc_email == "sci@example.org"
+    assert worker.prefer_jsoc is True
+    win.close()
+
+
+def _aia_search_result():
+    rows = [
+        SunPySearchRow(
+            start=datetime(2026, 2, 10, 1, 0, 0),
+            end=datetime(2026, 2, 10, 1, 1, 0),
+            source="SDO",
+            instrument="AIA",
+            provider="VSO",
+            fileid="a.fits",
+            size="1 MB",
+        )
+    ]
+    return SunPySearchResult(
+        spec=SunPyQuerySpec(
+            start_dt=datetime(2026, 2, 10, 1, 0, 0),
+            end_dt=datetime(2026, 2, 10, 2, 0, 0),
+            spacecraft="SDO",
+            instrument="AIA",
+            wavelength_angstrom=193.0,
+        ),
+        data_kind=DATA_KIND_MAP,
+        rows=rows,
+        raw_response=[[{"fileid": "a.fits"}]],
+        row_index_map=[(0, 0)],
+    )
+
+
+def test_solar_data_window_cutout_builds_jsoc_process(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._search_result = _aia_search_result()
+    monkeypatch.setattr(win, "_checked_rows", lambda: [0])
+    captured = {}
+    monkeypatch.setattr(win, "_start_worker", lambda w: captured.__setitem__("worker", w))
+
+    win.jsoc_email_edit.setText("sci@example.org")
+    win.frame_size_combo.setCurrentIndex(win.frame_size_combo.findData(SIZE_CUTOUT))
+    win.cutout_x_spin.setValue(100.0)
+    win.cutout_y_spin.setValue(-50.0)
+    win.cutout_w_spin.setValue(400.0)
+    win.cutout_h_spin.setValue(300.0)
+    win.download_and_load_selected()
+
+    worker = captured.get("worker")
+    assert worker is not None
+    assert worker.prefer_jsoc is True
+    assert worker.jsoc_process and "im_patch" in worker.jsoc_process
+    patch = worker.jsoc_process["im_patch"]
+    assert patch["x"] == 100.0 and patch["width"] == 400.0
+    win.close()
+
+
+def test_solar_data_window_binned_requires_email(monkeypatch):
+    _app()
+    from PySide6.QtWidgets import QMessageBox
+
+    win = SolarDataAnalysisWindow()
+    win._search_result = _aia_search_result()
+    monkeypatch.setattr(win, "_checked_rows", lambda: [0])
+    started = []
+    monkeypatch.setattr(win, "_start_worker", lambda w: started.append(w))
+    info = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: info.append(a))
+
+    win.jsoc_email_edit.setText("")  # no email
+    win.frame_size_combo.setCurrentIndex(win.frame_size_combo.findData(SIZE_BIN2))
+    win.download_and_load_selected()
+
+    assert not started      # blocked
+    assert info             # user was told to register / pick full disk
+    win.close()
+
+
+def test_solar_data_window_size_estimate_updates(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    monkeypatch.setattr(win, "_checked_rows", lambda: [0, 1, 2])
+
+    win.frame_size_combo.setCurrentIndex(win.frame_size_combo.findData(SIZE_FULL))
+    win._update_size_estimate()
+    full_text = win.size_estimate_label.text()
+    assert "3 frame" in full_text and "MB" in full_text
+
+    win.frame_size_combo.setCurrentIndex(win.frame_size_combo.findData(SIZE_BIN2))
+    win._update_size_estimate()
+    assert "JSOC only" in win.size_estimate_label.text()
+    win.close()
+
+
+def _timed_frame(value, *, exptime=2.0, date="2026-02-10T01:00:00"):
+    frame = FakeMap(np.full((6, 6), float(value)))
+    frame.meta = {"instrume": "AIA", "exptime": exptime}
+    frame.date = date
+    return frame
+
+
+def test_solar_data_window_region_lightcurve_dialog(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._map_frames = [
+        _timed_frame(10.0, date="2026-02-10T01:00:00"),
+        _timed_frame(40.0, date="2026-02-10T01:02:00"),
+    ]
+    win.crop_check.setChecked(False)
+    shown = {}
+    monkeypatch.setattr(solar_mod.RegionLightcurveDialog, "show", lambda self: shown.setdefault("ok", True))
+    win.show_region_lightcurve()
+    assert getattr(win, "_lightcurve_dialog", None) is not None
+    assert shown.get("ok") is True
+    win.close()
+
+
+def test_solar_data_window_lightcurve_requires_sequence(monkeypatch):
+    _app()
+    from PySide6.QtWidgets import QMessageBox
+
+    win = SolarDataAnalysisWindow()
+    win._map_frames = [_timed_frame(10.0)]  # single frame -> needs a sequence
+    info = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: info.append(a))
+    monkeypatch.setattr(solar_mod.RegionLightcurveDialog, "show", lambda self: None)
+    win.show_region_lightcurve()
+    assert info and getattr(win, "_lightcurve_dialog", None) is None
+    win.close()
+
+
+def test_solar_data_window_radio_reference_window(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+
+    class FakeParent:
+        def _current_time_window_utc(self):
+            return (datetime(2026, 2, 10, 1, 0, 0), datetime(2026, 2, 10, 1, 5, 0))
+
+    monkeypatch.setattr(win, "parent", lambda: FakeParent())
+    assert win._radio_reference_window() == (
+        datetime(2026, 2, 10, 1, 0, 0),
+        datetime(2026, 2, 10, 1, 5, 0),
+    )
+    win.close()
+
+
+def test_region_lightcurve_dialog_renders_with_radio_overlay():
+    from src.Backend.solar_data_analysis import AiaLightcurve
+
+    _app()
+    lc = AiaLightcurve(
+        times=[datetime(2026, 2, 10, 1, 0, 0), datetime(2026, 2, 10, 1, 2, 0)],
+        values=np.array([5.0, 20.0]),
+        bounds=None,
+        unit="DN/s",
+        statistic="mean",
+        wavelength="193 Angstrom",
+    )
+    dlg = solar_mod.RegionLightcurveDialog(
+        lc, radio_window=(datetime(2026, 2, 10, 0, 59, 0), datetime(2026, 2, 10, 1, 1, 0))
+    )
+    assert dlg.canvas is not None
+    dlg.close()
+
+
+def test_solar_data_window_jsoc_settings_round_trip():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win.jsoc_email_edit.setText("persist@example.org")
+    win.source_combo.setCurrentIndex(win.source_combo.findData("vso"))
+    win._save_jsoc_settings()
+    win.close()
+
+    win2 = SolarDataAnalysisWindow()  # fresh instance restores from settings
+    assert win2.jsoc_email_edit.text() == "persist@example.org"
+    assert str(win2.source_combo.currentData()) == "vso"
+    win2.close()
+
+
+def test_solar_data_window_byte_progress_drives_bar_and_defers_ticks():
+    from src.Backend.download_manager import AggregateProgress
+
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._set_busy(True, "Downloading")
+
+    agg = AggregateProgress(
+        files_total=4,
+        files_done=1,
+        bytes_done=50,
+        bytes_total=100,
+        speed_bps=10,
+        eta_seconds=5.0,
+    )
+    win._on_byte_progress(agg)
+    QApplication.processEvents()
+    # Byte fraction 0.5 maps into the worker's 5..85 download band -> 45.
+    assert win._byte_active is True
+    assert win.progress.value() == 45
+    assert win.progress_panel.stats_label.text() != ""
+
+    # A coarse file-count tick inside the download band must NOT overwrite the
+    # honest byte bar.
+    win._on_worker_progress(70, "Downloading batch 2/4...")
+    QApplication.processEvents()
+    assert win.progress.value() == 45
+
+    # Crossing into the loading phase (>85) releases byte mode.
+    win._on_worker_progress(96, "Finalizing data...")
+    QApplication.processEvents()
+    assert win._byte_active is False
     win.close()
 
 

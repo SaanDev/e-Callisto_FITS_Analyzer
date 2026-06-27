@@ -1025,3 +1025,135 @@ def test_ensure_event_loop_creates_loop_in_worker_thread():
     thread.start()
     thread.join()
     assert result.get("ok") is True, result
+
+
+def _byte_progress_rows(sizes):
+    rows = [
+        sa.SunPySearchRow(
+            start=datetime(2026, 2, 10, 1, i, 0),
+            end=datetime(2026, 2, 10, 1, i + 1, 0),
+            source="SDO",
+            instrument="AIA",
+            provider="VSO",
+            fileid=f"aia_{i + 1}.fits",
+            size=size,
+        )
+        for i, size in enumerate(sizes)
+    ]
+    raw = [[{"fileid": r.fileid} for r in rows]]
+    return sa.SunPySearchResult(
+        spec=_mk_query(),
+        data_kind=sa.DATA_KIND_MAP,
+        rows=rows,
+        raw_response=raw,
+        row_index_map=[(0, i) for i in range(len(rows))],
+    )
+
+
+def test_expected_bytes_for_rows_sums_known_sizes():
+    result = _byte_progress_rows(["1 MB", "3 MB"])
+    assert sa._expected_bytes_for_rows(result, [0, 1]) == 4 * 1024**2
+
+
+def test_expected_bytes_for_rows_extrapolates_unknowns():
+    # Two rows, only one reports a size -> scale the known average over both.
+    result = _byte_progress_rows(["2 MB", ""])
+    assert sa._expected_bytes_for_rows(result, [0, 1]) == 4 * 1024**2
+
+
+def test_expected_bytes_for_rows_returns_none_without_sizes():
+    result = _byte_progress_rows(["", ""])
+    assert sa._expected_bytes_for_rows(result, [0, 1]) is None
+
+
+def test_fetch_emits_byte_progress(tmp_path: Path):
+    result = _byte_progress_rows(["1 MB", "1 MB"])
+
+    class FakeFido:
+        def fetch(self, query_slice, path):
+            if len(query_slice) > 1:
+                raise RuntimeError("batch unsupported in fake client")
+            fileid = query_slice[0]["fileid"]
+            out = tmp_path / fileid
+            out.write_bytes(b"x" * 4096)
+            return [out]
+
+    snapshots = []
+    out = sa.fetch(
+        result,
+        tmp_path,
+        selected_rows=[0, 1],
+        fido_client=FakeFido(),
+        byte_progress_cb=snapshots.append,
+    )
+    assert out.failed_count == 0
+    # The poller always emits at least a final settled sample carrying the
+    # file-count totals folded in by the fetch loop.
+    assert snapshots, "expected at least one byte-progress snapshot"
+    last = snapshots[-1]
+    assert last.files_total == 2
+    assert last.bytes_done >= 0
+
+
+def test_fetch_via_jsoc_orchestrates_export_and_download(tmp_path: Path):
+    search_result = _byte_progress_rows(["1 MB", "1 MB"])
+
+    class _FakeReq:
+        urls = [
+            {"record": "r1", "filename": "a.fits", "url": "http://jsoc/a.fits", "size": 100},
+            {"record": "r2", "filename": "b.fits", "url": "http://jsoc/b.fits", "size": 100},
+        ]
+
+    class _FakeJsoc:
+        def __init__(self):
+            self.calls = []
+
+        def export(self, recordset, method=None, protocol=None, email=None, process=None):
+            self.calls.append({"recordset": recordset, "method": method, "protocol": protocol})
+            return _FakeReq()
+
+    class _FakeDM:
+        def __init__(self):
+            self.items = None
+
+        def download(self, items, progress_cb=None, cancel_cb=None):
+            from src.Backend.download_manager import AggregateProgress, DownloadResult
+
+            self.items = list(items)
+            if progress_cb is not None:
+                progress_cb(
+                    AggregateProgress(
+                        files_total=len(self.items),
+                        files_done=len(self.items),
+                        bytes_done=200,
+                        bytes_total=200,
+                    )
+                )
+            return DownloadResult(
+                paths=[str(it.dest) for it in self.items], errors=[], cached_count=0, cancelled=False
+            )
+
+    jsoc = _FakeJsoc()
+    dm = _FakeDM()
+    coarse: list = []
+    byte_snaps: list = []
+    out = sa.fetch_via_jsoc(
+        search_result,
+        tmp_path,
+        selected_rows=[0, 1],
+        email="sci@example.org",
+        jsoc_client=jsoc,
+        download_manager=dm,
+        progress_cb=lambda v, t: coarse.append((v, t)),
+        byte_progress_cb=byte_snaps.append,
+    )
+    assert out.requested_count == 2
+    assert out.failed_count == 0
+    assert len(out.paths) == 2
+    assert dm.items is not None and len(dm.items) == 2
+    # Fast path used the quick/as-is export.
+    assert jsoc.calls[0]["method"] == "url_quick"
+    assert jsoc.calls[0]["protocol"] == "as-is"
+    # Progress was forwarded both as rich byte snapshots and coarse text.
+    assert byte_snaps
+    assert coarse and "JSOC" in coarse[-1][1]

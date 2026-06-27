@@ -1049,7 +1049,7 @@ class MainWindow(QMainWindow):
             mode_menu.addAction(a)
 
         analysis_menu = menubar.addMenu("Analysis")
-        self.open_solar_data_analysis_action = QAction("Solar Data Analysis", self)
+        self.open_solar_data_analysis_action = QAction("SDO Data Analysis", self)
         self.open_solar_data_analysis_action.triggered.connect(self.open_solar_data_analysis_window)
         analysis_menu.addAction(self.open_solar_data_analysis_action)
         analysis_menu.addSeparator()
@@ -11930,7 +11930,7 @@ class MainWindow(QMainWindow):
             ):
                 if bool(self._solar_data_analysis_window.is_operation_running()):
                     self.statusBar().showMessage(
-                        "Solar Data Analysis is still running. Wait for completion before closing the app.",
+                        "SDO Data Analysis is still running. Wait for completion before closing the app.",
                         6000,
                     )
                     event.ignore()
@@ -12013,7 +12013,7 @@ class MainWindow(QMainWindow):
                 closed = bool(self._solar_data_analysis_window.close())
                 if not closed:
                     self.statusBar().showMessage(
-                        "Solar Data Analysis window is busy and cannot be closed yet.",
+                        "SDO Data Analysis window is busy and cannot be closed yet.",
                         6000,
                     )
                     event.ignore()

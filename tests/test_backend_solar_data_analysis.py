@@ -16,6 +16,7 @@ from src.Backend import solar_data_analysis as solar_mod
 from src.Backend.solar_data_analysis import (
     AiaArrayMap,
     AiaCompositeSpec,
+    AiaLightcurve,
     AiaMetadataRegion,
     AiaMovieExportSpec,
     clip_crop_bounds,
@@ -24,8 +25,15 @@ from src.Backend.solar_data_analysis import (
     detect_active_regions,
     difference_sequence,
     export_movie,
+    extract_region_lightcurve,
+    frame_exposure_time,
+    frame_observation_time,
     label_regions_with_metadata,
     make_composite,
+    nearest_frame_index,
+    normalize_exposure,
+    radio_euv_lag,
+    register_aia_maps,
     render_movie_frames,
 )
 
@@ -214,3 +222,97 @@ def test_export_movie_mp4_reports_missing_ffmpeg(monkeypatch, tmp_path):
 
     with pytest.raises(RuntimeError, match="imageio-ffmpeg"):
         export_movie([FakeMap(np.ones((4, 4)))], AiaMovieExportSpec(path=str(tmp_path / "aia.mp4")))
+
+
+def _aia_frame(data, *, exptime=2.0, date="2026-02-10T01:00:00"):
+    frame = FakeMap(np.asarray(data, dtype=float))
+    frame.meta = {"instrume": "AIA", "exptime": exptime}
+    frame.date = date
+    return frame
+
+
+def test_frame_exposure_time_reads_header():
+    assert frame_exposure_time(_aia_frame(np.ones((2, 2)), exptime=2.9)) == 2.9
+    no_exp = FakeMap(np.ones((2, 2)))
+    no_exp.meta = {"instrume": "AIA"}
+    assert frame_exposure_time(no_exp) is None
+
+
+def test_normalize_exposure_yields_dn_per_second():
+    frame = _aia_frame(np.full((4, 4), 10.0), exptime=2.0)
+    out = normalize_exposure([frame])
+    assert isinstance(out[0], AiaArrayMap)
+    np.testing.assert_allclose(out[0].data, np.full((4, 4), 5.0))
+    assert out[0].meta["bunit"] == "DN/s"
+    # Missing exposure -> passthrough (no divide-by-zero).
+    bare = FakeMap(np.full((2, 2), 7.0))
+    bare.meta = {"instrume": "AIA"}
+    np.testing.assert_allclose(normalize_exposure([bare])[0].data, np.full((2, 2), 7.0))
+
+
+def test_frame_observation_time_parses_iso():
+    when = frame_observation_time(_aia_frame(np.ones((2, 2)), date="2026-02-10T01:23:45"))
+    assert when == datetime(2026, 2, 10, 1, 23, 45)
+
+
+def test_extract_region_lightcurve_mean_dn_per_second():
+    frames = [
+        _aia_frame(np.full((6, 6), 10.0), exptime=2.0, date="2026-02-10T01:00:00"),
+        _aia_frame(np.full((6, 6), 40.0), exptime=2.0, date="2026-02-10T01:02:00"),
+        _aia_frame(np.full((6, 6), 20.0), exptime=2.0, date="2026-02-10T01:04:00"),
+    ]
+    lc = extract_region_lightcurve(frames, bounds=(1, 5, 1, 5), normalize=True)
+    assert isinstance(lc, AiaLightcurve)
+    # DN/s = DN / exptime; mean over the ROI.
+    np.testing.assert_allclose(lc.values, [5.0, 20.0, 10.0])
+    assert lc.unit == "DN/s"
+    assert lc.peak_index() == 1
+    assert lc.peak_time() == datetime(2026, 2, 10, 1, 2, 0)
+
+
+def test_extract_region_lightcurve_without_normalization():
+    frames = [_aia_frame(np.full((4, 4), 8.0), exptime=4.0)]
+    lc = extract_region_lightcurve(frames, normalize=False, statistic="sum")
+    assert lc.unit == "DN"
+    assert lc.statistic == "sum"
+    assert lc.values[0] == pytest.approx(8.0 * 16)
+
+
+def test_nearest_frame_index_picks_closest_time():
+    times = [
+        datetime(2026, 2, 10, 1, 0, 0),
+        datetime(2026, 2, 10, 1, 5, 0),
+        datetime(2026, 2, 10, 1, 10, 0),
+    ]
+    assert nearest_frame_index(times, datetime(2026, 2, 10, 1, 4, 0)) == 1
+    assert nearest_frame_index([None, None], datetime(2026, 2, 10, 1, 4, 0)) == -1
+
+
+def test_radio_euv_lag_seconds():
+    onset = datetime(2026, 2, 10, 1, 0, 0)
+    peak = datetime(2026, 2, 10, 1, 1, 30)
+    assert radio_euv_lag(onset, peak) == 90.0
+    assert radio_euv_lag(None, peak) is None
+
+
+def test_register_aia_maps_uses_injected_register():
+    frames = [_aia_frame(np.ones((4, 4))), _aia_frame(np.ones((4, 4)))]
+    calls = []
+
+    def fake_register(frame):
+        calls.append(frame)
+        return AiaArrayMap(np.asarray(frame.data) * 2.0, frame)
+
+    out = register_aia_maps(frames, aiapy_register=fake_register)
+    assert len(out) == 2 and len(calls) == 2
+    np.testing.assert_allclose(out[0].data, np.full((4, 4), 2.0))
+
+
+def test_register_aia_maps_falls_back_on_error():
+    frames = [_aia_frame(np.ones((4, 4)))]
+
+    def boom(_frame):
+        raise RuntimeError("registration failed")
+
+    # On a per-frame failure the original frame is preserved, never dropped.
+    assert register_aia_maps(frames, aiapy_register=boom) == frames
