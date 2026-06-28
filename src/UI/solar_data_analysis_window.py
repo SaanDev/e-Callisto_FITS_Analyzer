@@ -12,6 +12,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import re
+import shutil
 import time
 import traceback
 from typing import Any
@@ -197,7 +198,12 @@ class SolarMatplotlibCanvas(QWidget):
 
     def set_grid_visible(self, visible: bool) -> None:
         if getattr(self, "ax", None) is not None:
-            self.ax.grid(bool(visible), color="#7f8fa3" if self._is_dark_ui() else "#b8c4d2", alpha=0.25)
+            # Passing line styling together with grid(False) makes matplotlib
+            # warn and enable the grid anyway, so only style when turning it on.
+            if visible:
+                self.ax.grid(True, color="#7f8fa3" if self._is_dark_ui() else "#b8c4d2", alpha=0.25)
+            else:
+                self.ax.grid(False)
             self.canvas.draw_idle()
 
     def clear_plot(self) -> None:
@@ -272,8 +278,16 @@ class SolarMatplotlibCanvas(QWidget):
         for spine in self.ax.spines.values():
             spine.set_color(fg)
         self.ax.grid(True, color="#7f8fa3" if dark else "#b8c4d2", alpha=0.25)
-        self.ax.set_xlim(min(extent[0], extent[1]), max(extent[0], extent[1]))
-        self.ax.set_ylim(min(extent[2], extent[3]), max(extent[2], extent[3]))
+        # Square the view around the data centre so the equal-aspect image, the
+        # square box and the axis limits all agree (otherwise matplotlib warns
+        # and drops the y-limits to satisfy the fixed data aspect).
+        ex0, ex1 = min(extent[0], extent[1]), max(extent[0], extent[1])
+        ey0, ey1 = min(extent[2], extent[3]), max(extent[2], extent[3])
+        half = (max(ex1 - ex0, ey1 - ey0) / 2.0) or 1.0
+        cx = (ex0 + ex1) / 2.0
+        cy = (ey0 + ey1) / 2.0
+        self.ax.set_xlim(cx - half, cx + half)
+        self.ax.set_ylim(cy - half, cy + half)
         self._draw_overlays()
         self.figure.subplots_adjust(left=0.10, right=0.88 if self._colorbar_artist else 0.94, bottom=0.10, top=0.92)
         self.canvas.draw_idle()
@@ -556,6 +570,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._current_axis_transform: dict[str, float] = self._default_axis_transform()
         self._active_thread: QThread | None = None
         self._active_worker: QObject | None = None
+        self._save_target_dir: str | None = None
         self._busy = False
         self._progress_target = 0
         self._progress_value = 0
@@ -671,18 +686,23 @@ class SolarDataAnalysisWindow(QMainWindow):
     def _build_menu_bar(self) -> None:
         self.data_menu = self.menuBar().addMenu("Data")
         self.fetch_action = QAction("Fetch Archive Records", self)
-        self.load_selected_action = QAction("Load Selected", self)
+        self.load_selected_action = QAction("Load Selected (to cache)", self)
+        self.save_disk_action = QAction("Save Selected to Disk…", self)
         self.upload_action = QAction("Upload FITS Files", self)
         self.use_analyzer_action = QAction("Use Analyzer Window", self)
         self.stop_action = QAction("Stop Download/Search", self)
+        self.reset_all_action = QAction("Reset All (clear cache && defaults)", self)
         for action in (
             self.fetch_action,
             self.load_selected_action,
+            self.save_disk_action,
             self.upload_action,
             self.use_analyzer_action,
             self.stop_action,
         ):
             self.data_menu.addAction(action)
+        self.data_menu.addSeparator()
+        self.data_menu.addAction(self.reset_all_action)
 
         self.analysis_menu = self.menuBar().addMenu("Analysis")
         self.plot_action = QAction("Plot Frames", self)
@@ -1029,11 +1049,18 @@ class SolarDataAnalysisWindow(QMainWindow):
         table_controls.setContentsMargins(0, 0, 0, 0)
         self.select_all_results_btn = QPushButton("Select All")
         self.deselect_all_results_btn = QPushButton("Deselect All")
+        self.save_disk_btn = QPushButton("Save to Disk")
+        self.save_disk_btn.setToolTip(
+            "Download the checked rows to a folder you choose (kept on disk).\n"
+            "Use 'Load Selected' instead to download into the working cache."
+        )
         self.select_all_results_btn.setEnabled(False)
         self.deselect_all_results_btn.setEnabled(False)
+        self.save_disk_btn.setEnabled(False)
         table_controls.addWidget(self.select_all_results_btn)
         table_controls.addWidget(self.deselect_all_results_btn)
         table_controls.addStretch(1)
+        table_controls.addWidget(self.save_disk_btn)
         layout.addLayout(table_controls)
 
         self.results_table = QTableWidget(0, 5)
@@ -1259,6 +1286,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.stop_btn.clicked.connect(self.stop_active_operation)
         self.select_all_results_btn.clicked.connect(self.select_all_results)
         self.deselect_all_results_btn.clicked.connect(self.deselect_all_results)
+        self.save_disk_btn.clicked.connect(self.save_selected_to_disk)
         self.wavelength_combo.currentIndexChanged.connect(self._on_query_wavelength_changed)
         self.frame_size_combo.currentIndexChanged.connect(lambda _i: self._on_frame_size_changed())
         for _spin in (self.cutout_w_spin, self.cutout_h_spin):
@@ -1298,9 +1326,11 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.quick_mp4_btn.clicked.connect(lambda: self.export_movie(default_suffix=".mp4"))
         self.fetch_action.triggered.connect(self.search_archives)
         self.load_selected_action.triggered.connect(self.download_and_load_selected)
+        self.save_disk_action.triggered.connect(self.save_selected_to_disk)
         self.upload_action.triggered.connect(self.load_local_files)
         self.use_analyzer_action.triggered.connect(lambda: self.use_analyzer_time_window(auto_query=False))
         self.stop_action.triggered.connect(self.stop_active_operation)
+        self.reset_all_action.triggered.connect(self.reset_all)
         self.plot_action.triggered.connect(lambda: self._set_difference_mode("raw"))
         self.running_diff_action.triggered.connect(lambda: self._set_difference_mode("running"))
         self.composite_action.triggered.connect(self.show_composite_plot)
@@ -1381,6 +1411,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.cutout_widget.setEnabled(not busy)
         self.select_all_results_btn.setEnabled((not busy) and bool(self._search_result and self._search_result.rows))
         self.deselect_all_results_btn.setEnabled((not busy) and bool(self._search_result and self._search_result.rows))
+        self.save_disk_btn.setEnabled((not busy) and bool(self._search_result and self._search_result.rows))
         self.stop_btn.setEnabled(bool(busy))
         self.progress_panel.setVisible(bool(busy))
         if busy:
@@ -1413,6 +1444,8 @@ class SolarDataAnalysisWindow(QMainWindow):
         for action in (self.fetch_action, self.upload_action, self.use_analyzer_action):
             action.setEnabled(not busy)
         self.load_selected_action.setEnabled((not busy) and has_results)
+        self.save_disk_action.setEnabled((not busy) and has_results)
+        self.reset_all_action.setEnabled(not busy)
         self.stop_action.setEnabled(busy)
         for action in (
             self.running_diff_action,
@@ -1525,7 +1558,24 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._set_busy(True, "Searching SDO/AIA archives...")
         self._start_worker(SunPyWorker("search", query_spec=spec))
 
-    def download_and_load_selected(self):
+    def save_selected_to_disk(self):
+        """Download the selected rows into a user-chosen folder (kept on disk)."""
+        if self._search_result is None:
+            QMessageBox.information(self, "SDO Data Analysis", "Run an archive search first.")
+            return
+        if not self._checked_rows():
+            QMessageBox.information(self, "SDO Data Analysis", "Select at least one result row to save.")
+            return
+        target_dir = QFileDialog.getExistingDirectory(self, "Save Selected FITS To Folder")
+        if not target_dir:
+            return
+        self.download_and_load_selected(target_dir=Path(target_dir))
+
+    def download_and_load_selected(self, target_dir: Path | None = None):
+        # Connected Qt signals (clicked/triggered) pass a bool; ignore it so the
+        # download still defaults to the cache folder.
+        if not isinstance(target_dir, (str, Path)):
+            target_dir = None
         if self._search_result is None:
             QMessageBox.information(self, "SDO Data Analysis", "Run an archive search first.")
             return
@@ -1572,7 +1622,11 @@ class SolarDataAnalysisWindow(QMainWindow):
             QMessageBox.warning(self, "SDO Data Analysis", f"Invalid cutout settings: {exc}")
             return
 
-        if process is not None:
+        effective_cache = Path(target_dir) if target_dir else self.cache_dir
+        self._save_target_dir = str(effective_cache) if target_dir else None
+        if target_dir:
+            text = f"Downloading selected AIA files to {effective_cache} ..."
+        elif process is not None:
             text = "Downloading reduced AIA frames via JSOC..."
         elif prefer_jsoc:
             text = "Downloading AIA frames via JSOC (fast path)..."
@@ -1586,7 +1640,7 @@ class SolarDataAnalysisWindow(QMainWindow):
                 "fetch_load",
                 search_result=self._search_result,
                 selected_rows=selected_rows,
-                cache_dir=self.cache_dir,
+                cache_dir=effective_cache,
                 jsoc_email=email,
                 prefer_jsoc=prefer_jsoc,
                 jsoc_process=process,
@@ -1894,6 +1948,7 @@ class SolarDataAnalysisWindow(QMainWindow):
     def _set_results_selection_controls_enabled(self, enabled: bool) -> None:
         self.select_all_results_btn.setEnabled(bool(enabled))
         self.deselect_all_results_btn.setEnabled(bool(enabled))
+        self.save_disk_btn.setEnabled(bool(enabled))
 
     def select_all_results(self) -> None:
         self._set_all_result_check_states(Qt.Checked)
@@ -1954,8 +2009,15 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.frame_slider.blockSignals(False)
         self._select_default_colormap_for_wavelength(self._map_frames[0])
         self._render_current_frame()
-        self.analysis_text.setPlainText(self._loaded_frame_status_text("Loaded", self._map_frames))
-        self.statusBar().showMessage(f"Loaded {len(self._map_frames)} AIA frame(s).", 5000)
+        status = self._loaded_frame_status_text("Loaded", self._map_frames)
+        save_dir = getattr(self, "_save_target_dir", None)
+        if save_dir:
+            status += f"\nSaved {len(self._loaded_paths)} file(s) to {save_dir}."
+            self.statusBar().showMessage(f"Saved {len(self._loaded_paths)} file(s) to {save_dir}", 7000)
+        else:
+            self.statusBar().showMessage(f"Loaded {len(self._map_frames)} AIA frame(s).", 5000)
+        self._save_target_dir = None
+        self.analysis_text.setPlainText(status)
 
     def _loaded_frame_status_text(self, action: str, frames: list[Any]) -> str:
         return (
@@ -2417,6 +2479,115 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._render_current_frame()
         self.analysis_text.setPlainText(self._loaded_frame_status_text("Restored", self._map_frames))
 
+    def reset_all(self):
+        """Return the tool to a clean slate: clear data + UI defaults + cache."""
+        if self._busy or self.is_operation_running():
+            QMessageBox.information(
+                self, "Reset All", "Wait for the current operation to finish before resetting."
+            )
+            return
+        reply = QMessageBox.question(
+            self,
+            "Reset All",
+            "Reset SDO Data Analysis to defaults and delete the download cache?\n\n"
+            f"Cache folder:\n{self.cache_dir}\n\n"
+            "Loaded frames, search results and active regions will be cleared. "
+            "Your saved JSOC e-mail is kept.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        # 1) Clear loaded / analysis state.
+        self._search_result = None
+        self._loaded_paths = []
+        self._original_frames = []
+        self._map_frames = []
+        self._map_metadata = {}
+        self._regions = []
+        self._metadata_regions = []
+        self._current_frame_index = 0
+        self._current_map_data = None
+        self._current_axis_transform = self._default_axis_transform()
+        self._save_target_dir = None
+        self.results_table.setRowCount(0)
+        self.region_table.setRowCount(0)
+        self.archive_results_status_label.setText("Run Fetch to list matching SDO/AIA files.")
+        self.metadata_status_label.setText("Metadata: not loaded")
+        self.download_load_btn.setEnabled(False)
+        self._set_results_selection_controls_enabled(False)
+
+        # 2) Reset query + display controls to their construction defaults.
+        now = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
+        self.wavelength_combo.setCurrentText("AIA 193 A")
+        self.start_dt_edit.setDateTime(QDateTime(now - timedelta(hours=2)))
+        self.end_dt_edit.setDateTime(QDateTime(now))
+        self.sample_seconds_spin.setValue(120)
+        self.max_records_spin.setValue(120)
+        self.high_resolution_check.setChecked(False)
+        idx = self.source_combo.findData("auto")
+        if idx >= 0:
+            self.source_combo.setCurrentIndex(idx)
+        idx = self.frame_size_combo.findData(SIZE_FULL)
+        if idx >= 0:
+            self.frame_size_combo.setCurrentIndex(idx)
+        self.cutout_x_spin.setValue(0.0)
+        self.cutout_y_spin.setValue(0.0)
+        self.cutout_w_spin.setValue(500.0)
+        self.cutout_h_spin.setValue(500.0)
+        self.clip_low_slider.setValue(1.0)
+        self.clip_high_slider.setValue(99.9)
+        self.colormap_combo.setCurrentText("sdoaia193")
+        self.scale_combo.setCurrentText("linear")
+        self.renderer_combo.setCurrentText("PyQtGraph")
+        self.solar_limb_check.setChecked(False)
+        self.grid_check.setChecked(True)
+        self.colorbar_check.setChecked(True)
+        self.region_overlay_check.setChecked(True)
+        self.crop_x0_spin.setValue(-1100.0)
+        self.crop_x1_spin.setValue(1100.0)
+        self.crop_y0_spin.setValue(-1100.0)
+        self.crop_y1_spin.setValue(1100.0)
+        self._set_crop_mode_checked(False)
+
+        # 3) Clear the plot + analysis panels.
+        self._set_loaded_state(False)
+        for canvas in self._all_plot_canvases():
+            try:
+                canvas.clear_plot()
+            except Exception:
+                pass
+        self.plot_title_label.setText("No AIA data loaded.")
+        self.analysis_text.clear()
+        self._update_size_estimate()
+
+        # 4) Delete the download cache.
+        removed = self._clear_cache_folder()
+        self.statusBar().showMessage(f"Reset complete. Cache cleared ({removed}).", 6000)
+
+    def _clear_cache_folder(self) -> str:
+        cache_path = Path(self.cache_dir)
+        skipped = 0
+        try:
+            for child in cache_path.iterdir():
+                try:
+                    if child.is_dir():
+                        shutil.rmtree(child, ignore_errors=True)
+                    else:
+                        child.unlink(missing_ok=True)
+                except Exception:
+                    skipped += 1
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+        try:
+            cache_path.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return "some items in use were skipped" if skipped else f"{cache_path}"
+
     def detect_active_regions(self):
         if self._current_map_data is None:
             QMessageBox.information(self, "Active Regions", "Load or render an AIA frame first.")
@@ -2604,24 +2775,45 @@ class SolarDataAnalysisWindow(QMainWindow):
         path, _ = pick_export_path(self, "Export AIA Movie", default_name, "MP4 (*.mp4);;GIF (*.gif)")
         if not path:
             return
-        try:
-            crop_bounds = None
-            if self.crop_check.isChecked() and self._current_map_data is not None:
-                crop_bounds = self._crop_bounds_from_axis_fields(self._current_map_data.shape)
-            export_movie(
-                self._map_frames,
-                AiaMovieExportSpec(
-                    path=path,
-                    fps=float(self.fps_spin.value()),
-                    mode=self._movie_mode(),
-                    crop_bounds=crop_bounds,
-                    percentile_low=float(self.clip_low_slider.value()),
-                    percentile_high=float(self.clip_high_slider.value()),
-                    colormap_name=self._resolved_colormap_name(),
-                ),
+
+        crop_bounds = None
+        if self.crop_check.isChecked() and self._current_map_data is not None:
+            crop_bounds = self._crop_bounds_from_axis_fields(self._current_map_data.shape)
+
+        def _spec(out_path: str) -> AiaMovieExportSpec:
+            return AiaMovieExportSpec(
+                path=out_path,
+                fps=float(self.fps_spin.value()),
+                mode=self._movie_mode(),
+                crop_bounds=crop_bounds,
+                percentile_low=float(self.clip_low_slider.value()),
+                percentile_high=float(self.clip_high_slider.value()),
+                colormap_name=self._resolved_colormap_name(),
             )
+
+        try:
+            export_movie(self._map_frames, _spec(path))
             self.statusBar().showMessage(f"Movie saved: {path}", 5000)
         except Exception as exc:
+            # MP4 needs imageio-ffmpeg; if it is missing, offer a GIF instead
+            # rather than failing outright.
+            if path.lower().endswith(".mp4") and "imageio-ffmpeg" in str(exc).lower():
+                reply = QMessageBox.question(
+                    self,
+                    "Export Movie",
+                    "MP4 export needs the 'imageio-ffmpeg' package, which isn't available.\n\n"
+                    "Export an animated GIF instead?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                if reply == QMessageBox.Yes:
+                    gif_path = str(Path(path).with_suffix(".gif"))
+                    try:
+                        export_movie(self._map_frames, _spec(gif_path))
+                        self.statusBar().showMessage(f"Movie saved as GIF: {gif_path}", 6000)
+                    except Exception as gif_exc:
+                        QMessageBox.critical(self, "Export Movie", str(gif_exc))
+                return
             QMessageBox.critical(self, "Export Movie", str(exc))
 
     def stop_active_operation(self):

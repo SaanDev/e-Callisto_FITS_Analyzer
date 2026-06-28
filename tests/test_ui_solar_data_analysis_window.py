@@ -810,6 +810,77 @@ def test_solar_data_window_uses_fits_wcs_for_crop_coordinates():
     win.close()
 
 
+def test_solar_data_window_save_selected_to_disk(monkeypatch, tmp_path):
+    _app()
+    from PySide6.QtWidgets import QFileDialog
+
+    win = SolarDataAnalysisWindow()
+    win._search_result = _aia_search_result()
+    monkeypatch.setattr(win, "_checked_rows", lambda: [0])
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: str(tmp_path))
+    captured = {}
+    monkeypatch.setattr(win, "_start_worker", lambda w: captured.__setitem__("worker", w))
+
+    win.save_selected_to_disk()
+
+    worker = captured.get("worker")
+    assert worker is not None
+    assert str(worker.cache_dir) == str(tmp_path)   # downloads into the chosen folder
+    assert win._save_target_dir == str(tmp_path)
+    win.close()
+
+
+def test_solar_data_window_reset_all_clears_state_and_cache(monkeypatch, tmp_path):
+    _app()
+    from PySide6.QtWidgets import QMessageBox
+
+    win = SolarDataAnalysisWindow()
+    win.cache_dir = tmp_path
+    (tmp_path / "cached_frame.fits").write_bytes(b"x" * 16)
+
+    # Dirty the state and a few controls.
+    win._apply_loaded_frames([FakeMap(np.ones((8, 8)))], paths=["a.fits"], metadata={})
+    win._search_result = _aia_search_result()
+    win.wavelength_combo.setCurrentText("AIA 304 A")
+    win.clip_low_slider.slider.setValue(120)   # 12.0%
+    win.max_records_spin.setValue(500)
+    QApplication.processEvents()
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    win.reset_all()
+    QApplication.processEvents()
+
+    # State cleared.
+    assert win._map_frames == [] and win._search_result is None
+    assert win.results_table.rowCount() == 0
+    # Controls back to defaults.
+    assert win.wavelength_combo.currentText() == "AIA 193 A"
+    assert win.clip_low_slider.value() == 1.0
+    assert win.clip_high_slider.value() == 99.9
+    assert win.max_records_spin.value() == 120
+    # Cache deleted.
+    assert not (tmp_path / "cached_frame.fits").exists()
+    win.close()
+
+
+def test_solar_data_window_reset_all_declined_keeps_state(monkeypatch, tmp_path):
+    _app()
+    from PySide6.QtWidgets import QMessageBox
+
+    win = SolarDataAnalysisWindow()
+    win.cache_dir = tmp_path
+    (tmp_path / "keep.fits").write_bytes(b"x" * 8)
+    win._apply_loaded_frames([FakeMap(np.ones((8, 8)))], paths=["a.fits"], metadata={})
+    QApplication.processEvents()
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
+    win.reset_all()
+
+    assert win._map_frames != []                 # nothing cleared
+    assert (tmp_path / "keep.fits").exists()      # cache untouched
+    win.close()
+
+
 def test_solar_data_window_cropped_image_fills_view():
     _app()
     win = SolarDataAnalysisWindow()
