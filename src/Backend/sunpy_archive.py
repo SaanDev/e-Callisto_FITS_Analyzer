@@ -633,16 +633,23 @@ def fetch_via_jsoc(
     cache_root.mkdir(parents=True, exist_ok=True)
     configure_fetch_logging(cache_root.parent)
 
-    items = [
-        DownloadItem(
-            url=entry.url,
-            dest=cache_root / _sanitize_filename(entry.filename),
-            expected_size=entry.size,
-            record_id=entry.record,
-            label=entry.filename,
+    # JSOC reports the SAME segment filename ("image_lev1.fits") for every
+    # record, so naming local files after it makes all downloads collide on a
+    # single path (only one file survives, the rest fail the rename). Derive a
+    # unique, deterministic name from each record's timestamp instead.
+    items: list[Any] = []
+    used_names: set[str] = set()
+    for index, entry in enumerate(export.urls):
+        name = _jsoc_local_filename(entry, index, used_names)
+        items.append(
+            DownloadItem(
+                url=entry.url,
+                dest=cache_root / name,
+                expected_size=entry.size,
+                record_id=entry.record,
+                label=entry.filename,
+            )
         )
-        for entry in export.urls
-    ]
     _logger.info("JSOC fetch: %d url(s) resolved from %s", len(items), export.recordset)
 
     manager = download_manager or DownloadManager(
@@ -677,6 +684,34 @@ def _min_window_delta():
     from datetime import timedelta
 
     return timedelta(seconds=12)
+
+
+def _jsoc_local_filename(entry: Any, index: int, used_names: set[str]) -> str:
+    """Build a unique, deterministic local filename for a JSOC record.
+
+    The export's ``filename`` is the generic segment name shared by every
+    record, so we name files after the record id (which carries the unique
+    T_REC + wavelength). Re-running the same query yields the same names, so the
+    persistent cache still skips already-downloaded frames.
+    """
+    record = str(getattr(entry, "record", "") or "").strip()
+    base = _sanitize_filename(record)
+    if not base:
+        base = _sanitize_filename(str(getattr(entry, "filename", "") or ""))
+    if not base:
+        base = f"jsoc_{index:04d}"
+    if not base.lower().endswith((".fits", ".fts", ".fit")):
+        base = f"{base}.fits"
+
+    # Guard against two records sanitising to the same name.
+    candidate = base
+    suffix = 1
+    while candidate in used_names:
+        stem = base[:-5] if base.lower().endswith(".fits") else base
+        candidate = f"{stem}_{suffix}.fits"
+        suffix += 1
+    used_names.add(candidate)
+    return candidate
 
 
 def load_downloaded(

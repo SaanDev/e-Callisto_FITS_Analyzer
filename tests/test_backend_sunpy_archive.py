@@ -1272,3 +1272,48 @@ def test_fetch_via_jsoc_orchestrates_export_and_download(tmp_path: Path):
     # Progress was forwarded both as rich byte snapshots and coarse text.
     assert byte_snaps
     assert coarse and "JSOC" in coarse[-1][1]
+
+
+def test_fetch_via_jsoc_gives_unique_filenames_when_jsoc_repeats_one(tmp_path: Path):
+    # Regression: JSOC returns the SAME segment filename for every record, which
+    # used to make all downloads collide on one path (only one file saved).
+    search_result = _byte_progress_rows(["1 MB", "1 MB", "1 MB"])
+
+    class _FakeReq:
+        urls = [
+            {"record": "aia.lev1_euv_12s[2024-05-14T16:00:04Z][193]", "filename": "image_lev1.fits",
+             "url": "http://jsoc/seg?a"},
+            {"record": "aia.lev1_euv_12s[2024-05-14T16:02:04Z][193]", "filename": "image_lev1.fits",
+             "url": "http://jsoc/seg?b"},
+            {"record": "aia.lev1_euv_12s[2024-05-14T16:04:04Z][193]", "filename": "image_lev1.fits",
+             "url": "http://jsoc/seg?c"},
+        ]
+
+    class _FakeJsoc:
+        def export(self, recordset, method=None, protocol=None, email=None, process=None):
+            return _FakeReq()
+
+    class _FakeDM:
+        def __init__(self):
+            self.items = None
+
+        def download(self, items, progress_cb=None, cancel_cb=None):
+            from src.Backend.download_manager import DownloadResult
+
+            self.items = list(items)
+            return DownloadResult(paths=[str(it.dest) for it in self.items], errors=[], cached_count=0)
+
+    dm = _FakeDM()
+    sa.fetch_via_jsoc(
+        search_result,
+        tmp_path,
+        selected_rows=[0, 1, 2],
+        email="sci@example.org",
+        jsoc_client=_FakeJsoc(),
+        download_manager=dm,
+    )
+    dests = [str(it.dest) for it in dm.items]
+    assert len(dests) == 3
+    assert len(set(dests)) == 3, f"destinations collided: {dests}"
+    # Names are derived from the unique record timestamp, not the generic segment name.
+    assert all("image_lev1.fits" not in d for d in dests)

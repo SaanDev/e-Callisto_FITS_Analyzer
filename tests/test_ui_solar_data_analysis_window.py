@@ -469,7 +469,7 @@ def test_solar_data_window_byte_progress_drives_bar_and_defers_ticks():
     win._set_busy(True, "Downloading")
 
     agg = AggregateProgress(
-        files_total=4,
+        files_total=2,
         files_done=1,
         bytes_done=50,
         bytes_total=100,
@@ -478,7 +478,7 @@ def test_solar_data_window_byte_progress_drives_bar_and_defers_ticks():
     )
     win._on_byte_progress(agg)
     QApplication.processEvents()
-    # Byte fraction 0.5 maps into the worker's 5..85 download band -> 45.
+    # 1 of 2 files done -> progress_fraction 0.5 maps into the 5..85 band -> 45.
     assert win._byte_active is True
     assert win.progress.value() == 45
     assert win.progress_panel.stats_label.text() != ""

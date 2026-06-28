@@ -19,6 +19,7 @@ from src.Backend.solar_data_analysis import (
     AiaLightcurve,
     AiaMetadataRegion,
     AiaMovieExportSpec,
+    apply_display_scale,
     clip_crop_bounds,
     crop_array,
     crop_maps,
@@ -316,3 +317,38 @@ def test_register_aia_maps_falls_back_on_error():
 
     # On a per-frame failure the original frame is preserved, never dropped.
     assert register_aia_maps(frames, aiapy_register=boom) == frames
+
+
+def test_apply_display_scale_linear_and_log():
+    arr = np.array([[1.0, 10.0, 100.0, 1000.0]])
+    np.testing.assert_array_equal(apply_display_scale(arr, "linear"), arr)
+    log = apply_display_scale(arr, "log")
+    assert log[0, -1] == pytest.approx(3.0)        # log10(1000)
+    assert log[0, 1] == pytest.approx(1.0)         # log10(10)
+    # RGB composites (3-D) are returned unchanged.
+    rgb = np.ones((2, 2, 3))
+    np.testing.assert_array_equal(apply_display_scale(rgb, "log"), rgb)
+
+
+def test_render_movie_log_brighter_than_linear_for_high_dynamic_range():
+    # A high-dynamic-range frame: faint structure is crushed to black in linear
+    # but lifts into mid-tones in log (matching the on-screen preview).
+    vals = np.array([1, 2, 5, 10, 30, 80, 200, 600, 2000, 9000], dtype=float)
+    frame = FakeMap(np.tile(vals, (10, 1)))
+    lin = render_movie_frames([frame], scale="linear", percentile_low=0, percentile_high=100,
+                              colormap_name="gray")[0]
+    log = render_movie_frames([frame], scale="log", percentile_low=0, percentile_high=100,
+                              colormap_name="gray")[0]
+    assert float(log.mean()) > float(lin.mean()) * 1.5
+
+
+def test_pad_frame_to_block_preserves_pixels():
+    frame = np.full((1741, 1624, 3), 200, dtype=np.uint8)
+    padded = solar_mod._pad_frame_to_block(frame, 16)
+    assert padded.shape == (1744, 1632, 3)
+    assert padded.shape[0] % 16 == 0 and padded.shape[1] % 16 == 0
+    assert (padded[:1741, :1624] == 200).all()     # original pixels intact
+    assert (padded[1741:, :] == 0).all()           # black padding
+    # Already-divisible frames are untouched.
+    ok = np.ones((32, 16, 3), dtype=np.uint8)
+    assert solar_mod._pad_frame_to_block(ok, 16).shape == (32, 16, 3)

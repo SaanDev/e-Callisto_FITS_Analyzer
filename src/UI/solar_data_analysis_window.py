@@ -61,6 +61,7 @@ from src.Backend.solar_data_analysis import (
     AiaMovieExportSpec,
     AiaRegion,
     CropBounds,
+    apply_display_scale,
     crop_maps,
     detect_active_regions,
     export_movie,
@@ -1839,7 +1840,10 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._byte_active = True
         self._progress_timer.stop()
         try:
-            fraction = float(getattr(agg, "fraction", 0.0) or 0.0)
+            # File-count based fraction (plus in-flight partials): honest and
+            # smooth even when the source doesn't report total bytes upfront.
+            getter = getattr(agg, "progress_fraction", None)
+            fraction = float(getter()) if callable(getter) else float(getattr(agg, "fraction", 0.0) or 0.0)
         except Exception:
             fraction = 0.0
         bar_value = 5 + int(round(max(0.0, min(1.0, fraction)) * 80))
@@ -2202,12 +2206,9 @@ class SolarDataAnalysisWindow(QMainWindow):
                     current = current - prev
             title += " (Running Difference)"
 
-        display_data = np.asarray(current, dtype=float)
-        if self.scale_combo.currentText().lower() == "log":
-            positive = display_data[np.isfinite(display_data) & (display_data > 0)]
-            floor = float(np.nanpercentile(positive, 0.5)) if positive.size else 1.0
-            floor = max(floor, 1e-12)
-            display_data = np.log10(np.clip(display_data, floor, None))
+        # Shared with the movie exporter so the preview and the exported video
+        # use identical scaling.
+        display_data = apply_display_scale(current, self.scale_combo.currentText())
 
         finite = display_data[np.isfinite(display_data)]
         vmin = None
@@ -2789,6 +2790,7 @@ class SolarDataAnalysisWindow(QMainWindow):
                 percentile_low=float(self.clip_low_slider.value()),
                 percentile_high=float(self.clip_high_slider.value()),
                 colormap_name=self._resolved_colormap_name(),
+                scale=self.scale_combo.currentText(),
             )
 
         try:

@@ -127,6 +127,26 @@ class AggregateProgress:
             return max(0.0, min(1.0, self.files_done / self.files_total))
         return 0.0
 
+    def progress_fraction(self) -> float:
+        """Smooth, honest completion even when total bytes are unknown upfront.
+
+        Sources like JSOC ``url_quick`` do not report file sizes, so the byte
+        total is only learned per file as it starts — extrapolating from that
+        makes the bar lurch. Instead count each finished file as 1 and add the
+        live byte fraction of each in-flight file. Falls back to the byte
+        fraction when there is no file breakdown.
+        """
+        if self.files_total <= 0:
+            return self.fraction
+        done = float(self.files_done)
+        for fp in self.per_file:
+            if fp.status == STATUS_DOWNLOADING and fp.bytes_total:
+                try:
+                    done += max(0.0, min(1.0, fp.bytes_done / fp.bytes_total))
+                except Exception:
+                    pass
+        return max(0.0, min(1.0, done / self.files_total))
+
     def percent(self) -> int:
         return int(round(self.fraction * 100))
 

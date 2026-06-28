@@ -71,6 +71,7 @@ class AiaMovieExportSpec:
     percentile_low: float = 1.0
     percentile_high: float = 99.0
     colormap_name: str = "inferno"
+    scale: str = "linear"
 
 
 class AiaArrayMap:
@@ -519,6 +520,23 @@ def fetch_active_region_metadata(
     return [_metadata_region_from_hek(row) for row in results]
 
 
+def apply_display_scale(data: Any, scale: str) -> np.ndarray:
+    """Apply the linear/log display scaling shared by the live preview and the
+    exported movie, so the two never diverge.
+
+    Log mode floors the data at its 0.5th positive percentile before ``log10``,
+    identical to the on-screen renderer. RGB composites (3-D) are returned
+    unchanged because they are already display-ready.
+    """
+    arr = np.asarray(data, dtype=float)
+    if arr.ndim != 2 or str(scale or "linear").strip().lower() != "log":
+        return arr
+    positive = arr[np.isfinite(arr) & (arr > 0)]
+    floor = float(np.nanpercentile(positive, 0.5)) if positive.size else 1.0
+    floor = max(floor, 1e-12)
+    return np.log10(np.clip(arr, floor, None))
+
+
 def render_movie_frames(
     frames: Sequence[Any],
     *,
@@ -527,15 +545,20 @@ def render_movie_frames(
     percentile_low: float = 1.0,
     percentile_high: float = 99.0,
     colormap_name: str = "inferno",
+    scale: str = "linear",
 ) -> list[np.ndarray]:
     arrays = difference_sequence(frames, mode=mode, crop_bounds=crop_bounds)
+    # Match the on-screen clip clamp so the movie contrast equals the preview.
+    p_low = min(float(percentile_low), float(percentile_high) - 0.1)
+    p_high = max(float(percentile_high), p_low + 0.1)
     rendered = []
     for arr in arrays:
+        scaled = apply_display_scale(arr, scale)
         rendered.append(
             _array_to_rgb_uint8(
-                arr,
-                percentile_low=percentile_low,
-                percentile_high=percentile_high,
+                scaled,
+                percentile_low=p_low,
+                percentile_high=p_high,
                 colormap_name=colormap_name,
             )
         )
@@ -554,6 +577,7 @@ def export_movie(frames: Sequence[Any], spec: AiaMovieExportSpec) -> None:
         percentile_low=spec.percentile_low,
         percentile_high=spec.percentile_high,
         colormap_name=spec.colormap_name,
+        scale=spec.scale,
     )
     if not rendered:
         raise ValueError("No frames are available for movie export.")
@@ -591,6 +615,25 @@ def _write_gif_movie(out_path: Path, rendered: Sequence[np.ndarray], fps: float)
     imageio.mimsave(str(out_path), list(rendered), duration=1.0 / max(0.1, float(fps)))
 
 
+def _pad_frame_to_block(frame: Any, block: int = 16) -> np.ndarray:
+    """Pad an RGB frame with black so its width/height are multiples of ``block``.
+
+    H.264/imageio require frame dimensions divisible by the macro block size and
+    otherwise silently *resize* (interpolating and distorting) the image. Padding
+    keeps every original pixel intact and only adds a thin black border.
+    """
+    arr = np.asarray(frame, dtype=np.uint8)
+    if arr.ndim < 2:
+        return arr
+    h, w = arr.shape[:2]
+    pad_h = (-h) % block
+    pad_w = (-w) % block
+    if pad_h == 0 and pad_w == 0:
+        return arr
+    pad_spec = [(0, pad_h), (0, pad_w)] + ([(0, 0)] if arr.ndim == 3 else [])
+    return np.pad(arr, pad_spec, mode="constant", constant_values=0)
+
+
 def _write_mp4_movie(out_path: Path, rendered: Sequence[np.ndarray], fps: float) -> None:
     _ensure_imageio_ffmpeg_available()
     imageio = _import_imageio_v2()
@@ -607,7 +650,7 @@ def _write_mp4_movie(out_path: Path, rendered: Sequence[np.ndarray], fps: float)
         raise RuntimeError("MP4 export requires a working FFmpeg writer backend.") from exc
     try:
         for frame in rendered:
-            writer.append_data(np.asarray(frame, dtype=np.uint8))
+            writer.append_data(_pad_frame_to_block(frame, 16))
     finally:
         writer.close()
 

@@ -76,6 +76,23 @@ def test_speed_meter_tracks_recent_rate():
     assert meter.update(1000, now=1.0) == pytest.approx(1000.0, rel=0.01)
 
 
+def test_aggregate_progress_fraction_is_file_based_when_sizes_unknown():
+    from src.Backend.download_manager import FileProgress, STATUS_DONE, STATUS_DOWNLOADING
+
+    # 4 files, no byte totals known (JSOC url_quick): 1 done, 1 half in-flight.
+    per_file = [
+        FileProgress(name="a", status=STATUS_DONE, bytes_done=100, bytes_total=100),
+        FileProgress(name="b", status=STATUS_DOWNLOADING, bytes_done=50, bytes_total=100),
+        FileProgress(name="c", status="queued"),
+        FileProgress(name="d", status="queued"),
+    ]
+    agg = AggregateProgress(
+        files_total=4, files_done=1, bytes_done=150, bytes_total=None, per_file=per_file
+    )
+    # (1 done + 0.5 in-flight) / 4 = 0.375 — smooth, not dependent on total bytes.
+    assert agg.progress_fraction() == pytest.approx(0.375)
+
+
 def test_aggregate_progress_fraction():
     agg = AggregateProgress(files_total=4, files_done=2, bytes_done=50, bytes_total=200)
     assert agg.fraction == pytest.approx(0.25)
