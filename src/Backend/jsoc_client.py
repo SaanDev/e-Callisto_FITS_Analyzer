@@ -39,9 +39,34 @@ SERIES_AIA_EUV = "aia.lev1_euv_12s"
 SERIES_AIA_UV = "aia.lev1_uv_24s"
 AIA_SEGMENT = "image"
 
+# HMI line-of-sight observables at the standard 720 s cadence. Each maps to its
+# JSOC series, the segment name to export, and the VSO Physobs used as the
+# fallback. (45 s series exist as hmi.{M,Ic,V}_45s if higher cadence is needed.)
+HMI_PRODUCTS: dict[str, tuple[str, str, str]] = {
+    "magnetogram": ("hmi.M_720s", "magnetogram", "LOS_magnetic_field"),
+    "continuum": ("hmi.Ic_720s", "continuum", "intensity"),
+    "dopplergram": ("hmi.V_720s", "Dopplergram", "LOS_velocity"),
+}
+DEFAULT_HMI_CADENCE_SECONDS = 720
+
 # Default cadence (s) when the caller does not pin one, so a recordset never
 # accidentally expands to every native-cadence frame in the window.
 DEFAULT_CADENCE_SECONDS = 60
+
+
+def hmi_physobs(product: str) -> str:
+    """VSO Physobs string for an HMI product (for the VSO fallback path)."""
+    key = str(product or "").strip().lower()
+    if key not in HMI_PRODUCTS:
+        raise JsocError(f"Unknown HMI product {product!r}. Expected one of {sorted(HMI_PRODUCTS)}.")
+    return HMI_PRODUCTS[key][2]
+
+
+def normalize_hmi_product(product: str) -> str:
+    key = str(product or "").strip().lower()
+    if key not in HMI_PRODUCTS:
+        raise JsocError(f"Unknown HMI product {product!r}. Expected one of {sorted(HMI_PRODUCTS)}.")
+    return key
 
 # Frame-size modes. Smaller payloads download dramatically faster; binned and
 # cutout modes are produced server-side by JSOC (im_patch / rebin) so only the
@@ -181,6 +206,31 @@ def build_recordset(
     return series, recordset
 
 
+def build_recordset_hmi(
+    *,
+    start: datetime,
+    end: datetime,
+    product: str,
+    cadence_seconds: float | int | None = None,
+) -> tuple[str, str]:
+    """Return ``(series, recordset)`` for an HMI observable.
+
+    HMI record-sets carry no wavelength bracket, e.g.
+    ``hmi.M_720s[2024-05-14T16:00:00Z/3600s@720s]{magnetogram}``.
+    """
+    if end <= start:
+        raise JsocError("End time must be after start time.")
+    key = normalize_hmi_product(product)
+    series, segment, _physobs = HMI_PRODUCTS[key]
+
+    duration = int(round((end - start).total_seconds()))
+    cadence = int(round(float(cadence_seconds))) if cadence_seconds else DEFAULT_HMI_CADENCE_SECONDS
+    cadence = max(1, cadence)
+
+    recordset = f"{series}[{_format_jsoc_time(start)}/{duration}s@{cadence}s]{{{segment}}}"
+    return series, recordset
+
+
 def make_client(email: str | None = None, *, drms_module: Any | None = None) -> Any:
     """Construct a drms client, importing drms lazily."""
     if drms_module is None:
@@ -217,7 +267,8 @@ def export_urls(
     *,
     start: datetime,
     end: datetime,
-    wavelength_angstrom: float | int,
+    wavelength_angstrom: float | int | None = None,
+    product: str | None = None,
     email: str,
     cadence_seconds: float | int | None = None,
     segment: str = AIA_SEGMENT,
@@ -227,25 +278,34 @@ def export_urls(
     client: Any | None = None,
     drms_module: Any | None = None,
 ) -> JsocExportResult:
-    """Resolve direct download URLs for an AIA query via JSOC export.
+    """Resolve direct download URLs for an AIA or HMI query via JSOC export.
+
+    Pass ``wavelength_angstrom`` for AIA channels, or ``product`` (one of
+    ``magnetogram`` / ``continuum`` / ``dopplergram``) for HMI observables.
 
     ``method='url_quick'`` + ``protocol='as-is'`` skips the staging queue and
-    returns the compressed lev1 segments directly — the fast path. A
-    ``process`` dict (e.g. ``im_patch`` cutouts or ``rebin``) forces a staged
-    ``method='url'`` export because the server must generate new files; callers
-    that pass ``process`` should expect a short wait.
+    returns the compressed segments directly — the fast path. A ``process`` dict
+    (e.g. ``im_patch`` cutouts or ``rebin``) forces a staged ``method='url'``
+    export because the server must generate new files.
     """
     email = str(email or "").strip()
     if not email:
         raise JsocError("A registered JSOC notify e-mail is required for export.")
 
-    series, recordset = build_recordset(
-        start=start,
-        end=end,
-        wavelength_angstrom=wavelength_angstrom,
-        cadence_seconds=cadence_seconds,
-        segment=segment,
-    )
+    if product:
+        series, recordset = build_recordset_hmi(
+            start=start, end=end, product=product, cadence_seconds=cadence_seconds
+        )
+    elif wavelength_angstrom is not None:
+        series, recordset = build_recordset(
+            start=start,
+            end=end,
+            wavelength_angstrom=wavelength_angstrom,
+            cadence_seconds=cadence_seconds,
+            segment=segment,
+        )
+    else:
+        raise JsocError("export_urls needs either wavelength_angstrom (AIA) or product (HMI).")
 
     if client is None:
         client = make_client(email, drms_module=drms_module)

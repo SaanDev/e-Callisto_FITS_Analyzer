@@ -226,10 +226,9 @@ class SunPyWorker(QObject):
         spec = getattr(self.search_result, "spec", None)
         if spec is None or getattr(self.search_result, "data_kind", "") != DATA_KIND_MAP:
             return False
-        return (
-            str(getattr(spec, "spacecraft", "")).upper() == "SDO"
-            and str(getattr(spec, "instrument", "")).upper() == "AIA"
-        )
+        return str(getattr(spec, "spacecraft", "")).upper() == "SDO" and str(
+            getattr(spec, "instrument", "")
+        ).upper() in ("AIA", "HMI")
 
 
 class SunPySolarViewer(QMainWindow):

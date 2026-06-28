@@ -152,6 +152,58 @@ def test_export_urls_empty_raises():
         )
 
 
+def test_build_recordset_hmi():
+    series, recordset = jc.build_recordset_hmi(
+        start=datetime(2024, 5, 14, 16, 0, 0),
+        end=datetime(2024, 5, 14, 17, 0, 0),
+        product="magnetogram",
+        cadence_seconds=720,
+    )
+    assert series == "hmi.M_720s"
+    assert recordset == "hmi.M_720s[2024-05-14T16:00:00Z/3600s@720s]{magnetogram}"
+    # continuum + dopplergram map to their series/segments
+    assert jc.build_recordset_hmi(
+        start=datetime(2024, 5, 14, 16, 0, 0), end=datetime(2024, 5, 14, 17, 0, 0), product="continuum"
+    )[0] == "hmi.Ic_720s"
+    assert jc.build_recordset_hmi(
+        start=datetime(2024, 5, 14, 16, 0, 0), end=datetime(2024, 5, 14, 17, 0, 0), product="dopplergram"
+    )[1].endswith("{Dopplergram}")
+
+
+def test_hmi_physobs_mapping():
+    assert jc.hmi_physobs("magnetogram") == "LOS_magnetic_field"
+    assert jc.hmi_physobs("continuum") == "intensity"
+    assert jc.hmi_physobs("dopplergram") == "LOS_velocity"
+    with pytest.raises(jc.JsocError):
+        jc.hmi_physobs("bogus")
+
+
+def test_export_urls_hmi_product():
+    rows = [{"record": "hmi.M_720s[2024-05-14T16:00:00Z]", "filename": "magnetogram.fits",
+             "url": "http://jsoc/m.fits"}]
+    client = _FakeClient(rows)
+    result = jc.export_urls(
+        start=datetime(2024, 5, 14, 16, 0, 0),
+        end=datetime(2024, 5, 14, 17, 0, 0),
+        product="magnetogram",
+        email="sci@example.org",
+        client=client,
+    )
+    assert result.series == "hmi.M_720s"
+    assert "hmi.M_720s" in client.export_calls[0]["recordset"]
+    assert result.record_count == 1
+
+
+def test_export_urls_requires_wavelength_or_product():
+    with pytest.raises(jc.JsocError):
+        jc.export_urls(
+            start=datetime(2024, 5, 14, 16, 0, 0),
+            end=datetime(2024, 5, 14, 17, 0, 0),
+            email="sci@example.org",
+            client=_FakeClient([]),
+        )
+
+
 def test_check_email():
     assert jc.check_email("sci@example.org", client=_FakeClient([], registered=True)) is True
     assert jc.check_email("sci@example.org", client=_FakeClient([], registered=False)) is False

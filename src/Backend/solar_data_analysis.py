@@ -133,6 +133,75 @@ def load_aia_maps(paths: Iterable[str | Path], *, map_loader: Any | None = None)
     return AiaFrameSet(paths=normalized, maps=maps, metadata=metadata)
 
 
+def load_aia_maps_streaming(
+    paths: Iterable[str | Path],
+    *,
+    progress_cb: Any | None = None,
+    cancel_cb: Any | None = None,
+    map_loader: Any | None = None,
+) -> AiaFrameSet:
+    """Load AIA FITS one file at a time, reporting progress.
+
+    Loading every file at once (``Map(paths, sequence=True)``) blocks until the
+    whole set is parsed — for many high-resolution frames that hangs the UI.
+    Loading file by file lets a worker thread report ``progress_cb(done, total)``
+    and stop early via ``cancel_cb()``. A single unreadable file is skipped
+    rather than failing the whole load.
+    """
+    normalized = [str(Path(p).expanduser().resolve()) for p in paths if str(p).strip()]
+    if not normalized:
+        raise ValueError("Select at least one AIA FITS file.")
+
+    if map_loader is None:
+        try:
+            from sunpy.map import Map as map_loader
+        except Exception as exc:
+            raise RuntimeError(f"SunPy map loading is not available: {exc}") from exc
+
+    maps: list[Any] = []
+    loaded_paths: list[str] = []
+    errors: list[str] = []
+    cancelled = False
+    total = len(normalized)
+    for index, path in enumerate(normalized):
+        if cancel_cb is not None:
+            try:
+                if bool(cancel_cb()):
+                    cancelled = True
+                    break
+            except Exception:
+                pass
+        try:
+            frames = extract_map_frames(map_loader(path))
+            if frames:
+                maps.extend(frames)
+                loaded_paths.append(path)
+        except Exception as exc:  # noqa: BLE001 - skip one bad file, keep the rest
+            errors.append(f"{Path(path).name}: {exc}")
+        if progress_cb is not None:
+            try:
+                progress_cb(index + 1, total)
+            except Exception:
+                pass
+
+    if not maps:
+        if cancelled:
+            return AiaFrameSet(paths=[], maps=[], metadata={"n_frames": 0})
+        detail = ("\n" + "\n".join(errors[:5])) if errors else ""
+        raise RuntimeError("No AIA map frames were loaded." + detail)
+
+    first = maps[0]
+    metadata = {
+        "n_frames": len(maps),
+        "observatory": _safe_text(getattr(first, "observatory", "")),
+        "instrument": _safe_text(getattr(first, "instrument", "")),
+        "detector": _safe_text(getattr(first, "detector", "")),
+        "wavelength": _safe_text(getattr(first, "wavelength", "")),
+        "date": _safe_text(getattr(first, "date", "")),
+    }
+    return AiaFrameSet(paths=loaded_paths, maps=maps, metadata=metadata)
+
+
 def extract_map_frames(loaded_obj: Any) -> list[Any]:
     maps_attr = getattr(loaded_obj, "maps", None)
     if maps_attr is not None:
@@ -399,6 +468,79 @@ def make_composite(frames: Sequence[Any], spec: AiaCompositeSpec | None = None) 
     return AiaArrayMap(rgb, frames[indexes[0]], nickname="AIA Composite")
 
 
+def make_magnetogram_composite(
+    base_frame: Any,
+    magnetogram_frame: Any,
+    *,
+    base_colormap: str = "sdoaia171",
+    base_percentile_low: float = 1.0,
+    base_percentile_high: float = 99.5,
+    threshold_gauss: float = 100.0,
+    base_scale: str = "log",
+) -> AiaArrayMap:
+    """Overlay HMI magnetogram polarity contours on a colour-mapped AIA image.
+
+    Positive line-of-sight field (toward observer) is outlined in red, negative
+    in blue, at ``±threshold_gauss``. The AIA base is rendered exactly as in the
+    movie/preview (scale + percentile clip) and the contour edges are drawn on
+    top, producing the standard active-region composite. The magnetogram is
+    resampled to the AIA grid if their shapes differ.
+    """
+    base = np.asarray(crop_array(getattr(base_frame, "data"), None), dtype=float)
+    mag = np.asarray(crop_array(getattr(magnetogram_frame, "data"), None), dtype=float)
+    if base.ndim != 2:
+        raise ValueError("The AIA base frame must be a 2-D image for a magnetogram composite.")
+    if mag.shape != base.shape:
+        mag = _resample_nearest(mag, base.shape)
+
+    rgb = _array_to_rgb_uint8(
+        apply_display_scale(base, base_scale),
+        percentile_low=base_percentile_low,
+        percentile_high=base_percentile_high,
+        colormap_name=base_colormap,
+    )
+    rgb = np.array(rgb, dtype=np.uint8, copy=True)
+
+    thr = float(abs(threshold_gauss))
+    pos_edge = _binary_edge(np.isfinite(mag) & (mag > thr))
+    neg_edge = _binary_edge(np.isfinite(mag) & (mag < -thr))
+    rgb[pos_edge] = (255, 70, 70)    # positive polarity -> red
+    rgb[neg_edge] = (80, 150, 255)   # negative polarity -> blue
+
+    return AiaArrayMap(rgb, base_frame, nickname="AIA + HMI magnetogram contours")
+
+
+def _binary_edge(mask: np.ndarray) -> np.ndarray:
+    """Boolean array marking the 1-pixel boundary of True regions in ``mask``."""
+    mask = np.asarray(mask, dtype=bool)
+    if not mask.any():
+        return mask
+    try:
+        from scipy import ndimage
+
+        return mask & ~ndimage.binary_erosion(mask, border_value=0)
+    except Exception:
+        # numpy fallback: a pixel is an edge if any 4-neighbour is False.
+        eroded = np.ones_like(mask)
+        eroded[:-1, :] &= mask[1:, :]
+        eroded[1:, :] &= mask[:-1, :]
+        eroded[:, :-1] &= mask[:, 1:]
+        eroded[:, 1:] &= mask[:, :-1]
+        eroded &= mask
+        return mask & ~eroded
+
+
+def _resample_nearest(arr: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    """Nearest-neighbour resample a 2-D array to ``shape`` (no SciPy needed)."""
+    arr = np.asarray(arr, dtype=float)
+    ny, nx = int(shape[0]), int(shape[1])
+    sy = max(1, arr.shape[0])
+    sx = max(1, arr.shape[1])
+    rows = (np.linspace(0, sy - 1, ny)).round().astype(int)
+    cols = (np.linspace(0, sx - 1, nx)).round().astype(int)
+    return arr[np.ix_(rows, cols)]
+
+
 def detect_active_regions(
     data: Any,
     *,
@@ -537,6 +679,64 @@ def apply_display_scale(data: Any, scale: str) -> np.ndarray:
     return np.log10(np.clip(arr, floor, None))
 
 
+def iter_rendered_movie_frames(
+    frames: Sequence[Any],
+    *,
+    mode: str = "raw",
+    crop_bounds: CropBounds | None = None,
+    percentile_low: float = 1.0,
+    percentile_high: float = 99.0,
+    colormap_name: str = "inferno",
+    scale: str = "linear",
+):
+    """Yield rendered RGB uint8 frames one at a time.
+
+    Streaming avoids holding every rendered frame in memory at once, which for
+    full-resolution AIA (≈50 MB per RGB frame) otherwise exhausts RAM and hangs
+    the app. Difference modes keep only the base/previous frame in hand. Mirrors
+    :func:`difference_sequence` exactly so the output matches the preview.
+    """
+    n = len(frames)
+    if n == 0:
+        return
+    # Match the on-screen clip clamp so the movie contrast equals the preview.
+    p_low = min(float(percentile_low), float(percentile_high) - 0.1)
+    p_high = max(float(percentile_high), p_low + 0.1)
+    mode_key = str(mode or "raw").strip().lower()
+    if mode_key not in {"raw", "none", "base", "base_difference", "running", "running_difference"}:
+        raise ValueError(f"Unsupported difference mode: {mode}")
+
+    def _cropped(i: int) -> np.ndarray:
+        return np.asarray(crop_array(getattr(frames[i], "data"), crop_bounds), dtype=float)
+
+    def _render(arr: np.ndarray) -> np.ndarray:
+        return _array_to_rgb_uint8(
+            apply_display_scale(arr, scale),
+            percentile_low=p_low,
+            percentile_high=p_high,
+            colormap_name=colormap_name,
+        )
+
+    if mode_key in {"base", "base_difference"}:
+        base = _cropped(0)
+        for i in range(n):
+            yield _render(_cropped(i) - base)
+    elif mode_key in {"running", "running_difference"}:
+        prev: np.ndarray | None = None
+        for i in range(n):
+            current = _cropped(i)
+            if n == 1:
+                yield _render(current.copy())
+            elif i == 0:
+                yield _render(_cropped(1) - current)
+            else:
+                yield _render(current - prev)
+            prev = current
+    else:  # raw / none
+        for i in range(n):
+            yield _render(_cropped(i))
+
+
 def render_movie_frames(
     frames: Sequence[Any],
     *,
@@ -547,30 +747,45 @@ def render_movie_frames(
     colormap_name: str = "inferno",
     scale: str = "linear",
 ) -> list[np.ndarray]:
-    arrays = difference_sequence(frames, mode=mode, crop_bounds=crop_bounds)
-    # Match the on-screen clip clamp so the movie contrast equals the preview.
-    p_low = min(float(percentile_low), float(percentile_high) - 0.1)
-    p_high = max(float(percentile_high), p_low + 0.1)
-    rendered = []
-    for arr in arrays:
-        scaled = apply_display_scale(arr, scale)
-        rendered.append(
-            _array_to_rgb_uint8(
-                scaled,
-                percentile_low=p_low,
-                percentile_high=p_high,
-                colormap_name=colormap_name,
-            )
+    return list(
+        iter_rendered_movie_frames(
+            frames,
+            mode=mode,
+            crop_bounds=crop_bounds,
+            percentile_low=percentile_low,
+            percentile_high=percentile_high,
+            colormap_name=colormap_name,
+            scale=scale,
         )
-    return rendered
+    )
 
 
-def export_movie(frames: Sequence[Any], spec: AiaMovieExportSpec) -> None:
+def export_movie(
+    frames: Sequence[Any],
+    spec: AiaMovieExportSpec,
+    *,
+    progress_cb: Any | None = None,
+    cancel_cb: Any | None = None,
+) -> None:
+    """Render and write a movie, one frame at a time.
+
+    ``progress_cb(done, total)`` is called after each frame; ``cancel_cb()``
+    returning True stops early and removes the partial file. Designed to run in
+    a worker thread so the UI stays responsive.
+    """
     out_path = Path(spec.path).expanduser()
     if not out_path.suffix:
         raise ValueError("Movie export path must include .gif or .mp4.")
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    rendered = render_movie_frames(
+    if not frames:
+        raise ValueError("No frames are available for movie export.")
+
+    suffix = out_path.suffix.lower()
+    if suffix not in (".gif", ".mp4"):
+        raise ValueError("Movie export supports only .gif and .mp4 files.")
+    fps = max(0.1, float(spec.fps or 4.0))
+
+    frame_iter = iter_rendered_movie_frames(
         frames,
         mode=spec.mode,
         crop_bounds=spec.crop_bounds,
@@ -579,18 +794,75 @@ def export_movie(frames: Sequence[Any], spec: AiaMovieExportSpec) -> None:
         colormap_name=spec.colormap_name,
         scale=spec.scale,
     )
-    if not rendered:
-        raise ValueError("No frames are available for movie export.")
+    _write_movie_stream(
+        out_path,
+        frame_iter,
+        total=len(frames),
+        fps=fps,
+        is_mp4=(suffix == ".mp4"),
+        progress_cb=progress_cb,
+        cancel_cb=cancel_cb,
+    )
 
-    suffix = out_path.suffix.lower()
-    fps = max(0.1, float(spec.fps or 4.0))
-    if suffix == ".gif":
-        _write_gif_movie(out_path, rendered, fps)
+
+def _write_movie_stream(
+    out_path: Path,
+    frame_iter,
+    *,
+    total: int,
+    fps: float,
+    is_mp4: bool,
+    progress_cb: Any | None = None,
+    cancel_cb: Any | None = None,
+) -> None:
+    imageio = _import_imageio_v2()
+    if is_mp4:
+        _ensure_imageio_ffmpeg_available()
+        try:
+            writer = imageio.get_writer(
+                str(out_path),
+                format="FFMPEG",
+                mode="I",
+                fps=max(0.1, float(fps)),
+                codec="libx264",
+                macro_block_size=16,
+            )
+        except Exception as exc:
+            raise RuntimeError("MP4 export requires a working FFmpeg writer backend.") from exc
+    else:
+        writer = imageio.get_writer(str(out_path), mode="I", duration=1.0 / max(0.1, float(fps)))
+
+    wrote = 0
+    cancelled = False
+    try:
+        for frame in frame_iter:
+            if cancel_cb is not None:
+                try:
+                    if bool(cancel_cb()):
+                        cancelled = True
+                        break
+                except Exception:
+                    pass
+            data = _pad_frame_to_block(frame, 16) if is_mp4 else np.asarray(frame, dtype=np.uint8)
+            writer.append_data(data)
+            del data, frame
+            wrote += 1
+            if progress_cb is not None:
+                try:
+                    progress_cb(wrote, total)
+                except Exception:
+                    pass
+    finally:
+        writer.close()
+
+    if cancelled:
+        try:
+            out_path.unlink(missing_ok=True)
+        except Exception:
+            pass
         return
-    if suffix == ".mp4":
-        _write_mp4_movie(out_path, rendered, fps)
-        return
-    raise ValueError("Movie export supports only .gif and .mp4 files.")
+    if wrote == 0:
+        raise ValueError("No frames are available for movie export.")
 
 
 def _import_imageio_v2() -> Any:
@@ -610,11 +882,6 @@ def _ensure_imageio_ffmpeg_available() -> None:
         ) from exc
 
 
-def _write_gif_movie(out_path: Path, rendered: Sequence[np.ndarray], fps: float) -> None:
-    imageio = _import_imageio_v2()
-    imageio.mimsave(str(out_path), list(rendered), duration=1.0 / max(0.1, float(fps)))
-
-
 def _pad_frame_to_block(frame: Any, block: int = 16) -> np.ndarray:
     """Pad an RGB frame with black so its width/height are multiples of ``block``.
 
@@ -632,27 +899,6 @@ def _pad_frame_to_block(frame: Any, block: int = 16) -> np.ndarray:
         return arr
     pad_spec = [(0, pad_h), (0, pad_w)] + ([(0, 0)] if arr.ndim == 3 else [])
     return np.pad(arr, pad_spec, mode="constant", constant_values=0)
-
-
-def _write_mp4_movie(out_path: Path, rendered: Sequence[np.ndarray], fps: float) -> None:
-    _ensure_imageio_ffmpeg_available()
-    imageio = _import_imageio_v2()
-    try:
-        writer = imageio.get_writer(
-            str(out_path),
-            format="FFMPEG",
-            mode="I",
-            fps=max(0.1, float(fps)),
-            codec="libx264",
-            macro_block_size=16,
-        )
-    except Exception as exc:
-        raise RuntimeError("MP4 export requires a working FFmpeg writer backend.") from exc
-    try:
-        for frame in rendered:
-            writer.append_data(_pad_frame_to_block(frame, 16))
-    finally:
-        writer.close()
 
 
 def write_cropped_fits(frame: Any, bounds: CropBounds | None, path: str | Path) -> None:

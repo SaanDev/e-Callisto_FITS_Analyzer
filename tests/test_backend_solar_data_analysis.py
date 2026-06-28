@@ -155,15 +155,28 @@ def test_render_movie_frames_accepts_aia_colormap_name():
     assert rendered[0].dtype == np.uint8
 
 
-def test_export_movie_gif_uses_duration_not_fps(monkeypatch, tmp_path):
+def test_export_movie_gif_streams_with_duration(monkeypatch, tmp_path):
     captured = {}
+
+    class FakeWriter:
+        def __init__(self):
+            self.frames = []
+            self.closed = False
+
+        def append_data(self, frame):
+            self.frames.append(np.asarray(frame))
+
+        def close(self):
+            self.closed = True
+
+    writer = FakeWriter()
 
     class FakeImageIO:
         @staticmethod
-        def mimsave(path, frames, **kwargs):
+        def get_writer(path, **kwargs):
             captured["path"] = path
-            captured["frames"] = frames
             captured["kwargs"] = kwargs
+            return writer
 
     monkeypatch.setattr(solar_mod, "_import_imageio_v2", lambda: FakeImageIO)
 
@@ -171,8 +184,49 @@ def test_export_movie_gif_uses_duration_not_fps(monkeypatch, tmp_path):
     export_movie([FakeMap(np.arange(16).reshape(4, 4))], AiaMovieExportSpec(path=str(out_path), fps=5.0))
 
     assert captured["path"] == str(out_path)
-    assert len(captured["frames"]) == 1
-    assert captured["kwargs"] == {"duration": 0.2}
+    assert captured["kwargs"]["duration"] == pytest.approx(0.2)   # 1/fps
+    assert "format" not in captured["kwargs"]                     # GIF, not FFMPEG
+    assert len(writer.frames) == 1 and writer.closed is True
+
+
+def test_export_movie_streams_progress_and_cancels(monkeypatch, tmp_path):
+    class FakeWriter:
+        def __init__(self):
+            self.frames = []
+            self.closed = False
+
+        def append_data(self, frame):
+            self.frames.append(np.asarray(frame))
+
+        def close(self):
+            self.closed = True
+
+    writer = FakeWriter()
+
+    class FakeImageIO:
+        @staticmethod
+        def get_writer(path, **kwargs):
+            return writer
+
+    monkeypatch.setattr(solar_mod, "_ensure_imageio_ffmpeg_available", lambda: None)
+    monkeypatch.setattr(solar_mod, "_import_imageio_v2", lambda: FakeImageIO)
+
+    frames = [FakeMap(np.full((4, 4), v, dtype=float)) for v in range(5)]
+    progress = []
+    out_path = tmp_path / "aia.mp4"
+    out_path.write_bytes(b"partial")  # simulate a file the cancel should remove
+
+    # Cancel after 2 frames.
+    export_movie(
+        frames,
+        AiaMovieExportSpec(path=str(out_path)),
+        progress_cb=lambda done, total: progress.append((done, total)),
+        cancel_cb=lambda: len(progress) >= 2,
+    )
+    assert progress[:2] == [(1, 5), (2, 5)]   # per-frame progress reported
+    assert len(writer.frames) == 2            # stopped early, didn't render all 5
+    assert writer.closed is True
+    assert not out_path.exists()              # partial output removed on cancel
 
 
 def test_export_movie_mp4_forces_ffmpeg_writer(monkeypatch, tmp_path):
@@ -352,3 +406,66 @@ def test_pad_frame_to_block_preserves_pixels():
     # Already-divisible frames are untouched.
     ok = np.ones((32, 16, 3), dtype=np.uint8)
     assert solar_mod._pad_frame_to_block(ok, 16).shape == (32, 16, 3)
+
+
+def test_load_aia_maps_streaming_progress_and_skips_bad_file():
+    def fake_loader(path):
+        if "bad" in str(path):
+            raise RuntimeError("corrupt header")
+        return FakeMap(np.ones((4, 4)))
+
+    progress = []
+    fs = solar_mod.load_aia_maps_streaming(
+        ["/x/a.fits", "/x/bad.fits", "/x/c.fits"],
+        map_loader=fake_loader,
+        progress_cb=lambda done, total: progress.append((done, total)),
+    )
+    assert len(fs.maps) == 2                          # bad file skipped, rest kept
+    assert fs.metadata["n_frames"] == 2
+    assert progress == [(1, 3), (2, 3), (3, 3)]       # progress for every file
+
+
+def test_load_aia_maps_streaming_cancel_stops_early():
+    loaded = {"n": 0}
+
+    def fake_loader(path):
+        loaded["n"] += 1
+        return FakeMap(np.ones((4, 4)))
+
+    fs = solar_mod.load_aia_maps_streaming(
+        ["/a.fits", "/b.fits", "/c.fits"],
+        map_loader=fake_loader,
+        cancel_cb=lambda: loaded["n"] >= 1,           # cancel after the first file
+    )
+    assert loaded["n"] == 1                           # did not load all three
+    assert len(fs.maps) == 1
+
+
+def test_load_aia_maps_streaming_requires_paths():
+    with pytest.raises(ValueError):
+        solar_mod.load_aia_maps_streaming([], map_loader=lambda p: FakeMap(np.ones((2, 2))))
+
+
+def test_make_magnetogram_composite_draws_polarity_contours():
+    from src.Backend.solar_data_analysis import make_magnetogram_composite
+
+    base = FakeMap(np.random.rand(40, 40) * 1000.0)
+    mag = np.zeros((40, 40), dtype=float)
+    mag[8:16, 8:16] = 300.0     # positive polarity blob
+    mag[24:32, 24:32] = -300.0  # negative polarity blob
+    comp = make_magnetogram_composite(base, FakeMap(mag), base_colormap="gray", threshold_gauss=100.0)
+    assert comp.data.shape == (40, 40, 3)
+    assert comp.data.dtype == np.uint8
+    r, b = comp.data[..., 0], comp.data[..., 2]
+    assert bool((r == 255).any())   # red positive contour drawn
+    assert bool((b == 255).any())   # blue negative contour drawn
+
+
+def test_make_magnetogram_composite_resamples_mismatched_shape():
+    from src.Backend.solar_data_analysis import make_magnetogram_composite
+
+    base = FakeMap(np.ones((32, 32)))
+    mag = np.zeros((16, 16), dtype=float)   # different resolution -> resampled
+    mag[4:8, 4:8] = 500.0
+    comp = make_magnetogram_composite(base, FakeMap(mag), base_colormap="gray", threshold_gauss=100.0)
+    assert comp.data.shape == (32, 32, 3)

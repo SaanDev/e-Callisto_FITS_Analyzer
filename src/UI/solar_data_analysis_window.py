@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import re
 import shutil
+import threading
 import time
 import traceback
 from typing import Any
@@ -68,9 +69,11 @@ from src.Backend.solar_data_analysis import (
     extract_map_frames,
     extract_region_lightcurve,
     fetch_active_region_metadata,
+    frame_observation_time,
     label_regions_with_metadata,
-    load_aia_maps,
+    load_aia_maps_streaming,
     make_composite,
+    make_magnetogram_composite,
     radio_euv_lag,
     write_cropped_fits,
 )
@@ -102,6 +105,21 @@ AIA_COLORMAPS = tuple(f"sdoaia{value}" for value in AIA_WAVELENGTHS)
 AIA_FULL_RESOLUTION = 1.0
 AIA_HIGH_RES_WARN_ROWS = 8
 
+# SDO/HMI line-of-sight observables, with the display colormap each one reads
+# best in (magnetogram bipolar grey, continuum/Doppler in grey/diverging).
+HMI_OBSERVABLES = (
+    ("magnetogram", "HMI Magnetogram"),
+    ("continuum", "HMI Continuum (Intensitygram)"),
+    ("dopplergram", "HMI Dopplergram"),
+)
+HMI_COLORMAPS = {"magnetogram": "hmimag", "continuum": "gray", "dopplergram": "RdBu_r"}
+HMI_PRODUCT_CONTENT = {  # FITS CONTENT keyword -> product, to recolour loaded HMI frames
+    "magnetogram": "magnetogram",
+    "continuum intensity": "continuum",
+    "continuum": "continuum",
+    "dopplergram": "dopplergram",
+}
+
 
 class SolarMetadataWorker(QObject):
     progress = Signal(object, object)
@@ -120,6 +138,85 @@ class SolarMetadataWorker(QObject):
             metadata = fetch_active_region_metadata(self.start_dt, self.end_dt)
             self.progress.emit(100, f"Fetched {len(metadata)} metadata region(s).")
             self.finished.emit(metadata)
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
+def _imageio_ffmpeg_available() -> bool:
+    try:
+        import imageio_ffmpeg  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
+class MovieExportWorker(QObject):
+    """Renders and writes a movie off the UI thread, streaming one frame at a
+    time so full-resolution exports stay responsive and memory-light."""
+
+    export_progress = Signal(int, int)  # done, total
+    finished = Signal(str)              # output path
+    failed = Signal(str)
+    cancelled = Signal()
+
+    def __init__(self, frames: list[Any], spec: AiaMovieExportSpec):
+        super().__init__()
+        self._frames = list(frames)
+        self._spec = spec
+        self._cancel = threading.Event()
+
+    def cancel(self):
+        self._cancel.set()
+
+    @Slot()
+    def run(self):
+        try:
+            export_movie(
+                self._frames,
+                self._spec,
+                progress_cb=lambda done, total: self.export_progress.emit(int(done), int(total)),
+                cancel_cb=self._cancel.is_set,
+            )
+            if self._cancel.is_set():
+                self.cancelled.emit()
+            else:
+                self.finished.emit(str(self._spec.path))
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
+class MapLoadWorker(QObject):
+    """Loads local AIA FITS off the UI thread, one file at a time, so uploading
+    a large set of high-resolution frames does not freeze the window."""
+
+    load_progress = Signal(int, int)            # done, total
+    finished = Signal(object, object, object)   # frames, paths, metadata
+    failed = Signal(str)
+    cancelled = Signal()
+
+    def __init__(self, paths: list[str]):
+        super().__init__()
+        self._paths = list(paths)
+        self._cancel = threading.Event()
+
+    def cancel(self):
+        self._cancel.set()
+
+    @Slot()
+    def run(self):
+        try:
+            frame_set = load_aia_maps_streaming(
+                self._paths,
+                progress_cb=lambda done, total: self.load_progress.emit(int(done), int(total)),
+                cancel_cb=self._cancel.is_set,
+            )
+            if self._cancel.is_set():
+                self.cancelled.emit()
+            else:
+                self.finished.emit(
+                    list(frame_set.maps), list(frame_set.paths), dict(frame_set.metadata)
+                )
         except Exception:
             self.failed.emit(traceback.format_exc())
 
@@ -572,6 +669,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._active_thread: QThread | None = None
         self._active_worker: QObject | None = None
         self._save_target_dir: str | None = None
+        self._overlay_magnetogram: Any | None = None
         self._busy = False
         self._progress_target = 0
         self._progress_value = 0
@@ -905,9 +1003,15 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.stop_btn = QPushButton("Stop")
         self.stop_btn.setEnabled(False)
 
+        # Observable selector: AIA EUV/UV channels + HMI line-of-sight products.
+        # userData is a tuple ("AIA", wavelength_float) or ("HMI", product_str).
         self.wavelength_combo = QComboBox()
+        self.wavelength_combo.setToolTip("Choose the SDO observable: an AIA wavelength or an HMI product.")
         for value in AIA_WAVELENGTHS:
-            self.wavelength_combo.addItem(f"AIA {value} A", userData=float(value))
+            self.wavelength_combo.addItem(f"AIA {value} A", userData=("AIA", float(value)))
+        self.wavelength_combo.insertSeparator(self.wavelength_combo.count())
+        for product, label in HMI_OBSERVABLES:
+            self.wavelength_combo.addItem(label, userData=("HMI", product))
         self.wavelength_combo.setCurrentText("AIA 193 A")
 
         now = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
@@ -1099,6 +1203,21 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.base_diff_btn = QPushButton("Base Diff")
         self.base_diff_btn.setToolTip("Show each frame minus the first frame (eruptions, dimmings, EUV waves).")
         self.composite_btn = QPushButton("Composite")
+        self.composite_btn.setToolTip(
+            "AIA RGB tri-colour from the first 3 frames — or, with a magnetogram overlay\n"
+            "loaded, AIA with HMI polarity contours (red = +, blue = −)."
+        )
+        self.magnetogram_btn = QPushButton("Mag Overlay…")
+        self.magnetogram_btn.setToolTip(
+            "Load an HMI magnetogram FITS to overlay as ± polarity contours on the\n"
+            "current AIA frame when you click Composite."
+        )
+        self.mag_threshold_spin = QSpinBox()
+        self.mag_threshold_spin.setRange(10, 2000)
+        self.mag_threshold_spin.setSingleStep(10)
+        self.mag_threshold_spin.setValue(100)
+        self.mag_threshold_spin.setSuffix(" G")
+        self.mag_threshold_spin.setToolTip("Magnetogram contour level (Gauss).")
         self.lightcurve_btn = QPushButton("Light Curve")
         self.lightcurve_btn.setToolTip(
             "Plot region intensity (DN/s) vs time, with the e-Callisto radio burst window overlaid\n"
@@ -1112,9 +1231,11 @@ class SolarDataAnalysisWindow(QMainWindow):
         layout.addWidget(self.base_diff_btn, 1, 1)
         layout.addWidget(self.composite_btn, 2, 0)
         layout.addWidget(self.lightcurve_btn, 2, 1)
-        layout.addWidget(self.detect_regions_btn, 3, 0)
-        layout.addWidget(self.fetch_labels_btn, 3, 1)
-        layout.addWidget(self.reset_loaded_btn, 4, 0, 1, 2)
+        layout.addWidget(self.magnetogram_btn, 3, 0)
+        layout.addWidget(self.mag_threshold_spin, 3, 1)
+        layout.addWidget(self.detect_regions_btn, 4, 0)
+        layout.addWidget(self.fetch_labels_btn, 4, 1)
+        layout.addWidget(self.reset_loaded_btn, 5, 0, 1, 2)
 
     def _build_timeline_group(self, parent_layout: QVBoxLayout) -> None:
         group = QGroupBox("Timeline")
@@ -1178,7 +1299,9 @@ class SolarDataAnalysisWindow(QMainWindow):
         parent_layout.addWidget(group)
 
         self.colormap_combo = QComboBox()
-        self.colormap_combo.addItems([*AIA_COLORMAPS, "inferno", "magma", "plasma", "viridis", "cividis", "gray", "hot"])
+        self.colormap_combo.addItems(
+            [*AIA_COLORMAPS, "hmimag", "inferno", "magma", "plasma", "viridis", "cividis", "gray", "RdBu_r", "hot"]
+        )
         self.colormap_combo.setCurrentText("sdoaia193")
         self.renderer_combo = QComboBox()
         self.renderer_combo.addItems(["PyQtGraph", "Matplotlib"])
@@ -1298,6 +1421,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.base_diff_btn.clicked.connect(lambda: self._set_difference_mode("base"))
         self.lightcurve_btn.clicked.connect(self.show_region_lightcurve)
         self.composite_btn.clicked.connect(self.show_composite_plot)
+        self.magnetogram_btn.clicked.connect(self.load_magnetogram_overlay)
         self.detect_regions_btn.clicked.connect(self.detect_active_regions)
         self.fetch_labels_btn.clicked.connect(self.fetch_active_region_labels)
         self.reset_loaded_btn.clicked.connect(self.reset_loaded_frames)
@@ -1374,6 +1498,8 @@ class SolarDataAnalysisWindow(QMainWindow):
             self.base_diff_btn,
             self.lightcurve_btn,
             self.composite_btn,
+            self.magnetogram_btn,
+            self.mag_threshold_spin,
             self.detect_regions_btn,
             self.fetch_labels_btn,
             self.reset_loaded_btn,
@@ -1514,16 +1640,37 @@ class SolarDataAnalysisWindow(QMainWindow):
             self._progress_activity = False
             self._progress_soft_cap = 0
 
+    def _current_observable(self) -> tuple[str, Any]:
+        """Return (instrument, value) for the selected observable.
+
+        AIA -> ("AIA", wavelength_float); HMI -> ("HMI", product_str).
+        """
+        data = self.wavelength_combo.currentData()
+        if isinstance(data, (tuple, list)) and len(data) == 2:
+            return str(data[0]).upper(), data[1]
+        return "AIA", 193.0
+
     def _build_query_spec(self) -> SunPyQuerySpec:
         start_dt = self.start_dt_edit.dateTime().toPython().replace(tzinfo=None)
         end_dt = self.end_dt_edit.dateTime().toPython().replace(tzinfo=None)
         sample_seconds = int(self.sample_seconds_spin.value() or 0)
+        instrument, value = self._current_observable()
+        if instrument == "HMI":
+            return SunPyQuerySpec(
+                start_dt=start_dt,
+                end_dt=end_dt,
+                spacecraft="SDO",
+                instrument="HMI",
+                product=str(value),
+                sample_seconds=sample_seconds if sample_seconds > 0 else None,
+                max_records=int(self.max_records_spin.value()),
+            )
         return SunPyQuerySpec(
             start_dt=start_dt,
             end_dt=end_dt,
             spacecraft="SDO",
             instrument="AIA",
-            wavelength_angstrom=float(self.wavelength_combo.currentData() or 193.0),
+            wavelength_angstrom=float(value or 193.0),
             sample_seconds=sample_seconds if sample_seconds > 0 else None,
             resolution=AIA_FULL_RESOLUTION if self.high_resolution_check.isChecked() else None,
             max_records=int(self.max_records_spin.value()),
@@ -1772,6 +1919,22 @@ class SolarDataAnalysisWindow(QMainWindow):
             worker.finished.connect(self._on_metadata_finished)
             worker.failed.connect(thread.quit)
             worker.finished.connect(thread.quit)
+        elif isinstance(worker, MovieExportWorker):
+            worker.export_progress.connect(self._on_export_progress)
+            worker.finished.connect(self._on_export_finished)
+            worker.failed.connect(self._on_worker_failed)
+            worker.cancelled.connect(self._on_worker_cancelled)
+            worker.finished.connect(thread.quit)
+            worker.failed.connect(thread.quit)
+            worker.cancelled.connect(thread.quit)
+        elif isinstance(worker, MapLoadWorker):
+            worker.load_progress.connect(self._on_load_maps_progress)
+            worker.finished.connect(self._on_local_maps_loaded)
+            worker.failed.connect(self._on_worker_failed)
+            worker.cancelled.connect(self._on_worker_cancelled)
+            worker.finished.connect(thread.quit)
+            worker.failed.connect(thread.quit)
+            worker.cancelled.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(self._on_worker_stopped)
@@ -1985,16 +2148,66 @@ class SolarDataAnalysisWindow(QMainWindow):
             self.load_local_paths(paths)
 
     def load_local_paths(self, paths: list[str]) -> None:
+        paths = [str(p) for p in (paths or []) if str(p).strip()]
+        if not paths:
+            return
+        if self.is_operation_running():
+            QMessageBox.information(self, "Load Local AIA FITS", "Another operation is still running.")
+            return
+        self._save_target_dir = None
+        self._set_busy(True, f"Loading {len(paths)} FITS file(s)…")
+        self.progress_panel.set_status_text("Reading files…")
+        self._start_worker(MapLoadWorker(paths))
+
+    @Slot(int, int)
+    def _on_load_maps_progress(self, done: int, total: int):
+        total = max(1, int(total))
+        pct = int(max(0, min(100, int(done) * 100 / total)))
+        if self.progress.maximum() <= 0:
+            self.progress.setRange(0, 100)
+        self.progress.setValue(pct)
+        self.progress_panel.set_status_text(f"Loading frame {int(done)} of {total}  ·  {pct}%")
+        self.statusBar().showMessage(f"Loading FITS: frame {int(done)}/{total}", 2000)
+
+    @Slot(object, object, object)
+    def _on_local_maps_loaded(self, frames: object, paths: object, metadata: object):
         try:
-            frame_set = load_aia_maps(paths)
-            self._apply_loaded_frames(frame_set.maps, paths=frame_set.paths, metadata=frame_set.metadata)
+            self._apply_loaded_frames(
+                list(frames or []), paths=list(paths or []), metadata=dict(metadata or {})
+            )
         except Exception as exc:
-            QMessageBox.critical(self, "Load Local AIA FITS", str(exc))
+            self._on_worker_failed(str(exc))
+
+    def _sort_frames_by_time(self, frames: list[Any]) -> list[Any]:
+        """Return frames sorted by observation time (stable).
+
+        Frames whose header carries no usable time keep their original relative
+        order and are placed after the timed ones, so a missing timestamp never
+        scrambles the rest.
+        """
+        timed: list[tuple[datetime, int, Any]] = []
+        untimed: list[Any] = []
+        for index, frame in enumerate(frames):
+            when = None
+            try:
+                when = frame_observation_time(frame)
+            except Exception:
+                when = None
+            if when is not None:
+                timed.append((when, index, frame))
+            else:
+                untimed.append(frame)
+        timed.sort(key=lambda item: (item[0], item[1]))
+        return [frame for _, _, frame in timed] + untimed
 
     def _apply_loaded_frames(self, frames: list[Any], *, paths: list[str], metadata: dict[str, Any]):
         if not frames:
             QMessageBox.information(self, "SDO Data Analysis", "No AIA map frames were loaded.")
             return
+        # Order frames chronologically so the time-lapse / movie plays in
+        # observation order regardless of how the files were uploaded or the
+        # order downloads completed.
+        frames = self._sort_frames_by_time(list(frames))
         self._loaded_paths = list(paths or [])
         self._original_frames = list(frames)
         self._map_frames = list(frames)
@@ -2247,6 +2460,13 @@ class SolarDataAnalysisWindow(QMainWindow):
         return text or self._default_aia_colormap_name()
 
     def _on_query_wavelength_changed(self, _index: int) -> None:
+        # High-resolution VSO and the AIA composite only apply to AIA; gray them
+        # out for HMI observables.
+        is_aia = self._current_observable()[0] == "AIA"
+        if hasattr(self, "high_resolution_check"):
+            self.high_resolution_check.setEnabled(is_aia and not self._busy)
+            if not is_aia:
+                self.high_resolution_check.setChecked(False)
         if self._map_frames:
             return
         self._select_default_colormap_for_wavelength()
@@ -2263,13 +2483,39 @@ class SolarDataAnalysisWindow(QMainWindow):
         for canvas in self._all_plot_canvases():
             canvas.set_colormap_name(name)
 
+    def _frame_hmi_product(self, frame: Any | None = None) -> str | None:
+        """If the frame (or the selected observable) is HMI, return its product."""
+        source = frame
+        if source is None and self._map_frames:
+            source = self._map_frames[max(0, min(self._current_frame_index, len(self._map_frames) - 1))]
+        if source is not None:
+            instrument = str(getattr(source, "instrument", "") or "").upper()
+            meta = getattr(source, "meta", {}) or {}
+            content = str((meta.get("content") if isinstance(meta, dict) else "") or "").strip().lower()
+            if content in HMI_PRODUCT_CONTENT:
+                return HMI_PRODUCT_CONTENT[content]
+            if "HMI" in instrument:
+                return "magnetogram"
+            if source is not None and frame is not None:
+                return None
+        if frame is None:
+            instrument, value = self._current_observable()
+            if instrument == "HMI":
+                return str(value)
+        return None
+
     def _default_aia_colormap_name(self, frame: Any | None = None) -> str:
+        product = self._frame_hmi_product(frame)
+        if product is not None:
+            return HMI_COLORMAPS.get(product, "gray")
         wavelength = self._frame_wavelength_value(frame)
         if wavelength is None:
-            try:
-                wavelength = float(self.wavelength_combo.currentData())
-            except Exception:
-                wavelength = None
+            instrument, value = self._current_observable()
+            if instrument == "AIA":
+                try:
+                    wavelength = float(value)
+                except Exception:
+                    wavelength = None
         if wavelength is None:
             return "sdoaia193"
         rounded = int(round(float(wavelength)))
@@ -2512,6 +2758,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._current_map_data = None
         self._current_axis_transform = self._default_axis_transform()
         self._save_target_dir = None
+        self._overlay_magnetogram = None
         self.results_table.setRowCount(0)
         self.region_table.setRowCount(0)
         self.archive_results_status_label.setText("Run Fetch to list matching SDO/AIA files.")
@@ -2662,19 +2909,59 @@ class SolarDataAnalysisWindow(QMainWindow):
                     return float(radius)
         return 960.0
 
-    def show_composite_plot(self):
-        if not self._map_frames:
+    def load_magnetogram_overlay(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Load HMI Magnetogram (overlay)",
+            "",
+            "FITS files (*.fit *.fits *.fit.gz *.fits.gz)",
+        )
+        if not paths:
             return
         try:
-            composite = make_composite(self._map_frames, AiaCompositeSpec(frame_indexes=(0, 1, 2)))
+            frame_set = load_aia_maps_streaming([paths[0]])
+            self._overlay_magnetogram = frame_set.maps[0]
+        except Exception as exc:
+            QMessageBox.critical(self, "Magnetogram Overlay", str(exc))
+            return
+        self.statusBar().showMessage(
+            f"Magnetogram overlay loaded: {Path(paths[0]).name}. Click Composite to apply.", 6000
+        )
+        if self._map_frames:
+            self.show_composite_plot()
+
+    def show_composite_plot(self):
+        if not self._map_frames:
+            QMessageBox.information(self, "Composite", "Load or upload AIA frames first.")
+            return
+        try:
+            if self._overlay_magnetogram is not None:
+                base = self._map_frames[max(0, min(self._current_frame_index, len(self._map_frames) - 1))]
+                composite = make_magnetogram_composite(
+                    base,
+                    self._overlay_magnetogram,
+                    base_colormap=self._resolved_colormap_name(),
+                    base_scale=self.scale_combo.currentText(),
+                    base_percentile_low=float(self.clip_low_slider.value()),
+                    base_percentile_high=float(self.clip_high_slider.value()),
+                    threshold_gauss=float(self.mag_threshold_spin.value()),
+                )
+                note = (
+                    "Composited the current AIA frame with HMI magnetogram polarity contours "
+                    f"(red = +, blue = −, ±{int(self.mag_threshold_spin.value())} G)."
+                )
+            else:
+                composite = make_composite(self._map_frames, AiaCompositeSpec(frame_indexes=(0, 1, 2)))
+                note = "Rendered an RGB AIA composite from the first three loaded frames."
             self._map_frames = [composite]
             self._current_frame_index = 0
             self.frame_slider.blockSignals(True)
             self.frame_slider.setRange(0, 0)
             self.frame_slider.setValue(0)
             self.frame_slider.blockSignals(False)
+            self._reset_canvas_views()
             self._render_current_frame()
-            self.analysis_text.setPlainText("Rendered an RGB AIA composite from the first three loaded frames.")
+            self.analysis_text.setPlainText(note)
         except Exception as exc:
             QMessageBox.critical(self, "Composite Plot", str(exc))
 
@@ -2771,52 +3058,62 @@ class SolarDataAnalysisWindow(QMainWindow):
     def export_movie(self, *, default_suffix: str | None = None):
         if not self._map_frames:
             return
+        if self.is_operation_running():
+            QMessageBox.information(self, "Export Movie", "Another operation is still running.")
+            return
         suffix = default_suffix or (".gif" if self.movie_format_combo.currentText().upper() == "GIF" else ".mp4")
         default_name = f"aia_movie{suffix}"
         path, _ = pick_export_path(self, "Export AIA Movie", default_name, "MP4 (*.mp4);;GIF (*.gif)")
         if not path:
             return
 
+        # Resolve the MP4/ffmpeg question up front (on the UI thread) so the
+        # background worker never has to pop a dialog mid-render.
+        if path.lower().endswith(".mp4") and not _imageio_ffmpeg_available():
+            reply = QMessageBox.question(
+                self,
+                "Export Movie",
+                "MP4 export needs the 'imageio-ffmpeg' package, which isn't available.\n\n"
+                "Export an animated GIF instead?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply != QMessageBox.Yes:
+                return
+            path = str(Path(path).with_suffix(".gif"))
+
         crop_bounds = None
         if self.crop_check.isChecked() and self._current_map_data is not None:
             crop_bounds = self._crop_bounds_from_axis_fields(self._current_map_data.shape)
 
-        def _spec(out_path: str) -> AiaMovieExportSpec:
-            return AiaMovieExportSpec(
-                path=out_path,
-                fps=float(self.fps_spin.value()),
-                mode=self._movie_mode(),
-                crop_bounds=crop_bounds,
-                percentile_low=float(self.clip_low_slider.value()),
-                percentile_high=float(self.clip_high_slider.value()),
-                colormap_name=self._resolved_colormap_name(),
-                scale=self.scale_combo.currentText(),
-            )
+        spec = AiaMovieExportSpec(
+            path=path,
+            fps=float(self.fps_spin.value()),
+            mode=self._movie_mode(),
+            crop_bounds=crop_bounds,
+            percentile_low=float(self.clip_low_slider.value()),
+            percentile_high=float(self.clip_high_slider.value()),
+            colormap_name=self._resolved_colormap_name(),
+            scale=self.scale_combo.currentText(),
+        )
+        self._set_busy(True, f"Exporting movie ({len(self._map_frames)} frame(s))…")
+        self.progress_panel.set_status_text("Preparing export…")
+        self._start_worker(MovieExportWorker(self._map_frames, spec))
 
-        try:
-            export_movie(self._map_frames, _spec(path))
-            self.statusBar().showMessage(f"Movie saved: {path}", 5000)
-        except Exception as exc:
-            # MP4 needs imageio-ffmpeg; if it is missing, offer a GIF instead
-            # rather than failing outright.
-            if path.lower().endswith(".mp4") and "imageio-ffmpeg" in str(exc).lower():
-                reply = QMessageBox.question(
-                    self,
-                    "Export Movie",
-                    "MP4 export needs the 'imageio-ffmpeg' package, which isn't available.\n\n"
-                    "Export an animated GIF instead?",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.Yes,
-                )
-                if reply == QMessageBox.Yes:
-                    gif_path = str(Path(path).with_suffix(".gif"))
-                    try:
-                        export_movie(self._map_frames, _spec(gif_path))
-                        self.statusBar().showMessage(f"Movie saved as GIF: {gif_path}", 6000)
-                    except Exception as gif_exc:
-                        QMessageBox.critical(self, "Export Movie", str(gif_exc))
-                return
-            QMessageBox.critical(self, "Export Movie", str(exc))
+    @Slot(int, int)
+    def _on_export_progress(self, done: int, total: int):
+        total = max(1, int(total))
+        pct = int(max(0, min(100, int(done) * 100 / total)))
+        if self.progress.maximum() <= 0:
+            self.progress.setRange(0, 100)
+        self.progress.setValue(pct)
+        self.progress_panel.set_status_text(f"Rendering frame {int(done)} of {total}  ·  {pct}%")
+        self.statusBar().showMessage(f"Exporting movie: frame {int(done)}/{total}", 2000)
+
+    @Slot(str)
+    def _on_export_finished(self, out_path: str):
+        self.statusBar().showMessage(f"Movie saved: {out_path}", 6000)
+        self.analysis_text.setPlainText(f"Movie exported to:\n{out_path}")
 
     def stop_active_operation(self):
         worker = self._active_worker

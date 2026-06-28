@@ -1274,6 +1274,58 @@ def test_fetch_via_jsoc_orchestrates_export_and_download(tmp_path: Path):
     assert coarse and "JSOC" in coarse[-1][1]
 
 
+def test_fetch_via_jsoc_builds_hmi_recordset(tmp_path: Path):
+    rows = [
+        sa.SunPySearchRow(
+            start=datetime(2024, 5, 14, 16, 0, 0),
+            end=datetime(2024, 5, 14, 16, 12, 0),
+            source="SDO",
+            instrument="HMI",
+            provider="JSOC",
+            fileid="m1.fits",
+            size="3 MB",
+        )
+    ]
+    spec = sa.SunPyQuerySpec(
+        start_dt=datetime(2024, 5, 14, 16, 0, 0),
+        end_dt=datetime(2024, 5, 14, 17, 0, 0),
+        spacecraft="SDO",
+        instrument="HMI",
+        product="magnetogram",
+        sample_seconds=720,
+    )
+    search_result = sa.SunPySearchResult(
+        spec=spec, data_kind=sa.DATA_KIND_MAP, rows=rows,
+        raw_response=[[{"fileid": "m1.fits"}]], row_index_map=[(0, 0)],
+    )
+
+    class _FakeReq:
+        urls = [{"record": "hmi.M_720s[2024-05-14T16:00:00Z]", "filename": "magnetogram.fits",
+                 "url": "http://jsoc/m.fits"}]
+
+    class _FakeJsoc:
+        def __init__(self):
+            self.recordsets = []
+
+        def export(self, recordset, method=None, protocol=None, email=None, process=None):
+            self.recordsets.append(recordset)
+            return _FakeReq()
+
+    class _FakeDM:
+        def download(self, items, progress_cb=None, cancel_cb=None):
+            from src.Backend.download_manager import DownloadResult
+
+            return DownloadResult(paths=[str(it.dest) for it in items], errors=[], cached_count=0)
+
+    jsoc = _FakeJsoc()
+    out = sa.fetch_via_jsoc(
+        search_result, tmp_path, selected_rows=[0], email="sci@example.org",
+        jsoc_client=jsoc, download_manager=_FakeDM(),
+    )
+    assert out.requested_count == 1
+    assert jsoc.recordsets and jsoc.recordsets[0].startswith("hmi.M_720s[")
+
+
 def test_fetch_via_jsoc_gives_unique_filenames_when_jsoc_repeats_one(tmp_path: Path):
     # Regression: JSOC returns the SAME segment filename for every record, which
     # used to make all downloads collide on one path (only one file saved).

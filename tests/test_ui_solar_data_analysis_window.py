@@ -29,6 +29,16 @@ def _app():
     return QApplication.instance() or QApplication([])
 
 
+def _wait_for_worker(win, timeout_ms: int = 5000):
+    """Block until a background worker thread finishes and its queued
+    completion signals have been delivered on the main thread."""
+    thread = getattr(win, "_active_thread", None)
+    if thread is not None:
+        thread.wait(timeout_ms)
+    QApplication.processEvents()
+    QApplication.processEvents()
+
+
 class FakeMap:
     observatory = "SDO"
     instrument = "AIA"
@@ -564,17 +574,22 @@ def test_solar_data_stop_active_operation_calls_worker_cancel(monkeypatch):
 def test_solar_data_window_loads_local_fake_maps(monkeypatch):
     _app()
 
-    def fake_load(paths):
+    progress = []
+
+    def fake_load(paths, *, progress_cb=None, cancel_cb=None):
+        if progress_cb is not None:
+            for i in range(len(paths)):
+                progress_cb(i + 1, len(paths))
         return AiaFrameSet(
             paths=list(paths),
             maps=[FakeMap(np.ones((8, 8))), FakeMap(np.full((8, 8), 3.0))],
             metadata={"n_frames": 2, "instrument": "AIA"},
         )
 
-    monkeypatch.setattr(solar_mod, "load_aia_maps", fake_load)
+    monkeypatch.setattr(solar_mod, "load_aia_maps_streaming", fake_load)
     win = SolarDataAnalysisWindow()
     win.load_local_paths(["a.fits", "b.fits"])
-    QApplication.processEvents()
+    _wait_for_worker(win)
 
     assert len(win._map_frames) == 2
     assert not hasattr(win, "_plot_window")
@@ -613,18 +628,18 @@ def test_solar_data_window_loads_local_fake_maps(monkeypatch):
 def test_solar_data_window_matplotlib_renderer_is_light_and_square(monkeypatch):
     _app()
 
-    def fake_load(paths):
+    def fake_load(paths, *, progress_cb=None, cancel_cb=None):
         data = np.zeros((12, 12), dtype=float)
         data[4:8, 4:8] = 50.0
         return AiaFrameSet(paths=list(paths), maps=[FakeMap(data)], metadata={"n_frames": 1, "instrument": "AIA"})
 
-    monkeypatch.setattr(solar_mod, "load_aia_maps", fake_load)
+    monkeypatch.setattr(solar_mod, "load_aia_maps_streaming", fake_load)
     win = SolarDataAnalysisWindow()
     win.show()
     win.resize(1500, 900)
     win.renderer_combo.setCurrentText("Matplotlib")
     win.load_local_paths(["a.fits"])
-    QApplication.processEvents()
+    _wait_for_worker(win)
 
     canvas = win._active_canvas()
     assert canvas.backend_name() == "matplotlib"
@@ -878,6 +893,155 @@ def test_solar_data_window_reset_all_declined_keeps_state(monkeypatch, tmp_path)
 
     assert win._map_frames != []                 # nothing cleared
     assert (tmp_path / "keep.fits").exists()      # cache untouched
+    win.close()
+
+
+def test_solar_data_window_query_spec_hmi_observable():
+    _app()
+    win = SolarDataAnalysisWindow()
+    idx = win.wavelength_combo.findText("HMI Magnetogram")
+    assert idx >= 0
+    win.wavelength_combo.setCurrentIndex(idx)
+    spec = win._build_query_spec()
+    assert spec.instrument == "HMI"
+    assert spec.product == "magnetogram"
+    assert spec.wavelength_angstrom is None
+    # HMI default colormap is the bipolar magnetogram map.
+    assert win._default_aia_colormap_name() == "hmimag"
+    win.close()
+
+
+def test_solar_data_window_query_spec_aia_observable():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win.wavelength_combo.setCurrentText("AIA 304 A")
+    spec = win._build_query_spec()
+    assert spec.instrument == "AIA"
+    assert spec.wavelength_angstrom == 304.0
+    assert spec.product is None
+    win.close()
+
+
+def test_solar_data_window_composite_uses_magnetogram_overlay(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames([FakeMap(np.random.rand(16, 16) * 100.0)], paths=["a.fits"], metadata={})
+    QApplication.processEvents()
+
+    mag = np.zeros((16, 16), dtype=float)
+    mag[2:6, 2:6] = 400.0
+    mag[10:14, 10:14] = -400.0
+    win._overlay_magnetogram = FakeMap(mag)
+    win.show_composite_plot()
+    QApplication.processEvents()
+
+    # Composite frame is RGB with polarity contours overlaid.
+    frame = win._map_frames[0]
+    assert frame.data.ndim == 3 and frame.data.shape[-1] == 3
+    assert "magnetogram" in win.analysis_text.toPlainText().lower()
+    win.close()
+
+
+def test_solar_data_window_sorts_uploaded_frames_by_time(monkeypatch):
+    _app()
+
+    def _frame(value, date):
+        f = FakeMap(np.full((6, 6), float(value)))
+        f.date = date
+        return f
+
+    # Provided out of chronological order (values tag the intended time order).
+    shuffled = [
+        _frame(3, "2026-02-10T01:04:00"),
+        _frame(1, "2026-02-10T01:00:00"),
+        _frame(4, "2026-02-10T01:06:00"),
+        _frame(2, "2026-02-10T01:02:00"),
+    ]
+
+    def fake_load(paths, *, progress_cb=None, cancel_cb=None):
+        return AiaFrameSet(paths=list(paths), maps=shuffled, metadata={"n_frames": 4, "instrument": "AIA"})
+
+    monkeypatch.setattr(solar_mod, "load_aia_maps_streaming", fake_load)
+    win = SolarDataAnalysisWindow()
+    win.load_local_paths(["c.fits", "a.fits", "d.fits", "b.fits"])
+    _wait_for_worker(win)
+
+    values = [float(f.data[0, 0]) for f in win._map_frames]
+    assert values == [1.0, 2.0, 3.0, 4.0]   # chronological, not upload order
+    assert [float(f.data[0, 0]) for f in win._original_frames] == [1.0, 2.0, 3.0, 4.0]
+    win.close()
+
+
+def test_solar_data_window_sort_keeps_untimed_frames_last():
+    _app()
+    win = SolarDataAnalysisWindow()
+
+    def _frame(value, date=None):
+        f = FakeMap(np.full((4, 4), float(value)))
+        f.date = date  # None -> no observation time
+        return f
+
+    frames = [_frame(9, None), _frame(2, "2026-02-10T01:02:00"), _frame(1, "2026-02-10T01:00:00")]
+    ordered = win._sort_frames_by_time(frames)
+    vals = [float(f.data[0, 0]) for f in ordered]
+    assert vals == [1.0, 2.0, 9.0]   # timed sorted first, untimed kept at the end
+    win.close()
+
+
+def test_solar_data_window_export_movie_runs_in_background(monkeypatch, tmp_path):
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames(
+        [FakeMap(np.ones((8, 8))), FakeMap(np.full((8, 8), 2.0))], paths=["a.fits"], metadata={}
+    )
+    QApplication.processEvents()
+
+    out = str(tmp_path / "m.mp4")
+    monkeypatch.setattr(solar_mod, "pick_export_path", lambda *a, **k: (out, ""))
+    monkeypatch.setattr(solar_mod, "_imageio_ffmpeg_available", lambda: True)
+    captured = {}
+    monkeypatch.setattr(win, "_start_worker", lambda w: captured.__setitem__("worker", w))
+
+    win.scale_combo.setCurrentText("log")
+    win.export_movie()
+
+    worker = captured.get("worker")
+    assert isinstance(worker, solar_mod.MovieExportWorker)   # not blocking on the UI thread
+    assert worker._spec.path == out
+    assert worker._spec.scale == "log"
+    assert worker._spec.percentile_low == win.clip_low_slider.value()
+    win.close()
+
+
+def test_solar_data_window_export_movie_offers_gif_without_ffmpeg(monkeypatch, tmp_path):
+    _app()
+    from PySide6.QtWidgets import QMessageBox
+
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames([FakeMap(np.ones((8, 8)))], paths=["a.fits"], metadata={})
+    QApplication.processEvents()
+
+    monkeypatch.setattr(solar_mod, "pick_export_path", lambda *a, **k: (str(tmp_path / "m.mp4"), ""))
+    monkeypatch.setattr(solar_mod, "_imageio_ffmpeg_available", lambda: False)
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    captured = {}
+    monkeypatch.setattr(win, "_start_worker", lambda w: captured.__setitem__("worker", w))
+
+    win.export_movie()
+
+    worker = captured.get("worker")
+    assert worker is not None
+    assert worker._spec.path.endswith(".gif")   # fell back to GIF
+    win.close()
+
+
+def test_solar_data_window_export_progress_updates_bar():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._set_busy(True, "Exporting")
+    win._on_export_progress(3, 12)
+    assert win.progress.value() == 25                       # 3/12
+    assert "3 of 12" in win.progress_panel.stats_label.text()
     win.close()
 
 

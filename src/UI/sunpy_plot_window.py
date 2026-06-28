@@ -60,6 +60,23 @@ def _safe_text(value: Any) -> str:
         return repr(value)
 
 
+def _opengl_capable() -> bool:
+    """True if the platform can actually create an OpenGL context.
+
+    Lets hardware acceleration default ON but fall back to software rendering on
+    machines/drivers where GL can't initialise (the cause of the
+    'QOpenGLWidget is not supported on this platform' warning), instead of
+    enabling it blindly and risking a crash.
+    """
+    try:
+        from PySide6.QtGui import QOpenGLContext
+
+        ctx = QOpenGLContext()
+        return bool(ctx.create())
+    except Exception:
+        return False
+
+
 def _configure_pyqtgraph_once():
     raw = str(os.environ.get("ECALLISTO_SUNPY_OPENGL", "") or "").strip().lower()
     in_pytest = bool(os.environ.get("PYTEST_CURRENT_TEST")) or ("pytest" in sys.modules)
@@ -68,8 +85,9 @@ def _configure_pyqtgraph_once():
     elif raw in {"0", "false", "no", "off"}:
         desired_use_gl = False
     else:
-        # Avoid known crashes in headless/pytest contexts; default to OpenGL in app runs.
-        desired_use_gl = not in_pytest
+        # Hardware-accelerate by default in app runs, but only if the platform
+        # can actually create a GL context (auto-fallback). Off under pytest.
+        desired_use_gl = (not in_pytest) and _opengl_capable()
 
     if getattr(_configure_pyqtgraph_once, "_configured", False):
         try:
@@ -165,6 +183,12 @@ class SunPyPlotCanvas(QWidget):
         map_bottom_axis.setHeight(42)
 
         self.map_image = pg.ImageItem(axisOrder="row-major")
+        # Downsample full-resolution (4096²) frames to the viewport before
+        # drawing — a large smoothness win when panning/zooming big images.
+        try:
+            self.map_image.setAutoDownsample(True)
+        except Exception:
+            pass
         self.map_plot.addItem(self.map_image)
         self._base_map_colormap = pg.colormap.get("inferno", source="matplotlib")
         self._base_map_lut = self._base_map_colormap.getLookupTable(nPts=256)

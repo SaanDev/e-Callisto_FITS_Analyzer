@@ -131,6 +131,7 @@ class SunPyQuerySpec:
     sample_seconds: float | None = None
     resolution: float | str | None = None
     max_records: int = 200
+    product: str | None = None  # HMI observable: magnetogram/continuum/dopplergram
 
 
 @dataclass(frozen=True)
@@ -187,6 +188,9 @@ class InstrumentRegistryEntry:
     default_detector: str | None
     default_satellite: int | None
     wavelengths: tuple[float, ...]
+    supports_product: bool = False
+    products: tuple[str, ...] = ()
+    default_product: str | None = None
 
 
 @dataclass(frozen=True)
@@ -214,6 +218,24 @@ INSTRUMENT_REGISTRY: tuple[InstrumentRegistryEntry, ...] = (
         default_detector=None,
         default_satellite=None,
         wavelengths=(94.0, 131.0, 171.0, 193.0, 211.0, 304.0, 335.0, 1600.0, 1700.0),
+    ),
+    InstrumentRegistryEntry(
+        key="sdo_hmi",
+        label="SDO/HMI",
+        spacecraft="SDO",
+        instrument="HMI",
+        detector=None,
+        data_kind=DATA_KIND_MAP,
+        supports_wavelength=False,
+        supports_detector=False,
+        supports_satellite=False,
+        default_wavelength=None,
+        default_detector=None,
+        default_satellite=None,
+        wavelengths=(),
+        supports_product=True,
+        products=("magnetogram", "continuum", "dopplergram"),
+        default_product="magnetogram",
     ),
     InstrumentRegistryEntry(
         key="soho_lasco_c2",
@@ -371,6 +393,18 @@ def build_attrs(
     wavelength = spec.wavelength_angstrom or entry.default_wavelength
     if wavelength is not None and entry.supports_wavelength:
         out.append(attrs_module.Wavelength(float(wavelength) * units_module.angstrom))
+
+    # HMI observables (magnetogram / continuum / dopplergram) are selected via
+    # VSO Physobs rather than a wavelength.
+    if entry.supports_product:
+        product = (spec.product or entry.default_product or "").strip().lower()
+        if product and hasattr(attrs_module, "Physobs"):
+            try:
+                from src.Backend.jsoc_client import hmi_physobs
+
+                out.append(attrs_module.Physobs(hmi_physobs(product)))
+            except Exception:
+                pass
 
     if spec.sample_seconds and float(spec.sample_seconds) > 0 and hasattr(attrs_module, "Sample"):
         out.append(attrs_module.Sample(float(spec.sample_seconds) * units_module.second))
@@ -616,18 +650,29 @@ def fetch_via_jsoc(
     if end <= start:
         end = start + _min_window_delta()
 
-    wavelength = spec.wavelength_angstrom or 193.0
     cadence = cadence_seconds if cadence_seconds is not None else spec.sample_seconds
+    is_hmi = str(getattr(spec, "instrument", "") or "").upper() == "HMI"
 
-    export = export_urls(
-        start=start,
-        end=end,
-        wavelength_angstrom=wavelength,
-        email=str(email),
-        cadence_seconds=cadence,
-        process=process,
-        client=jsoc_client,
-    )
+    if is_hmi:
+        export = export_urls(
+            start=start,
+            end=end,
+            product=str(spec.product or "magnetogram"),
+            email=str(email),
+            cadence_seconds=cadence,
+            process=process,
+            client=jsoc_client,
+        )
+    else:
+        export = export_urls(
+            start=start,
+            end=end,
+            wavelength_angstrom=(spec.wavelength_angstrom or 193.0),
+            email=str(email),
+            cadence_seconds=cadence,
+            process=process,
+            client=jsoc_client,
+        )
 
     cache_root = Path(cache_dir).expanduser().resolve()
     cache_root.mkdir(parents=True, exist_ok=True)
@@ -785,6 +830,7 @@ def normalize_query_spec(spec: SunPyQuerySpec) -> SunPyQuerySpec:
         sample_seconds=(float(spec.sample_seconds) if spec.sample_seconds is not None else None),
         resolution=_normalize_resolution_value(spec.resolution),
         max_records=max(1, int(spec.max_records or 1)),
+        product=(str(spec.product).strip().lower() if spec.product else None),
     )
 
 
