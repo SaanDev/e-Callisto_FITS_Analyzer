@@ -729,6 +729,60 @@ def test_solar_data_window_applies_axis_coordinate_crop():
     win.close()
 
 
+def test_solar_data_window_crops_from_coordinates_without_checkbox():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames([FakeMap(np.arange(100, dtype=float).reshape(10, 10))], paths=["a.fits"], metadata={})
+    QApplication.processEvents()
+
+    # The "Rectangle crop" checkbox is OFF; typing bounds + Apply must still work.
+    assert win.crop_check.isChecked() is False
+    win.crop_x0_spin.setValue(-2.0)
+    win.crop_x1_spin.setValue(2.0)
+    win.crop_y0_spin.setValue(-2.0)
+    win.crop_y1_spin.setValue(2.0)
+    win.apply_axis_crop()
+    QApplication.processEvents()
+
+    assert win._map_frames[0].data.shape == (5, 5)
+    win.close()
+
+
+def test_solar_data_window_apply_crop_without_frames_informs(monkeypatch):
+    _app()
+    from PySide6.QtWidgets import QMessageBox
+
+    win = SolarDataAnalysisWindow()
+    info = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: info.append(a))
+    win.apply_axis_crop()  # no frames loaded
+    assert info  # informed, no crash, no "enable checkbox" message
+    win.close()
+
+
+def test_solar_data_window_clip_sliders_drive_live_render(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames([FakeMap(np.arange(100, dtype=float).reshape(10, 10))], paths=["a.fits"], metadata={})
+    QApplication.processEvents()
+
+    # Slider values are exposed as float percent, like the old spin boxes.
+    assert win.clip_low_slider.value() == 1.0
+    assert win.clip_high_slider.value() == 99.9
+    win.clip_low_slider.setValue(5.0)
+    assert win.clip_low_slider.value() == 5.0
+    assert "5.0%" in win.clip_low_slider.readout.text()
+
+    # Dragging (moving the underlying QSlider) schedules a throttled live render.
+    renders = {"n": 0}
+    monkeypatch.setattr(win, "_render_current_frame", lambda: renders.__setitem__("n", renders["n"] + 1))
+    win.clip_high_slider.slider.setValue(950)  # 95.0% drag -> valueChanged -> _schedule_clip_render
+    QApplication.processEvents()
+    assert renders["n"] >= 1  # rendered immediately on the leading edge
+    assert win.clip_high_slider.value() == 95.0
+    win.close()
+
+
 def test_solar_data_window_uses_fits_wcs_for_crop_coordinates():
     _app()
     win = SolarDataAnalysisWindow()
@@ -753,6 +807,30 @@ def test_solar_data_window_uses_fits_wcs_for_crop_coordinates():
     assert win._current_axis_transform["x_ref_pix"] == 2.5
     assert win._current_axis_transform["y_ref_pix"] == 2.5
     assert win.canvas.map_view_rect()[2] == 10.0
+    win.close()
+
+
+def test_solar_data_window_cropped_image_fills_view():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames([FakeWcsMap(np.arange(100, dtype=float).reshape(10, 10))], paths=["a.fits"], metadata={})
+    QApplication.processEvents()
+
+    win.crop_x0_spin.setValue(-4.0)
+    win.crop_x1_spin.setValue(4.0)
+    win.crop_y0_spin.setValue(-4.0)
+    win.crop_y1_spin.setValue(4.0)
+    win.apply_axis_crop()
+    QApplication.processEvents()
+
+    # Regression: the cropped image used to be scaled by the *previous* frame's
+    # pixel size (setRect before setImage) and shrink into the bottom-left
+    # corner. The image extent must now match the zoomed view exactly.
+    img = win.pyqt_canvas.map_image
+    irect = img.mapRectToView(img.boundingRect()).getRect()
+    vrect = win.pyqt_canvas.map_view_rect()
+    assert abs(irect[2] - vrect[2]) < 1e-6  # width fills the view
+    assert abs(irect[3] - vrect[3]) < 1e-6  # height fills the view
     win.close()
 
 

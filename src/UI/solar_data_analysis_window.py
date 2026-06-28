@@ -189,6 +189,12 @@ class SolarMatplotlibCanvas(QWidget):
     def has_visible_colorbar(self) -> bool:
         return self._colorbar_artist is not None
 
+    def reset_map_view(self) -> None:
+        # Matplotlib re-applies set_xlim/set_ylim to the data extent on every
+        # render, so the axes always match the current (cropped) range. Provided
+        # for interface parity with the PyQtGraph canvas.
+        return None
+
     def set_grid_visible(self, visible: bool) -> None:
         if getattr(self, "ax", None) is not None:
             self.ax.grid(bool(visible), color="#7f8fa3" if self._is_dark_ui() else "#b8c4d2", alpha=0.25)
@@ -419,6 +425,51 @@ class SolarMatplotlibCanvas(QWidget):
         }
 
 
+class PercentSlider(QWidget):
+    """Horizontal slider for a 0–100% value with a live readout.
+
+    A drop-in for the clip-percentile spin boxes: it exposes ``value()`` /
+    ``setValue()`` in float percent and a ``valueChanged(float)`` signal, with
+    0.1% resolution so image contrast can be tuned smoothly by dragging.
+    """
+
+    valueChanged = Signal(float)
+
+    def __init__(self, value: float, *, minimum: float = 0.0, maximum: float = 100.0, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        self.slider = QSlider(Qt.Horizontal, self)
+        self.slider.setRange(int(round(minimum * 10)), int(round(maximum * 10)))
+        self.slider.setSingleStep(1)   # 0.1%
+        self.slider.setPageStep(10)    # 1%
+        self.readout = QLabel(self)
+        self.readout.setMinimumWidth(46)
+        self.readout.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        layout.addWidget(self.slider, 1)
+        layout.addWidget(self.readout, 0)
+        self.slider.valueChanged.connect(self._on_slider_changed)
+        self.setValue(value)
+
+    def _on_slider_changed(self, raw: int) -> None:
+        val = raw / 10.0
+        self.readout.setText(f"{val:.1f}%")
+        self.valueChanged.emit(val)
+
+    def value(self) -> float:
+        return self.slider.value() / 10.0
+
+    def setValue(self, value: float) -> None:
+        blocked = self.slider.blockSignals(True)
+        self.slider.setValue(int(round(float(value) * 10)))
+        self.slider.blockSignals(blocked)
+        self.readout.setText(f"{self.value():.1f}%")
+
+    def setRange(self, minimum: float, maximum: float) -> None:
+        self.slider.setRange(int(round(minimum * 10)), int(round(maximum * 10)))
+
+
 class RegionLightcurveDialog(QDialog):
     """Plots an AIA region light curve (DN/s vs time) with optional radio overlay.
 
@@ -520,6 +571,12 @@ class SolarDataAnalysisWindow(QMainWindow):
 
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self.next_frame)
+
+        # Throttle live clip-slider re-renders to ~30 fps so dragging stays smooth.
+        self._clip_render_pending = False
+        self._clip_render_timer = QTimer(self)
+        self._clip_render_timer.setInterval(33)
+        self._clip_render_timer.timeout.connect(self._flush_clip_render)
 
         self._build_ui()
         self._build_menu_bar()
@@ -1099,22 +1156,22 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.renderer_combo.addItems(["PyQtGraph", "Matplotlib"])
         self.scale_combo = QComboBox()
         self.scale_combo.addItems(["linear", "log"])
-        self.clip_low_spin = QDoubleSpinBox()
-        self.clip_low_spin.setRange(0.0, 99.0)
-        self.clip_low_spin.setDecimals(1)
-        self.clip_low_spin.setValue(1.0)
-        self.clip_high_spin = QDoubleSpinBox()
-        self.clip_high_spin.setRange(1.0, 100.0)
-        self.clip_high_spin.setDecimals(1)
-        self.clip_high_spin.setValue(99.9)
+        self.clip_low_slider = PercentSlider(1.0, minimum=0.0, maximum=99.0)
+        self.clip_low_slider.setToolTip("Lower percentile clip for image contrast. Drag for a live preview.")
+        self.clip_high_slider = PercentSlider(99.9, minimum=1.0, maximum=100.0)
+        self.clip_high_slider.setToolTip("Upper percentile clip for image contrast. Drag for a live preview.")
 
         self.crop_check = QCheckBox("Rectangle crop")
-        self.crop_check.setToolTip("Drag the rectangle on the PyQtGraph image or edit the X/Y arcsec bounds.")
+        self.crop_check.setToolTip(
+            "Optional: show a draggable rectangle on the PyQtGraph image that fills in the\n"
+            "X/Y arcsec boxes for you. You can also just type the bounds and click Apply Crop."
+        )
         self.crop_x0_spin = self._make_arcsec_spin(-1100.0)
         self.crop_x1_spin = self._make_arcsec_spin(1100.0)
         self.crop_y0_spin = self._make_arcsec_spin(-1100.0)
         self.crop_y1_spin = self._make_arcsec_spin(1100.0)
         self.apply_crop_btn = QPushButton("Apply Crop")
+        self.apply_crop_btn.setToolTip("Crop all loaded frames to the X/Y arcsec bounds above.")
         self.export_crop_btn = QPushButton("Export Cropped FITS")
 
         self.solar_limb_check = QCheckBox("Solar Limb")
@@ -1135,9 +1192,9 @@ class SolarDataAnalysisWindow(QMainWindow):
         layout.addWidget(QLabel("Scale"), 2, 0)
         layout.addWidget(self.scale_combo, 2, 1)
         layout.addWidget(QLabel("Clip low %"), 3, 0)
-        layout.addWidget(self.clip_low_spin, 3, 1)
+        layout.addWidget(self.clip_low_slider, 3, 1)
         layout.addWidget(QLabel("Clip high %"), 4, 0)
-        layout.addWidget(self.clip_high_spin, 4, 1)
+        layout.addWidget(self.clip_high_slider, 4, 1)
         layout.addWidget(self.crop_check, 5, 0, 1, 2)
         layout.addWidget(QLabel("X min / max"), 6, 0)
         layout.addWidget(self._two_widgets(self.crop_x0_spin, self.crop_x1_spin), 6, 1)
@@ -1226,8 +1283,8 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.renderer_combo.currentTextChanged.connect(self._on_renderer_changed)
         self.colormap_combo.currentTextChanged.connect(self._on_colormap_changed)
         self.scale_combo.currentTextChanged.connect(lambda _text: self._render_current_frame())
-        self.clip_low_spin.valueChanged.connect(lambda _v: self._render_current_frame())
-        self.clip_high_spin.valueChanged.connect(lambda _v: self._render_current_frame())
+        self.clip_low_slider.valueChanged.connect(lambda _v: self._schedule_clip_render())
+        self.clip_high_slider.valueChanged.connect(lambda _v: self._schedule_clip_render())
         self.crop_check.toggled.connect(self._on_crop_toggled)
         self.apply_crop_btn.clicked.connect(self.apply_axis_crop)
         self.solar_limb_check.toggled.connect(lambda _checked: self._render_current_frame())
@@ -2033,6 +2090,26 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.frame_slider.blockSignals(False)
         self._render_current_frame()
 
+    def _schedule_clip_render(self) -> None:
+        """Throttle live clip-slider re-renders (leading edge + ~30 fps).
+
+        Renders immediately on the first change, then at most once per ~33 ms
+        while the handle keeps moving, with a final render after the last
+        change. Keeps dragging smooth without re-rendering on every 0.1% tick.
+        """
+        if self._clip_render_timer.isActive():
+            self._clip_render_pending = True
+            return
+        self._render_current_frame()
+        self._clip_render_timer.start()
+
+    def _flush_clip_render(self) -> None:
+        if self._clip_render_pending:
+            self._clip_render_pending = False
+            self._render_current_frame()
+        else:
+            self._clip_render_timer.stop()
+
     def _render_current_frame(self) -> None:
         if not self._map_frames:
             for canvas in self._all_plot_canvases():
@@ -2074,8 +2151,8 @@ class SolarDataAnalysisWindow(QMainWindow):
         vmin = None
         vmax = None
         if finite.size > 0:
-            lo = min(float(self.clip_low_spin.value()), float(self.clip_high_spin.value()) - 0.1)
-            hi = max(float(self.clip_high_spin.value()), lo + 0.1)
+            lo = min(float(self.clip_low_slider.value()), float(self.clip_high_slider.value()) - 0.1)
+            hi = max(float(self.clip_high_slider.value()), lo + 0.1)
             vmin = float(np.nanpercentile(finite, lo))
             vmax = float(np.nanpercentile(finite, hi))
             if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
@@ -2286,9 +2363,11 @@ class SolarDataAnalysisWindow(QMainWindow):
 
     def apply_axis_crop(self):
         if not self._map_frames or self._current_map_data is None:
-            return
-        if not self.crop_check.isChecked():
-            QMessageBox.information(self, "Apply Crop", "Enable Crop by arcsec first.")
+            QMessageBox.information(
+                self,
+                "Apply Crop",
+                "Load or upload AIA frames first, then enter the X/Y arcsec bounds to crop.",
+            )
             return
         try:
             bounds = self._crop_bounds_from_axis_fields(self._current_map_data.shape)
@@ -2300,6 +2379,10 @@ class SolarDataAnalysisWindow(QMainWindow):
             self.frame_slider.setRange(0, max(0, len(self._map_frames) - 1))
             self.frame_slider.setValue(0)
             self.frame_slider.blockSignals(False)
+            # Cropping changes the image extent, so force every canvas to snap
+            # its view + axes to the new (smaller) region instead of keeping the
+            # previous full-disk range.
+            self._reset_canvas_views()
             self._render_current_frame()
             self._set_crop_mode_checked(False)
             self.analysis_text.setPlainText(
@@ -2308,6 +2391,15 @@ class SolarDataAnalysisWindow(QMainWindow):
             )
         except Exception as exc:
             QMessageBox.critical(self, "Apply Crop", str(exc))
+
+    def _reset_canvas_views(self) -> None:
+        for canvas in self._all_plot_canvases():
+            reset = getattr(canvas, "reset_map_view", None)
+            if callable(reset):
+                try:
+                    reset()
+                except Exception:
+                    pass
 
     def reset_loaded_frames(self):
         if not self._original_frames:
@@ -2321,6 +2413,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.frame_slider.setValue(0)
         self.frame_slider.blockSignals(False)
         self._set_crop_mode_checked(False)
+        self._reset_canvas_views()
         self._render_current_frame()
         self.analysis_text.setPlainText(self._loaded_frame_status_text("Restored", self._map_frames))
 
@@ -2463,9 +2556,11 @@ class SolarDataAnalysisWindow(QMainWindow):
 
     def export_cropped_fits(self):
         if not self._map_frames or self._current_map_data is None:
-            return
-        if not self.crop_check.isChecked():
-            QMessageBox.information(self, "Export Cropped FITS", "Enable Crop by arcsec first.")
+            QMessageBox.information(
+                self,
+                "Export Cropped FITS",
+                "Load or upload AIA frames first, then enter the X/Y arcsec bounds to export a crop.",
+            )
             return
         path, _ = pick_export_path(
             self,
@@ -2520,8 +2615,8 @@ class SolarDataAnalysisWindow(QMainWindow):
                     fps=float(self.fps_spin.value()),
                     mode=self._movie_mode(),
                     crop_bounds=crop_bounds,
-                    percentile_low=float(self.clip_low_spin.value()),
-                    percentile_high=float(self.clip_high_spin.value()),
+                    percentile_low=float(self.clip_low_slider.value()),
+                    percentile_high=float(self.clip_high_slider.value()),
                     colormap_name=self._resolved_colormap_name(),
                 ),
             )

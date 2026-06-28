@@ -417,6 +417,17 @@ class SunPyPlotCanvas(QWidget):
         self._axis_transform = self._default_axis_transform()
         self._last_map_bounds = None
 
+    def reset_map_view(self) -> None:
+        """Drop the cached view bounds so the next ``plot_map_data`` re-fits.
+
+        Map renders normally preserve the user's pan/zoom when only the data
+        (not its extent) changes. After a crop the extent changes and the view
+        must snap to the new region; clearing the cache forces that re-fit
+        unconditionally, immune to any stale bounds left by renderer switches
+        or earlier panning.
+        """
+        self._last_map_bounds = None
+
     def has_plot_content(self) -> bool:
         return self.map_image.image is not None
 
@@ -684,7 +695,6 @@ class SunPyPlotCanvas(QWidget):
 
         self._axis_transform = dict(axis_transform or self._default_axis_transform())
         x0, y0, width, height = self._map_rect_from_transform(arr.shape)
-        self.map_image.setRect(QRectF(x0, y0, width, height))
 
         if is_rgb:
             self.map_image.setLookupTable(None)
@@ -713,6 +723,12 @@ class SunPyPlotCanvas(QWidget):
                 self._colorbar.setLevels(levels)
                 self._colorbar.setColorMap(self._map_colormap)
             self._update_colorbar_visibility(is_rgb=False)
+
+        # Position/scale the image AFTER setImage: pyqtgraph's setRect derives the
+        # transform from the *current* image dimensions, so calling it earlier
+        # would scale a freshly cropped frame by the previous frame's size and
+        # shrink it into a corner.
+        self.map_image.setRect(QRectF(x0, y0, width, height))
 
         self.map_plot.setTitle(title)
         self._set_map_axis_labels()
