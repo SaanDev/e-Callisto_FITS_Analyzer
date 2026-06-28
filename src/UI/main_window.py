@@ -8200,7 +8200,24 @@ class MainWindow(QMainWindow):
                 pass
 
     def open_solar_data_analysis_window(self):
-        from src.UI.solar_data_analysis_window import SolarDataAnalysisWindow  # import here, not at top
+        try:
+            from src.UI.solar_data_analysis_window import SolarDataAnalysisWindow  # import here, not at top
+        except Exception as exc:
+            # A failure here is almost always a stale source checkout (e.g. one
+            # machine pulled new UI code that imports backend symbols another
+            # machine has not synced yet). Show an actionable message instead of
+            # crashing with a raw traceback.
+            from PySide6.QtWidgets import QMessageBox
+
+            QMessageBox.critical(
+                self,
+                "SDO Data Analysis",
+                "The SDO Data Analysis window could not be loaded.\n\n"
+                f"{type(exc).__name__}: {exc}\n\n"
+                "This usually means the source code on this computer is out of date. "
+                "Update it (git pull) and restart the application.",
+            )
+            return
         try:
             alive = self._solar_data_analysis_window is not None
             if alive:
