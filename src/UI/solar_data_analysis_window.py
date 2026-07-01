@@ -120,6 +120,15 @@ HMI_PRODUCT_CONTENT = {  # FITS CONTENT keyword -> product, to recolour loaded H
     "dopplergram": "dopplergram",
 }
 
+# SOHO/LASCO white-light coronagraphs. These are VSO-only (no JSOC fast path),
+# have no EUV wavelength or HMI product, and read best in SunPy's dedicated
+# soholasco2/3 colormaps. The detector string doubles as the observable value.
+LASCO_DETECTORS = (
+    ("C2", "SOHO/LASCO C2"),
+    ("C3", "SOHO/LASCO C3"),
+)
+LASCO_COLORMAPS = {"C2": "soholasco2", "C3": "soholasco3"}
+
 
 class SolarMetadataWorker(QObject):
     progress = Signal(object, object)
@@ -417,6 +426,8 @@ class SolarMatplotlibCanvas(QWidget):
             "sdoaia335": ((0, 0, 0), (16, 64, 128), (64, 128, 181), (145, 192, 221), (255, 255, 255)),
             "sdoaia1600": ((0, 0, 0), (91, 91, 16), (142, 142, 64), (196, 196, 145), (255, 255, 255)),
             "sdoaia1700": ((0, 0, 0), (128, 64, 64), (181, 128, 128), (221, 192, 192), (255, 255, 255)),
+            "soholasco2": ((0, 0, 0), (20, 20, 90), (30, 90, 165), (120, 185, 220), (255, 255, 255)),
+            "soholasco3": ((0, 0, 0), (60, 20, 12), (150, 62, 22), (222, 150, 60), (255, 252, 220)),
         }
         colors = np.asarray(palettes.get(str(name or "").lower(), palettes["sdoaia193"]), dtype=float) / 255.0
         stops = np.linspace(0.0, 1.0, colors.shape[0])
@@ -650,7 +661,7 @@ class RegionLightcurveDialog(QDialog):
 class SolarDataAnalysisWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("SDO Data Analysis")
+        self.setWindowTitle("Solar Image Analysis (SDO · SOHO/LASCO)")
         self.resize(1440, 900)
 
         self.theme = _get_theme()
@@ -705,6 +716,7 @@ class SolarDataAnalysisWindow(QMainWindow):
                 pass
         self.use_analyzer_time_window(auto_query=False)
         self._set_loaded_state(False)
+        self._apply_observable_download_gating()
         self._update_size_estimate()
         self.statusBar().showMessage("Ready.")
 
@@ -745,7 +757,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         plot_layout = QVBoxLayout(plot_group)
 
         top_row = QHBoxLayout()
-        self.plot_title_label = QLabel("No AIA data loaded.")
+        self.plot_title_label = QLabel("No image data loaded.")
         self.plot_title_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.quick_mp4_btn = QPushButton("MP4")
         self.quick_mp4_btn.setEnabled(False)
@@ -1003,15 +1015,22 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.stop_btn = QPushButton("Stop")
         self.stop_btn.setEnabled(False)
 
-        # Observable selector: AIA EUV/UV channels + HMI line-of-sight products.
-        # userData is a tuple ("AIA", wavelength_float) or ("HMI", product_str).
+        # Observable selector: AIA EUV/UV channels, HMI line-of-sight products,
+        # and SOHO/LASCO coronagraph detectors. userData is a tuple
+        # ("AIA", wavelength_float), ("HMI", product_str) or ("LASCO", "C2"/"C3").
         self.wavelength_combo = QComboBox()
-        self.wavelength_combo.setToolTip("Choose the SDO observable: an AIA wavelength or an HMI product.")
+        self.wavelength_combo.setToolTip(
+            "Choose the observable: an SDO/AIA wavelength, an SDO/HMI product, "
+            "or a SOHO/LASCO coronagraph detector."
+        )
         for value in AIA_WAVELENGTHS:
             self.wavelength_combo.addItem(f"AIA {value} A", userData=("AIA", float(value)))
         self.wavelength_combo.insertSeparator(self.wavelength_combo.count())
         for product, label in HMI_OBSERVABLES:
             self.wavelength_combo.addItem(label, userData=("HMI", product))
+        self.wavelength_combo.insertSeparator(self.wavelength_combo.count())
+        for detector, label in LASCO_DETECTORS:
+            self.wavelength_combo.addItem(label, userData=("LASCO", detector))
         self.wavelength_combo.setCurrentText("AIA 193 A")
 
         now = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
@@ -1096,7 +1115,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         layout.addWidget(self.stop_btn, row, 1)
 
         row += 1
-        layout.addWidget(QLabel("Wavelength"), row, 0, 1, 2)
+        layout.addWidget(QLabel("Observable"), row, 0, 1, 2)
         row += 1
         layout.addWidget(self.wavelength_combo, row, 0, 1, 2)
 
@@ -1145,7 +1164,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         layout.setSpacing(8)
         parent_layout.addWidget(self.archive_results_group)
 
-        self.archive_results_status_label = QLabel("Run Fetch to list matching SDO/AIA files.")
+        self.archive_results_status_label = QLabel("Run Fetch to list matching archive files.")
         self.archive_results_status_label.setObjectName("SolarResultsStatus")
         self.archive_results_status_label.setWordWrap(True)
         layout.addWidget(self.archive_results_status_label)
@@ -1300,7 +1319,20 @@ class SolarDataAnalysisWindow(QMainWindow):
 
         self.colormap_combo = QComboBox()
         self.colormap_combo.addItems(
-            [*AIA_COLORMAPS, "hmimag", "inferno", "magma", "plasma", "viridis", "cividis", "gray", "RdBu_r", "hot"]
+            [
+                *AIA_COLORMAPS,
+                "hmimag",
+                "soholasco2",
+                "soholasco3",
+                "inferno",
+                "magma",
+                "plasma",
+                "viridis",
+                "cividis",
+                "gray",
+                "RdBu_r",
+                "hot",
+            ]
         )
         self.colormap_combo.setCurrentText("sdoaia193")
         self.renderer_combo = QComboBox()
@@ -1491,6 +1523,30 @@ class SolarDataAnalysisWindow(QMainWindow):
         active.set_grid_visible(self.grid_check.isChecked()) if hasattr(active, "set_grid_visible") else None
         self._render_current_frame()
 
+    def _sdo_only_widgets(self) -> tuple[QWidget, ...]:
+        """Controls that only make sense for SDO/EUV disk imagery (AIA RGB
+        composite, HMI magnetogram overlay, disk active-region detection)."""
+        return (
+            self.composite_btn,
+            self.magnetogram_btn,
+            self.mag_threshold_spin,
+            self.detect_regions_btn,
+            self.fetch_labels_btn,
+        )
+
+    def _loaded_is_lasco(self) -> bool:
+        """True when the loaded frame sequence is a SOHO/LASCO coronagraph, for
+        which AIA/HMI composites and disk active-region tools do not apply."""
+        if not self._map_frames:
+            return False
+        frame = self._map_frames[0]
+        instrument = str(getattr(frame, "instrument", "") or "").upper()
+        if "LASCO" in instrument:
+            return True
+        detector = str(getattr(frame, "detector", "") or "").upper()
+        observatory = str(getattr(frame, "observatory", "") or "").upper()
+        return "SOHO" in observatory and detector in ("C2", "C3")
+
     def _set_loaded_state(self, loaded: bool):
         self.plot_mode_btn.setEnabled(True)
         for widget in (
@@ -1523,6 +1579,17 @@ class SolarDataAnalysisWindow(QMainWindow):
             widget.setEnabled(bool(loaded))
         if not loaded:
             self._set_crop_mode_checked(False)
+        # SOHO/LASCO coronagraph frames have no EUV RGB composite, HMI overlay or
+        # disk active-region concept — keep those SDO-only tools disabled.
+        if not hasattr(self, "_sdo_only_tooltips"):
+            self._sdo_only_tooltips = {w: w.toolTip() for w in self._sdo_only_widgets()}
+        is_lasco = bool(loaded and self._loaded_is_lasco())
+        for widget in self._sdo_only_widgets():
+            if is_lasco:
+                widget.setEnabled(False)
+                widget.setToolTip("Not applicable to SOHO/LASCO coronagraph images (SDO/EUV disk tool).")
+            else:
+                widget.setToolTip(self._sdo_only_tooltips.get(widget, ""))
         self.export_regions_btn.setEnabled(bool(self._regions))
         self._sync_menu_action_state(loaded=bool(loaded))
 
@@ -1531,11 +1598,9 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.search_btn.setEnabled(not busy)
         self.download_load_btn.setEnabled((not busy) and bool(self._search_result and self._search_result.rows))
         self.load_local_btn.setEnabled(not busy)
-        self.high_resolution_check.setEnabled(not busy)
-        self.source_combo.setEnabled(not busy)
-        self.jsoc_email_edit.setEnabled(not busy)
-        self.frame_size_combo.setEnabled(not busy)
-        self.cutout_widget.setEnabled(not busy)
+        # SDO-only download controls (source/e-mail/frame-size/cutout/high-res)
+        # are gated by observable as well as busy state.
+        self._apply_observable_download_gating()
         self.select_all_results_btn.setEnabled((not busy) and bool(self._search_result and self._search_result.rows))
         self.deselect_all_results_btn.setEnabled((not busy) and bool(self._search_result and self._search_result.rows))
         self.save_disk_btn.setEnabled((not busy) and bool(self._search_result and self._search_result.rows))
@@ -1591,6 +1656,10 @@ class SolarDataAnalysisWindow(QMainWindow):
             self.quick_mp4_action,
         ):
             action.setEnabled((not busy) and bool(loaded))
+        # SDO/EUV-only analysis actions stay disabled for SOHO/LASCO frames.
+        if loaded and self._loaded_is_lasco():
+            for action in (self.composite_action, self.detect_regions_action, self.labels_action):
+                action.setEnabled(False)
         self.plot_action.setEnabled(not busy)
         self.export_regions_action.setEnabled((not busy) and has_regions)
 
@@ -1665,6 +1734,18 @@ class SolarDataAnalysisWindow(QMainWindow):
                 sample_seconds=sample_seconds if sample_seconds > 0 else None,
                 max_records=int(self.max_records_spin.value()),
             )
+        if instrument == "LASCO":
+            # SOHO/LASCO coronagraph: VSO-only, selected by detector (C2/C3),
+            # no EUV wavelength, no HMI product, no JSOC resolution/cutout.
+            return SunPyQuerySpec(
+                start_dt=start_dt,
+                end_dt=end_dt,
+                spacecraft="SOHO",
+                instrument="LASCO",
+                detector=str(value),
+                sample_seconds=sample_seconds if sample_seconds > 0 else None,
+                max_records=int(self.max_records_spin.value()),
+            )
         return SunPyQuerySpec(
             start_dt=start_dt,
             end_dt=end_dt,
@@ -1701,18 +1782,18 @@ class SolarDataAnalysisWindow(QMainWindow):
         try:
             spec = self._build_query_spec()
         except Exception as exc:
-            QMessageBox.warning(self, "SDO Data Analysis", f"Invalid query inputs: {exc}")
+            QMessageBox.warning(self, "Solar Image Analysis", f"Invalid query inputs: {exc}")
             return
-        self._set_busy(True, "Searching SDO/AIA archives...")
+        self._set_busy(True, "Searching solar image archives...")
         self._start_worker(SunPyWorker("search", query_spec=spec))
 
     def save_selected_to_disk(self):
         """Download the selected rows into a user-chosen folder (kept on disk)."""
         if self._search_result is None:
-            QMessageBox.information(self, "SDO Data Analysis", "Run an archive search first.")
+            QMessageBox.information(self, "Solar Image Analysis", "Run an archive search first.")
             return
         if not self._checked_rows():
-            QMessageBox.information(self, "SDO Data Analysis", "Select at least one result row to save.")
+            QMessageBox.information(self, "Solar Image Analysis", "Select at least one result row to save.")
             return
         target_dir = QFileDialog.getExistingDirectory(self, "Save Selected FITS To Folder")
         if not target_dir:
@@ -1725,63 +1806,70 @@ class SolarDataAnalysisWindow(QMainWindow):
         if not isinstance(target_dir, (str, Path)):
             target_dir = None
         if self._search_result is None:
-            QMessageBox.information(self, "SDO Data Analysis", "Run an archive search first.")
+            QMessageBox.information(self, "Solar Image Analysis", "Run an archive search first.")
             return
         selected_rows = self._checked_rows()
         if not selected_rows:
-            QMessageBox.information(self, "SDO Data Analysis", "Select at least one result row.")
+            QMessageBox.information(self, "Solar Image Analysis", "Select at least one result row.")
             return
         if not self._confirm_high_resolution_download(selected_rows):
             return
-        email, prefer_jsoc = self._jsoc_params()
-        size_mode = self._frame_size_mode()
-        needs_jsoc = size_mode != SIZE_FULL
 
-        if (str(self.source_combo.currentData() or "") == "jsoc" or needs_jsoc) and not email:
-            reason = (
-                f"The '{self.frame_size_combo.currentText()}' frame size is produced server-side by JSOC"
-                if needs_jsoc
-                else "The JSOC source"
-            )
-            QMessageBox.information(
-                self,
-                "SDO Data Analysis",
-                f"{reason}, which needs a registered notify e-mail.\n"
-                "Enter it in the JSOC Notify E-mail field, switch Frame Size to Full disk, "
-                "or switch the source to VSO.\n\n"
-                "Register once (free) at https://jsoc.stanford.edu/ajax/register_email.html",
-            )
-            return
+        # SOHO/LASCO is VSO-only: no JSOC fast path, no server-side binning or
+        # cutout, so bypass the JSOC e-mail / frame-size handling entirely.
+        is_lasco = self._current_observable()[0] == "LASCO"
+        if is_lasco:
+            email, prefer_jsoc, process = "", False, None
+        else:
+            email, prefer_jsoc = self._jsoc_params()
+            size_mode = self._frame_size_mode()
+            needs_jsoc = size_mode != SIZE_FULL
 
-        # Binned/cutout require JSOC; force it on (with email present).
-        if needs_jsoc:
-            prefer_jsoc = True
+            if (str(self.source_combo.currentData() or "") == "jsoc" or needs_jsoc) and not email:
+                reason = (
+                    f"The '{self.frame_size_combo.currentText()}' frame size is produced server-side by JSOC"
+                    if needs_jsoc
+                    else "The JSOC source"
+                )
+                QMessageBox.information(
+                    self,
+                    "Solar Image Analysis",
+                    f"{reason}, which needs a registered notify e-mail.\n"
+                    "Enter it in the JSOC Notify E-mail field, switch Frame Size to Full disk, "
+                    "or switch the source to VSO.\n\n"
+                    "Register once (free) at https://jsoc.stanford.edu/ajax/register_email.html",
+                )
+                return
 
-        # Reference time for cutout tracking: the start of the selection.
-        t_ref = None
-        try:
-            rows = self._search_result.rows
-            t_ref = min(rows[i].start for i in selected_rows).strftime("%Y-%m-%dT%H:%M:%SZ")
-        except Exception:
+            # Binned/cutout require JSOC; force it on (with email present).
+            if needs_jsoc:
+                prefer_jsoc = True
+
+            # Reference time for cutout tracking: the start of the selection.
             t_ref = None
-        try:
-            process = self._frame_size_process(t_ref=t_ref) if prefer_jsoc else None
-        except JsocError as exc:
-            QMessageBox.warning(self, "SDO Data Analysis", f"Invalid cutout settings: {exc}")
-            return
+            try:
+                rows = self._search_result.rows
+                t_ref = min(rows[i].start for i in selected_rows).strftime("%Y-%m-%dT%H:%M:%SZ")
+            except Exception:
+                t_ref = None
+            try:
+                process = self._frame_size_process(t_ref=t_ref) if prefer_jsoc else None
+            except JsocError as exc:
+                QMessageBox.warning(self, "Solar Image Analysis", f"Invalid cutout settings: {exc}")
+                return
 
         effective_cache = Path(target_dir) if target_dir else self.cache_dir
         self._save_target_dir = str(effective_cache) if target_dir else None
         if target_dir:
-            text = f"Downloading selected AIA files to {effective_cache} ..."
+            text = f"Downloading selected files to {effective_cache} ..."
         elif process is not None:
-            text = "Downloading reduced AIA frames via JSOC..."
+            text = "Downloading reduced frames via JSOC..."
         elif prefer_jsoc:
-            text = "Downloading AIA frames via JSOC (fast path)..."
+            text = "Downloading frames via JSOC (fast path)..."
         elif self._search_result_is_high_resolution():
-            text = "Downloading high-resolution AIA sequence..."
+            text = "Downloading high-resolution sequence..."
         else:
-            text = "Downloading selected AIA files..."
+            text = "Downloading selected files..."
         self._set_busy(True, text)
         self._start_worker(
             SunPyWorker(
@@ -1896,7 +1984,7 @@ class SolarDataAnalysisWindow(QMainWindow):
 
     def _start_worker(self, worker: QObject):
         if self._active_thread is not None:
-            QMessageBox.information(self, "SDO Data Analysis", "Another operation is still running.")
+            QMessageBox.information(self, "Solar Image Analysis", "Another operation is still running.")
             return
         thread = QThread(self)
         worker.moveToThread(thread)
@@ -2029,7 +2117,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.analysis_text.setPlainText("Operation failed.\n\n" + short)
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Critical)
-        msg.setWindowTitle("SDO Data Analysis")
+        msg.setWindowTitle("Solar Image Analysis")
         msg.setText(short)
         msg.setDetailedText(tb_text or "")
         msg.exec()
@@ -2202,7 +2290,7 @@ class SolarDataAnalysisWindow(QMainWindow):
 
     def _apply_loaded_frames(self, frames: list[Any], *, paths: list[str], metadata: dict[str, Any]):
         if not frames:
-            QMessageBox.information(self, "SDO Data Analysis", "No AIA map frames were loaded.")
+            QMessageBox.information(self, "Solar Image Analysis", "No map frames were loaded.")
             return
         # Order frames chronologically so the time-lapse / movie plays in
         # observation order regardless of how the files were uploaded or the
@@ -2232,15 +2320,38 @@ class SolarDataAnalysisWindow(QMainWindow):
             status += f"\nSaved {len(self._loaded_paths)} file(s) to {save_dir}."
             self.statusBar().showMessage(f"Saved {len(self._loaded_paths)} file(s) to {save_dir}", 7000)
         else:
-            self.statusBar().showMessage(f"Loaded {len(self._map_frames)} AIA frame(s).", 5000)
+            self.statusBar().showMessage(
+                f"Loaded {len(self._map_frames)} {self._loaded_instrument_label()} frame(s).", 5000
+            )
         self._save_target_dir = None
         self.analysis_text.setPlainText(status)
 
+    def _loaded_instrument_label(self, frames: list[Any] | None = None) -> str:
+        """Short instrument label for status text, e.g. 'AIA', 'HMI', 'LASCO C2'."""
+        frames = frames if frames is not None else self._map_frames
+        if not frames:
+            return "image"
+        frame = frames[0]
+        inst = str(getattr(frame, "instrument", "") or "").upper()
+        det = str(getattr(frame, "detector", "") or "").upper()
+        if "LASCO" in inst:
+            return f"LASCO {det}".strip()
+        if "AIA" in inst:
+            return "AIA"
+        if "HMI" in inst:
+            return "HMI"
+        return inst or "image"
+
     def _loaded_frame_status_text(self, action: str, frames: list[Any]) -> str:
+        label = self._loaded_instrument_label(frames)
+        if "LASCO" in label.upper():
+            tools = "Use the embedded timeline, crop, colormap, difference and movie tools in this window."
+        else:
+            tools = "Use the embedded timeline, crop controls, colormap, and active-region tools in this window."
         return (
-            f"{action} {len(frames)} AIA frame(s).\n"
+            f"{action} {len(frames)} {label} frame(s).\n"
             f"{self._frame_resolution_status(frames)}\n"
-            "Use the embedded timeline, crop controls, colormap, and active-region tools in this window."
+            f"{tools}"
         )
 
     def _frame_resolution_status(self, frames: list[Any]) -> str:
@@ -2394,7 +2505,7 @@ class SolarDataAnalysisWindow(QMainWindow):
             for canvas in self._all_plot_canvases():
                 canvas.clear_plot()
             self.frame_label.setText("Frame 0 / 0")
-            self.plot_title_label.setText("No AIA data loaded.")
+            self.plot_title_label.setText("No image data loaded.")
             return
 
         idx = max(0, min(self._current_frame_index, len(self._map_frames) - 1))
@@ -2459,14 +2570,42 @@ class SolarDataAnalysisWindow(QMainWindow):
         text = self.colormap_combo.currentText().strip()
         return text or self._default_aia_colormap_name()
 
+    def _apply_observable_download_gating(self) -> None:
+        """Enable the SDO-only download controls only for SDO observables.
+
+        SOHO/LASCO is VSO-only and full-disk only, with no JSOC fast path, no
+        server-side binning/cutout and no reduced-resolution product, so the
+        Download Source, JSOC e-mail, Frame Size, cutout and high-resolution
+        controls are greyed out (and Frame Size forced to Full disk) when a
+        LASCO observable is selected. Re-evaluated whenever the observable
+        changes or the busy state toggles.
+        """
+        if not hasattr(self, "source_combo"):
+            return
+        instrument = self._current_observable()[0]
+        is_sdo = instrument in ("AIA", "HMI")
+        is_aia = instrument == "AIA"
+        busy = bool(getattr(self, "_busy", False))
+        for widget in (self.source_combo, self.jsoc_email_edit, self.frame_size_combo, self.cutout_widget):
+            widget.setEnabled(is_sdo and not busy)
+        # High-resolution VSO is an AIA-only product (HMI/LASCO have none).
+        self.high_resolution_check.setEnabled(is_aia and not busy)
+        if not is_aia:
+            self.high_resolution_check.setChecked(False)
+        if not is_sdo:
+            # Force full-disk VSO so the "needs JSOC e-mail" prompt path (binned
+            # or cutout frame sizes) can never trigger for LASCO.
+            idx = self.frame_size_combo.findData(SIZE_FULL)
+            if idx >= 0 and self.frame_size_combo.currentIndex() != idx:
+                was = self.frame_size_combo.blockSignals(True)
+                self.frame_size_combo.setCurrentIndex(idx)
+                self.frame_size_combo.blockSignals(was)
+            self.cutout_widget.setVisible(False)
+
     def _on_query_wavelength_changed(self, _index: int) -> None:
-        # High-resolution VSO and the AIA composite only apply to AIA; gray them
-        # out for HMI observables.
-        is_aia = self._current_observable()[0] == "AIA"
-        if hasattr(self, "high_resolution_check"):
-            self.high_resolution_check.setEnabled(is_aia and not self._busy)
-            if not is_aia:
-                self.high_resolution_check.setChecked(False)
+        # High-resolution VSO / JSOC / composite only apply to SDO; gate the
+        # SDO-only download controls for HMI and SOHO/LASCO observables.
+        self._apply_observable_download_gating()
         if self._map_frames:
             return
         self._select_default_colormap_for_wavelength()
@@ -2482,6 +2621,27 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.colormap_combo.blockSignals(was_blocked)
         for canvas in self._all_plot_canvases():
             canvas.set_colormap_name(name)
+
+    def _frame_lasco_detector(self, frame: Any | None = None) -> str | None:
+        """If the frame (or the selected observable) is SOHO/LASCO, return its
+        detector ('C2'/'C3'), else None."""
+        source = frame
+        if source is None and self._map_frames:
+            source = self._map_frames[max(0, min(self._current_frame_index, len(self._map_frames) - 1))]
+        if source is not None:
+            instrument = str(getattr(source, "instrument", "") or "").upper()
+            if "LASCO" in instrument:
+                detector = str(getattr(source, "detector", "") or "").strip().upper()
+                return detector if detector in LASCO_COLORMAPS else "C2"
+            # An explicit non-LASCO frame must not fall back to the combo.
+            if frame is not None:
+                return None
+        if frame is None:
+            instrument, value = self._current_observable()
+            if instrument == "LASCO":
+                detector = str(value or "").strip().upper()
+                return detector if detector in LASCO_COLORMAPS else "C2"
+        return None
 
     def _frame_hmi_product(self, frame: Any | None = None) -> str | None:
         """If the frame (or the selected observable) is HMI, return its product."""
@@ -2505,6 +2665,9 @@ class SolarDataAnalysisWindow(QMainWindow):
         return None
 
     def _default_aia_colormap_name(self, frame: Any | None = None) -> str:
+        detector = self._frame_lasco_detector(frame)
+        if detector is not None:
+            return LASCO_COLORMAPS.get(detector, "soholasco2")
         product = self._frame_hmi_product(frame)
         if product is not None:
             return HMI_COLORMAPS.get(product, "gray")
@@ -2736,7 +2899,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         reply = QMessageBox.question(
             self,
             "Reset All",
-            "Reset SDO Data Analysis to defaults and delete the download cache?\n\n"
+            "Reset Solar Image Analysis to defaults and delete the download cache?\n\n"
             f"Cache folder:\n{self.cache_dir}\n\n"
             "Loaded frames, search results and active regions will be cleared. "
             "Your saved JSOC e-mail is kept.",
@@ -2806,7 +2969,7 @@ class SolarDataAnalysisWindow(QMainWindow):
                 canvas.clear_plot()
             except Exception:
                 pass
-        self.plot_title_label.setText("No AIA data loaded.")
+        self.plot_title_label.setText("No image data loaded.")
         self.analysis_text.clear()
         self._update_size_estimate()
 
@@ -3162,14 +3325,19 @@ class SolarDataAnalysisWindow(QMainWindow):
     def _frame_title(self, frame: Any, frame_index: int) -> str:
         obs = self._safe_text(getattr(frame, "observatory", None))
         inst = self._safe_text(getattr(frame, "instrument", None))
+        det = self._safe_text(getattr(frame, "detector", None))
         wl = self._safe_text(getattr(frame, "wavelength", None))
         date = self._safe_text(getattr(frame, "date", None))
         chunks = ["/".join([x for x in (obs, inst) if x])]
+        # Show the detector (e.g. LASCO C2/C3) when it adds information beyond
+        # the instrument name.
+        if det and det.upper() != (inst or "").upper():
+            chunks.append(det)
         if wl:
             chunks.append(wl)
         if date:
             chunks.append(f"{date} UTC" if "UTC" not in date.upper() else date)
-        return " | ".join([x for x in chunks if x]) or f"AIA Frame {frame_index + 1}"
+        return " | ".join([x for x in chunks if x]) or f"Frame {frame_index + 1}"
 
     def _frame_wavelength_text(self) -> str:
         if not self._map_frames:

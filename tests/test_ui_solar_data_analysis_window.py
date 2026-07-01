@@ -922,6 +922,86 @@ def test_solar_data_window_query_spec_aia_observable():
     win.close()
 
 
+def _lasco_frame(data=None, detector="C2"):
+    frame = FakeMap(np.ones((6, 6), dtype=float) if data is None else data)
+    frame.observatory = "SOHO"
+    frame.instrument = "LASCO"
+    frame.detector = detector
+    frame.wavelength = None
+    frame.meta = {"instrume": "LASCO"}
+    return frame
+
+
+def test_solar_data_window_query_spec_lasco_observable():
+    _app()
+    win = SolarDataAnalysisWindow()
+    for detector, cmap in (("C2", "soholasco2"), ("C3", "soholasco3")):
+        idx = win.wavelength_combo.findText(f"SOHO/LASCO {detector}")
+        assert idx >= 0
+        win.wavelength_combo.setCurrentIndex(idx)
+        spec = win._build_query_spec()
+        assert spec.spacecraft == "SOHO"
+        assert spec.instrument == "LASCO"
+        assert spec.detector == detector
+        # Coronagraph: no EUV wavelength, no JSOC resolution, no HMI product.
+        assert spec.wavelength_angstrom is None
+        assert spec.resolution is None
+        assert spec.product is None
+        assert win._default_aia_colormap_name() == cmap
+    win.close()
+
+
+def test_solar_data_window_lasco_disables_sdo_download_controls():
+    _app()
+    win = SolarDataAnalysisWindow()
+    idx = win.wavelength_combo.findText("SOHO/LASCO C2")
+    win.wavelength_combo.setCurrentIndex(idx)
+    # LASCO is VSO-only, full-disk only: JSOC / frame-size / high-res are off.
+    assert not win.source_combo.isEnabled()
+    assert not win.jsoc_email_edit.isEnabled()
+    assert not win.frame_size_combo.isEnabled()
+    assert not win.high_resolution_check.isEnabled()
+    assert win.frame_size_combo.currentData() == SIZE_FULL
+    # Switching back to an SDO/AIA observable restores them.
+    win.wavelength_combo.setCurrentText("AIA 193 A")
+    assert win.source_combo.isEnabled()
+    assert win.frame_size_combo.isEnabled()
+    assert win.high_resolution_check.isEnabled()
+    win.close()
+
+
+def test_solar_data_window_lasco_gates_euv_only_tools():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames([_lasco_frame(detector="C2")], paths=["c2.fts"], metadata={})
+    QApplication.processEvents()
+
+    assert win._loaded_is_lasco() is True
+    assert win._loaded_instrument_label() == "LASCO C2"
+    assert "C2" in win._frame_title(win._map_frames[0], 0)
+    assert win.colormap_combo.currentText() == "soholasco2"
+
+    # EUV/disk-only tools are disabled for a coronagraph sequence...
+    assert not win.composite_btn.isEnabled()
+    assert not win.magnetogram_btn.isEnabled()
+    assert not win.detect_regions_btn.isEnabled()
+    assert not win.composite_action.isEnabled()
+    assert not win.detect_regions_action.isEnabled()
+    # ...while the mission-agnostic tools stay available.
+    assert win.difference_mode_btn.isEnabled()
+    assert win.crop_check.isEnabled()
+    assert win.export_movie_btn.isEnabled()
+    assert win.lightcurve_btn.isEnabled()
+
+    # Loading an SDO/AIA sequence re-enables the EUV tools.
+    win._apply_loaded_frames([FakeMap(np.ones((6, 6)))], paths=["a.fits"], metadata={"instrument": "AIA"})
+    QApplication.processEvents()
+    assert win._loaded_is_lasco() is False
+    assert win.composite_btn.isEnabled()
+    assert win.detect_regions_btn.isEnabled()
+    win.close()
+
+
 def test_solar_data_window_composite_uses_magnetogram_overlay(monkeypatch):
     _app()
     win = SolarDataAnalysisWindow()

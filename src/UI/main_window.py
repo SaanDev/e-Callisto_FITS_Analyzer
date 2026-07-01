@@ -1049,7 +1049,7 @@ class MainWindow(QMainWindow):
             mode_menu.addAction(a)
 
         analysis_menu = menubar.addMenu("Analysis")
-        self.open_solar_data_analysis_action = QAction("SDO Data Analysis", self)
+        self.open_solar_data_analysis_action = QAction("Solar Image Analysis (SDO · SOHO/LASCO)", self)
         self.open_solar_data_analysis_action.triggered.connect(self.open_solar_data_analysis_window)
         analysis_menu.addAction(self.open_solar_data_analysis_action)
         analysis_menu.addSeparator()
@@ -8211,8 +8211,8 @@ class MainWindow(QMainWindow):
 
             QMessageBox.critical(
                 self,
-                "SDO Data Analysis",
-                "The SDO Data Analysis window could not be loaded.\n\n"
+                "Solar Image Analysis",
+                "The Solar Image Analysis window could not be loaded.\n\n"
                 f"{type(exc).__name__}: {exc}\n\n"
                 "This usually means the source code on this computer is out of date. "
                 "Update it (git pull) and restart the application.",
@@ -11947,7 +11947,7 @@ class MainWindow(QMainWindow):
             ):
                 if bool(self._solar_data_analysis_window.is_operation_running()):
                     self.statusBar().showMessage(
-                        "SDO Data Analysis is still running. Wait for completion before closing the app.",
+                        "Solar Image Analysis is still running. Wait for completion before closing the app.",
                         6000,
                     )
                     event.ignore()
@@ -12030,7 +12030,7 @@ class MainWindow(QMainWindow):
                 closed = bool(self._solar_data_analysis_window.close())
                 if not closed:
                     self.statusBar().showMessage(
-                        "SDO Data Analysis window is busy and cannot be closed yet.",
+                        "Solar Image Analysis window is busy and cannot be closed yet.",
                         6000,
                     )
                     event.ignore()
