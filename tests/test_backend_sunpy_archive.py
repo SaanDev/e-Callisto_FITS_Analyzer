@@ -8,7 +8,7 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import threading
 import warnings
@@ -1369,3 +1369,78 @@ def test_fetch_via_jsoc_gives_unique_filenames_when_jsoc_repeats_one(tmp_path: P
     assert len(set(dests)) == 3, f"destinations collided: {dests}"
     # Names are derived from the unique record timestamp, not the generic segment name.
     assert all("image_lev1.fits" not in d for d in dests)
+
+
+def _fake_search_factory(frontier: datetime, cadence_min: int = 12):
+    """Return a fake ``sa.search`` that yields rows only for observation times
+    at or before ``frontier`` (simulating an archive that lags real time)."""
+    calls = {"n": 0}
+
+    def _fake(spec, **kwargs):
+        calls["n"] += 1
+        rows = []
+        t = spec.start_dt
+        while t <= spec.end_dt:
+            if datetime(1996, 1, 1) <= t <= frontier:
+                rows.append(
+                    sa.SunPySearchRow(
+                        start=t, end=t, source="SOHO", instrument="LASCO",
+                        provider="SDAC", fileid=f"{t:%Y%m%d_%H%M}.fts", size="2 MB",
+                    )
+                )
+            t += timedelta(minutes=cadence_min)
+        return sa.SunPySearchResult(
+            spec=spec, data_kind=sa.DATA_KIND_MAP, rows=rows,
+            raw_response=[rows], row_index_map=[(0, i) for i in range(len(rows))],
+        )
+
+    _fake.calls = calls
+    return _fake
+
+
+def test_find_latest_search_walks_back_to_archive_frontier(monkeypatch):
+    now = datetime(2026, 7, 1)
+    frontier = datetime(2025, 2, 16, 18, 24)  # ~16 months of archive latency
+    fake = _fake_search_factory(frontier)
+    monkeypatch.setattr(sa, "search", fake)
+
+    spec = _mk_query(
+        spacecraft="SOHO", instrument="LASCO", detector="C2",
+        start_dt=now - timedelta(hours=6), end_dt=now, max_records=60,
+    )
+    result = sa.find_latest_search(spec, now=now, chunk_days=20, max_lookback_days=1000)
+
+    assert result is not None and result.rows
+    latest = max(r.start for r in result.rows)
+    # Freshest returned frame lands on the archive frontier (within a cadence step).
+    assert abs((latest - frontier).total_seconds()) <= 12 * 60
+    # Final window is the requested 6 h span, anchored at the newest frame.
+    assert result.spec.end_dt >= frontier
+    assert (result.spec.end_dt - result.spec.start_dt) <= timedelta(hours=6, minutes=5)
+    # VSO round-trips are slow, so the walk-back stays economical.
+    assert fake.calls["n"] <= 20
+
+
+def test_find_latest_search_resolves_near_real_time_in_few_calls(monkeypatch):
+    now = datetime(2026, 7, 1)
+    fake = _fake_search_factory(now)  # data available right up to "now"
+    monkeypatch.setattr(sa, "search", fake)
+
+    spec = _mk_query(start_dt=now - timedelta(hours=2), end_dt=now)
+    result = sa.find_latest_search(spec, now=now, chunk_days=20)
+
+    assert result is not None and result.rows
+    assert fake.calls["n"] <= 2  # first probe already has data
+
+
+def test_find_latest_search_returns_none_when_no_recent_data(monkeypatch):
+    now = datetime(2026, 7, 1)
+    fake = _fake_search_factory(datetime(1990, 1, 1))  # nothing within horizon
+    monkeypatch.setattr(sa, "search", fake)
+
+    spec = _mk_query(
+        spacecraft="SOHO", instrument="LASCO", detector="C2",
+        start_dt=now - timedelta(hours=6), end_dt=now,
+    )
+    result = sa.find_latest_search(spec, now=now, chunk_days=20, max_lookback_days=200)
+    assert result is None

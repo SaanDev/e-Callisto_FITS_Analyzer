@@ -52,6 +52,7 @@ from src.Backend.sunpy_archive import (
     configure_fetch_logging,
     fetch,
     fetch_via_jsoc,
+    find_latest_search,
     get_fetch_log_path,
     load_downloaded,
     registry_detectors_for,
@@ -135,6 +136,28 @@ class SunPyWorker(QObject):
                 self.progress.emit(None, "Searching SunPy archives...")
                 result = search(self.query_spec)
                 self.progress.emit(100, f"Found {len(result.rows)} candidate files.")
+                self.search_finished.emit(result)
+                return
+
+            if self.mode == "find_latest":
+                if self.query_spec is None:
+                    raise ValueError("Find-latest mode requires a query spec.")
+                self.progress.emit(None, "Scanning the archive for the latest available data...")
+                result = find_latest_search(
+                    self.query_spec,
+                    progress_cb=self.progress.emit,
+                    cancel_cb=self._cancel_event.is_set,
+                )
+                if self._cancel_event.is_set():
+                    self.cancelled.emit()
+                    return
+                if result is None or not result.rows:
+                    self.failed.emit(
+                        "No records were found in the archive within the look-back horizon.\n"
+                        "The archive latency may exceed the search window, or this target has no data."
+                    )
+                    return
+                self.progress.emit(100, f"Latest data located: {len(result.rows)} record(s).")
                 self.search_finished.emit(result)
                 return
 

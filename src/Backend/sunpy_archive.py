@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta, timezone
 import logging
 from logging.handlers import RotatingFileHandler
 import os
@@ -447,6 +447,156 @@ def search(
         raw_response=raw_response,
         row_index_map=row_index_map,
     )
+
+
+def find_latest_search(
+    spec: SunPyQuerySpec,
+    *,
+    now: datetime | None = None,
+    chunk_days: int = 20,
+    max_lookback_days: int = 1000,
+    final_window_hours: float | None = None,
+    max_probes: int = 28,
+    fido_client: Any | None = None,
+    attrs_module: Any | None = None,
+    units_module: Any | None = None,
+    progress_cb: Callable[[Any, str], None] | None = None,
+    cancel_cb: Callable[[], bool] | None = None,
+) -> SunPySearchResult | None:
+    """Find and return a search over the most recent records available.
+
+    The definitive VSO archives can lag real time by many months — notably the
+    SOHO/LASCO SDAC product, which is often more than a year behind — so a query
+    over "the last few hours" returns nothing even while the instrument keeps
+    observing. This walks backwards to the archive's data frontier by
+    exponentially bracketing it and then binary-searching, and finally returns a
+    normal search over the newest window that actually has records (respecting
+    the caller's cadence and record limit). Returns ``None`` when nothing is
+    found within ``max_lookback_days``.
+
+    VSO round-trips are slow (~10 s each), so this deliberately minimises the
+    number of searches performed.
+    """
+    now_dt = (
+        _naive_utc(now)
+        if now is not None
+        else datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
+    )
+    chunk = max(1, int(chunk_days))
+    horizon = max(chunk, int(max_lookback_days))
+
+    # Validate the target once so misconfigured specs fail fast (before any I/O).
+    resolve_registry_entry(
+        normalize_query_spec(replace(spec, start_dt=now_dt - timedelta(days=chunk), end_dt=now_dt))
+    )
+
+    probes = 0
+    best: SunPySearchResult | None = None
+    best_off: int | None = None
+
+    def _cancelled() -> bool:
+        return _is_cancelled(cancel_cb)
+
+    def _emit(message: str) -> None:
+        if progress_cb is not None:
+            progress_cb(None, message)
+
+    def _probe(offset_days: int) -> SunPySearchResult | None:
+        nonlocal probes
+        if _cancelled() or probes >= int(max_probes):
+            return None
+        end = now_dt - timedelta(days=max(0, int(offset_days)))
+        start = end - timedelta(days=chunk)
+        probes += 1
+        _emit(f"Scanning archive around {end:%Y-%m-%d} for the latest data (search {probes})...")
+        try:
+            return search(
+                replace(spec, start_dt=start, end_dt=end),
+                fido_client=fido_client,
+                attrs_module=attrs_module,
+                units_module=units_module,
+            )
+        except Exception as exc:  # noqa: BLE001 - keep walking back on transient errors
+            _logger.warning("find_latest probe failed at offset=%dd: %s", offset_days, exc)
+            return None
+
+    def _consider(offset_days: int, result: SunPySearchResult | None) -> bool:
+        nonlocal best, best_off
+        if result is not None and result.rows:
+            if best is None or offset_days < best_off:
+                best, best_off = result, int(offset_days)
+            return True
+        return False
+
+    # Phase A: exponentially bracket the newest window that contains data. The
+    # first probe (offset 0) resolves near-real-time instruments (SDO) in one
+    # call; each subsequent probe doubles the look-back.
+    offsets: list[int] = [0]
+    step = max(chunk, 30)
+    while step < horizon:
+        offsets.append(step)
+        step *= 2
+    offsets.append(horizon)
+
+    prev_empty = 0
+    hit_off: int | None = None
+    for offset in offsets:
+        if _cancelled():
+            return best
+        if _consider(offset, _probe(offset)):
+            hit_off = offset
+            break
+        prev_empty = offset
+
+    if hit_off is None:
+        return best  # None unless a probe unexpectedly had data without breaking
+
+    # Phase B: binary-search the frontier between the last empty offset and the
+    # first offset that had data, converging on the window closest to "now".
+    lo, hi = prev_empty, hit_off
+    while hi - lo > chunk and not _cancelled() and probes < int(max_probes):
+        mid = (lo + hi) // 2
+        if _consider(mid, _probe(mid)):
+            hi = mid
+        else:
+            lo = mid
+
+    if best is None:
+        return None
+
+    t_latest = max((row.start for row in best.rows), default=None)
+    if t_latest is None:
+        return best
+
+    # Final, targeted search anchored at the newest observation so the caller
+    # gets the freshest frames at the requested cadence/record count.
+    if final_window_hours is not None:
+        span_hours = float(final_window_hours)
+    else:
+        span_hours = (spec.end_dt - spec.start_dt).total_seconds() / 3600.0
+        if not (span_hours and span_hours > 0):
+            span_hours = 6.0
+    span_hours = min(max(span_hours, 0.25), 24.0 * 30.0)
+
+    final_spec = replace(
+        spec,
+        start_dt=t_latest - timedelta(hours=span_hours),
+        end_dt=t_latest + timedelta(minutes=1),
+    )
+    _emit(f"Latest data found at {t_latest:%Y-%m-%d %H:%M} UTC; loading the newest frames...")
+    if _cancelled():
+        return best
+    try:
+        final = search(
+            final_spec,
+            fido_client=fido_client,
+            attrs_module=attrs_module,
+            units_module=units_module,
+        )
+    except Exception as exc:  # noqa: BLE001 - fall back to the bracketing result
+        _logger.warning("find_latest final search failed: %s", exc)
+        return best
+    return final if final.rows else best
 
 
 def fetch(

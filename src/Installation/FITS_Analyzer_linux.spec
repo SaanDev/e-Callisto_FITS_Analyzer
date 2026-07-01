@@ -133,6 +133,8 @@ a = Analysis(
         "src.UI.kp_index_gui",
         "src.UI.sunpy_solar_viewer",
         "src.UI.solar_data_analysis_window",
+        "src.UI.helioviewer_preview_dialog",
+        "src.Backend.helioviewer",
         "src.UI.fits_header_viewer",
         "src.UI.theme_manager",
         "src.UI.mpl_style",

@@ -680,6 +680,8 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._active_thread: QThread | None = None
         self._active_worker: QObject | None = None
         self._save_target_dir: str | None = None
+        self._pending_latest = False
+        self._helioviewer_dialog: Any | None = None
         self._overlay_magnetogram: Any | None = None
         self._busy = False
         self._progress_target = 0
@@ -797,6 +799,8 @@ class SolarDataAnalysisWindow(QMainWindow):
     def _build_menu_bar(self) -> None:
         self.data_menu = self.menuBar().addMenu("Data")
         self.fetch_action = QAction("Fetch Archive Records", self)
+        self.find_latest_action = QAction("Find Latest Available", self)
+        self.live_preview_action = QAction("SOHO/LASCO Live Preview (Helioviewer)", self)
         self.load_selected_action = QAction("Load Selected (to cache)", self)
         self.save_disk_action = QAction("Save Selected to Disk…", self)
         self.upload_action = QAction("Upload FITS Files", self)
@@ -805,6 +809,8 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.reset_all_action = QAction("Reset All (clear cache && defaults)", self)
         for action in (
             self.fetch_action,
+            self.find_latest_action,
+            self.live_preview_action,
             self.load_selected_action,
             self.save_disk_action,
             self.upload_action,
@@ -1010,6 +1016,17 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.search_btn = QPushButton("Fetch")
         self.download_load_btn = QPushButton("Load Selected")
         self.download_load_btn.setEnabled(False)
+        self.find_latest_btn = QPushButton("Find Latest")
+        self.find_latest_btn.setToolTip(
+            "Jump to the newest data actually available in the archive for the selected observable.\n"
+            "Especially useful for SOHO/LASCO, whose calibrated FITS archive can lag real time by many\n"
+            "months. This scans the archive backwards and may take up to a minute or two."
+        )
+        self.live_preview_btn = QPushButton("Live Preview")
+        self.live_preview_btn.setToolTip(
+            "Show the newest SOHO/LASCO C2/C3 quicklook image from Helioviewer (updated within ~an hour).\n"
+            "A near-real-time browse image for situational awareness — not analysis-grade FITS."
+        )
         self.load_local_btn = QPushButton("Upload")
         self.use_analyzer_btn = QPushButton("Use Analyzer Window")
         self.stop_btn = QPushButton("Stop")
@@ -1110,6 +1127,9 @@ class SolarDataAnalysisWindow(QMainWindow):
         row = 0
         layout.addWidget(self.search_btn, row, 0)
         layout.addWidget(self.download_load_btn, row, 1)
+        row += 1
+        layout.addWidget(self.find_latest_btn, row, 0)
+        layout.addWidget(self.live_preview_btn, row, 1)
         row += 1
         layout.addWidget(self.load_local_btn, row, 0)
         layout.addWidget(self.stop_btn, row, 1)
@@ -1437,6 +1457,8 @@ class SolarDataAnalysisWindow(QMainWindow):
     def _connect_signals(self):
         self.search_btn.clicked.connect(self.search_archives)
         self.download_load_btn.clicked.connect(self.download_and_load_selected)
+        self.find_latest_btn.clicked.connect(self.find_latest_data)
+        self.live_preview_btn.clicked.connect(self.open_helioviewer_preview)
         self.load_local_btn.clicked.connect(self.load_local_files)
         self.use_analyzer_btn.clicked.connect(lambda: self.use_analyzer_time_window(auto_query=False))
         self.stop_btn.clicked.connect(self.stop_active_operation)
@@ -1482,6 +1504,8 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.export_movie_btn.clicked.connect(self.export_movie)
         self.quick_mp4_btn.clicked.connect(lambda: self.export_movie(default_suffix=".mp4"))
         self.fetch_action.triggered.connect(self.search_archives)
+        self.find_latest_action.triggered.connect(self.find_latest_data)
+        self.live_preview_action.triggered.connect(self.open_helioviewer_preview)
         self.load_selected_action.triggered.connect(self.download_and_load_selected)
         self.save_disk_action.triggered.connect(self.save_selected_to_disk)
         self.upload_action.triggered.connect(self.load_local_files)
@@ -1597,6 +1621,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._busy = bool(busy)
         self.search_btn.setEnabled(not busy)
         self.download_load_btn.setEnabled((not busy) and bool(self._search_result and self._search_result.rows))
+        self.find_latest_btn.setEnabled(not busy)
         self.load_local_btn.setEnabled(not busy)
         # SDO-only download controls (source/e-mail/frame-size/cutout/high-res)
         # are gated by observable as well as busy state.
@@ -1633,7 +1658,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         busy = bool(getattr(self, "_busy", False))
         has_results = bool(self._search_result and self._search_result.rows)
         has_regions = bool(self._regions)
-        for action in (self.fetch_action, self.upload_action, self.use_analyzer_action):
+        for action in (self.fetch_action, self.find_latest_action, self.upload_action, self.use_analyzer_action):
             action.setEnabled(not busy)
         self.load_selected_action.setEnabled((not busy) and has_results)
         self.save_disk_action.setEnabled((not busy) and has_results)
@@ -1786,6 +1811,60 @@ class SolarDataAnalysisWindow(QMainWindow):
             return
         self._set_busy(True, "Searching solar image archives...")
         self._start_worker(SunPyWorker("search", query_spec=spec))
+
+    def find_latest_data(self):
+        """Jump to the newest records actually available in the archive.
+
+        Definitive VSO archives — notably SOHO/LASCO — can lag real time by many
+        months, so a plain search over recent dates returns nothing. This walks
+        back to the archive's data frontier, sets the query window to the newest
+        available frames and lists them for download.
+        """
+        try:
+            spec = self._build_query_spec()
+        except Exception as exc:
+            QMessageBox.warning(self, "Solar Image Analysis", f"Invalid query inputs: {exc}")
+            return
+        self._pending_latest = True
+        self._set_busy(
+            True,
+            "Scanning the archive for the latest available data (this can take up to a minute)...",
+        )
+        self._start_worker(SunPyWorker("find_latest", query_spec=spec))
+
+    def open_helioviewer_preview(self):
+        """Open the near-real-time SOHO/LASCO quicklook preview (Helioviewer).
+
+        These are browse images updated within ~an hour — the fresh view the
+        calibrated (months-behind) VSO/SDAC FITS archive cannot provide.
+        """
+        instrument, value = self._current_observable()
+        if instrument != "LASCO":
+            QMessageBox.information(
+                self,
+                "Live Preview",
+                "The near-real-time preview is available for SOHO/LASCO. "
+                "Select the SOHO/LASCO C2 or C3 observable first.",
+            )
+            return
+        detector = str(value or "C2")
+        try:
+            from src.UI.helioviewer_preview_dialog import HelioviewerPreviewDialog
+        except Exception as exc:  # noqa: BLE001 - surface an import/runtime failure cleanly
+            QMessageBox.critical(self, "Live Preview", f"The preview could not be opened:\n{exc}")
+            return
+        existing = self._helioviewer_dialog
+        if existing is not None:
+            try:
+                existing.close()
+            except Exception:
+                pass
+        dialog = HelioviewerPreviewDialog(self, detector=detector, theme=self.theme)
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        self._helioviewer_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def save_selected_to_disk(self):
         """Download the selected rows into a user-chosen folder (kept on disk)."""
@@ -2033,6 +2112,9 @@ class SolarDataAnalysisWindow(QMainWindow):
     def _on_worker_stopped(self):
         self._active_thread = None
         self._active_worker = None
+        # Clear the find-latest flag so a failed/cancelled scan never taints the
+        # next ordinary search (it is consumed on success in _on_search_finished).
+        self._pending_latest = False
         self._set_busy(False)
         # A close requested mid-download was deferred until the worker stopped;
         # complete it now that nothing is running.
@@ -2132,26 +2214,80 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.analysis_text.setPlainText("Operation cancelled by user.")
 
     @Slot(object)
+    def _spec_target_label(self, spec: Any) -> str:
+        """Human label for a query target, e.g. 'SDO/AIA 193 Å', 'SOHO/LASCO C2'."""
+        sc = str(getattr(spec, "spacecraft", "") or "").upper()
+        inst = str(getattr(spec, "instrument", "") or "").upper()
+        det = str(getattr(spec, "detector", "") or "").upper()
+        wl = getattr(spec, "wavelength_angstrom", None)
+        prod = getattr(spec, "product", None)
+        base = "/".join([x for x in (sc, inst) if x]) or "archive"
+        if det:
+            return f"{base} {det}"
+        if wl:
+            return f"{base} {int(round(float(wl)))} Å"
+        if prod:
+            return f"{base} {prod}"
+        return base
+
+    def _sync_time_fields_from_spec(self, spec: Any) -> None:
+        try:
+            self.start_dt_edit.setDateTime(QDateTime(spec.start_dt.replace(tzinfo=None)))
+            self.end_dt_edit.setDateTime(QDateTime(spec.end_dt.replace(tzinfo=None)))
+        except Exception:
+            pass
+
+    def _announce_latest(self, result: SunPySearchResult, target: str) -> None:
+        latest = max((r.start for r in result.rows), default=None)
+        oldest = min((r.start for r in result.rows), default=None)
+        if latest is None:
+            return
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        age_days = max(0, int((now - latest).total_seconds() // 86400))
+        lines = [
+            f"Latest available {target} data in the VSO archive:",
+            f"  Newest frame: {latest:%Y-%m-%d %H:%M:%S} UTC  (~{age_days} day(s) behind real time)",
+            f"  Loaded window: {oldest:%Y-%m-%d %H:%M} → {latest:%Y-%m-%d %H:%M} UTC · {len(result.rows)} record(s).",
+            "Select rows and click Load Selected to download and plot the newest frames.",
+        ]
+        if "LASCO" in target.upper():
+            lines.append(
+                "Note: the calibrated SOHO/LASCO FITS archive lags real time by many months. "
+                "For near-real-time coronagraph movies, use Solar Events → CMEs → SOHO/LASCO CME Catalog."
+            )
+        self.analysis_text.setPlainText("\n".join(lines))
+        self.statusBar().showMessage(
+            f"Latest {target}: {latest:%Y-%m-%d %H:%M} UTC (~{age_days} day(s) behind).", 8000
+        )
+
     def _on_search_finished(self, result_obj: object):
         result = result_obj if isinstance(result_obj, SunPySearchResult) else None
         if result is None:
             self._on_worker_failed("Search worker returned an unexpected payload.")
             return
+        latest_mode = bool(getattr(self, "_pending_latest", False))
+        self._pending_latest = False
         self._search_result = result
         self._populate_results_table(result)
         self.download_load_btn.setEnabled(bool(result.rows))
         self._set_results_selection_controls_enabled(bool(result.rows))
         self._sync_menu_action_state(loaded=bool(self._map_frames))
+        target = self._spec_target_label(result.spec)
         if not result.rows:
-            self.archive_results_status_label.setText("No SDO/AIA archive records found for this query.")
-            self.analysis_text.setPlainText("No SDO/AIA records found for the selected time range.")
+            self.archive_results_status_label.setText(f"No {target} archive records found for this query.")
+            self.analysis_text.setPlainText(f"No {target} records found for the selected time range.")
             return
+        if latest_mode:
+            self._sync_time_fields_from_spec(result.spec)
         quality_text = " high-resolution" if result.spec.resolution is not None else ""
         self.archive_results_status_label.setText(
             f"{len(result.rows)}{quality_text} record(s) found. Checked rows will be downloaded with Load Selected."
         )
-        self.analysis_text.setPlainText(f"Found {len(result.rows)} SDO/AIA{quality_text} archive records.")
-        self.statusBar().showMessage(f"Found {len(result.rows)} SDO/AIA records.", 5000)
+        if latest_mode:
+            self._announce_latest(result, target)
+        else:
+            self.analysis_text.setPlainText(f"Found {len(result.rows)} {target}{quality_text} archive records.")
+        self.statusBar().showMessage(f"Found {len(result.rows)} {target} records.", 5000)
 
     @Slot(object, object)
     def _on_load_finished(self, fetch_obj: object, load_obj: object):
@@ -2585,9 +2721,15 @@ class SolarDataAnalysisWindow(QMainWindow):
         instrument = self._current_observable()[0]
         is_sdo = instrument in ("AIA", "HMI")
         is_aia = instrument == "AIA"
+        is_lasco = instrument == "LASCO"
         busy = bool(getattr(self, "_busy", False))
         for widget in (self.source_combo, self.jsoc_email_edit, self.frame_size_combo, self.cutout_widget):
             widget.setEnabled(is_sdo and not busy)
+        # Helioviewer near-real-time preview only applies to SOHO/LASCO.
+        if hasattr(self, "live_preview_btn"):
+            self.live_preview_btn.setEnabled(is_lasco)
+        if hasattr(self, "live_preview_action"):
+            self.live_preview_action.setEnabled(is_lasco)
         # High-resolution VSO is an AIA-only product (HMI/LASCO have none).
         self.high_resolution_check.setEnabled(is_aia and not busy)
         if not is_aia:

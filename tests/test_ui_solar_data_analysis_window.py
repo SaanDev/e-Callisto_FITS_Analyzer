@@ -1177,3 +1177,97 @@ def test_solar_data_window_crops_from_interactive_rectangle():
     assert win.crop_check.isChecked() is False
     assert win.pyqt_canvas.roi_selector_active() is False
     win.close()
+
+
+def test_solar_data_window_find_latest_starts_find_latest_worker(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    idx = win.wavelength_combo.findText("SOHO/LASCO C2")
+    win.wavelength_combo.setCurrentIndex(idx)
+
+    captured = {}
+    monkeypatch.setattr(win, "_start_worker", lambda worker: captured.setdefault("worker", worker))
+    win.find_latest_data()
+
+    assert win._pending_latest is True
+    assert captured["worker"].mode == "find_latest"
+    spec = captured["worker"].query_spec
+    assert (spec.spacecraft, spec.instrument, spec.detector) == ("SOHO", "LASCO", "C2")
+    win.close()
+
+
+def test_solar_data_window_find_latest_announces_and_syncs_window():
+    _app()
+    win = SolarDataAnalysisWindow()
+    idx = win.wavelength_combo.findText("SOHO/LASCO C2")
+    win.wavelength_combo.setCurrentIndex(idx)
+
+    # Synthetic "latest available" result, roughly 16 months behind real time.
+    t = datetime(2025, 2, 16, 18, 24)
+    rows = [
+        SunPySearchRow(
+            start=t - timedelta(minutes=12 * i), end=t, source="SOHO",
+            instrument="LASCO", provider="SDAC", fileid=f"f{i}.fts", size="2 MB",
+        )
+        for i in range(4)
+    ]
+    spec = SunPyQuerySpec(
+        start_dt=t - timedelta(hours=6), end_dt=t + timedelta(minutes=1),
+        spacecraft="SOHO", instrument="LASCO", detector="C2",
+    )
+    result = SunPySearchResult(
+        spec=spec, data_kind=DATA_KIND_MAP, rows=rows,
+        raw_response=[rows], row_index_map=[(0, i) for i in range(len(rows))],
+    )
+
+    win._pending_latest = True
+    win._on_search_finished(result)
+
+    assert win._pending_latest is False
+    assert win.results_table.rowCount() == 4
+    # Query window fields jump to the newest available data.
+    assert win.end_dt_edit.dateTime().toString("yyyy-MM-dd") == "2025-02-16"
+    text = win.analysis_text.toPlainText()
+    assert "Latest available SOHO/LASCO C2" in text
+    assert "behind real time" in text
+    assert "CME Catalog" in text  # near-real-time movie pointer for LASCO
+    win.close()
+
+
+def test_solar_data_window_live_preview_enabled_only_for_lasco():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win.wavelength_combo.setCurrentText("AIA 193 A")
+    assert not win.live_preview_btn.isEnabled()
+    assert not win.live_preview_action.isEnabled()
+
+    idx = win.wavelength_combo.findText("SOHO/LASCO C2")
+    win.wavelength_combo.setCurrentIndex(idx)
+    assert win.live_preview_btn.isEnabled()
+    assert win.live_preview_action.isEnabled()
+    win.close()
+
+
+def test_solar_data_window_opens_helioviewer_preview(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    idx = win.wavelength_combo.findText("SOHO/LASCO C3")
+    win.wavelength_combo.setCurrentIndex(idx)
+
+    import src.UI.helioviewer_preview_dialog as hvd
+
+    def _boom(detector, **kw):  # avoid any real network call from the dialog worker
+        raise RuntimeError("stubbed")
+
+    monkeypatch.setattr(hvd, "fetch_preview", _boom)
+    win.open_helioviewer_preview()
+    dialog = win._helioviewer_dialog
+    assert dialog is not None
+    assert dialog._current_detector() == "C3"
+    # Let the (stubbed) worker finish before teardown.
+    for _ in range(100):
+        QApplication.processEvents()
+        if not dialog._is_loading():
+            break
+    dialog.close()
+    win.close()
