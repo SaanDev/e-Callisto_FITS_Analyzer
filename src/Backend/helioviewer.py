@@ -18,7 +18,8 @@ the FITS analysis canvas.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import Callable
 from urllib.parse import urlencode
 
 import requests
@@ -52,6 +53,14 @@ class HelioviewerPreview:
     image_scale: float      # arcsec/pixel used to render the preview
     size_px: int
     image_url: str          # direct takeScreenshot URL (opens the PNG in a browser)
+
+
+@dataclass(frozen=True)
+class HelioviewerFrame:
+    date: datetime          # actual observation time of the frame (UTC, naive)
+    png_bytes: bytes
+    image_scale: float
+    image_url: str
 
 
 def _normalize_detector(detector: str) -> str:
@@ -190,3 +199,98 @@ def fetch_preview(
         size_px=int(size_px),
         image_url=url,
     )
+
+
+def build_frame_times(
+    start: datetime,
+    end: datetime,
+    step_seconds: float,
+    *,
+    max_frames: int = 48,
+) -> list[datetime]:
+    """Target timestamps spanning ``[start, end]`` at ``step_seconds`` spacing.
+
+    Honours the requested step while the frame count stays within
+    ``max_frames``; if the range/step would exceed that cap, the frames are
+    spread evenly across the full range instead (so the whole window is still
+    covered). Timestamps are the *requested* times — the fetcher resolves each
+    to the nearest actually-available frame and de-duplicates.
+    """
+    start = start.replace(tzinfo=None) if start.tzinfo else start
+    end = end.replace(tzinfo=None) if end.tzinfo else end
+    if end < start:
+        start, end = end, start
+    span = (end - start).total_seconds()
+    if span <= 0:
+        return [start]
+    step = max(1.0, float(step_seconds))
+    cap = max(1, int(max_frames))
+
+    count = int(span // step) + 1
+    if count <= cap:
+        times = [start + timedelta(seconds=step * i) for i in range(count)]
+        if (end - times[-1]).total_seconds() > step * 0.5:
+            times.append(end)
+        return times
+
+    # Too many frames for the cap: spread `cap` points evenly across the range.
+    return [start + timedelta(seconds=span * i / (cap - 1)) for i in range(cap)]
+
+
+def fetch_frame_sequence(
+    detector: str,
+    start: datetime,
+    end: datetime,
+    *,
+    step_seconds: float,
+    size_px: int = 512,
+    max_frames: int = 48,
+    api_base: str = HELIOVIEWER_API_BASE,
+    timeout: tuple[int, int] | float = _HTTP_TIMEOUT,
+    session: requests.Session | None = None,
+    progress_cb: Callable[[int, int, datetime], None] | None = None,
+    cancel_cb: Callable[[], bool] | None = None,
+) -> list[HelioviewerFrame]:
+    """Fetch a de-duplicated LASCO frame sequence over ``[start, end]``.
+
+    One Helioviewer frame is fetched per target timestamp (see
+    :func:`build_frame_times`). Frames that resolve to the same actual
+    observation time (when the step is finer than the native cadence) are
+    dropped, and timestamps with no data are skipped, so the result is the set
+    of distinct real frames covering the window, ordered in time.
+    """
+    det = _normalize_detector(detector)
+    sess = _session(session)
+    targets = build_frame_times(start, end, step_seconds, max_frames=max_frames)
+    total = len(targets)
+
+    frames: list[HelioviewerFrame] = []
+    seen: set[datetime] = set()
+    for index, target in enumerate(targets):
+        if cancel_cb is not None and cancel_cb():
+            break
+        if progress_cb is not None:
+            progress_cb(index, total, target)
+        try:
+            preview = fetch_preview(
+                det, date=target, size_px=size_px,
+                api_base=api_base, timeout=timeout, session=sess,
+            )
+        except Exception:
+            continue  # data gap or transient error: skip this timestamp
+        actual = preview.info.date
+        if actual in seen:
+            continue
+        seen.add(actual)
+        frames.append(
+            HelioviewerFrame(
+                date=actual,
+                png_bytes=preview.png_bytes,
+                image_scale=preview.image_scale,
+                image_url=preview.image_url,
+            )
+        )
+    frames.sort(key=lambda frame: frame.date)
+    if progress_cb is not None:
+        progress_cb(total, total, end.replace(tzinfo=None) if end.tzinfo else end)
+    return frames

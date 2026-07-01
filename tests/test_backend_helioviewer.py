@@ -105,3 +105,59 @@ def test_fetch_preview_rejects_non_image_response():
     )
     with pytest.raises(RuntimeError):
         hv.fetch_preview("C2", session=session)
+
+
+def test_build_frame_times_honours_step_and_cap():
+    start = datetime(2026, 7, 1, 0, 0)
+    end = datetime(2026, 7, 1, 6, 0)
+    times = hv.build_frame_times(start, end, 30 * 60, max_frames=48)
+    assert times[0] == start and times[-1] == end and len(times) == 13
+    # Exceeding the cap spreads frames evenly across the whole range.
+    capped = hv.build_frame_times(datetime(2026, 7, 1), datetime(2026, 7, 2), 5 * 60, max_frames=48)
+    assert len(capped) == 48 and capped[0] == datetime(2026, 7, 1) and capped[-1] == datetime(2026, 7, 2)
+
+
+class _GridSession:
+    """getClosestImage snaps every request to the top of the hour, so a finer
+    step produces duplicate frames that must be de-duplicated."""
+
+    def __init__(self):
+        self.calls = []
+
+    def get(self, url, params=None, timeout=None):
+        self.calls.append(url)
+        if "getClosestImage" in url:
+            snapped = datetime.strptime(params["date"], "%Y-%m-%dT%H:%M:%SZ").replace(minute=0, second=0)
+            return _FakeResp(
+                json_data={"date": snapped.strftime("%Y-%m-%d %H:%M:%S"),
+                           "name": "LASCO C2", "scale": 11.9, "width": 1024, "height": 1024},
+                headers={"Content-Type": "application/json"},
+            )
+        return _FakeResp(content=_PNG, headers={"Content-Type": "image/png"})
+
+
+def test_fetch_frame_sequence_dedupes_finer_than_cadence():
+    start = datetime(2026, 7, 1, 0, 0)
+    end = datetime(2026, 7, 1, 6, 0)
+    progress = []
+    frames = hv.fetch_frame_sequence(
+        "C2", start, end, step_seconds=30 * 60, session=_GridSession(),
+        progress_cb=lambda done, total, _dt: progress.append((done, total)),
+    )
+    # 30-min steps across 6 h snap to 7 distinct hourly frames, ordered in time.
+    assert [f.date.hour for f in frames] == [0, 1, 2, 3, 4, 5, 6]
+    assert progress[-1][0] == progress[-1][1]
+
+
+def test_fetch_frame_sequence_honours_cancel():
+    calls = {"n": 0}
+
+    def _cancel():
+        calls["n"] += 1
+        return calls["n"] > 2
+
+    frames = hv.fetch_frame_sequence(
+        "C2", datetime(2026, 7, 1, 0, 0), datetime(2026, 7, 1, 6, 0),
+        step_seconds=30 * 60, session=_GridSession(), cancel_cb=_cancel,
+    )
+    assert len(frames) <= 3

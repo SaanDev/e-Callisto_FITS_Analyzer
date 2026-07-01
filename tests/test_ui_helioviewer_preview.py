@@ -97,3 +97,45 @@ def test_helioviewer_dialog_defaults_to_requested_detector(monkeypatch):
     _wait(dialog)
     assert dialog._current_detector() == "C3"
     dialog.close()
+
+
+def test_helioviewer_dialog_builds_and_plays_movie(monkeypatch):
+    _app()
+    from datetime import timedelta
+    from PySide6.QtCore import QDateTime
+    from src.Backend.helioviewer import HelioviewerFrame
+
+    monkeypatch.setattr(hvd, "fetch_preview", lambda detector, **kw: _fake_preview(detector))
+
+    def _fake_seq(detector, start, end, *, step_seconds, size_px, max_frames, progress_cb=None, cancel_cb=None):
+        base = datetime(2026, 7, 1, 0, 0)
+        if progress_cb:
+            progress_cb(4, 4, end)
+        return [
+            HelioviewerFrame(date=base + timedelta(hours=i), png_bytes=_qt_png_bytes(), image_scale=23.8, image_url=f"u{i}")
+            for i in range(4)
+        ]
+
+    monkeypatch.setattr(hvd, "fetch_frame_sequence", _fake_seq)
+
+    dialog = HelioviewerPreviewDialog(detector="C2")
+    _wait(dialog)
+
+    dialog.start_edit.setDateTime(QDateTime(datetime(2026, 7, 1, 0, 0)))
+    dialog.end_edit.setDateTime(QDateTime(datetime(2026, 7, 1, 3, 0)))
+    dialog._build_movie()
+    _wait(dialog)
+
+    assert len(dialog._frames) == 4
+    assert dialog.frame_slider.maximum() == 3
+    assert dialog.play_btn.isEnabled()
+
+    dialog.frame_slider.setValue(2)
+    assert dialog._frame_index == 2
+    assert "frame 3/4" in dialog.status_label.text()
+
+    dialog._play()
+    assert dialog._play_timer.isActive()
+    dialog._pause()
+    assert not dialog._play_timer.isActive()
+    dialog.close()
