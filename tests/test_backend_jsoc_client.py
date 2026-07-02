@@ -256,3 +256,165 @@ def test_filename_fallback_from_record():
     )
     assert result.urls[0].filename.endswith(".fits")
     assert "[" not in result.urls[0].filename
+
+
+def test_build_recordset_hmi_vector():
+    series, recordset = jc.build_recordset_hmi_vector(
+        start=datetime(2024, 5, 14, 16, 0, 0),
+        end=datetime(2024, 5, 14, 17, 0, 0),
+        cadence_seconds=720,
+    )
+    assert series == "hmi.B_720s"
+    assert recordset == (
+        "hmi.B_720s[2024-05-14T16:00:00Z/3600s@720s]{field,inclination,azimuth,disambig}"
+    )
+    # Defaults to the native 720 s cadence and rejects an inverted window.
+    _series, rs_default = jc.build_recordset_hmi_vector(
+        start=datetime(2024, 5, 14, 16, 0, 0), end=datetime(2024, 5, 14, 17, 0, 0)
+    )
+    assert "@720s" in rs_default
+    with pytest.raises(jc.JsocError):
+        jc.build_recordset_hmi_vector(
+            start=datetime(2024, 5, 14, 17, 0, 0), end=datetime(2024, 5, 14, 16, 0, 0)
+        )
+    with pytest.raises(jc.JsocError):
+        jc.build_recordset_hmi_vector(
+            start=datetime(2024, 5, 14, 16, 0, 0),
+            end=datetime(2024, 5, 14, 17, 0, 0),
+            segments=(),
+        )
+
+
+def test_export_hmi_vector_urls_quick_path():
+    rows = [
+        {"record": "hmi.B_720s[2024.05.14_16:00:00_TAI]", "filename": "field.fits",
+         "url": "http://jsoc/field.fits"},
+        {"record": "hmi.B_720s[2024.05.14_16:00:00_TAI]", "filename": "inclination.fits",
+         "url": "http://jsoc/inclination.fits"},
+        {"record": "hmi.B_720s[2024.05.14_16:00:00_TAI]", "filename": "azimuth.fits",
+         "url": "http://jsoc/azimuth.fits"},
+        {"record": "hmi.B_720s[2024.05.14_16:00:00_TAI]", "filename": "disambig.fits",
+         "url": "http://jsoc/disambig.fits"},
+    ]
+    client = _FakeClient(rows)
+    result = jc.export_hmi_vector_urls(
+        start=datetime(2024, 5, 14, 16, 0, 0),
+        end=datetime(2024, 5, 14, 17, 0, 0),
+        email="sci@example.org",
+        cadence_seconds=720,
+        client=client,
+    )
+    assert result.series == "hmi.B_720s"
+    assert result.record_count == 4
+    call = client.export_calls[0]
+    assert call["method"] == "url_quick"
+    assert call["protocol"] == "as-is"
+    assert "{field,inclination,azimuth,disambig}" in call["recordset"]
+
+
+class _LazyFailRequest:
+    """Mimics drms deferring the server round-trip to the .urls property."""
+
+    def __init__(self, message):
+        self._message = message
+
+    @property
+    def urls(self):
+        raise RuntimeError(self._message)
+
+
+class _EmptyRecordSetClient(_FakeClient):
+    def __init__(self, latest=None, *, fail_message="There are no files in this RecordSet [status=4]"):
+        super().__init__([])
+        self._latest = latest
+        self._fail_message = fail_message
+
+    def export(self, recordset, method=None, protocol=None, email=None, process=None):
+        self.export_calls.append(
+            {"recordset": recordset, "method": method, "protocol": protocol,
+             "email": email, "process": process}
+        )
+        return _LazyFailRequest(self._fail_message)
+
+    def query(self, ds, key=None):
+        if self._latest is None:
+            raise RuntimeError("query unavailable")
+        assert ds.endswith("[$]")
+        return {key: [self._latest]}
+
+
+def test_export_hmi_vector_urls_empty_recordset_gives_actionable_error():
+    client = _EmptyRecordSetClient(latest="2026.06.18_12:00:00_TAI")
+    with pytest.raises(jc.JsocEmptyRecordSetError) as err:
+        jc.export_hmi_vector_urls(
+            start=datetime(2026, 7, 2, 8, 0, 0),
+            end=datetime(2026, 7, 2, 10, 0, 0),
+            email="sci@example.org",
+            client=client,
+        )
+    # A JsocError subclass (existing handlers keep working) with the newest
+    # available record surfaced for the UI to offer.
+    assert isinstance(err.value, jc.JsocError)
+    assert err.value.latest_trec == "2026.06.18_12:00:00_TAI"
+    message = str(err.value)
+    assert "hmi.B_720s" in message
+    assert "2026.06.18_12:00:00_TAI" in message
+    assert "earlier time window" in message.lower()
+
+
+def test_export_hmi_vector_urls_empty_recordset_without_query_support():
+    client = _EmptyRecordSetClient(latest=None)
+    with pytest.raises(jc.JsocEmptyRecordSetError) as err:
+        jc.export_hmi_vector_urls(
+            start=datetime(2026, 7, 2, 8, 0, 0),
+            end=datetime(2026, 7, 2, 10, 0, 0),
+            email="sci@example.org",
+            client=client,
+        )
+    assert err.value.latest_trec is None
+
+
+def test_export_urls_wraps_lazy_drms_errors_as_jsoc_error():
+    # Any non-empty-recordset failure raised from .urls becomes a JsocError,
+    # never an unhandled drms exception (the original crash mode).
+    client = _EmptyRecordSetClient(fail_message="something else broke")
+    with pytest.raises(jc.JsocError) as err:
+        jc.export_urls(
+            start=datetime(2026, 7, 2, 8, 0, 0),
+            end=datetime(2026, 7, 2, 10, 0, 0),
+            wavelength_angstrom=193,
+            email="sci@example.org",
+            client=client,
+        )
+    assert "JSOC export failed" in str(err.value)
+    assert not isinstance(err.value, jc.JsocEmptyRecordSetError)
+
+
+def test_export_urls_empty_recordset_is_a_clean_jsoc_error():
+    client = _EmptyRecordSetClient()
+    with pytest.raises(jc.JsocError) as err:
+        jc.export_urls(
+            start=datetime(2026, 7, 2, 8, 0, 0),
+            end=datetime(2026, 7, 2, 10, 0, 0),
+            wavelength_angstrom=193,
+            email="sci@example.org",
+            client=client,
+        )
+    assert "no records" in str(err.value).lower()
+
+
+def test_export_hmi_vector_urls_requires_email_and_urls():
+    with pytest.raises(jc.JsocError):
+        jc.export_hmi_vector_urls(
+            start=datetime(2024, 5, 14, 16, 0, 0),
+            end=datetime(2024, 5, 14, 17, 0, 0),
+            email="",
+            client=_FakeClient([]),
+        )
+    with pytest.raises(jc.JsocError):
+        jc.export_hmi_vector_urls(
+            start=datetime(2024, 5, 14, 16, 0, 0),
+            end=datetime(2024, 5, 14, 17, 0, 0),
+            email="sci@example.org",
+            client=_FakeClient([]),
+        )

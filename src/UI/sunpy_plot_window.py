@@ -217,6 +217,34 @@ class SunPyPlotCanvas(QWidget):
         self._aia_limb_curve.hide()
         self.map_plot.addItem(self._aia_limb_curve)
 
+        # HMI vector magnetic field overlay: |B| magnitude layer under the
+        # line work, streamlines, and quiver arrows split by Bz polarity
+        # (red = toward the observer, blue = away) matching the polarity
+        # convention of the magnetogram contour composite.
+        self._vector_geometry: Any | None = None
+        self._vector_mag_item = pg.ImageItem(axisOrder="row-major")
+        self._vector_mag_item.setZValue(12)
+        self._vector_mag_item.hide()
+        self.map_plot.addItem(self._vector_mag_item)
+        self._vector_stream_curve = pg.PlotCurveItem(
+            pen=pg.mkPen((255, 210, 80), width=1.1), antialias=True
+        )
+        self._vector_stream_curve.setZValue(24)
+        self._vector_stream_curve.hide()
+        self.map_plot.addItem(self._vector_stream_curve)
+        self._vector_arrow_pos_curve = pg.PlotCurveItem(
+            pen=pg.mkPen((255, 80, 80), width=1.3), antialias=True
+        )
+        self._vector_arrow_pos_curve.setZValue(26)
+        self._vector_arrow_pos_curve.hide()
+        self.map_plot.addItem(self._vector_arrow_pos_curve)
+        self._vector_arrow_neg_curve = pg.PlotCurveItem(
+            pen=pg.mkPen((80, 150, 255), width=1.3), antialias=True
+        )
+        self._vector_arrow_neg_curve.setZValue(26)
+        self._vector_arrow_neg_curve.hide()
+        self.map_plot.addItem(self._vector_arrow_neg_curve)
+
         # Interactive region-of-interest selector (hidden until enabled). The
         # rectangle lives in data (arcsec) coordinates; bounds are converted to
         # pixel indices and pushed through the ROI callback.
@@ -433,9 +461,68 @@ class SunPyPlotCanvas(QWidget):
         if getattr(self, "_colorbar", None) is not None:
             self._colorbar.setColorMap(self._map_colormap)
 
+    def set_vector_field_overlay(self, geometry: Any | None) -> None:
+        """Draw (or clear, with None) an HMI vector-field overlay.
+
+        ``geometry`` is a :class:`~src.Backend.hmi_vector_field.VectorOverlayGeometry`
+        with NaN-separated polylines and an optional RGBA magnitude layer, all
+        in the map's arcsec coordinates.
+        """
+        self._vector_geometry = geometry
+        empty = np.asarray([], dtype=float)
+
+        def _set_curve(curve, x_data, y_data):
+            x_arr = np.asarray(x_data if x_data is not None else empty, dtype=float)
+            y_arr = np.asarray(y_data if y_data is not None else empty, dtype=float)
+            if x_arr.size and y_arr.size and x_arr.size == y_arr.size:
+                curve.setData(x_arr, y_arr, connect="finite")
+                curve.show()
+            else:
+                curve.setData([], [])
+                curve.hide()
+
+        if geometry is None:
+            for curve in (
+                self._vector_arrow_pos_curve,
+                self._vector_arrow_neg_curve,
+                self._vector_stream_curve,
+            ):
+                curve.setData([], [])
+                curve.hide()
+            self._vector_mag_item.clear()
+            self._vector_mag_item.hide()
+            return
+
+        _set_curve(self._vector_arrow_pos_curve, getattr(geometry, "arrows_pos_x", None), getattr(geometry, "arrows_pos_y", None))
+        _set_curve(self._vector_arrow_neg_curve, getattr(geometry, "arrows_neg_x", None), getattr(geometry, "arrows_neg_y", None))
+        _set_curve(self._vector_stream_curve, getattr(geometry, "stream_x", None), getattr(geometry, "stream_y", None))
+
+        rgba = getattr(geometry, "magnitude_rgba", None)
+        rect = getattr(geometry, "magnitude_rect", None)
+        if rgba is not None and rect is not None:
+            self._vector_mag_item.setImage(np.asarray(rgba, dtype=np.uint8), autoLevels=False)
+            x0, y0, width, height = [float(v) for v in rect]
+            self._vector_mag_item.setRect(QRectF(x0, y0, width, height))
+            self._vector_mag_item.show()
+        else:
+            self._vector_mag_item.clear()
+            self._vector_mag_item.hide()
+
+    def has_vector_field_overlay(self) -> bool:
+        return bool(
+            self._vector_geometry is not None
+            and (
+                self._vector_arrow_pos_curve.isVisible()
+                or self._vector_arrow_neg_curve.isVisible()
+                or self._vector_stream_curve.isVisible()
+                or self._vector_mag_item.isVisible()
+            )
+        )
+
     def clear_plot(self):
         self.map_image.clear()
         self.set_aia_limb_overlay(None, None, visible=False)
+        self.set_vector_field_overlay(None)
         self.clear_region_overlays()
         self._last_map_levels = None
         self._update_colorbar_visibility(is_rgb=False)

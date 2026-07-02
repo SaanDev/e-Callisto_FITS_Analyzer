@@ -49,6 +49,12 @@ HMI_PRODUCTS: dict[str, tuple[str, str, str]] = {
 }
 DEFAULT_HMI_CADENCE_SECONDS = 720
 
+# HMI full-disk vector magnetic field (Milne-Eddington inversion, 720 s). The
+# vector is distributed as separate segments per record: |B| (field), the
+# inclination/azimuth angles and the 180-degree azimuth disambiguation.
+HMI_VECTOR_SERIES = "hmi.B_720s"
+HMI_VECTOR_SEGMENTS = ("field", "inclination", "azimuth", "disambig")
+
 # Default cadence (s) when the caller does not pin one, so a recordset never
 # accidentally expands to every native-cadence frame in the window.
 DEFAULT_CADENCE_SECONDS = 60
@@ -162,6 +168,19 @@ class JsocError(RuntimeError):
     """Raised when a JSOC request cannot be built or resolved."""
 
 
+class JsocEmptyRecordSetError(JsocError):
+    """Raised when a query resolves to zero records (JSOC status=4).
+
+    ``latest_trec`` carries the newest record time actually available in the
+    series (when it could be determined) so the UI can offer to re-aim the
+    time window instead of leaving the user at a dead end.
+    """
+
+    def __init__(self, message: str, *, latest_trec: str | None = None):
+        super().__init__(message)
+        self.latest_trec = latest_trec
+
+
 def series_for_wavelength(wavelength_angstrom: float | int) -> str:
     wl = int(round(float(wavelength_angstrom)))
     if wl in _AIA_UV_WAVELENGTHS:
@@ -229,6 +248,86 @@ def build_recordset_hmi(
 
     recordset = f"{series}[{_format_jsoc_time(start)}/{duration}s@{cadence}s]{{{segment}}}"
     return series, recordset
+
+
+def build_recordset_hmi_vector(
+    *,
+    start: datetime,
+    end: datetime,
+    cadence_seconds: float | int | None = None,
+    segments: Sequence[str] = HMI_VECTOR_SEGMENTS,
+) -> tuple[str, str]:
+    """Return ``(series, recordset)`` for the hmi.B_720s vector field.
+
+    One record exports several segment files, e.g.
+    ``hmi.B_720s[2024-05-14T16:00:00Z/3600s@720s]{field,inclination,azimuth,disambig}``.
+    """
+    if end <= start:
+        raise JsocError("End time must be after start time.")
+    names = [str(s).strip() for s in segments if str(s).strip()]
+    if not names:
+        raise JsocError("At least one hmi.B_720s segment name is required.")
+
+    duration = int(round((end - start).total_seconds()))
+    cadence = int(round(float(cadence_seconds))) if cadence_seconds else DEFAULT_HMI_CADENCE_SECONDS
+    cadence = max(1, cadence)
+
+    recordset = (
+        f"{HMI_VECTOR_SERIES}[{_format_jsoc_time(start)}/{duration}s@{cadence}s]"
+        f"{{{','.join(names)}}}"
+    )
+    return HMI_VECTOR_SERIES, recordset
+
+
+def export_hmi_vector_urls(
+    *,
+    start: datetime,
+    end: datetime,
+    email: str,
+    cadence_seconds: float | int | None = None,
+    segments: Sequence[str] = HMI_VECTOR_SEGMENTS,
+    client: Any | None = None,
+    drms_module: Any | None = None,
+) -> JsocExportResult:
+    """Resolve direct URLs for the hmi.B_720s vector segments (quick path).
+
+    Every requested time step yields one URL per segment; the caller pairs
+    them back up by record. As-is protocol keeps the files Rice-compressed.
+    """
+    email = str(email or "").strip()
+    if not email:
+        raise JsocError("A registered JSOC notify e-mail is required for export.")
+
+    series, recordset = build_recordset_hmi_vector(
+        start=start, end=end, cadence_seconds=cadence_seconds, segments=segments
+    )
+    if client is None:
+        client = make_client(email, drms_module=drms_module)
+
+    _logger.info("JSOC vector export: series=%s recordset=%s", series, recordset)
+    try:
+        request = client.export(recordset, method="url_quick", protocol="as-is", email=email)
+    except TypeError:
+        request = client.export(recordset, method="url_quick", protocol="as-is")
+    except Exception as exc:
+        raise JsocError(f"JSOC export failed: {exc}") from exc
+
+    _wait_for_request(request, staged=False)
+    urls = _extract_urls(request)
+    if not urls:
+        # Most common cause: the definitive vector pipeline lags real time by
+        # days to weeks, so a recent window is simply empty. Report the newest
+        # record that actually exists so the user can re-aim the window.
+        latest = _latest_record_time(client, HMI_VECTOR_SERIES)
+        hint = f" Newest available record: {latest}." if latest else ""
+        raise JsocEmptyRecordSetError(
+            "JSOC has no hmi.B_720s vector records in the requested time window "
+            "(the definitive vector pipeline lags real time by days to weeks)."
+            f"{hint} Choose an earlier time window and try again.",
+            latest_trec=latest,
+        )
+
+    return JsocExportResult(series=series, recordset=recordset, urls=urls, record_count=len(urls))
 
 
 def make_client(email: str | None = None, *, drms_module: Any | None = None) -> Any:
@@ -340,7 +439,10 @@ def export_urls(
     _wait_for_request(request, staged=bool(process) or effective_method == "url")
     urls = _extract_urls(request)
     if not urls:
-        raise JsocError("JSOC export returned no URLs for the requested records.")
+        raise JsocError(
+            "JSOC returned no records for this query — the requested time window "
+            "may not be covered by the archive (yet). Try an earlier window."
+        )
 
     return JsocExportResult(series=series, recordset=recordset, urls=urls, record_count=len(urls))
 
@@ -354,14 +456,53 @@ def _wait_for_request(request: Any, *, staged: bool) -> None:
             raise JsocError(f"JSOC export did not complete: {exc}") from exc
 
 
+def _is_empty_recordset_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "no files in this recordset" in text or "status=4" in text
+
+
+def _latest_record_time(client: Any, series: str) -> str | None:
+    """T_REC of the newest record in a series (JSOC '[$]' shorthand), or None.
+
+    Best-effort: used only to enrich 'no records found' error messages, so any
+    failure here silently degrades to the plain message.
+    """
+    query = getattr(client, "query", None)
+    if not callable(query):
+        return None
+    try:
+        result = query(f"{series}[$]", key="T_REC")
+    except Exception:
+        return None
+    try:
+        column = result["T_REC"]
+        if len(column) > 0:
+            value = column.iloc[0] if hasattr(column, "iloc") else column[0]
+            text = str(value).strip()
+            return text or None
+    except Exception:
+        pass
+    return None
+
+
 def _extract_urls(request: Any) -> list[JsocUrl]:
     """Pull (url, filename, record) rows out of an ExportRequest.
 
     drms exposes them as a pandas DataFrame on ``.urls`` with at least a 'url'
     column and usually 'record' and 'filename'. We stay duck-typed so a fake
     request (a plain object with a list/records) works in tests.
+
+    For quick exports drms defers the server round-trip until ``.urls`` is
+    read, so server-side failures surface *here*, not at ``client.export()``.
+    An empty recordset (JSOC status=4) becomes an empty list — callers raise
+    their own, more specific message; anything else becomes a JsocError.
     """
-    table = getattr(request, "urls", None)
+    try:
+        table = getattr(request, "urls", None)
+    except Exception as exc:
+        if _is_empty_recordset_error(exc):
+            return []
+        raise JsocError(f"JSOC export failed: {exc}") from exc
     if table is None:
         return []
 

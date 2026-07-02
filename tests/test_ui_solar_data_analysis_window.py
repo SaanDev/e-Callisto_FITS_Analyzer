@@ -1271,3 +1271,290 @@ def test_solar_data_window_opens_helioviewer_preview(monkeypatch):
             break
     dialog.close()
     win.close()
+
+
+# -- HMI vector magnetic field overlay ---------------------------------------
+
+
+class FakeHmiMap(FakeMap):
+    instrument = "HMI"
+    wavelength = ""
+
+    def __init__(self, data):
+        super().__init__(data)
+        self.meta = {"instrume": "HMI_SIDE1", "content": "MAGNETOGRAM"}
+
+
+def _make_vector_frame(when=None, shape=(32, 32)):
+    from src.Backend.hmi_vector_field import HmiVectorFrame
+
+    ny, nx = shape
+    transform = {
+        "x_ref_pix": (nx - 1) / 2.0,
+        "y_ref_pix": (ny - 1) / 2.0,
+        "x_scale_arcsec_per_pix": 1.0,
+        "y_scale_arcsec_per_pix": 1.0,
+        "x_ref_arcsec": 0.0,
+        "y_ref_arcsec": 0.0,
+    }
+    return HmiVectorFrame(
+        time=when or datetime(2026, 2, 10, 1, 0, 0),
+        bx=np.full(shape, 300.0, dtype=np.float32),
+        by=np.full(shape, 400.0, dtype=np.float32),
+        bz=np.full(shape, 250.0, dtype=np.float32),
+        axis_transform=transform,
+        meta={},
+    )
+
+
+def test_solar_data_window_vector_field_controls_exist_with_defaults():
+    _app()
+    win = SolarDataAnalysisWindow()
+
+    assert win.vector_load_btn.isEnabled()
+    assert win.vector_download_btn.isEnabled()
+    assert win.vector_show_check.isChecked() is False
+    assert win.vector_arrows_check.isChecked() is True
+    assert win.vector_stream_check.isChecked() is False
+    assert win.vector_mag_check.isChecked() is False
+    assert win.vector_spacing_spin.value() == 64
+    assert win.vector_threshold_spin.value() == 200
+    assert "no vector field" in win.vector_status_label.text().lower()
+    win.close()
+
+
+def test_solar_data_window_vector_overlay_draws_on_hmi_frames():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames(
+        [FakeHmiMap(np.random.rand(32, 32) * 100.0)], paths=["m.fits"], metadata={"instrument": "HMI"}
+    )
+    QApplication.processEvents()
+
+    win._vector_frames = [_make_vector_frame()]
+    win.vector_spacing_spin.setValue(16)
+    win.vector_threshold_spin.setValue(100)
+    win.vector_show_check.setChecked(True)
+    QApplication.processEvents()
+
+    assert win.pyqt_canvas.has_vector_field_overlay() is True
+    assert "arrow" in win.vector_status_label.text().lower()
+
+    win.vector_show_check.setChecked(False)
+    QApplication.processEvents()
+    assert win.pyqt_canvas.has_vector_field_overlay() is False
+    win.close()
+
+
+def test_solar_data_window_vector_overlay_skips_non_hmi_frames():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames([FakeMap(np.ones((16, 16)))], paths=["a.fits"], metadata={"instrument": "AIA"})
+    QApplication.processEvents()
+
+    win._vector_frames = [_make_vector_frame()]
+    win.vector_show_check.setChecked(True)
+    QApplication.processEvents()
+
+    assert win.pyqt_canvas.has_vector_field_overlay() is False
+    assert "hmi" in win.vector_status_label.text().lower()
+    win.close()
+
+
+def test_solar_data_window_vector_overlay_renders_on_matplotlib_canvas():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win.renderer_combo.setCurrentText("Matplotlib")
+    win._apply_loaded_frames(
+        [FakeHmiMap(np.random.rand(32, 32) * 100.0)], paths=["m.fits"], metadata={"instrument": "HMI"}
+    )
+    QApplication.processEvents()
+
+    win._vector_frames = [_make_vector_frame()]
+    win.vector_spacing_spin.setValue(16)
+    win.vector_threshold_spin.setValue(100)
+    win.vector_mag_check.setChecked(True)
+    win.vector_show_check.setChecked(True)
+    QApplication.processEvents()
+
+    assert win.matplotlib_canvas.has_vector_field_overlay() is True
+    win.close()
+
+
+def test_solar_data_window_vector_frames_loaded_updates_state():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames(
+        [FakeHmiMap(np.random.rand(32, 32) * 100.0)], paths=["m.fits"], metadata={"instrument": "HMI"}
+    )
+    QApplication.processEvents()
+
+    frames = [_make_vector_frame(), _make_vector_frame(when=datetime(2026, 2, 10, 1, 12, 0))]
+    win._on_vector_frames_loaded(frames)
+    QApplication.processEvents()
+
+    assert win._vector_frames == frames
+    assert win.vector_show_check.isChecked() is True
+    assert "2 vector time step" in win.vector_status_label.text() or "arrow" in win.vector_status_label.text().lower()
+    assert "hmi.b_720s" in win.analysis_text.toPlainText().lower()
+    win.close()
+
+
+def test_solar_data_window_vector_download_requires_jsoc_email(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    win.jsoc_email_edit.setText("")
+
+    seen = {}
+
+    def _info(parent, title, text, *args, **kwargs):
+        seen["text"] = text
+        return solar_mod.QMessageBox.Ok
+
+    monkeypatch.setattr(solar_mod.QMessageBox, "information", _info)
+    win.download_vector_field()
+    assert "e-mail" in seen.get("text", "").lower()
+    assert win.is_operation_running() is False
+    win.close()
+
+
+def test_solar_data_window_vector_download_plots_bz_when_nothing_loaded():
+    _app()
+    win = SolarDataAnalysisWindow()
+    assert not win._map_frames
+
+    win._on_vector_frames_loaded([_make_vector_frame()])
+    QApplication.processEvents()
+
+    # The vector data itself is plotted (as its Bz magnetogram) so the
+    # download is immediately visible, with the overlay on top.
+    assert len(win._map_frames) == 1
+    assert win._frame_hmi_product(win._map_frames[0]) == "magnetogram"
+    assert win.pyqt_canvas.has_plot_content() is True
+    assert win.pyqt_canvas.has_vector_field_overlay() is True
+    assert win.vector_show_check.isChecked() is True
+    assert "bz" in win.analysis_text.toPlainText().lower()
+    win.close()
+
+
+def test_solar_data_window_vector_download_keeps_loaded_hmi_frames():
+    _app()
+    win = SolarDataAnalysisWindow()
+    hmi_frame = FakeHmiMap(np.random.rand(32, 32) * 100.0)
+    win._apply_loaded_frames([hmi_frame], paths=["m.fits"], metadata={"instrument": "HMI"})
+    QApplication.processEvents()
+
+    win.vector_spacing_spin.setValue(16)
+    win.vector_threshold_spin.setValue(100)
+    win._on_vector_frames_loaded([_make_vector_frame()])
+    QApplication.processEvents()
+
+    # An already-loaded HMI sequence stays; the overlay lands on it.
+    assert win._map_frames == [hmi_frame]
+    assert win.pyqt_canvas.has_vector_field_overlay() is True
+    win.close()
+
+
+def test_solar_data_window_vector_download_asks_before_replacing_aia(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    aia_frame = FakeMap(np.ones((16, 16)))
+    win._apply_loaded_frames([aia_frame], paths=["a.fits"], metadata={"instrument": "AIA"})
+    QApplication.processEvents()
+
+    answers = {"reply": solar_mod.QMessageBox.No}
+    monkeypatch.setattr(
+        solar_mod.QMessageBox, "question", lambda *a, **k: answers["reply"]
+    )
+
+    # Declined: loaded AIA frames stay, no overlay is drawn on them.
+    win._on_vector_frames_loaded([_make_vector_frame()])
+    QApplication.processEvents()
+    assert win._map_frames == [aia_frame]
+    assert win.pyqt_canvas.has_vector_field_overlay() is False
+
+    # Accepted: the Bz magnetogram replaces the AIA frames and the overlay shows.
+    answers["reply"] = solar_mod.QMessageBox.Yes
+    win.vector_spacing_spin.setValue(16)
+    win.vector_threshold_spin.setValue(100)
+    win._on_vector_frames_loaded([_make_vector_frame()])
+    QApplication.processEvents()
+    assert win._frame_hmi_product(win._map_frames[0]) == "magnetogram"
+    assert win.pyqt_canvas.has_vector_field_overlay() is True
+    win.close()
+
+
+def test_vector_download_worker_emits_no_records(monkeypatch, tmp_path):
+    _app()
+    import src.Backend.jsoc_client as jc
+
+    def _raise_empty(**kwargs):
+        raise jc.JsocEmptyRecordSetError("empty window", latest_trec="2026.06.18_12:00:00_TAI")
+
+    monkeypatch.setattr(jc, "export_hmi_vector_urls", _raise_empty)
+    worker = solar_mod.VectorFieldDownloadWorker(
+        start_dt=datetime(2026, 7, 2, 8, 0, 0),
+        end_dt=datetime(2026, 7, 2, 10, 0, 0),
+        cadence_seconds=720,
+        email="sci@example.org",
+        cache_dir=tmp_path,
+    )
+    seen = {"no_records": [], "failed": []}
+    worker.no_records.connect(seen["no_records"].append)
+    worker.failed.connect(seen["failed"].append)
+    worker.run()
+
+    # The empty window is reported through the dedicated signal (with the
+    # newest available record), never as a raw traceback failure.
+    assert seen["no_records"] == ["2026.06.18_12:00:00_TAI"]
+    assert seen["failed"] == []
+
+
+def test_solar_data_window_vector_no_records_offers_newest(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    calls = {"download": 0}
+    monkeypatch.setattr(win, "download_vector_field", lambda: calls.__setitem__("download", calls["download"] + 1))
+    monkeypatch.setattr(solar_mod.QMessageBox, "question", lambda *a, **k: solar_mod.QMessageBox.Yes)
+
+    win._on_vector_no_records("2026.06.18_12:00:00_TAI")
+
+    # Accepting moves the query window to the newest record and re-downloads.
+    assert calls["download"] == 1
+    assert win.end_dt_edit.dateTime().toString("yyyy-MM-dd") == "2026-06-18"
+    assert win.start_dt_edit.dateTime().toPython() < win.end_dt_edit.dateTime().toPython()
+    win.close()
+
+
+def test_solar_data_window_vector_no_records_decline_keeps_window(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    before_start = win.start_dt_edit.dateTime().toPython()
+    before_end = win.end_dt_edit.dateTime().toPython()
+    calls = {"download": 0}
+    monkeypatch.setattr(win, "download_vector_field", lambda: calls.__setitem__("download", calls["download"] + 1))
+    monkeypatch.setattr(solar_mod.QMessageBox, "question", lambda *a, **k: solar_mod.QMessageBox.No)
+
+    win._on_vector_no_records("2026.06.18_12:00:00_TAI")
+
+    assert calls["download"] == 0
+    assert win.start_dt_edit.dateTime().toPython() == before_start
+    assert win.end_dt_edit.dateTime().toPython() == before_end
+    win.close()
+
+
+def test_solar_data_window_vector_no_records_without_latest(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    seen = {}
+    monkeypatch.setattr(
+        solar_mod.QMessageBox, "information", lambda parent, title, text, *a, **k: seen.setdefault("text", text)
+    )
+    calls = {"download": 0}
+    monkeypatch.setattr(win, "download_vector_field", lambda: calls.__setitem__("download", calls["download"] + 1))
+
+    win._on_vector_no_records("")
+
+    assert calls["download"] == 0
+    assert "earlier time window" in seen.get("text", "").lower()
+    win.close()

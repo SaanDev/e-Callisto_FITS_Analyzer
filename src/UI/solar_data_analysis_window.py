@@ -78,6 +78,14 @@ from src.Backend.solar_data_analysis import (
     write_cropped_fits,
 )
 from src.Backend.download_manager import format_bytes, format_eta
+from src.Backend.hmi_vector_field import (
+    VectorOverlayOptions,
+    build_overlay_geometry,
+    load_vector_frames,
+    nearest_vector_frame,
+    parse_trec_time,
+    vector_display_frame,
+)
 from src.Backend.jsoc_client import (
     SIZE_BIN2,
     SIZE_BIN4,
@@ -230,6 +238,152 @@ class MapLoadWorker(QObject):
             self.failed.emit(traceback.format_exc())
 
 
+class VectorFieldLoadWorker(QObject):
+    """Loads local hmi.B_720s segment FITS off the UI thread and assembles
+    them into vector-field time steps."""
+
+    progress = Signal(object, object)  # value 0-100 (or None), text
+    finished = Signal(object)          # list[HmiVectorFrame]
+    failed = Signal(str)
+    cancelled = Signal()
+
+    def __init__(self, paths: list[str]):
+        super().__init__()
+        self._paths = list(paths)
+        self._cancel = threading.Event()
+
+    def cancel(self):
+        self._cancel.set()
+
+    @Slot()
+    def run(self):
+        try:
+            frames = load_vector_frames(
+                self._paths,
+                progress_cb=lambda done, total: self.progress.emit(
+                    int(done * 100 / max(total, 1)),
+                    f"Loading vector segment {done}/{total}...",
+                ),
+                cancel_cb=self._cancel.is_set,
+            )
+            if self._cancel.is_set() or not frames:
+                self.cancelled.emit()
+            else:
+                self.finished.emit(frames)
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
+class VectorFieldDownloadWorker(QObject):
+    """Downloads the hmi.B_720s vector segments via the JSOC fast path and
+    loads them into vector-field frames, entirely off the UI thread."""
+
+    progress = Signal(object, object)  # value 0-100 (or None), text
+    byte_progress = Signal(object)     # DownloadManager aggregate
+    finished = Signal(object)          # list[HmiVectorFrame]
+    no_records = Signal(object)        # newest available T_REC text ('' if unknown)
+    failed = Signal(str)
+    cancelled = Signal()
+
+    def __init__(
+        self,
+        *,
+        start_dt: datetime,
+        end_dt: datetime,
+        cadence_seconds: int,
+        email: str,
+        cache_dir: Path,
+    ):
+        super().__init__()
+        self._start_dt = start_dt
+        self._end_dt = end_dt
+        self._cadence = int(cadence_seconds)
+        self._email = str(email)
+        self._cache_dir = Path(cache_dir)
+        self._cancel = threading.Event()
+
+    def cancel(self):
+        self._cancel.set()
+
+    @Slot()
+    def run(self):
+        try:
+            from src.Backend.download_manager import DownloadItem, DownloadManager
+            from src.Backend.jsoc_client import JsocEmptyRecordSetError, export_hmi_vector_urls
+
+            self.progress.emit(2, "Resolving hmi.B_720s vector segments via JSOC...")
+            try:
+                export = export_hmi_vector_urls(
+                    start=self._start_dt,
+                    end=self._end_dt,
+                    email=self._email,
+                    cadence_seconds=self._cadence,
+                )
+            except JsocEmptyRecordSetError as exc:
+                # Not a failure of the app: the window simply has no vector
+                # records (yet). Let the UI offer the newest available data.
+                self.no_records.emit(str(getattr(exc, "latest_trec", "") or ""))
+                return
+            if self._cancel.is_set():
+                self.cancelled.emit()
+                return
+
+            self._cache_dir.mkdir(parents=True, exist_ok=True)
+            # Every record exports one URL per segment, all with the same
+            # record id — name local files record + segment so a full time
+            # step never collides and the cache stays deterministic.
+            items = []
+            used_names: set[str] = set()
+            for index, entry in enumerate(export.urls):
+                segment_name = Path(str(entry.url).split("?", 1)[0]).name or str(entry.filename or "")
+                record_part = re.sub(r"[^A-Za-z0-9._-]+", "_", str(entry.record or "")).strip("_.")
+                name = f"{record_part}.{segment_name}" if record_part else segment_name
+                if not name:
+                    name = f"hmi_vector_{index:04d}.fits"
+                candidate = name
+                suffix = 1
+                while candidate in used_names:
+                    candidate = f"{suffix}_{name}"
+                    suffix += 1
+                used_names.add(candidate)
+                items.append(
+                    DownloadItem(
+                        url=entry.url,
+                        dest=self._cache_dir / candidate,
+                        expected_size=entry.size,
+                        record_id=entry.record,
+                        label=segment_name,
+                    )
+                )
+
+            manager = DownloadManager(max_concurrent=4, progress_interval=0.2)
+            result = manager.download(
+                items, progress_cb=self.byte_progress.emit, cancel_cb=self._cancel.is_set
+            )
+            if self._cancel.is_set() or result.cancelled:
+                self.cancelled.emit()
+                return
+            if not result.paths:
+                detail = f"\n{result.errors[0]}" if result.errors else ""
+                raise RuntimeError("No hmi.B_720s segment files could be downloaded." + detail)
+
+            self.progress.emit(86, "Assembling vector field time steps...")
+            frames = load_vector_frames(
+                result.paths,
+                progress_cb=lambda done, total: self.progress.emit(
+                    86 + int(done * 13 / max(total, 1)),
+                    f"Reading vector segment {done}/{total}...",
+                ),
+                cancel_cb=self._cancel.is_set,
+            )
+            if self._cancel.is_set() or not frames:
+                self.cancelled.emit()
+            else:
+                self.finished.emit(frames)
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
 class SolarMatplotlibCanvas(QWidget):
     def __init__(self, parent: QWidget | None = None, theme: Any | None = None):
         super().__init__(parent)
@@ -244,6 +398,7 @@ class SolarMatplotlibCanvas(QWidget):
         self._limb_x: np.ndarray | None = None
         self._limb_y: np.ndarray | None = None
         self._limb_visible = False
+        self._vector_geometry: Any | None = None
         self._last_plot: dict[str, Any] | None = None
 
         layout = QVBoxLayout(self)
@@ -319,6 +474,7 @@ class SolarMatplotlibCanvas(QWidget):
         self._image_artist = None
         self._colorbar_artist = None
         self._overlay_artists = []
+        self._vector_geometry = None
         self._last_plot = None
         self.apply_theme()
 
@@ -459,6 +615,23 @@ class SolarMatplotlibCanvas(QWidget):
     def region_overlay_count(self) -> int:
         return len(self._regions)
 
+    def set_vector_field_overlay(self, geometry: Any | None) -> None:
+        self._vector_geometry = geometry
+        self._draw_overlays()
+        self.canvas.draw_idle()
+
+    def has_vector_field_overlay(self) -> bool:
+        geometry = self._vector_geometry
+        if geometry is None:
+            return False
+        is_empty = getattr(geometry, "is_empty", None)
+        if callable(is_empty):
+            try:
+                return not bool(is_empty())
+            except Exception:
+                return True
+        return True
+
     def _draw_overlays(self) -> None:
         if getattr(self, "ax", None) is None:
             return
@@ -471,6 +644,34 @@ class SolarMatplotlibCanvas(QWidget):
         if self._limb_visible and self._limb_x is not None and self._limb_y is not None:
             (line,) = self.ax.plot(self._limb_x, self._limb_y, color="#45ff9a", linewidth=1.4)
             self._overlay_artists.append(line)
+        geometry = self._vector_geometry
+        if geometry is not None:
+            rgba = getattr(geometry, "magnitude_rgba", None)
+            rect = getattr(geometry, "magnitude_rect", None)
+            if rgba is not None and rect is not None:
+                x0, y0, width, height = [float(v) for v in rect]
+                artist = self.ax.imshow(
+                    np.asarray(rgba, dtype=np.uint8),
+                    origin="lower",
+                    extent=(x0, x0 + width, y0, y0 + height),
+                    interpolation="nearest",
+                    zorder=2,
+                )
+                self._overlay_artists.append(artist)
+            # NaN-separated polylines: matplotlib breaks lines at NaN natively.
+            for x_data, y_data, color, lw in (
+                (getattr(geometry, "stream_x", None), getattr(geometry, "stream_y", None), "#ffd24d", 0.9),
+                (getattr(geometry, "arrows_pos_x", None), getattr(geometry, "arrows_pos_y", None), "#ff5050", 1.1),
+                (getattr(geometry, "arrows_neg_x", None), getattr(geometry, "arrows_neg_y", None), "#509aff", 1.1),
+            ):
+                if x_data is None or y_data is None:
+                    continue
+                x_arr = np.asarray(x_data, dtype=float)
+                y_arr = np.asarray(y_data, dtype=float)
+                if x_arr.size == 0 or x_arr.size != y_arr.size:
+                    continue
+                (line,) = self.ax.plot(x_arr, y_arr, color=color, linewidth=lw, zorder=3)
+                self._overlay_artists.append(line)
         for region in self._regions:
             bbox = getattr(region, "bbox", None)
             if not bbox or len(bbox) != 4:
@@ -683,6 +884,9 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._pending_latest = False
         self._helioviewer_dialog: Any | None = None
         self._overlay_magnetogram: Any | None = None
+        self._vector_frames: list[Any] = []
+        self._vector_geometry_cache: dict[Any, Any] = {}
+        self._pending_vector_download = False
         self._busy = False
         self._progress_target = 0
         self._progress_value = 0
@@ -752,6 +956,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._build_timeline_group(controls_layout)
         self._build_movie_group(controls_layout)
         self._build_plot_controls_group(controls_layout)
+        self._build_vector_field_group(controls_layout)
         self._build_region_group(controls_layout)
         controls_layout.addStretch(1)
 
@@ -1410,6 +1615,76 @@ class SolarDataAnalysisWindow(QMainWindow):
         layout.addWidget(self.colorbar_check, 10, 0)
         layout.addWidget(self.region_overlay_check, 10, 1)
 
+    def _build_vector_field_group(self, parent_layout: QVBoxLayout) -> None:
+        group = QGroupBox("Magnetic Vector Field (HMI)")
+        layout = QGridLayout(group)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(8)
+        parent_layout.addWidget(group)
+
+        self.vector_load_btn = QPushButton("Load Vector FITS…")
+        self.vector_load_btn.setToolTip(
+            "Load hmi.B_720s vector magnetogram segments from disk: the field,\n"
+            "inclination and azimuth FITS of each time step (plus the optional\n"
+            "disambig segment, applied automatically when present)."
+        )
+        self.vector_download_btn = QPushButton("Download Vector (JSOC)")
+        self.vector_download_btn.setToolTip(
+            "Download the true measured vector field (hmi.B_720s) for the query\n"
+            "time window via the JSOC fast path. Needs the registered JSOC notify\n"
+            "e-mail above. Each 720 s time step is 4 segments ≈ 50 MB.\n"
+            "If no HMI image is loaded, the derived vertical-field (Bz) magnetogram\n"
+            "is plotted automatically with the vectors overlaid."
+        )
+        self.vector_show_check = QCheckBox("Show vector field")
+        self.vector_show_check.setToolTip(
+            "Overlay the magnetic vector field on the displayed HMI frame\n"
+            "(magnetogram, continuum or Doppler). Arrows show the transverse\n"
+            "component; red = vertical field toward the observer (+Bz), blue = away."
+        )
+        self.vector_arrows_check = QCheckBox("Arrows")
+        self.vector_arrows_check.setChecked(True)
+        self.vector_arrows_check.setToolTip("Quiver arrows of the transverse field (length ∝ strength).")
+        self.vector_stream_check = QCheckBox("Streamlines")
+        self.vector_stream_check.setToolTip("Field-direction streamlines traced through the transverse field.")
+        self.vector_mag_check = QCheckBox("|B| layer")
+        self.vector_mag_check.setToolTip("Semi-transparent tint by total field strength |B|.")
+
+        self.vector_spacing_spin = QSpinBox()
+        self.vector_spacing_spin.setRange(16, 512)
+        self.vector_spacing_spin.setSingleStep(8)
+        self.vector_spacing_spin.setValue(64)
+        self.vector_spacing_spin.setSuffix(" px")
+        self.vector_spacing_spin.setToolTip("Arrow grid spacing in detector pixels (smaller = denser).")
+        self.vector_threshold_spin = QSpinBox()
+        self.vector_threshold_spin.setRange(50, 2000)
+        self.vector_threshold_spin.setSingleStep(50)
+        self.vector_threshold_spin.setValue(200)
+        self.vector_threshold_spin.setSuffix(" G")
+        self.vector_threshold_spin.setToolTip(
+            "Minimum transverse field strength to draw. The hmi.B_720s transverse\n"
+            "noise floor is ~100 G, so values below that mostly show noise."
+        )
+
+        self.vector_status_label = QLabel("No vector field data loaded.")
+        self.vector_status_label.setWordWrap(True)
+
+        layout.addWidget(self.vector_load_btn, 0, 0)
+        layout.addWidget(self.vector_download_btn, 0, 1)
+        layout.addWidget(self.vector_show_check, 1, 0, 1, 2)
+        style_row = QHBoxLayout()
+        style_row.setContentsMargins(0, 0, 0, 0)
+        style_row.addWidget(self.vector_arrows_check)
+        style_row.addWidget(self.vector_stream_check)
+        style_row.addWidget(self.vector_mag_check)
+        style_row.addStretch(1)
+        style_widget = QWidget()
+        style_widget.setLayout(style_row)
+        layout.addWidget(style_widget, 2, 0, 1, 2)
+        layout.addWidget(QLabel("Spacing / Min B⊥"), 3, 0)
+        layout.addWidget(self._two_widgets(self.vector_spacing_spin, self.vector_threshold_spin), 3, 1)
+        layout.addWidget(self.vector_status_label, 4, 0, 1, 2)
+
     def _build_region_group(self, parent_layout: QVBoxLayout) -> None:
         group = QGroupBox("Active Regions")
         layout = QVBoxLayout(group)
@@ -1495,6 +1770,14 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.crop_check.toggled.connect(self._on_crop_toggled)
         self.apply_crop_btn.clicked.connect(self.apply_axis_crop)
         self.solar_limb_check.toggled.connect(lambda _checked: self._render_current_frame())
+        self.vector_load_btn.clicked.connect(self.load_vector_field_files)
+        self.vector_download_btn.clicked.connect(self.download_vector_field)
+        self.vector_show_check.toggled.connect(lambda _checked: self._refresh_vector_overlay())
+        self.vector_arrows_check.toggled.connect(lambda _checked: self._refresh_vector_overlay())
+        self.vector_stream_check.toggled.connect(lambda _checked: self._refresh_vector_overlay())
+        self.vector_mag_check.toggled.connect(lambda _checked: self._refresh_vector_overlay())
+        self.vector_spacing_spin.valueChanged.connect(lambda _value: self._refresh_vector_overlay())
+        self.vector_threshold_spin.valueChanged.connect(lambda _value: self._refresh_vector_overlay())
         self.grid_check.toggled.connect(self._on_grid_toggled)
         self.colorbar_check.toggled.connect(self._on_colorbar_toggled)
         self.region_overlay_check.toggled.connect(self._refresh_region_overlays)
@@ -1623,6 +1906,8 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.download_load_btn.setEnabled((not busy) and bool(self._search_result and self._search_result.rows))
         self.find_latest_btn.setEnabled(not busy)
         self.load_local_btn.setEnabled(not busy)
+        self.vector_load_btn.setEnabled(not busy)
+        self.vector_download_btn.setEnabled(not busy)
         # SDO-only download controls (source/e-mail/frame-size/cutout/high-res)
         # are gated by observable as well as busy state.
         self._apply_observable_download_gating()
@@ -2102,6 +2387,18 @@ class SolarDataAnalysisWindow(QMainWindow):
             worker.finished.connect(thread.quit)
             worker.failed.connect(thread.quit)
             worker.cancelled.connect(thread.quit)
+        elif isinstance(worker, (VectorFieldLoadWorker, VectorFieldDownloadWorker)):
+            if hasattr(worker, "byte_progress"):
+                worker.byte_progress.connect(self._on_byte_progress)
+            worker.finished.connect(self._on_vector_frames_loaded)
+            worker.failed.connect(self._on_worker_failed)
+            worker.cancelled.connect(self._on_worker_cancelled)
+            worker.finished.connect(thread.quit)
+            worker.failed.connect(thread.quit)
+            worker.cancelled.connect(thread.quit)
+            if hasattr(worker, "no_records"):
+                worker.no_records.connect(self._on_vector_no_records)
+                worker.no_records.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(self._on_worker_stopped)
@@ -2121,6 +2418,12 @@ class SolarDataAnalysisWindow(QMainWindow):
         if self._pending_close:
             self._pending_close = False
             self.close()
+            return
+        # A vector re-download accepted while the previous worker was still
+        # winding down starts once the thread has fully stopped.
+        if self._pending_vector_download:
+            self._pending_vector_download = False
+            self.download_vector_field()
 
     def is_operation_running(self) -> bool:
         thread = self._active_thread
@@ -2693,6 +2996,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.plot_title_label.setText(title)
         self._refresh_limb_overlay()
         self._refresh_region_overlays()
+        self._refresh_vector_overlay()
 
     def _movie_mode(self) -> str:
         text = self.movie_content_combo.currentText().lower()
@@ -3064,6 +3368,8 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._current_axis_transform = self._default_axis_transform()
         self._save_target_dir = None
         self._overlay_magnetogram = None
+        self._vector_frames = []
+        self._vector_geometry_cache = {}
         self.results_table.setRowCount(0)
         self.region_table.setRowCount(0)
         self.archive_results_status_label.setText("Run Fetch to list matching SDO/AIA files.")
@@ -3103,6 +3409,13 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.crop_y0_spin.setValue(-1100.0)
         self.crop_y1_spin.setValue(1100.0)
         self._set_crop_mode_checked(False)
+        self.vector_show_check.setChecked(False)
+        self.vector_arrows_check.setChecked(True)
+        self.vector_stream_check.setChecked(False)
+        self.vector_mag_check.setChecked(False)
+        self.vector_spacing_spin.setValue(64)
+        self.vector_threshold_spin.setValue(200)
+        self.vector_status_label.setText("No vector field data loaded.")
 
         # 3) Clear the plot + analysis panels.
         self._set_loaded_state(False)
@@ -3234,6 +3547,255 @@ class SolarDataAnalysisWindow(QMainWindow):
         )
         if self._map_frames:
             self.show_composite_plot()
+
+    def load_vector_field_files(self):
+        """Load hmi.B_720s vector segments (field/inclination/azimuth[/disambig])
+        from disk and assemble them into overlay time steps."""
+        if self.is_operation_running():
+            QMessageBox.information(self, "Vector Field", "Another operation is still running.")
+            return
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Load HMI Vector FITS (hmi.B_720s segments)",
+            "",
+            "FITS files (*.fit *.fits *.fit.gz *.fits.gz)",
+        )
+        if not paths:
+            return
+        self._set_busy(True, "Loading HMI vector field segments...")
+        self._start_worker(VectorFieldLoadWorker(list(paths)))
+
+    def download_vector_field(self):
+        """Download the measured full-disk vector field (hmi.B_720s) for the
+        query time window via the JSOC fast path."""
+        if self.is_operation_running():
+            QMessageBox.information(self, "Vector Field", "Another operation is still running.")
+            return
+        email, _prefer = self._jsoc_params()
+        if not email:
+            QMessageBox.information(
+                self,
+                "Vector Field",
+                "The hmi.B_720s vector field is served by JSOC, which needs a registered "
+                "notify e-mail.\nEnter it in the JSOC Notify E-mail field first.\n\n"
+                "Register once (free) at https://jsoc.stanford.edu/ajax/register_email.html",
+            )
+            return
+        start_dt = self.start_dt_edit.dateTime().toPython().replace(tzinfo=None)
+        end_dt = self.end_dt_edit.dateTime().toPython().replace(tzinfo=None)
+        if end_dt <= start_dt:
+            QMessageBox.warning(self, "Vector Field", "End time must be after start time.")
+            return
+        sample = int(self.sample_seconds_spin.value() or 0)
+        # The vector pipeline runs at a fixed 720 s cadence; honour a coarser
+        # requested sampling but never ask for more than the series provides.
+        cadence = max(720, sample if sample > 0 else 720)
+        steps = max(1, int((end_dt - start_dt).total_seconds() // cadence) + 1)
+        if steps > 6:
+            approx_mb = steps * 4 * 13
+            reply = QMessageBox.question(
+                self,
+                "Vector Field",
+                f"This window covers about {steps} vector time steps "
+                f"(4 segments each, ≈ {approx_mb} MB total).\n\nDownload anyway?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+        self._set_busy(True, "Downloading hmi.B_720s vector field via JSOC...")
+        self._start_worker(
+            VectorFieldDownloadWorker(
+                start_dt=start_dt,
+                end_dt=end_dt,
+                cadence_seconds=cadence,
+                email=email,
+                cache_dir=self.cache_dir,
+            )
+        )
+
+    @Slot(object)
+    def _on_vector_frames_loaded(self, frames_obj: object):
+        frames = list(frames_obj or [])
+        if not frames:
+            self._on_worker_failed("The vector field worker returned no usable time steps.")
+            return
+        self._vector_frames = frames
+        self._vector_geometry_cache = {}
+        times = sorted(frame.time for frame in frames if frame.time is not None)
+        label = f"{len(frames)} vector time step(s) loaded"
+        if times:
+            label += f" · {times[0]:%Y-%m-%d %H:%M} → {times[-1]:%H:%M} UTC"
+        self.vector_status_label.setText(label)
+        # The overlay needs an HMI base image in the plot area; when none is
+        # loaded, plot the vector field's own Bz magnetogram so the download
+        # is visible immediately.
+        plotted_base = self._ensure_vector_base_frames(frames)
+        if not self.vector_show_check.isChecked():
+            self.vector_show_check.setChecked(True)  # toggled() refreshes the overlay
+        else:
+            self._refresh_vector_overlay()
+        extra = (
+            "\nPlotted the vertical-field (Bz) magnetogram derived from the vector data "
+            "as the base image."
+            if plotted_base
+            else ""
+        )
+        self.analysis_text.setPlainText(
+            "Loaded the HMI vector magnetic field (hmi.B_720s Milne-Eddington inversion).\n"
+            f"{label}.{extra}\n"
+            "Arrows show the transverse component (red = vertical field toward the "
+            "observer, blue = away); the nearest time step is matched to each displayed "
+            "HMI frame automatically."
+        )
+        self.statusBar().showMessage(label, 6000)
+
+    @Slot(object)
+    def _on_vector_no_records(self, latest_obj: object):
+        """The requested window has no hmi.B_720s records — offer the newest.
+
+        The definitive vector series lags real time by days to weeks, so a
+        'recent' window is routinely empty. When JSOC told us the newest
+        record that does exist, offer to move the query window there and
+        re-download instead of leaving a dead-end error.
+        """
+        latest_text = str(latest_obj or "").strip()
+        latest_dt = parse_trec_time(latest_text) if latest_text else None
+        base = (
+            "JSOC has no hmi.B_720s vector magnetic field records in the requested "
+            "time window.\nThe definitive vector pipeline lags real time by days to "
+            "weeks, so very recent windows are usually empty."
+        )
+        self.statusBar().showMessage("No hmi.B_720s vector records in the requested window.", 8000)
+        self.analysis_text.setPlainText(base)
+        if latest_dt is None:
+            QMessageBox.information(
+                self, "Vector Field", base + "\n\nChoose an earlier time window and try again."
+            )
+            return
+        reply = QMessageBox.question(
+            self,
+            "Vector Field",
+            base
+            + f"\n\nNewest available record: {latest_text}\n"
+            "Move the query time window there and download the newest vector data?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        span_seconds = (
+            self.end_dt_edit.dateTime().toPython() - self.start_dt_edit.dateTime().toPython()
+        ).total_seconds()
+        span_seconds = min(max(span_seconds, 720.0), 6 * 3600.0)
+        self.start_dt_edit.setDateTime(QDateTime(latest_dt - timedelta(seconds=span_seconds)))
+        self.end_dt_edit.setDateTime(QDateTime(latest_dt + timedelta(minutes=1)))
+        # The failed worker's thread may still be winding down (this handler
+        # can run from inside its notification); defer the retry if so.
+        if self.is_operation_running():
+            self._pending_vector_download = True
+        else:
+            self.download_vector_field()
+
+    def _ensure_vector_base_frames(self, vframes: list[Any]) -> bool:
+        """Guarantee the plot area shows something the overlay can draw on.
+
+        Keeps an already-loaded HMI sequence untouched (the overlay lands on
+        it). With nothing loaded, plots Bz frames derived from the vector
+        data; with a non-HMI sequence loaded (AIA/LASCO, where the overlay
+        cannot be drawn), asks before replacing it. Returns True when the Bz
+        base frames were plotted.
+        """
+        if self._map_frames:
+            idx = max(0, min(self._current_frame_index, len(self._map_frames) - 1))
+            if self._frame_hmi_product(self._map_frames[idx]) is not None:
+                return False
+            reply = QMessageBox.question(
+                self,
+                "Vector Field",
+                "The loaded frames are not HMI, so the vector field cannot be overlaid "
+                "on them.\n\nPlot the vector field's own vertical-field (Bz) magnetogram "
+                "instead? This replaces the currently loaded frames.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply != QMessageBox.Yes:
+                return False
+        try:
+            base_frames = [vector_display_frame(vf) for vf in vframes]
+        except Exception as exc:  # noqa: BLE001 - overlay data is still usable
+            self.statusBar().showMessage(f"Could not build Bz base frames: {exc}", 6000)
+            return False
+        paths = [str(vf.source_paths[0]) for vf in vframes if vf.source_paths]
+        times = [vf.time for vf in vframes if vf.time is not None]
+        metadata = {
+            "n_frames": len(base_frames),
+            "observatory": "SDO",
+            "instrument": "HMI",
+            "detector": "",
+            "wavelength": "",
+            "date": times[0].isoformat() if times else "",
+        }
+        self._apply_loaded_frames(base_frames, paths=paths, metadata=metadata)
+        return True
+
+    def _vector_overlay_options(self) -> VectorOverlayOptions:
+        return VectorOverlayOptions(
+            show_arrows=self.vector_arrows_check.isChecked(),
+            show_streamlines=self.vector_stream_check.isChecked(),
+            show_magnitude=self.vector_mag_check.isChecked(),
+            grid_step_px=int(self.vector_spacing_spin.value()),
+            min_transverse_gauss=float(self.vector_threshold_spin.value()),
+        )
+
+    def _refresh_vector_overlay(self) -> None:
+        canvas = self._active_canvas()
+        setter = getattr(canvas, "set_vector_field_overlay", None)
+        if setter is None:
+            return
+        if not (self.vector_show_check.isChecked() and self._vector_frames and self._map_frames):
+            setter(None)
+            return
+        idx = max(0, min(self._current_frame_index, len(self._map_frames) - 1))
+        frame = self._map_frames[idx]
+        # HMI-only: the vector data shares HMI's stored (CCD) orientation, so it
+        # aligns on HMI products but not on AIA/LASCO frames.
+        if self._frame_hmi_product(frame) is None:
+            setter(None)
+            self.vector_status_label.setText(
+                "Vector field overlay applies to HMI frames only — load or select an "
+                "HMI observable to see it."
+            )
+            return
+        target_time = frame_observation_time(frame)
+        vframe = nearest_vector_frame(self._vector_frames, target_time)
+        if vframe is None:
+            setter(None)
+            return
+        options = self._vector_overlay_options()
+        if not (options.show_arrows or options.show_streamlines or options.show_magnitude):
+            setter(None)
+            return
+        key = (id(vframe), options)
+        geometry = self._vector_geometry_cache.get(key)
+        if geometry is None:
+            try:
+                geometry = build_overlay_geometry(vframe, options)
+            except Exception as exc:  # noqa: BLE001 - never take the render loop down
+                setter(None)
+                self.statusBar().showMessage(f"Vector field overlay failed: {exc}", 6000)
+                return
+            if len(self._vector_geometry_cache) > 24:
+                self._vector_geometry_cache.clear()
+            self._vector_geometry_cache[key] = geometry
+        setter(geometry)
+        status = f"Overlaying {geometry.arrow_count} arrow(s)"
+        if geometry.streamline_count:
+            status += f", {geometry.streamline_count} streamline(s)"
+        if vframe.time is not None and target_time is not None:
+            delta = abs((vframe.time - target_time).total_seconds())
+            status += f" · Δt to frame {delta:.0f} s"
+        self.vector_status_label.setText(status)
 
     def show_composite_plot(self):
         if not self._map_frames:
