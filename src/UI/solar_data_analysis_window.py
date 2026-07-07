@@ -66,18 +66,30 @@ from src.Backend.solar_data_analysis import (
     crop_maps,
     detect_active_regions,
     export_movie,
+    exposures_differ,
     extract_map_frames,
     extract_region_lightcurve,
     fetch_active_region_metadata,
+    frame_exposure_time,
     frame_observation_time,
     label_regions_with_metadata,
     load_aia_maps_streaming,
     make_composite,
     make_magnetogram_composite,
+    partition_frames_by_config,
     radio_euv_lag,
     write_cropped_fits,
 )
 from src.Backend.download_manager import format_bytes, format_eta
+from src.Backend.instrument_profiles import (
+    CORONAGRAPH,
+    DISK_EUV,
+    HELIOSPHERIC,
+    MAGNETOGRAPH,
+    UNKNOWN,
+    classify_frame,
+    classify_observable,
+)
 from src.Backend.hmi_vector_field import (
     VectorOverlayOptions,
     build_overlay_geometry,
@@ -136,6 +148,46 @@ LASCO_DETECTORS = (
     ("C3", "SOHO/LASCO C3"),
 )
 LASCO_COLORMAPS = {"C2": "soholasco2", "C3": "soholasco3"}
+
+# STEREO/SECCHI observables on both spacecraft (A still operating; B is historical,
+# 2007-2014). Like LASCO these are VSO-only (no JSOC fast path). EUVI is an EUV
+# disk imager selected per wavelength; COR1/COR2 are white-light coronagraphs and
+# HI1/HI2 wide-field heliospheric imagers (no wavelength). The observable value is
+# a (spacecraft, detector, wavelength_or_None) tuple.
+STEREO_SPACECRAFT = (("STEREO_A", "STEREO-A"), ("STEREO_B", "STEREO-B"))
+STEREO_EUVI_WAVELENGTHS = (171, 195, 284, 304)
+STEREO_WHITE_LIGHT_DETECTORS = (("COR1", "COR1"), ("COR2", "COR2"), ("HI1", "HI1"), ("HI2", "HI2"))
+
+# GOES/SUVI EUV passbands (GOES-16, Level 1b by default). Observable value is the
+# wavelength; sunpy ships dedicated goes-rsuvi* colormaps.
+SUVI_WAVELENGTHS = (94, 131, 171, 195, 284, 304)
+
+
+def _secchi_colormap_name(detector: str | None, wavelength: Any | None) -> str:
+    """Colormap for a STEREO/SECCHI detector (sunpy stereocor*/stereohi*/euvi*)."""
+    det = str(detector or "").strip().upper()
+    if det == "COR1":
+        return "stereocor1"
+    if det == "COR2":
+        return "stereocor2"
+    if det == "HI1":
+        return "stereohi1"
+    if det == "HI2":
+        return "stereohi2"
+    try:
+        rounded = int(round(float(wavelength)))
+    except (TypeError, ValueError):
+        rounded = 195
+    return f"euvi{rounded}" if rounded in STEREO_EUVI_WAVELENGTHS else "euvi195"
+
+
+def _suvi_colormap_name(wavelength: Any | None) -> str:
+    """Colormap for a GOES/SUVI passband (sunpy goes-rsuvi*)."""
+    try:
+        rounded = int(round(float(wavelength)))
+    except (TypeError, ValueError):
+        rounded = 171
+    return f"goes-rsuvi{rounded}" if rounded in SUVI_WAVELENGTHS else "goes-rsuvi171"
 
 
 class SolarMetadataWorker(QObject):
@@ -795,17 +847,25 @@ class PercentSlider(QWidget):
 
 
 class RegionLightcurveDialog(QDialog):
-    """Plots an AIA region light curve (DN/s vs time) with optional radio overlay.
+    """Plots a region light curve (DN/s vs time) with optional radio overlay.
 
-    This is the cross-instrument view: the EUV intensity time profile over a
+    This is the cross-instrument view: the intensity time profile over a
     region, with the e-Callisto radio burst window shaded so the timing of the
     EUV brightening relative to the radio burst onset can be read directly.
     """
 
-    def __init__(self, lightcurve: Any, *, radio_window: tuple[datetime, datetime] | None = None, parent=None):
+    def __init__(
+        self,
+        lightcurve: Any,
+        *,
+        radio_window: tuple[datetime, datetime] | None = None,
+        instrument_label: str = "",
+        parent=None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Region Light Curve")
         self.resize(760, 460)
+        self._instrument_label = str(instrument_label or "").strip()
         layout = QVBoxLayout(self)
         self._figure = Figure(figsize=(6.5, 3.8))
         self.canvas = FigureCanvas(self._figure)
@@ -827,11 +887,14 @@ class RegionLightcurveDialog(QDialog):
 
         times = [p[0] for p in pairs]
         values = [p[1] for p in pairs]
-        label = f"AIA {lc.wavelength}".strip() + f" · {lc.statistic} {lc.unit}"
+        source = " ".join(
+            part for part in (self._instrument_label or "AIA", str(lc.wavelength or "").strip()) if part
+        ).strip()
+        label = source + f" · {lc.statistic} {lc.unit}"
         ax.plot(times, values, marker="o", markersize=3, linewidth=1.3, color="#e8a33d", label=label)
 
         peak_time = lc.peak_time()
-        title = f"AIA {lc.wavelength} region light curve ({lc.unit})".replace("  ", " ").strip()
+        title = f"{source} region light curve ({lc.unit})".replace("  ", " ").strip()
         if peak_time is not None and peak_time in times:
             peak_val = values[times.index(peak_time)]
             ax.axvline(peak_time, color="#d04545", linestyle="--", linewidth=1.0, alpha=0.8)
@@ -862,7 +925,7 @@ class RegionLightcurveDialog(QDialog):
 class SolarDataAnalysisWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Solar Image Analysis (SDO · SOHO/LASCO)")
+        self.setWindowTitle("Solar Image Analysis (SDO · SOHO/LASCO · STEREO · GOES/SUVI)")
         self.resize(1440, 900)
 
         self.theme = _get_theme()
@@ -878,6 +941,10 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._current_frame_index = 0
         self._current_map_data: np.ndarray | None = None
         self._current_axis_transform: dict[str, float] = self._default_axis_transform()
+        # Observation-config bookkeeping for the loaded sequence (see
+        # partition_frames_by_config / exposures_differ).
+        self._loaded_config_key: tuple | None = None
+        self._exposure_varies = False
         self._active_thread: QThread | None = None
         self._active_worker: QObject | None = None
         self._save_target_dir: str | None = None
@@ -1238,12 +1305,15 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.stop_btn.setEnabled(False)
 
         # Observable selector: AIA EUV/UV channels, HMI line-of-sight products,
-        # and SOHO/LASCO coronagraph detectors. userData is a tuple
-        # ("AIA", wavelength_float), ("HMI", product_str) or ("LASCO", "C2"/"C3").
+        # SOHO/LASCO coronagraph detectors, STEREO/SECCHI detectors and GOES/SUVI
+        # passbands. userData is a tuple: ("AIA", wavelength_float),
+        # ("HMI", product_str), ("LASCO", "C2"/"C3"),
+        # ("SECCHI", (spacecraft, detector, wavelength_or_None)) or ("SUVI", wavelength_float).
         self.wavelength_combo = QComboBox()
         self.wavelength_combo.setToolTip(
-            "Choose the observable: an SDO/AIA wavelength, an SDO/HMI product, "
-            "or a SOHO/LASCO coronagraph detector."
+            "Choose the observable: an SDO/AIA wavelength, an SDO/HMI product, a "
+            "SOHO/LASCO coronagraph, a STEREO/SECCHI detector (EUVI/COR1/COR2/HI1/HI2) "
+            "or a GOES/SUVI passband."
         )
         for value in AIA_WAVELENGTHS:
             self.wavelength_combo.addItem(f"AIA {value} A", userData=("AIA", float(value)))
@@ -1253,6 +1323,19 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.wavelength_combo.insertSeparator(self.wavelength_combo.count())
         for detector, label in LASCO_DETECTORS:
             self.wavelength_combo.addItem(label, userData=("LASCO", detector))
+        self.wavelength_combo.insertSeparator(self.wavelength_combo.count())
+        for sc_code, sc_label in STEREO_SPACECRAFT:
+            for wl in STEREO_EUVI_WAVELENGTHS:
+                self.wavelength_combo.addItem(
+                    f"{sc_label}/EUVI {wl} A", userData=("SECCHI", (sc_code, "EUVI", float(wl)))
+                )
+            for det_code, det_label in STEREO_WHITE_LIGHT_DETECTORS:
+                self.wavelength_combo.addItem(
+                    f"{sc_label}/{det_label}", userData=("SECCHI", (sc_code, det_code, None))
+                )
+        self.wavelength_combo.insertSeparator(self.wavelength_combo.count())
+        for wl in SUVI_WAVELENGTHS:
+            self.wavelength_combo.addItem(f"GOES/SUVI {wl} A", userData=("SUVI", float(wl)))
         self.wavelength_combo.setCurrentText("AIA 193 A")
 
         now = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
@@ -1442,7 +1525,7 @@ class SolarDataAnalysisWindow(QMainWindow):
 
         self.plot_mode_btn = QPushButton("Plot")
         self.plot_mode_btn.setObjectName("SolarPrimaryAction")
-        self.plot_mode_btn.setToolTip("Render the loaded AIA frame sequence in the embedded plot area.")
+        self.plot_mode_btn.setToolTip("Render the loaded solar frame sequence in the embedded plot area.")
         self.difference_mode_btn = QPushButton("Running Diff")
         self.base_diff_btn = QPushButton("Base Diff")
         self.base_diff_btn.setToolTip("Show each frame minus the first frame (eruptions, dimmings, EUV waves).")
@@ -1549,6 +1632,12 @@ class SolarDataAnalysisWindow(QMainWindow):
                 "hmimag",
                 "soholasco2",
                 "soholasco3",
+                "stereocor1",
+                "stereocor2",
+                "stereohi1",
+                "stereohi2",
+                *(f"euvi{wl}" for wl in STEREO_EUVI_WAVELENGTHS),
+                *(f"goes-rsuvi{wl}" for wl in SUVI_WAVELENGTHS),
                 "inferno",
                 "magma",
                 "plasma",
@@ -1854,12 +1943,29 @@ class SolarDataAnalysisWindow(QMainWindow):
         observatory = str(getattr(frame, "observatory", "") or "").upper()
         return "SOHO" in observatory and detector in ("C2", "C3")
 
+    def _loaded_instrument_class(self) -> str:
+        """Science class (disk_euv/coronagraph/heliospheric/magnetograph) of the
+        loaded frames, or UNKNOWN when nothing is loaded."""
+        if not self._map_frames:
+            return UNKNOWN
+        return classify_frame(self._map_frames[0])
+
+    def _selected_observable_class(self) -> str:
+        """Science class of the currently selected observable."""
+        instrument, value = self._current_observable()
+        return classify_observable(instrument, value)
+
+    def _effective_instrument_class(self) -> str:
+        """Class that should drive tool visibility: loaded data wins, otherwise
+        the observable the user is about to fetch."""
+        loaded = self._loaded_instrument_class()
+        return loaded if loaded != UNKNOWN else self._selected_observable_class()
+
     def _set_loaded_state(self, loaded: bool):
         self.plot_mode_btn.setEnabled(True)
         for widget in (
             self.difference_mode_btn,
             self.base_diff_btn,
-            self.lightcurve_btn,
             self.composite_btn,
             self.magnetogram_btn,
             self.mag_threshold_spin,
@@ -1886,15 +1992,22 @@ class SolarDataAnalysisWindow(QMainWindow):
             widget.setEnabled(bool(loaded))
         if not loaded:
             self._set_crop_mode_checked(False)
-        # SOHO/LASCO coronagraph frames have no EUV RGB composite, HMI overlay or
-        # disk active-region concept — keep those SDO-only tools disabled.
+        # A light curve is a time profile: it needs at least two frames.
+        self.lightcurve_btn.setEnabled(bool(loaded) and len(self._map_frames) >= 2)
+        # White-light coronagraph / heliospheric frames have no EUV RGB
+        # composite, HMI overlay or disk active-region concept — keep those
+        # disk-only tools disabled (LASCO, STEREO COR1/COR2, HI1/HI2).
         if not hasattr(self, "_sdo_only_tooltips"):
             self._sdo_only_tooltips = {w: w.toolTip() for w in self._sdo_only_widgets()}
-        is_lasco = bool(loaded and self._loaded_is_lasco())
+        loaded_class = self._loaded_instrument_class()
+        block_disk_tools = bool(loaded and loaded_class in (CORONAGRAPH, HELIOSPHERIC))
         for widget in self._sdo_only_widgets():
-            if is_lasco:
+            if block_disk_tools:
                 widget.setEnabled(False)
-                widget.setToolTip("Not applicable to SOHO/LASCO coronagraph images (SDO/EUV disk tool).")
+                widget.setToolTip(
+                    "Not applicable to white-light coronagraph / heliospheric imagery "
+                    "(solar-disk tool)."
+                )
             else:
                 widget.setToolTip(self._sdo_only_tooltips.get(widget, ""))
         self.export_regions_btn.setEnabled(bool(self._regions))
@@ -1966,8 +2079,9 @@ class SolarDataAnalysisWindow(QMainWindow):
             self.quick_mp4_action,
         ):
             action.setEnabled((not busy) and bool(loaded))
-        # SDO/EUV-only analysis actions stay disabled for SOHO/LASCO frames.
-        if loaded and self._loaded_is_lasco():
+        # Disk-only analysis actions stay disabled for white-light coronagraph
+        # and heliospheric frames (LASCO, STEREO COR1/COR2, HI1/HI2).
+        if loaded and self._loaded_instrument_class() in (CORONAGRAPH, HELIOSPHERIC):
             for action in (self.composite_action, self.detect_regions_action, self.labels_action):
                 action.setEnabled(False)
         self.plot_action.setEnabled(not busy)
@@ -2053,6 +2167,33 @@ class SolarDataAnalysisWindow(QMainWindow):
                 spacecraft="SOHO",
                 instrument="LASCO",
                 detector=str(value),
+                sample_seconds=sample_seconds if sample_seconds > 0 else None,
+                max_records=int(self.max_records_spin.value()),
+            )
+        if instrument == "SECCHI":
+            # STEREO/SECCHI (VSO-only): value is (spacecraft, detector, wavelength).
+            # EUVI carries a wavelength; COR1/COR2/HI1/HI2 do not.
+            spacecraft, detector, wavelength = value
+            return SunPyQuerySpec(
+                start_dt=start_dt,
+                end_dt=end_dt,
+                spacecraft=str(spacecraft),
+                instrument="SECCHI",
+                detector=str(detector),
+                wavelength_angstrom=float(wavelength) if wavelength else None,
+                sample_seconds=sample_seconds if sample_seconds > 0 else None,
+                max_records=int(self.max_records_spin.value()),
+            )
+        if instrument == "SUVI":
+            # GOES/SUVI EUV imager (NOAA dataretriever): default GOES-16, L1b.
+            return SunPyQuerySpec(
+                start_dt=start_dt,
+                end_dt=end_dt,
+                spacecraft="GOES",
+                instrument="SUVI",
+                wavelength_angstrom=float(value),
+                satellite_number=16,
+                level="1b",
                 sample_seconds=sample_seconds if sample_seconds > 0 else None,
                 max_records=int(self.max_records_spin.value()),
             )
@@ -2667,9 +2808,9 @@ class SolarDataAnalysisWindow(QMainWindow):
     def load_local_files(self):
         paths, _ = QFileDialog.getOpenFileNames(
             self,
-            "Load Local AIA FITS",
+            "Load Local Solar FITS",
             "",
-            "FITS files (*.fit *.fits *.fit.gz *.fits.gz)",
+            "FITS files (*.fit *.fits *.fit.gz *.fits.gz *.fts)",
         )
         if paths:
             self.load_local_paths(paths)
@@ -2679,7 +2820,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         if not paths:
             return
         if self.is_operation_running():
-            QMessageBox.information(self, "Load Local AIA FITS", "Another operation is still running.")
+            QMessageBox.information(self, "Load Local Solar FITS", "Another operation is still running.")
             return
         self._save_target_dir = None
         self._set_busy(True, f"Loading {len(paths)} FITS file(s)…")
@@ -2735,6 +2876,29 @@ class SolarDataAnalysisWindow(QMainWindow):
         # observation order regardless of how the files were uploaded or the
         # order downloads completed.
         frames = self._sort_frames_by_time(list(frames))
+        # Keep a single consistent observing configuration. Archive windows mix
+        # frames that must never be differenced against each other: STEREO/SECCHI
+        # COR sequences interleave polarizer triplets (POLAR=0/120/240) with
+        # total-brightness frames (POLAR=1001) at the same image size, plus small
+        # browse "double" frames; mixed uploads can span wavelengths. Keeping only
+        # the science group prevents raw-looking frames sneaking into running/base
+        # difference views and movies.
+        partition = partition_frames_by_config(frames)
+        dropped_note = ""
+        self._loaded_config_key = partition.kept_key
+        if partition.dropped and len(partition.kept) >= 2:
+            frames = partition.kept
+            dropped_note = f"\nNote: {partition.note}"
+        elif partition.dropped:
+            # Too few compatible frames to auto-filter; keep everything but warn.
+            dropped_note = (
+                "\nWarning: this sequence mixes observing configurations "
+                "(polarizer states, wavelengths or image sizes); running/base "
+                "differences may be unreliable."
+            )
+        # Differencing frames with unequal exposure times in raw DN creates
+        # false signal, so remember whether normalisation to DN/s is needed.
+        self._exposure_varies = exposures_differ(frames)
         self._loaded_paths = list(paths or [])
         self._original_frames = list(frames)
         self._map_frames = list(frames)
@@ -2763,23 +2927,45 @@ class SolarDataAnalysisWindow(QMainWindow):
                 f"Loaded {len(self._map_frames)} {self._loaded_instrument_label()} frame(s).", 5000
             )
         self._save_target_dir = None
-        self.analysis_text.setPlainText(status)
+        self.analysis_text.setPlainText(status + dropped_note)
 
     def _loaded_instrument_label(self, frames: list[Any] | None = None) -> str:
-        """Short instrument label for status text, e.g. 'AIA', 'HMI', 'LASCO C2'."""
+        """Short instrument label for status text, e.g. 'AIA', 'HMI', 'LASCO C2',
+        'STEREO-A COR2', 'SUVI 171'."""
         frames = frames if frames is not None else self._map_frames
         if not frames:
             return "image"
         frame = frames[0]
         inst = str(getattr(frame, "instrument", "") or "").upper()
-        det = str(getattr(frame, "detector", "") or "").upper()
+        det = str(getattr(frame, "detector", "") or "").strip().upper()
+        obs = str(getattr(frame, "observatory", "") or "").strip().upper()
         if "LASCO" in inst:
             return f"LASCO {det}".strip()
         if "AIA" in inst:
             return "AIA"
         if "HMI" in inst:
             return "HMI"
-        return inst or "image"
+        if "SECCHI" in inst or det in ("EUVI", "COR1", "COR2", "HI1", "HI2"):
+            # "STEREO_A"/"STEREO A" -> "STEREO-A"
+            craft = obs.replace("_", "-").replace(" ", "-") if "STEREO" in obs else "STEREO"
+            return f"{craft} {det}".strip()
+        if "SUVI" in inst or "SOLAR ULTRAVIOLET IMAGER" in inst:
+            wl = self._frame_wavelength_value(frame)
+            return f"SUVI {int(round(wl))}" if wl else "SUVI"
+        return (inst or det or "image").strip() or "image"
+
+    def _frames_word(self) -> str:
+        """Instrument word for dialogs: the loaded label, else a neutral term."""
+        label = self._loaded_instrument_label()
+        return label if label != "image" else "solar image"
+
+    def _export_basename(self, stem: str) -> str:
+        """Instrument-aware default export filename, e.g. 'stereo_a_cor2_movie'."""
+        label = self._loaded_instrument_label()
+        if label == "image":
+            return f"solar_{stem}"
+        slug = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
+        return f"{slug}_{stem}" if slug else f"solar_{stem}"
 
     def _loaded_frame_status_text(self, action: str, frames: list[Any]) -> str:
         label = self._loaded_instrument_label(frames)
@@ -2832,7 +3018,7 @@ class SolarDataAnalysisWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Region Light Curve",
-                "Load or upload AIA frames first. The light curve needs the time sequence.",
+                f"Load or upload {self._frames_word()} frames first. The light curve needs the time sequence.",
             )
             return
         if len(self._map_frames) < 2:
@@ -2853,6 +3039,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         dialog = RegionLightcurveDialog(
             lightcurve,
             radio_window=self._radio_reference_window(),
+            instrument_label=self._frames_word(),
             parent=self,
         )
         dialog.show()
@@ -2863,8 +3050,8 @@ class SolarDataAnalysisWindow(QMainWindow):
         if not self._map_frames:
             QMessageBox.information(
                 self,
-                "Plot AIA Images",
-                "Load selected archive records or upload local AIA FITS files before plotting.",
+                "Plot Solar Images",
+                "Load selected archive records or upload local FITS files before plotting.",
             )
             return
         if mode == "running":
@@ -2953,21 +3140,45 @@ class SolarDataAnalysisWindow(QMainWindow):
         title = self._frame_title(frame, idx)
 
         mode = self._movie_mode()
+        # Frames with unequal EXPTIME must be differenced in rate units (DN/s):
+        # subtracting raw DN would show the exposure ratio as false brightening.
+        normalize = bool(self._exposure_varies) and mode in ("base", "running")
+        unit_suffix = ", DN/s" if normalize else ""
+
+        def _diff_ready(source_frame: Any, arr: np.ndarray) -> np.ndarray:
+            if not normalize:
+                return arr
+            exptime = frame_exposure_time(source_frame)
+            return arr / exptime if exptime and exptime > 0 else arr
+
         if mode == "base" and len(self._map_frames) > 1:
             base = self._prepare_map_array(getattr(self._map_frames[0], "data"), "base frame")
             if base.shape == current.shape:
-                current = current - base
-                title += " (Base Difference)"
+                current = _diff_ready(frame, current) - _diff_ready(self._map_frames[0], base)
+                title += f" (Base Difference{unit_suffix})"
+            else:
+                title += " (raw — size differs from base frame)"
         elif mode == "running" and len(self._map_frames) > 1:
+            # Difference against the neighbour only when it shares this frame's
+            # size; never label a raw frame as a difference (see the load-time
+            # config partitioning that normally prevents this).
+            differenced = False
             if idx == 0:
                 other = self._prepare_map_array(getattr(self._map_frames[1], "data"), "next frame")
                 if other.shape == current.shape:
-                    current = other - current
+                    current = _diff_ready(self._map_frames[1], other) - _diff_ready(frame, current)
+                    differenced = True
             else:
-                prev = self._prepare_map_array(getattr(self._map_frames[idx - 1], "data"), "previous frame")
+                prev_frame = self._map_frames[idx - 1]
+                prev = self._prepare_map_array(getattr(prev_frame, "data"), "previous frame")
                 if prev.shape == current.shape:
-                    current = current - prev
-            title += " (Running Difference)"
+                    current = _diff_ready(frame, current) - _diff_ready(prev_frame, prev)
+                    differenced = True
+            title += (
+                f" (Running Difference{unit_suffix})"
+                if differenced
+                else " (raw — no matching frame to difference)"
+            )
 
         # Shared with the movie exporter so the preview and the exported video
         # use identical scaling.
@@ -3110,10 +3321,37 @@ class SolarDataAnalysisWindow(QMainWindow):
                 return str(value)
         return None
 
+    def _frame_stereo_suvi_colormap(self, frame: Any | None = None) -> str | None:
+        """Colormap for a STEREO/SECCHI or GOES/SUVI frame (or selected observable)."""
+        source = frame
+        if source is None and self._map_frames:
+            source = self._map_frames[max(0, min(self._current_frame_index, len(self._map_frames) - 1))]
+        if source is not None:
+            instrument = str(getattr(source, "instrument", "") or "").upper()
+            detector = str(getattr(source, "detector", "") or "").strip().upper()
+            if "SUVI" in instrument:
+                return _suvi_colormap_name(self._frame_wavelength_value(source))
+            if "SECCHI" in instrument or detector in ("COR1", "COR2", "EUVI", "HI1", "HI2"):
+                return _secchi_colormap_name(detector, self._frame_wavelength_value(source))
+            # An explicit non-STEREO/SUVI frame must not fall back to the combo.
+            if frame is not None:
+                return None
+        if frame is None:
+            instrument, value = self._current_observable()
+            if instrument == "SUVI":
+                return _suvi_colormap_name(value)
+            if instrument == "SECCHI":
+                _spacecraft, det, wavelength = value
+                return _secchi_colormap_name(det, wavelength)
+        return None
+
     def _default_aia_colormap_name(self, frame: Any | None = None) -> str:
         detector = self._frame_lasco_detector(frame)
         if detector is not None:
             return LASCO_COLORMAPS.get(detector, "soholasco2")
+        stereo_suvi = self._frame_stereo_suvi_colormap(frame)
+        if stereo_suvi is not None:
+            return stereo_suvi
         product = self._frame_hmi_product(frame)
         if product is not None:
             return HMI_COLORMAPS.get(product, "gray")
@@ -3284,7 +3522,7 @@ class SolarDataAnalysisWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Apply Crop",
-                "Load or upload AIA frames first, then enter the X/Y arcsec bounds to crop.",
+                "Load or upload solar frames first, then enter the X/Y arcsec bounds to crop.",
             )
             return
         try:
@@ -3372,7 +3610,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._vector_geometry_cache = {}
         self.results_table.setRowCount(0)
         self.region_table.setRowCount(0)
-        self.archive_results_status_label.setText("Run Fetch to list matching SDO/AIA files.")
+        self.archive_results_status_label.setText("Run Fetch to list matching archive files.")
         self.metadata_status_label.setText("Metadata: not loaded")
         self.download_load_btn.setEnabled(False)
         self._set_results_selection_controls_enabled(False)
@@ -3456,7 +3694,7 @@ class SolarDataAnalysisWindow(QMainWindow):
 
     def detect_active_regions(self):
         if self._current_map_data is None:
-            QMessageBox.information(self, "Active Regions", "Load or render an AIA frame first.")
+            QMessageBox.information(self, "Active Regions", "Load or render a solar disk frame first.")
             return
         try:
             regions = detect_active_regions(
@@ -3799,7 +4037,7 @@ class SolarDataAnalysisWindow(QMainWindow):
 
     def show_composite_plot(self):
         if not self._map_frames:
-            QMessageBox.information(self, "Composite", "Load or upload AIA frames first.")
+            QMessageBox.information(self, "Composite", "Load or upload EUV disk frames first.")
             return
         try:
             if self._overlay_magnetogram is not None:
@@ -3844,7 +4082,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         path, _ = pick_export_path(
             self,
             "Export Solar Plot",
-            "aia_solar_analysis.png",
+            f"{self._export_basename('solar_analysis')}.png",
             "PNG (*.png);;PDF (*.pdf);;SVG (*.svg);;TIFF (*.tiff *.tif);;JPG (*.jpg *.jpeg)",
         )
         if not path:
@@ -3885,13 +4123,13 @@ class SolarDataAnalysisWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Export Cropped FITS",
-                "Load or upload AIA frames first, then enter the X/Y arcsec bounds to export a crop.",
+                "Load or upload solar frames first, then enter the X/Y arcsec bounds to export a crop.",
             )
             return
         path, _ = pick_export_path(
             self,
             "Export Cropped FITS",
-            "aia_crop.fits",
+            f"{self._export_basename('crop')}.fits",
             "FITS (*.fits *.fit);;Compressed FITS (*.fits.gz *.fit.gz)",
         )
         if not path:
@@ -3908,7 +4146,9 @@ class SolarDataAnalysisWindow(QMainWindow):
         if not self._regions:
             QMessageBox.information(self, "Export Regions", "Detect active regions first.")
             return
-        path, _ = pick_export_path(self, "Export Regions CSV", "aia_active_regions.csv", "CSV (*.csv)")
+        path, _ = pick_export_path(
+            self, "Export Regions CSV", f"{self._export_basename('active_regions')}.csv", "CSV (*.csv)"
+        )
         if not path:
             return
         try:
@@ -3929,8 +4169,8 @@ class SolarDataAnalysisWindow(QMainWindow):
             QMessageBox.information(self, "Export Movie", "Another operation is still running.")
             return
         suffix = default_suffix or (".gif" if self.movie_format_combo.currentText().upper() == "GIF" else ".mp4")
-        default_name = f"aia_movie{suffix}"
-        path, _ = pick_export_path(self, "Export AIA Movie", default_name, "MP4 (*.mp4);;GIF (*.gif)")
+        default_name = f"{self._export_basename('movie')}{suffix}"
+        path, _ = pick_export_path(self, "Export Movie", default_name, "MP4 (*.mp4);;GIF (*.gif)")
         if not path:
             return
 
@@ -3962,6 +4202,8 @@ class SolarDataAnalysisWindow(QMainWindow):
             percentile_high=float(self.clip_high_slider.value()),
             colormap_name=self._resolved_colormap_name(),
             scale=self.scale_combo.currentText(),
+            # Match the preview: difference movies normalise unequal exposures.
+            normalize_exposure=bool(self._exposure_varies) and self._movie_mode() != "raw",
         )
         self._set_busy(True, f"Exporting movie ({len(self._map_frames)} frame(s))…")
         self.progress_panel.set_status_text("Preparing export…")

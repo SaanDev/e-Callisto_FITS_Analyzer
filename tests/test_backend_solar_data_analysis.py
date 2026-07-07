@@ -53,6 +53,174 @@ class FakeMap:
         self.meta = {"instrume": "AIA"}
 
 
+class ConfigMap(FakeMap):
+    """FakeMap with a controllable observing configuration."""
+
+    def __init__(self, data, *, instrument="SECCHI", detector="COR2", polar=None,
+                 wavelnth=None, exptime=None):
+        super().__init__(data)
+        self.instrument = instrument
+        self.detector = detector
+        self.meta = {"instrume": instrument, "detector": detector}
+        if polar is not None:
+            self.meta["polar"] = polar
+        if wavelnth is not None:
+            self.meta["wavelnth"] = wavelnth
+        if exptime is not None:
+            self.meta["exptime"] = exptime
+
+
+def test_partition_prefers_total_brightness_over_polarizer_triplet():
+    from src.Backend.solar_data_analysis import partition_frames_by_config
+
+    # The verified STEREO COR2 case: 2 total-brightness frames (POLAR=1001) vs a
+    # 3-frame polarizer triplet at the SAME image size. The total-brightness
+    # science sequence must win even though it has fewer frames.
+    frames = [
+        ConfigMap(np.zeros((8, 8)), polar=1001.0),
+        ConfigMap(np.zeros((8, 8)), polar=0.0),
+        ConfigMap(np.zeros((8, 8)), polar=120.0),
+        ConfigMap(np.zeros((8, 8)), polar=240.0),
+        ConfigMap(np.zeros((8, 8)), polar=1001.0),
+    ]
+    part = partition_frames_by_config(frames)
+    assert len(part.kept) == 2
+    assert len(part.dropped) == 3
+    assert part.kept_key[3] == "total"
+    assert "excluded 3 frame(s)" in part.note
+    assert sum(part.dropped_keys.values()) == 3
+
+
+def test_partition_drops_smaller_browse_frames():
+    from src.Backend.solar_data_analysis import partition_frames_by_config
+
+    frames = [
+        ConfigMap(np.zeros((8, 8)), polar=1001.0),
+        ConfigMap(np.zeros((4, 4)), polar=1001.0),  # browse "double" frame
+        ConfigMap(np.zeros((8, 8)), polar=1001.0),
+    ]
+    part = partition_frames_by_config(frames)
+    assert len(part.kept) == 2 and len(part.dropped) == 1
+    assert part.dropped[0].data.shape == (4, 4)
+    assert "excluded 1 frame(s)" in part.note
+
+
+def test_partition_groups_by_wavelength():
+    from src.Backend.solar_data_analysis import partition_frames_by_config
+
+    frames = [
+        ConfigMap(np.zeros((8, 8)), instrument="AIA", detector="", wavelnth=171),
+        ConfigMap(np.zeros((8, 8)), instrument="AIA", detector="", wavelnth=193),
+        ConfigMap(np.zeros((8, 8)), instrument="AIA", detector="", wavelnth=171),
+        ConfigMap(np.zeros((8, 8)), instrument="AIA", detector="", wavelnth=171),
+    ]
+    part = partition_frames_by_config(frames)
+    assert len(part.kept) == 3
+    assert part.kept_key[2] == 171
+    assert len(part.dropped) == 1
+
+
+def test_partition_single_config_keeps_all_with_empty_note():
+    from src.Backend.solar_data_analysis import partition_frames_by_config
+
+    frames = [ConfigMap(np.zeros((8, 8)), polar=1001.0) for _ in range(3)]
+    part = partition_frames_by_config(frames)
+    assert part.kept == frames and part.dropped == [] and part.note == ""
+
+
+def test_partition_empty_and_single_frame():
+    from src.Backend.solar_data_analysis import partition_frames_by_config
+
+    empty = partition_frames_by_config([])
+    assert empty.kept == [] and empty.dropped == [] and empty.kept_key is None
+
+    one = ConfigMap(np.zeros((4, 4)))
+    part = partition_frames_by_config([one])
+    assert part.kept == [one] and part.dropped == [] and part.note == ""
+
+
+def test_polar_state_normalization():
+    from src.Backend.solar_data_analysis import _polar_state
+
+    assert _polar_state(ConfigMap(np.zeros((2, 2)), polar=1001.0)) == "total"
+    assert _polar_state(ConfigMap(np.zeros((2, 2)))) == "total"  # missing POLAR
+    assert _polar_state(ConfigMap(np.zeros((2, 2)), polar="Clear")) == "total"
+    assert _polar_state(ConfigMap(np.zeros((2, 2)), polar=120.0)) == "pol120"
+    assert _polar_state(ConfigMap(np.zeros((2, 2)), polar=0)) == "pol0"
+
+
+def test_exposures_differ():
+    from src.Backend.solar_data_analysis import exposures_differ
+
+    same = [ConfigMap(np.zeros((2, 2)), exptime=2.0) for _ in range(3)]
+    assert exposures_differ(same) is False
+
+    mixed = [ConfigMap(np.zeros((2, 2)), exptime=2.0), ConfigMap(np.zeros((2, 2)), exptime=6.0)]
+    assert exposures_differ(mixed) is True
+
+    unknown = [ConfigMap(np.zeros((2, 2))), ConfigMap(np.zeros((2, 2)))]
+    assert exposures_differ(unknown) is False
+
+
+def test_difference_sequence_normalize_flag():
+    frames = [
+        ConfigMap(np.full((4, 4), 100.0), exptime=1.0),
+        ConfigMap(np.full((4, 4), 200.0), exptime=2.0),
+    ]
+    raw = difference_sequence(frames, mode="running")
+    normalized = difference_sequence(frames, mode="running", normalize=True)
+    # Raw DN difference shows the exposure ratio as false signal (+100)...
+    assert np.allclose(raw[1], 100.0)
+    # ...while DN/s differencing correctly reports no change.
+    assert np.allclose(normalized[1], 0.0)
+
+
+def test_iter_rendered_movie_frames_normalize_exposure():
+    from src.Backend.solar_data_analysis import iter_rendered_movie_frames
+
+    frames = [
+        ConfigMap(np.full((4, 4), 100.0), exptime=1.0),
+        ConfigMap(np.full((4, 4), 200.0), exptime=2.0),
+    ]
+    rendered = list(iter_rendered_movie_frames(frames, mode="running", normalize=True))
+    assert len(rendered) == 2
+    # A zero difference renders as a uniform frame (single colour everywhere).
+    tail = rendered[1].reshape(-1, rendered[1].shape[-1])
+    assert np.all(tail == tail[0])
+
+
+def test_dominant_shape_frames_drops_odd_sized_frames():
+    from src.Backend.solar_data_analysis import dominant_shape_frames
+
+    # A STEREO/COR-like sequence: mostly 8x8 science frames with one 4x4 browse
+    # frame interspersed (the case that broke running difference).
+    frames = [
+        FakeMap(np.zeros((8, 8))),
+        FakeMap(np.zeros((8, 8))),
+        FakeMap(np.zeros((4, 4))),
+        FakeMap(np.zeros((8, 8))),
+    ]
+    kept, dropped, shape = dominant_shape_frames(frames)
+    assert shape == (8, 8)
+    assert len(kept) == 3 and len(dropped) == 1
+    assert dropped[0].data.shape == (4, 4)
+    assert all(f.data.shape == (8, 8) for f in kept)
+
+
+def test_dominant_shape_frames_uniform_keeps_all():
+    from src.Backend.solar_data_analysis import dominant_shape_frames
+
+    frames = [FakeMap(np.zeros((8, 8))) for _ in range(3)]
+    kept, dropped, shape = dominant_shape_frames(frames)
+    assert kept == frames and dropped == [] and shape == (8, 8)
+
+
+def test_dominant_shape_frames_empty():
+    from src.Backend.solar_data_analysis import dominant_shape_frames
+
+    assert dominant_shape_frames([]) == ([], [], None)
+
+
 def test_clip_crop_bounds_clamps_and_sorts():
     assert clip_crop_bounds((10, 20), (18, -4, 12, 2)) == (0, 18, 2, 10)
 

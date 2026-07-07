@@ -1049,7 +1049,7 @@ class MainWindow(QMainWindow):
             mode_menu.addAction(a)
 
         analysis_menu = menubar.addMenu("Analysis")
-        self.open_solar_data_analysis_action = QAction("Solar Image Analysis (SDO · SOHO/LASCO)", self)
+        self.open_solar_data_analysis_action = QAction("Solar Image Analysis (SDO · SOHO/LASCO · STEREO · GOES/SUVI)", self)
         self.open_solar_data_analysis_action.triggered.connect(self.open_solar_data_analysis_window)
         analysis_menu.addAction(self.open_solar_data_analysis_action)
         analysis_menu.addSeparator()

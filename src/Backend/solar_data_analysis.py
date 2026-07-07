@@ -72,6 +72,8 @@ class AiaMovieExportSpec:
     percentile_high: float = 99.0
     colormap_name: str = "inferno"
     scale: str = "linear"
+    # Divide frames by EXPTIME before differencing (set when exposures vary).
+    normalize_exposure: bool = False
 
 
 class AiaArrayMap:
@@ -259,8 +261,188 @@ def crop_maps(frames: Sequence[Any], bounds: CropBounds | None) -> list[AiaArray
     return out
 
 
-def difference_sequence(frames: Sequence[Any], *, mode: str = "running", crop_bounds: CropBounds | None = None) -> list[np.ndarray]:
+def dominant_shape_frames(frames: Sequence[Any]) -> tuple[list[Any], list[Any], tuple[int, ...] | None]:
+    """Partition frames into ``(kept, dropped, shape)`` by their data-array shape.
+
+    Only the frames matching the single most common image shape are kept. Mixed
+    image sizes — e.g. STEREO/SECCHI COR "double" 256x256 browse frames
+    interspersed among 2048x2048 science frames — are undefined for running/base
+    difference, movie export and compositing (you cannot subtract differently
+    sized arrays), so they must be excluded from a multi-frame sequence. Ties are
+    resolved in favour of the shape that appears first. Returns the original list
+    unchanged (nothing dropped) when every frame already shares one shape.
+    """
+    frame_list = list(frames)
+    if not frame_list:
+        return [], [], None
+    shapes = [tuple(np.asarray(getattr(frame, "data")).shape) for frame in frame_list]
+    counts: dict[tuple[int, ...], int] = {}
+    first_index: dict[tuple[int, ...], int] = {}
+    for i, shape in enumerate(shapes):
+        counts[shape] = counts.get(shape, 0) + 1
+        first_index.setdefault(shape, i)
+    dominant = max(counts, key=lambda shape: (counts[shape], -first_index[shape]))
+    kept = [frame for frame, shape in zip(frame_list, shapes) if shape == dominant]
+    dropped = [frame for frame, shape in zip(frame_list, shapes) if shape != dominant]
+    return kept, dropped, dominant
+
+
+@dataclass(frozen=True)
+class FramePartition:
+    """Result of grouping a frame sequence by observing configuration."""
+
+    kept: list[Any]
+    dropped: list[Any]
+    kept_key: tuple | None  # config key of the retained science group
+    dropped_keys: dict  # dropped config key -> frame count
+    note: str  # human-readable summary ("" when nothing dropped)
+
+
+def _polar_state(frame: Any) -> str:
+    """Normalise a frame's POLAR header into a comparable polarizer state.
+
+    SECCHI/LASCO conventions: a numeric polarizer angle (0/120/240...) marks one
+    leg of a polarization triplet, while total-brightness products carry POLAR
+    >= 1000 (e.g. 1001), a textual value like "Clear", or no POLAR at all. All
+    of the latter collapse to "total" so ordinary EUV/HMI frames (no POLAR)
+    compare equal to coronagraph total-brightness frames.
+    """
+    value = _frame_meta_get(frame, "polar")
+    number = _as_float(value)
+    if number is None or number >= 1000.0:
+        return "total"
+    return f"pol{int(round(number))}"
+
+
+def frame_config_key(frame: Any) -> tuple:
+    """Observation-configuration identity for sequence compatibility.
+
+    ``(instrument, detector, wavelength, polar_state, shape)`` — two frames are
+    difference/movie-compatible only when all five match. Exposure time is
+    deliberately NOT part of the key: AIA's automatic exposure control varies
+    EXPTIME by design inside a perfectly valid sequence, so exposure mismatch is
+    corrected by normalisation (see ``exposures_differ``), not by exclusion.
+    """
+    instrument = _safe_text(
+        getattr(frame, "instrument", None) or _frame_meta_get(frame, "instrume", "instrument")
+    ).strip().upper()
+    detector = _safe_text(
+        getattr(frame, "detector", None) or _frame_meta_get(frame, "detector")
+    ).strip().upper()
+    wavelength = _as_float(_frame_meta_get(frame, "wavelnth"))
+    wavelength_key = int(round(wavelength)) if wavelength is not None else None
+    shape = tuple(np.asarray(getattr(frame, "data")).shape)
+    return (instrument, detector, wavelength_key, _polar_state(frame), shape)
+
+
+def partition_frames_by_config(frames: Sequence[Any]) -> FramePartition:
+    """Split frames into the dominant science group and incompatible leftovers.
+
+    Archive time windows routinely mix observing configurations that must never
+    be differenced against each other: STEREO/SECCHI COR sequences interleave
+    polarizer triplets (POLAR=0/120/240) with total-brightness frames
+    (POLAR=1001) at the same image size, plus small browse ("double") frames;
+    mixed AIA uploads can span wavelengths. Selection policy:
+
+    1. Only groups at the maximum pixel area are science candidates (drops
+       browse/thumbnail frames regardless of their headers).
+    2. Among candidates, a total-brightness group beats polarizer groups even
+       when it has fewer frames (the physically meaningful movie sequence).
+    3. Otherwise the most numerous group wins; ties break to first occurrence.
+
+    Frame order is preserved. ``note`` is "" when nothing was dropped.
+    """
+    frame_list = list(frames)
+    if not frame_list:
+        return FramePartition(kept=[], dropped=[], kept_key=None, dropped_keys={}, note="")
+
+    keys = [frame_config_key(frame) for frame in frame_list]
+    counts: dict[tuple, int] = {}
+    first_index: dict[tuple, int] = {}
+    for i, key in enumerate(keys):
+        counts[key] = counts.get(key, 0) + 1
+        first_index.setdefault(key, i)
+
+    if len(counts) == 1:
+        return FramePartition(
+            kept=frame_list, dropped=[], kept_key=keys[0], dropped_keys={}, note=""
+        )
+
+    def _area(key: tuple) -> int:
+        shape = key[4]
+        area = 1
+        for dim in shape:
+            area *= int(dim)
+        return area
+
+    max_area = max(_area(key) for key in counts)
+    candidates = [key for key in counts if _area(key) == max_area]
+    total_candidates = [key for key in candidates if key[3] == "total"]
+    pool = total_candidates or candidates
+    chosen = max(pool, key=lambda key: (counts[key], -first_index[key]))
+
+    kept = [frame for frame, key in zip(frame_list, keys) if key == chosen]
+    dropped = [frame for frame, key in zip(frame_list, keys) if key != chosen]
+    dropped_keys: dict[tuple, int] = {}
+    for key in keys:
+        if key != chosen:
+            dropped_keys[key] = dropped_keys.get(key, 0) + 1
+
+    reasons = []
+    for key, n in dropped_keys.items():
+        parts = []
+        if key[4] != chosen[4]:
+            parts.append(f"{key[4][1]}x{key[4][0]} px" if len(key[4]) == 2 else "different size")
+        if key[3] != chosen[3]:
+            parts.append("polarizer " + key[3][3:] + "°" if key[3].startswith("pol") else key[3])
+        if key[2] != chosen[2] and key[2] is not None:
+            parts.append(f"{key[2]} Å")
+        if key[0] != chosen[0] or key[1] != chosen[1]:
+            parts.append("/".join(x for x in (key[0], key[1]) if x))
+        reasons.append(f"{n} × ({', '.join(parts) or 'other configuration'})")
+
+    kept_desc = "total-brightness" if chosen[3] == "total" else f"polarizer {chosen[3][3:]}°"
+    note = (
+        f"excluded {len(dropped)} frame(s) with a different observing configuration "
+        f"[{'; '.join(reasons)}] so differences and movies stay physically consistent "
+        f"(kept the {kept_desc} science sequence)."
+    )
+    return FramePartition(
+        kept=kept, dropped=dropped, kept_key=chosen, dropped_keys=dropped_keys, note=note
+    )
+
+
+def exposures_differ(frames: Sequence[Any], *, tolerance: float = 0.01) -> bool:
+    """True when known exposure times in a sequence spread more than ``tolerance``.
+
+    Differencing frames with unequal EXPTIME in raw DN creates false
+    brightenings/dimmings proportional to the exposure ratio, so callers use
+    this to decide whether to normalise to DN/s first. Frames without a usable
+    EXPTIME are ignored; fewer than two known exposures -> False.
+    """
+    known = [t for t in (frame_exposure_time(f) for f in frames) if t and t > 0]
+    if len(known) < 2:
+        return False
+    return (max(known) / min(known)) - 1.0 > float(tolerance)
+
+
+def difference_sequence(
+    frames: Sequence[Any],
+    *,
+    mode: str = "running",
+    crop_bounds: CropBounds | None = None,
+    normalize: bool = False,
+) -> list[np.ndarray]:
+    # normalize: divide each frame by its EXPTIME (DN -> DN/s) before
+    # differencing, so unequal exposures don't masquerade as brightness changes.
     arrays = [crop_array(getattr(frame, "data"), crop_bounds) for frame in frames]
+    if normalize:
+        scaled: list[np.ndarray] = []
+        for frame, arr in zip(frames, arrays):
+            exptime = frame_exposure_time(frame)
+            arr = np.asarray(arr, dtype=float)
+            scaled.append(arr / exptime if exptime and exptime > 0 else arr)
+        arrays = scaled
     if not arrays:
         return []
     mode_key = str(mode or "running").strip().lower()
@@ -688,13 +870,15 @@ def iter_rendered_movie_frames(
     percentile_high: float = 99.0,
     colormap_name: str = "inferno",
     scale: str = "linear",
+    normalize: bool = False,
 ):
     """Yield rendered RGB uint8 frames one at a time.
 
     Streaming avoids holding every rendered frame in memory at once, which for
     full-resolution AIA (≈50 MB per RGB frame) otherwise exhausts RAM and hangs
     the app. Difference modes keep only the base/previous frame in hand. Mirrors
-    :func:`difference_sequence` exactly so the output matches the preview.
+    :func:`difference_sequence` exactly so the output matches the preview
+    (including exposure normalisation when ``normalize`` is set).
     """
     n = len(frames)
     if n == 0:
@@ -707,7 +891,12 @@ def iter_rendered_movie_frames(
         raise ValueError(f"Unsupported difference mode: {mode}")
 
     def _cropped(i: int) -> np.ndarray:
-        return np.asarray(crop_array(getattr(frames[i], "data"), crop_bounds), dtype=float)
+        arr = np.asarray(crop_array(getattr(frames[i], "data"), crop_bounds), dtype=float)
+        if normalize:
+            exptime = frame_exposure_time(frames[i])
+            if exptime and exptime > 0:
+                arr = arr / exptime
+        return arr
 
     def _render(arr: np.ndarray) -> np.ndarray:
         return _array_to_rgb_uint8(
@@ -793,6 +982,7 @@ def export_movie(
         percentile_high=spec.percentile_high,
         colormap_name=spec.colormap_name,
         scale=spec.scale,
+        normalize=bool(getattr(spec, "normalize_exposure", False)),
     )
     _write_movie_stream(
         out_path,

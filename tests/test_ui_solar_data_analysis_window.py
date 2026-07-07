@@ -163,6 +163,245 @@ def test_solar_data_window_high_resolution_is_opt_in():
     win.close()
 
 
+def _select_observable(win, label: str) -> None:
+    idx = win.wavelength_combo.findText(label)
+    assert idx >= 0, f"observable {label!r} not found in the selector"
+    win.wavelength_combo.setCurrentIndex(idx)
+
+
+def test_solar_data_window_offers_stereo_and_suvi_observables():
+    _app()
+    win = SolarDataAnalysisWindow()
+    labels = [win.wavelength_combo.itemText(i) for i in range(win.wavelength_combo.count())]
+    for expected in ("STEREO-A/COR2", "STEREO-B/EUVI 195 A", "STEREO-A/HI1", "GOES/SUVI 171 A"):
+        assert expected in labels
+    win.close()
+
+
+def test_solar_data_window_builds_stereo_cor2_query():
+    _app()
+    win = SolarDataAnalysisWindow()
+    _select_observable(win, "STEREO-A/COR2")
+    spec = win._build_query_spec()
+    assert spec.spacecraft == "STEREO_A"
+    assert spec.instrument == "SECCHI"
+    assert spec.detector == "COR2"
+    assert spec.wavelength_angstrom is None
+    assert win._default_aia_colormap_name() == "stereocor2"
+    win.close()
+
+
+def test_solar_data_window_builds_stereo_euvi_query_with_wavelength():
+    _app()
+    win = SolarDataAnalysisWindow()
+    _select_observable(win, "STEREO-B/EUVI 195 A")
+    spec = win._build_query_spec()
+    assert spec.spacecraft == "STEREO_B"
+    assert spec.instrument == "SECCHI"
+    assert spec.detector == "EUVI"
+    assert spec.wavelength_angstrom == 195.0
+    assert win._default_aia_colormap_name() == "euvi195"
+    win.close()
+
+
+def test_solar_data_window_builds_suvi_query():
+    _app()
+    win = SolarDataAnalysisWindow()
+    _select_observable(win, "GOES/SUVI 171 A")
+    spec = win._build_query_spec()
+    assert spec.spacecraft == "GOES"
+    assert spec.instrument == "SUVI"
+    assert spec.wavelength_angstrom == 171.0
+    assert spec.satellite_number == 16
+    assert spec.level == "1b"
+    assert win._default_aia_colormap_name() == "goes-rsuvi171"
+    win.close()
+
+
+def test_solar_data_window_gates_sdo_controls_for_stereo():
+    _app()
+    win = SolarDataAnalysisWindow()
+    # STEREO/SUVI are VSO-only like LASCO: the JSOC/cutout/high-res controls
+    # must be disabled so no JSOC fast-path is attempted for them.
+    _select_observable(win, "STEREO-A/COR2")
+    assert win.source_combo.isEnabled() is False
+    assert win.frame_size_combo.isEnabled() is False
+    assert win.high_resolution_check.isEnabled() is False
+    win.close()
+
+
+def test_solar_data_window_drops_odd_sized_frames_on_load():
+    _app()
+    win = SolarDataAnalysisWindow()
+    # A STEREO/COR-like sequence with one odd-sized browse frame interspersed;
+    # it must be excluded so running/base difference never mixes raw frames in.
+    frames = [
+        FakeMap(np.ones((8, 8))),
+        FakeMap(np.ones((8, 8))),
+        FakeMap(np.ones((4, 4))),
+        FakeMap(np.ones((8, 8))),
+    ]
+    win._apply_loaded_frames(frames, paths=["a.fits"], metadata={})
+    assert len(win._map_frames) == 3
+    assert all(f.data.shape == (8, 8) for f in win._map_frames)
+    assert "excluded 1 frame" in win.analysis_text.toPlainText()
+    win.close()
+
+
+class _CorFakeMap(FakeMap):
+    """STEREO/COR2-like frame with a controllable polarizer state and exposure."""
+
+    observatory = "STEREO_A"
+    instrument = "SECCHI"
+    detector = "COR2"
+    wavelength = ""
+
+    def __init__(self, data, *, polar=None, exptime=None, date="2012-07-12T16:00:00"):
+        super().__init__(data)
+        self.date = date
+        self.meta = {"instrume": "SECCHI", "detector": "COR2"}
+        if polar is not None:
+            self.meta["polar"] = polar
+        if exptime is not None:
+            self.meta["exptime"] = exptime
+
+
+def test_solar_data_window_excludes_polarizer_frames_on_load():
+    _app()
+    win = SolarDataAnalysisWindow()
+    # The verified real-data case: total-brightness (POLAR=1001) frames mixed
+    # with a same-size polarizer triplet (POLAR=0/120/240). Only the
+    # total-brightness science sequence must survive.
+    frames = [
+        _CorFakeMap(np.ones((8, 8)), polar=1001.0, date="2012-07-12T15:39:00"),
+        _CorFakeMap(np.ones((8, 8)), polar=0.0, date="2012-07-12T16:08:15"),
+        _CorFakeMap(np.ones((8, 8)), polar=120.0, date="2012-07-12T16:08:45"),
+        _CorFakeMap(np.ones((8, 8)), polar=240.0, date="2012-07-12T16:09:15"),
+        _CorFakeMap(np.ones((8, 8)), polar=1001.0, date="2012-07-12T16:24:00"),
+    ]
+    win._apply_loaded_frames(frames, paths=["a.fts"], metadata={})
+    assert len(win._map_frames) == 2
+    assert all(f.meta.get("polar") == 1001.0 for f in win._map_frames)
+    assert "excluded 3 frame(s)" in win.analysis_text.toPlainText()
+    win.close()
+
+
+def test_running_difference_normalizes_unequal_exposures():
+    _app()
+    win = SolarDataAnalysisWindow()
+    # data/exptime chosen so the DN/s rate is identical: raw DN differencing
+    # would show +100 of false signal; normalized differencing shows zero.
+    frames = [
+        _CorFakeMap(np.full((8, 8), 100.0), polar=1001.0, exptime=1.0,
+                    date="2012-07-12T16:00:00"),
+        _CorFakeMap(np.full((8, 8), 200.0), polar=1001.0, exptime=2.0,
+                    date="2012-07-12T16:15:00"),
+    ]
+    win._apply_loaded_frames(frames, paths=["a.fts", "b.fts"], metadata={})
+    assert win._exposure_varies is True
+
+    win.movie_content_combo.setCurrentText("Running Difference")
+    win.frame_slider.setValue(1)
+    win._render_current_frame()
+    assert win._current_map_data is not None
+    assert np.allclose(win._current_map_data, 0.0)
+    assert "DN/s" in win.plot_title_label.text()
+    win.close()
+
+
+def test_running_difference_keeps_raw_dn_for_equal_exposures():
+    _app()
+    win = SolarDataAnalysisWindow()
+    frames = [
+        _CorFakeMap(np.full((8, 8), 100.0), polar=1001.0, exptime=2.0,
+                    date="2012-07-12T16:00:00"),
+        _CorFakeMap(np.full((8, 8), 250.0), polar=1001.0, exptime=2.0,
+                    date="2012-07-12T16:15:00"),
+    ]
+    win._apply_loaded_frames(frames, paths=["a.fts", "b.fts"], metadata={})
+    assert win._exposure_varies is False
+
+    win.movie_content_combo.setCurrentText("Running Difference")
+    win.frame_slider.setValue(1)
+    win._render_current_frame()
+    assert np.allclose(win._current_map_data, 150.0)
+    assert "DN/s" not in win.plot_title_label.text()
+    assert "Running Difference" in win.plot_title_label.text()
+    win.close()
+
+
+def test_gating_disables_disk_tools_for_stereo_cor2():
+    _app()
+    win = SolarDataAnalysisWindow()
+    frames = [
+        _CorFakeMap(np.ones((8, 8)), polar=1001.0, date="2012-07-12T16:00:00"),
+        _CorFakeMap(np.ones((8, 8)), polar=1001.0, date="2012-07-12T16:15:00"),
+    ]
+    win._apply_loaded_frames(frames, paths=["a.fts", "b.fts"], metadata={})
+    # White-light coronagraph: no composites, magnetogram overlays or disk ARs.
+    assert win.composite_btn.isEnabled() is False
+    assert win.magnetogram_btn.isEnabled() is False
+    assert win.detect_regions_btn.isEnabled() is False
+    assert win.fetch_labels_btn.isEnabled() is False
+    assert win.composite_action.isEnabled() is False
+    assert win.detect_regions_action.isEnabled() is False
+    assert win.labels_action.isEnabled() is False
+    win.close()
+
+
+class _EuviFakeMap(FakeMap):
+    observatory = "STEREO_A"
+    instrument = "SECCHI"
+    detector = "EUVI"
+    wavelength = "195 Angstrom"
+
+    def __init__(self, data, *, date="2012-07-12T16:00:00"):
+        super().__init__(data)
+        self.date = date
+        self.meta = {"instrume": "SECCHI", "detector": "EUVI", "wavelnth": 195}
+
+
+def test_gating_keeps_disk_tools_for_euvi():
+    _app()
+    win = SolarDataAnalysisWindow()
+    frames = [
+        _EuviFakeMap(np.ones((8, 8)), date="2012-07-12T16:00:00"),
+        _EuviFakeMap(np.ones((8, 8)), date="2012-07-12T16:10:00"),
+    ]
+    win._apply_loaded_frames(frames, paths=["a.fts", "b.fts"], metadata={})
+    # EUVI is a disk EUV imager: region detection and composites stay usable.
+    assert win.detect_regions_btn.isEnabled() is True
+    assert win.composite_btn.isEnabled() is True
+    assert win.detect_regions_action.isEnabled() is True
+    win.close()
+
+
+def test_lightcurve_requires_two_frames():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames([FakeMap(np.ones((8, 8)))], paths=["a.fits"], metadata={})
+    assert win.lightcurve_btn.isEnabled() is False
+
+    frames = [FakeMap(np.ones((8, 8))), FakeMap(np.ones((8, 8)))]
+    win._apply_loaded_frames(frames, paths=["a.fits", "b.fits"], metadata={})
+    assert win.lightcurve_btn.isEnabled() is True
+    win.close()
+
+
+def test_export_basename_and_frames_word_for_cor2():
+    _app()
+    win = SolarDataAnalysisWindow()
+    frames = [
+        _CorFakeMap(np.ones((8, 8)), polar=1001.0, date="2012-07-12T16:00:00"),
+        _CorFakeMap(np.ones((8, 8)), polar=1001.0, date="2012-07-12T16:15:00"),
+    ]
+    win._apply_loaded_frames(frames, paths=["a.fts", "b.fts"], metadata={})
+    assert win._frames_word() == "STEREO-A COR2"
+    assert win._export_basename("movie") == "stereo_a_cor2_movie"
+    assert "AIA" not in win._loaded_frame_status_text("Loaded", win._map_frames)
+    win.close()
+
+
 def test_solar_data_window_warns_before_large_high_resolution_download(monkeypatch):
     _app()
     start = datetime(2026, 2, 10, 1, 0, 0)
@@ -973,7 +1212,12 @@ def test_solar_data_window_lasco_disables_sdo_download_controls():
 def test_solar_data_window_lasco_gates_euv_only_tools():
     _app()
     win = SolarDataAnalysisWindow()
-    win._apply_loaded_frames([_lasco_frame(detector="C2")], paths=["c2.fts"], metadata={})
+    # Two frames so the sequence tools (light curve needs >= 2) stay enabled.
+    win._apply_loaded_frames(
+        [_lasco_frame(detector="C2"), _lasco_frame(detector="C2")],
+        paths=["c2_a.fts", "c2_b.fts"],
+        metadata={},
+    )
     QApplication.processEvents()
 
     assert win._loaded_is_lasco() is True
