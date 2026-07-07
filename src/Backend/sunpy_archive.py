@@ -132,6 +132,7 @@ class SunPyQuerySpec:
     resolution: float | str | None = None
     max_records: int = 200
     product: str | None = None  # HMI observable: magnetogram/continuum/dopplergram
+    level: str | None = None  # Processing level, e.g. GOES/SUVI "1b" or "2"
 
 
 @dataclass(frozen=True)
@@ -191,6 +192,9 @@ class InstrumentRegistryEntry:
     supports_product: bool = False
     products: tuple[str, ...] = ()
     default_product: str | None = None
+    supports_level: bool = False
+    levels: tuple[str, ...] = ()
+    default_level: str | None = None
 
 
 @dataclass(frozen=True)
@@ -201,6 +205,61 @@ class _DirectDownloadItem:
     path_hint: str
     expected_bytes: int | None = None
     urls: tuple[str, ...] = ()
+
+
+# STEREO/SECCHI detectors. Every SECCHI imager is served by the VSO under the
+# single instrument name "SECCHI" and distinguished by detector: EUVI is an EUV
+# disk imager (selectable passbands), COR1/COR2 are white-light coronagraphs and
+# HI1/HI2 are wide-field heliospheric imagers (no passband selection).
+_SECCHI_DETECTORS: tuple[dict[str, Any], ...] = (
+    {
+        "detector": "EUVI",
+        "label": "EUVI",
+        "supports_wavelength": True,
+        "wavelengths": (171.0, 195.0, 284.0, 304.0),
+        "default_wavelength": 195.0,
+    },
+    {"detector": "COR1", "label": "COR1"},
+    {"detector": "COR2", "label": "COR2"},
+    {"detector": "HI1", "label": "HI1"},
+    {"detector": "HI2", "label": "HI2"},
+)
+
+# (spacecraft code used by the VSO Source attr, short A/B suffix for keys/labels)
+_STEREO_SOURCES: tuple[tuple[str, str], ...] = (
+    ("STEREO_A", "A"),
+    ("STEREO_B", "B"),
+)
+
+
+def _stereo_secchi_entries() -> tuple[InstrumentRegistryEntry, ...]:
+    """Build the STEREO-A/B x SECCHI-detector registry matrix.
+
+    STEREO-B (Behind) lost contact in October 2014, so its entries only ever
+    resolve historical (2007-2014) archive records; they are still registered so
+    that archive browsing of that era works.
+    """
+    out: list[InstrumentRegistryEntry] = []
+    for source, ab in _STEREO_SOURCES:
+        for det in _SECCHI_DETECTORS:
+            out.append(
+                InstrumentRegistryEntry(
+                    key=f"stereo_{ab.lower()}_{str(det['detector']).lower()}",
+                    label=f"STEREO-{ab}/{det['label']}",
+                    spacecraft=source,
+                    instrument="SECCHI",
+                    detector=str(det["detector"]),
+                    data_kind=DATA_KIND_MAP,
+                    supports_wavelength=bool(det.get("supports_wavelength", False)),
+                    supports_detector=True,
+                    supports_satellite=False,
+                    default_wavelength=det.get("default_wavelength"),
+                    default_detector=str(det["detector"]),
+                    default_satellite=None,
+                    wavelengths=tuple(det.get("wavelengths", ())),
+                )
+            )
+    return tuple(out)
 
 
 INSTRUMENT_REGISTRY: tuple[InstrumentRegistryEntry, ...] = (
@@ -267,21 +326,7 @@ INSTRUMENT_REGISTRY: tuple[InstrumentRegistryEntry, ...] = (
         default_satellite=None,
         wavelengths=(),
     ),
-    InstrumentRegistryEntry(
-        key="stereo_a_euvi",
-        label="STEREO-A/EUVI",
-        spacecraft="STEREO_A",
-        instrument="EUVI",
-        detector=None,
-        data_kind=DATA_KIND_MAP,
-        supports_wavelength=True,
-        supports_detector=False,
-        supports_satellite=False,
-        default_wavelength=195.0,
-        default_detector=None,
-        default_satellite=None,
-        wavelengths=(171.0, 195.0, 284.0, 304.0),
-    ),
+    *_stereo_secchi_entries(),
     InstrumentRegistryEntry(
         key="goes_xrs",
         label="GOES/XRS",
@@ -296,6 +341,24 @@ INSTRUMENT_REGISTRY: tuple[InstrumentRegistryEntry, ...] = (
         default_detector=None,
         default_satellite=16,
         wavelengths=(),
+    ),
+    InstrumentRegistryEntry(
+        key="goes_suvi",
+        label="GOES/SUVI",
+        spacecraft="GOES",
+        instrument="SUVI",
+        detector=None,
+        data_kind=DATA_KIND_MAP,
+        supports_wavelength=True,
+        supports_detector=False,
+        supports_satellite=True,
+        default_wavelength=171.0,
+        default_detector=None,
+        default_satellite=16,
+        wavelengths=(94.0, 131.0, 171.0, 195.0, 284.0, 304.0),
+        supports_level=True,
+        levels=("1b", "2"),
+        default_level="1b",
     ),
     InstrumentRegistryEntry(
         key="proba2_swap",
@@ -420,7 +483,21 @@ def build_attrs(
             if sat_cls is not None:
                 out.append(sat_cls(int(sat_number)))
 
+    # Processing level (e.g. GOES/SUVI "1b" or "2"). The SUVI dataretriever
+    # client selects L1b vs L2 products via a.Level; numeric levels are passed as
+    # ints ("2" -> 2) while alphanumeric levels ("1b") stay strings.
+    if entry.supports_level and hasattr(attrs_module, "Level"):
+        level = (spec.level or entry.default_level or "").strip()
+        if level:
+            out.append(attrs_module.Level(_coerce_level_value(level)))
+
     return out
+
+
+def _coerce_level_value(level: str) -> int | str:
+    """Return an int for purely-numeric levels, else the original string."""
+    text = str(level).strip()
+    return int(text) if text.isdigit() else text
 
 
 def search(
@@ -915,15 +992,25 @@ def load_downloaded(
     *,
     map_loader: Callable[..., Any] | None = None,
     timeseries_loader: Callable[..., Any] | None = None,
+    instrument: str | None = None,
 ) -> SunPyLoadResult:
     normalized = [str(Path(p).expanduser().resolve()) for p in paths if str(p).strip()]
     if not normalized:
         raise ValueError("No files were provided for SunPy loading.")
 
     if data_kind == DATA_KIND_MAP:
+        per_file = False
         if map_loader is None:
-            map_loader = _import_map_loader()
-        loaded = _load_maps(map_loader, normalized)
+            # GOES/SUVI L1b FITS need a header repair that must happen one file at
+            # a time (see suvi_ingest); other instruments use the plain loader.
+            if str(instrument or "").strip().upper() == "SUVI":
+                from src.Backend.suvi_ingest import load_suvi_map
+
+                map_loader = load_suvi_map
+                per_file = True
+            else:
+                map_loader = _import_map_loader()
+        loaded = _load_maps(map_loader, normalized, per_file=per_file)
         maps = _extract_maps(loaded)
         meta = {
             "n_frames": len(maps),
@@ -981,6 +1068,7 @@ def normalize_query_spec(spec: SunPyQuerySpec) -> SunPyQuerySpec:
         resolution=_normalize_resolution_value(spec.resolution),
         max_records=max(1, int(spec.max_records or 1)),
         product=(str(spec.product).strip().lower() if spec.product else None),
+        level=(str(spec.level).strip().lower() if spec.level else None),
     )
 
 
@@ -2746,7 +2834,12 @@ def _format_sunpy_dependency_error(exc: Exception) -> str:
     )
 
 
-def _load_maps(map_loader: Callable[..., Any], paths: list[str]) -> Any:
+def _load_maps(map_loader: Callable[..., Any], paths: list[str], *, per_file: bool = False) -> Any:
+    # Some instruments (GOES/SUVI) need their header repaired per file, so the
+    # loader cannot be handed a whole sequence at once; map it over the list.
+    if per_file or getattr(map_loader, "per_file", False):
+        return [map_loader(path) for path in paths]
+
     if len(paths) <= 1:
         return map_loader(paths[0])
 

@@ -63,6 +63,10 @@ class _FakeAttrs:
     def Resolution(value):
         return ("Resolution", value)
 
+    @staticmethod
+    def Level(value):
+        return ("Level", value)
+
 
 def _mk_query(**kwargs):
     defaults = dict(
@@ -96,6 +100,59 @@ def test_build_attrs_for_goes_includes_satellite():
     sat_attrs = [item for item in attrs if isinstance(item, _FakeAttrs.goes.SatelliteNumber)]
     assert len(sat_attrs) == 1
     assert sat_attrs[0].value == 18
+
+
+def test_build_attrs_for_stereo_secchi_detectors():
+    # COR2 is a white-light detector: Source/Instrument/Detector, no Wavelength.
+    cor2 = sa.build_attrs(
+        _mk_query(spacecraft="STEREO_A", instrument="SECCHI", detector="COR2"),
+        attrs_module=_FakeAttrs,
+        units_module=_FakeUnits,
+    )
+    assert ("Source", "STEREO_A") in cor2
+    assert ("Instrument", "SECCHI") in cor2
+    assert ("Detector", "COR2") in cor2
+    assert not any(isinstance(x, tuple) and x[0] == "Wavelength" for x in cor2)
+
+    # EUVI is an EUV imager: the wavelength attr is included.
+    euvi = sa.build_attrs(
+        _mk_query(spacecraft="STEREO_B", instrument="SECCHI", detector="EUVI", wavelength_angstrom=195.0),
+        attrs_module=_FakeAttrs,
+        units_module=_FakeUnits,
+    )
+    assert ("Source", "STEREO_B") in euvi
+    assert ("Detector", "EUVI") in euvi
+    assert any(isinstance(x, tuple) and x[0] == "Wavelength" for x in euvi)
+
+
+def test_build_attrs_for_suvi_includes_level_and_satellite():
+    # Default level ("1b") is emitted from the registry entry.
+    default = sa.build_attrs(
+        _mk_query(spacecraft="GOES", instrument="SUVI", wavelength_angstrom=171.0),
+        attrs_module=_FakeAttrs,
+        units_module=_FakeUnits,
+    )
+    assert ("Level", "1b") in default
+    assert any(isinstance(x, _FakeAttrs.goes.SatelliteNumber) for x in default)
+
+    # An explicit numeric level is coerced to int (a.Level(2), not "2").
+    l2 = sa.build_attrs(
+        _mk_query(spacecraft="GOES", instrument="SUVI", wavelength_angstrom=171.0, level="2"),
+        attrs_module=_FakeAttrs,
+        units_module=_FakeUnits,
+    )
+    assert ("Level", 2) in l2
+
+
+def test_registry_lookup_resolves_new_entries():
+    cor1 = sa.registry_lookup("STEREO_A", "SECCHI", "COR1")
+    assert cor1 is not None and cor1.key == "stereo_a_cor1"
+    assert cor1.supports_detector and not cor1.supports_wavelength
+
+    suvi = sa.registry_lookup("GOES", "SUVI")
+    assert suvi is not None and suvi.key == "goes_suvi"
+    assert suvi.supports_level and suvi.default_level == "1b"
+    assert suvi.supports_satellite and suvi.supports_wavelength
 
 
 def test_search_normalizes_rows():
@@ -711,10 +768,15 @@ def test_registry_spacecraft_and_instrument_helpers():
     spacecraft = sa.registry_spacecraft_list()
     assert spacecraft[0] == "SDO"
     assert "PROBA2" in spacecraft
+    assert {"STEREO_A", "STEREO_B"} <= set(spacecraft)
     assert spacecraft.count("GOES") == 1
-    assert sa.registry_instruments_for("GOES") == ["XRS"]
+    # GOES now carries both the XRS timeseries and the SUVI imager.
+    assert sa.registry_instruments_for("GOES") == ["XRS", "SUVI"]
     assert sa.registry_instruments_for("SOHO") == ["LASCO"]
     assert sa.registry_instruments_for("PROBA2") == ["SWAP"]
+    # STEREO/SECCHI exposes all five detectors on each spacecraft.
+    assert sa.registry_instruments_for("STEREO_A") == ["SECCHI"]
+    assert sa.registry_detectors_for("STEREO_A", "SECCHI") == ["EUVI", "COR1", "COR2", "HI1", "HI2"]
 
 
 def test_registry_detectors_and_lookup():

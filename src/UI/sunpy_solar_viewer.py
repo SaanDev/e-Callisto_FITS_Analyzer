@@ -193,7 +193,11 @@ class SunPyWorker(QObject):
                     )
 
                 self.progress.emit(88, "Loading downloaded files...")
-                load_result = load_downloaded(fetch_result.paths, data_kind=self.search_result.data_kind)
+                load_result = load_downloaded(
+                    fetch_result.paths,
+                    data_kind=self.search_result.data_kind,
+                    instrument=self.search_result.spec.instrument,
+                )
                 self.progress.emit(96, "Finalizing data...")
                 self.progress.emit(100, "Data loaded.")
                 self.load_finished.emit(fetch_result, load_result)
@@ -321,9 +325,16 @@ class SunPySolarViewer(QMainWindow):
 
         self.satellite_label = QLabel("GOES Satellite")
         self.satellite_combo = QComboBox()
-        for sat in (13, 14, 15, 16, 17, 18):
+        for sat in (13, 14, 15, 16, 17, 18, 19):
             self.satellite_combo.addItem(str(sat), userData=sat)
         self.satellite_combo.setCurrentText("16")
+
+        # Processing level (currently GOES/SUVI only: L1b raw vs L2 composites).
+        self.level_label = QLabel("Level")
+        self.level_combo = QComboBox()
+        self.level_combo.setToolTip(
+            "GOES/SUVI processing level: '1b' (raw, full cadence) or '2' (science-ready composites)."
+        )
 
         now = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
         start_default = now - timedelta(hours=2)
@@ -361,6 +372,8 @@ class SunPySolarViewer(QMainWindow):
         qlayout.addWidget(self.instrument_combo, row, 3)
         qlayout.addWidget(self.detector_label, row, 4)
         qlayout.addWidget(self.detector_combo, row, 5)
+        qlayout.addWidget(self.level_label, row, 6)
+        qlayout.addWidget(self.level_combo, row, 7)
 
         row += 1
         qlayout.addWidget(self.wavelength_label, row, 0)
@@ -462,6 +475,7 @@ class SunPySolarViewer(QMainWindow):
     def _connect_signals(self):
         self.spacecraft_combo.currentTextChanged.connect(self._on_spacecraft_changed)
         self.instrument_combo.currentTextChanged.connect(self._on_instrument_changed)
+        self.detector_combo.currentTextChanged.connect(self._update_capability_widgets)
         self.search_btn.clicked.connect(self.search_archives)
         self.retry_btn.clicked.connect(self.retry_last_query)
         self.open_cache_btn.clicked.connect(self.open_cache_folder)
@@ -548,19 +562,35 @@ class SunPySolarViewer(QMainWindow):
                 self.detector_combo.setCurrentIndex(0)
         self.detector_combo.blockSignals(False)
 
-        current_detector = self.detector_combo.currentText().strip().upper() if detectors else None
+        self.detector_label.setVisible(bool(detectors))
+        self.detector_combo.setVisible(bool(detectors))
+        # Wavelength/level/satellite capabilities can differ per detector (e.g.
+        # STEREO/SECCHI EUVI has passbands but COR1/COR2 do not), so resolve them
+        # from the selected detector here and whenever the detector changes.
+        self._update_capability_widgets()
+
+    def _update_capability_widgets(self):
+        """Show/populate the wavelength, satellite and level controls for the
+        currently selected spacecraft/instrument/detector."""
+        spacecraft = self.spacecraft_combo.currentText().strip().upper()
+        instrument = self.instrument_combo.currentText().strip().upper()
+        current_detector = (
+            self.detector_combo.currentText().strip().upper()
+            if self.detector_combo.count() > 0
+            else None
+        )
         entry = registry_lookup(spacecraft, instrument, current_detector)
 
-        has_detector = bool(detectors)
         has_wavelength = bool(entry and entry.supports_wavelength)
         has_satellite = bool(entry and entry.supports_satellite)
+        has_level = bool(entry and entry.supports_level)
 
-        self.detector_label.setVisible(has_detector)
-        self.detector_combo.setVisible(has_detector)
         self.wavelength_label.setVisible(has_wavelength)
         self.wavelength_combo.setVisible(has_wavelength)
         self.satellite_label.setVisible(has_satellite)
         self.satellite_combo.setVisible(has_satellite)
+        self.level_label.setVisible(has_level)
+        self.level_combo.setVisible(has_level)
 
         if has_wavelength and entry is not None:
             values = [int(w) for w in entry.wavelengths]
@@ -568,6 +598,14 @@ class SunPySolarViewer(QMainWindow):
             self._set_wavelength_values(values, default)
         if has_satellite and entry is not None and entry.default_satellite:
             self.satellite_combo.setCurrentText(str(int(entry.default_satellite)))
+        if has_level and entry is not None:
+            self.level_combo.blockSignals(True)
+            self.level_combo.clear()
+            for lvl in entry.levels:
+                self.level_combo.addItem(str(lvl))
+            if entry.default_level:
+                self.level_combo.setCurrentText(str(entry.default_level))
+            self.level_combo.blockSignals(False)
 
     def _build_query_spec(self) -> SunPyQuerySpec:
         start_dt = self.start_dt_edit.dateTime().toPython().replace(tzinfo=None)
@@ -579,6 +617,7 @@ class SunPySolarViewer(QMainWindow):
         detector = None
         wavelength = None
         satellite_number = None
+        level = None
 
         if self.detector_combo.isVisible():
             detector = self.detector_combo.currentText().strip().upper()
@@ -587,6 +626,8 @@ class SunPySolarViewer(QMainWindow):
             wavelength = float(text) if text else None
         if self.satellite_combo.isVisible():
             satellite_number = int(self.satellite_combo.currentData())
+        if self.level_combo.isVisible():
+            level = self.level_combo.currentText().strip() or None
 
         sample_seconds = int(self.sample_seconds_spin.value() or 0)
         sample_value = sample_seconds if sample_seconds > 0 else None
@@ -601,6 +642,7 @@ class SunPySolarViewer(QMainWindow):
             satellite_number=satellite_number,
             sample_seconds=sample_value,
             max_records=int(self.max_records_spin.value()),
+            level=level,
         )
 
     def _start_worker(self, worker: SunPyWorker):

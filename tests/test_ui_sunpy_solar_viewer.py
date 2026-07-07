@@ -133,6 +133,58 @@ def test_set_time_window_validation():
     win.close()
 
 
+def test_goes_suvi_shows_level_and_builds_spec():
+    _app()
+    win = SunPySolarViewer()
+    win.show()
+    QApplication.processEvents()
+
+    win.spacecraft_combo.setCurrentText("GOES")
+    QApplication.processEvents()
+    win.instrument_combo.setCurrentText("SUVI")
+    QApplication.processEvents()
+
+    # SUVI exposes wavelength, GOES satellite and processing level.
+    assert win.wavelength_combo.isVisible() is True
+    assert win.satellite_combo.isVisible() is True
+    assert win.level_combo.isVisible() is True
+    assert win.level_combo.currentText() == "1b"
+
+    win.level_combo.setCurrentText("2")
+    spec = win._build_query_spec()
+    assert spec.instrument == "SUVI"
+    assert spec.level == "2"
+    assert spec.satellite_number in (16, 17, 18, 19)
+    win.close()
+
+
+def test_stereo_secchi_detector_switches_wavelength_visibility():
+    _app()
+    win = SunPySolarViewer()
+    win.show()
+    QApplication.processEvents()
+
+    win.spacecraft_combo.setCurrentText("STEREO_A")
+    QApplication.processEvents()
+    assert win.instrument_combo.currentText() == "SECCHI"
+    detectors = [win.detector_combo.itemText(i) for i in range(win.detector_combo.count())]
+    assert detectors == ["EUVI", "COR1", "COR2", "HI1", "HI2"]
+
+    # COR2 is white-light: no wavelength selector; level stays hidden.
+    win.detector_combo.setCurrentText("COR2")
+    QApplication.processEvents()
+    assert win.wavelength_combo.isVisible() is False
+    assert win.level_combo.isVisible() is False
+    spec = win._build_query_spec()
+    assert spec.detector == "COR2" and spec.wavelength_angstrom is None
+
+    # EUVI is an EUV imager: wavelength selector appears.
+    win.detector_combo.setCurrentText("EUVI")
+    QApplication.processEvents()
+    assert win.wavelength_combo.isVisible() is True
+    win.close()
+
+
 def test_use_analyzer_button_disabled_without_parent():
     _app()
     win = SunPySolarViewer()

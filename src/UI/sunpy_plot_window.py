@@ -132,6 +132,13 @@ def _fallback_colormap(name: str) -> pg.ColorMap | None:
         "sdoaia1700": ((0, 0, 0), (128, 64, 64), (181, 128, 128), (221, 192, 192), (255, 255, 255)),
         "soholasco2": ((0, 0, 0), (20, 20, 90), (30, 90, 165), (120, 185, 220), (255, 255, 255)),
         "soholasco3": ((0, 0, 0), (60, 20, 12), (150, 62, 22), (222, 150, 60), (255, 252, 220)),
+        # STEREO/SECCHI white-light detectors. sunpy ships proper stereocor*/
+        # stereohi* colormaps (used via the matplotlib path); these approximate
+        # them as an offline fallback so coronagraph frames never render as EUV.
+        "stereocor1": ((0, 0, 0), (20, 30, 60), (60, 90, 140), (150, 180, 220), (255, 255, 255)),
+        "stereocor2": ((0, 0, 0), (30, 25, 60), (90, 75, 130), (170, 155, 210), (255, 255, 255)),
+        "stereohi1": ((0, 0, 0), (40, 40, 50), (100, 100, 110), (180, 180, 190), (255, 255, 255)),
+        "stereohi2": ((0, 0, 0), (40, 40, 50), (100, 100, 110), (180, 180, 190), (255, 255, 255)),
     }
     colors = palettes.get(str(name or "").lower())
     if not colors:
@@ -1008,6 +1015,12 @@ class SunPyPlotWindow(QMainWindow):
         self.base_diff_check.setVisible(False)
         self.aia_limb_check = QCheckBox("AIA Limb (EUVI)")
         self.aia_limb_check.setEnabled(False)
+        self.nrgf_check = QCheckBox("NRGF")
+        self.nrgf_check.setEnabled(False)
+        self.nrgf_check.setToolTip(
+            "Normalizing-Radial-Graded Filter: flattens the coronagraph's radial "
+            "brightness fall-off to reveal faint CME fronts (COR1/COR2, LASCO)."
+        )
         self.play_btn = QPushButton("Play")
         self.play_btn.setEnabled(False)
         self.pause_btn = QPushButton("Pause")
@@ -1031,6 +1044,7 @@ class SunPyPlotWindow(QMainWindow):
 
         bottom_row.addWidget(self.running_diff_check)
         bottom_row.addWidget(self.aia_limb_check)
+        bottom_row.addWidget(self.nrgf_check)
         bottom_row.addWidget(self.play_btn)
         bottom_row.addWidget(self.pause_btn)
         bottom_row.addWidget(self.rewind_btn)
@@ -1057,6 +1071,7 @@ class SunPyPlotWindow(QMainWindow):
         self.base_diff_check.toggled.connect(self._on_base_diff_toggled)
         self.base_diff_action.toggled.connect(self._on_base_diff_action_toggled)
         self.aia_limb_check.toggled.connect(self._on_aia_limb_toggled)
+        self.nrgf_check.toggled.connect(self._on_nrgf_toggled)
         self.play_btn.clicked.connect(self._on_play_clicked)
         self.pause_btn.clicked.connect(self._on_pause_clicked)
         self.rewind_btn.clicked.connect(self._on_rewind_clicked)
@@ -1103,6 +1118,10 @@ class SunPyPlotWindow(QMainWindow):
         has_euvi = bool(has_euvi or self._metadata_indicates_stereo_euvi(self._map_metadata))
         self.aia_limb_check.setEnabled(has_euvi)
         self.aia_limb_check.setChecked(False)
+        has_coronagraph = any(self._is_coronagraph_frame(frame) for frame in values)
+        has_coronagraph = bool(has_coronagraph or self._metadata_indicates_coronagraph(self._map_metadata))
+        self.nrgf_check.setEnabled(has_coronagraph)
+        self.nrgf_check.setChecked(False)
         self.play_btn.setEnabled(False)
         self.pause_btn.setEnabled(False)
         self.rewind_btn.setEnabled(False)
@@ -1111,6 +1130,13 @@ class SunPyPlotWindow(QMainWindow):
         self.roi_select_check.setChecked(False)
         self.roi_select_check.setEnabled(True)
         self.roi_select_check.blockSignals(False)
+
+        # Colour each frame with the instrument-appropriate colormap sunpy
+        # assigned to its source (AIA/LASCO/EUVI/COR/HI/SUVI/HMI) instead of the
+        # generic default; users can still override via the colormap control.
+        cmap_name = self._colormap_name_for_frame(values[0])
+        if cmap_name:
+            self.canvas.set_colormap_name(cmap_name)
 
         self.canvas.clear_plot()
         self.canvas.reset_roi()
@@ -1348,6 +1374,43 @@ class SunPyPlotWindow(QMainWindow):
             return
         self._render_current_map_frame(emit_signal=False)
 
+    def _on_nrgf_toggled(self, _checked: bool):
+        if self._mode != "map":
+            return
+        self._render_current_map_frame(emit_signal=False)
+
+    def _is_coronagraph_frame(self, frame: Any) -> bool:
+        """True for white-light coronagraph frames (SOHO/LASCO, STEREO COR1/COR2)."""
+        instrument = _safe_text(getattr(frame, "instrument", None)).upper()
+        detector = _safe_text(getattr(frame, "detector", None)).upper()
+        meta = getattr(frame, "meta", None)
+        meta_instrument = self._frame_meta_text(meta, ("instrume", "instrument")).upper()
+        meta_detector = self._frame_meta_text(meta, ("detector",)).upper()
+        text = " ".join((instrument, detector, meta_instrument, meta_detector))
+        return ("LASCO" in text) or ("COR1" in text) or ("COR2" in text)
+
+    def _metadata_indicates_coronagraph(self, metadata: dict[str, Any] | None) -> bool:
+        if not metadata:
+            return False
+        text = " ".join(
+            _safe_text(metadata.get(key, None)).upper()
+            for key in ("instrument", "detector", "query_instrument", "query_detector")
+        )
+        return ("LASCO" in text) or ("COR1" in text) or ("COR2" in text)
+
+    def _nrgf_filter_frame(self, frame: Any, current: np.ndarray) -> np.ndarray:
+        """Return the NRGF-filtered frame, falling back to the raw array on error."""
+        try:
+            from src.Backend.coronagraph import nrgf, solar_center_from_meta
+
+            center = solar_center_from_meta(getattr(frame, "meta", None), data_shape=current.shape)
+            filtered = nrgf(current, center)
+            if np.isfinite(filtered).any():
+                return filtered
+        except Exception:
+            pass
+        return current
+
     def _render_current_map_frame(self, *, emit_signal: bool):
         if not self._map_frames:
             return
@@ -1357,6 +1420,11 @@ class SunPyPlotWindow(QMainWindow):
 
         current = self._prepare_map_array(getattr(frame, "data"), "current frame")
         title = self._frame_title(frame, idx)
+
+        apply_nrgf = self.nrgf_check.isEnabled() and self.nrgf_check.isChecked()
+        if apply_nrgf:
+            current = self._nrgf_filter_frame(frame, current)
+            title += " (NRGF)"
 
         if self.base_diff_check.isChecked() and len(self._map_frames) > 1:
             base = self._prepare_map_array(getattr(self._map_frames[0], "data"), "base frame")
@@ -1677,6 +1745,27 @@ class SunPyPlotWindow(QMainWindow):
             return
         x_arc, y_arc = overlay
         self.canvas.set_aia_limb_overlay(x_arc, y_arc, visible=True)
+
+    def _colormap_name_for_frame(self, frame: Any) -> str | None:
+        """Return the colormap name sunpy assigned to a map's source.
+
+        Each sunpy map source sets its own ``plot_settings['cmap']`` — ``sdoaia171``,
+        ``soholasco2``, ``stereocor2``, ``euvi195``, ``goes-rsuvi171``, ``hmimag`` and
+        so on — which is exactly the instrument-appropriate colormap we want,
+        instead of the generic ``inferno`` default. Falls back to ``frame.cmap`` and
+        returns ``None`` when nothing usable is present.
+        """
+        cmap: Any = None
+        settings = getattr(frame, "plot_settings", None)
+        if isinstance(settings, dict):
+            cmap = settings.get("cmap")
+        if cmap is None:
+            cmap = getattr(frame, "cmap", None)
+        name = getattr(cmap, "name", None)
+        if not name and isinstance(cmap, str):
+            name = cmap
+        text = str(name or "").strip()
+        return text or None
 
     def _is_stereo_euvi_frame(self, frame: Any) -> bool:
         detector = _safe_text(getattr(frame, "detector", None)).upper()
