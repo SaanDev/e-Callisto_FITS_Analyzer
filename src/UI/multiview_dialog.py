@@ -74,9 +74,10 @@ def build_spec_for_observable(
             max_records=max_records,
         )
     if instrument == "SUVI":
+        # GOES-18 serves the operational SUVI for current dates (see registry).
         return SunPyQuerySpec(
             start_dt=start_dt, end_dt=end_dt, spacecraft="GOES", instrument="SUVI",
-            wavelength_angstrom=float(value), satellite_number=16, level="1b",
+            wavelength_angstrom=float(value), satellite_number=18, level="1b",
             max_records=max_records,
         )
     return SunPyQuerySpec(

@@ -325,9 +325,11 @@ class SunPySolarViewer(QMainWindow):
 
         self.satellite_label = QLabel("GOES Satellite")
         self.satellite_combo = QComboBox()
-        for sat in (13, 14, 15, 16, 17, 18, 19):
+        # sunpy 7.1's GOES dataretriever clients register satellites up to 18;
+        # GOES-18 is the operational choice for current dates (16 retired 2025).
+        for sat in (13, 14, 15, 16, 17, 18):
             self.satellite_combo.addItem(str(sat), userData=sat)
-        self.satellite_combo.setCurrentText("16")
+        self.satellite_combo.setCurrentText("18")
 
         # Processing level (currently GOES/SUVI only: L1b raw vs L2 composites).
         self.level_label = QLabel("Level")

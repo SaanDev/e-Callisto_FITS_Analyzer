@@ -212,8 +212,12 @@ def test_solar_data_window_builds_suvi_query():
     assert spec.spacecraft == "GOES"
     assert spec.instrument == "SUVI"
     assert spec.wavelength_angstrom == 171.0
-    assert spec.satellite_number == 16
+    # GOES-18 carries the operational SUVI (16 retired to storage in 2025).
+    assert spec.satellite_number == 18
     assert spec.level == "1b"
+    # The SUVI dataretriever client rejects queries carrying a Sample attr, so
+    # the spec must not request a cadence.
+    assert spec.sample_seconds is None
     assert win._default_aia_colormap_name() == "goes-rsuvi171"
     win.close()
 

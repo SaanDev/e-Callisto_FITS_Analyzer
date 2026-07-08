@@ -13,6 +13,8 @@ from pathlib import Path
 import threading
 import warnings
 
+import pytest
+
 from src.Backend import sunpy_archive as sa
 
 
@@ -153,6 +155,53 @@ def test_registry_lookup_resolves_new_entries():
     assert suvi is not None and suvi.key == "goes_suvi"
     assert suvi.supports_level and suvi.default_level == "1b"
     assert suvi.supports_satellite and suvi.supports_wavelength
+    # GOES-18 carries the operational SUVI for current dates (16 retired 2025).
+    assert suvi.default_satellite == 18
+
+
+def test_build_attrs_omits_sample_for_dataretriever_targets():
+    # sunpy's GOES dataretriever clients (SUVI/XRS) reject the whole query when
+    # a Sample attr is present ("not understood by any clients"), so build_attrs
+    # must drop the cadence for them while keeping it for VSO targets.
+    suvi = sa.build_attrs(
+        _mk_query(spacecraft="GOES", instrument="SUVI", wavelength_angstrom=171.0,
+                  sample_seconds=120.0),
+        attrs_module=_FakeAttrs,
+        units_module=_FakeUnits,
+    )
+    assert not any(isinstance(x, tuple) and x[0] == "Sample" for x in suvi)
+
+    xrs = sa.build_attrs(
+        _mk_query(spacecraft="GOES", instrument="XRS", satellite_number=18,
+                  sample_seconds=60.0),
+        attrs_module=_FakeAttrs,
+        units_module=_FakeUnits,
+    )
+    assert not any(isinstance(x, tuple) and x[0] == "Sample" for x in xrs)
+
+    aia = sa.build_attrs(
+        _mk_query(wavelength_angstrom=193.0, sample_seconds=120.0),
+        attrs_module=_FakeAttrs,
+        units_module=_FakeUnits,
+    )
+    assert any(isinstance(x, tuple) and x[0] == "Sample" for x in aia)
+
+
+def test_search_wraps_no_match_error_with_actionable_message():
+    class NoMatchError(Exception):
+        pass
+
+    class FakeFido:
+        def search(self, *attrs):
+            raise NoMatchError("This query was not understood by any clients.")
+
+    spec = _mk_query(spacecraft="GOES", instrument="SUVI", wavelength_angstrom=171.0,
+                     satellite_number=19)
+    with pytest.raises(RuntimeError) as excinfo:
+        sa.search(spec, fido_client=FakeFido(), attrs_module=_FakeAttrs, units_module=_FakeUnits)
+    message = str(excinfo.value)
+    assert "satellite 19" in message
+    assert "16-18" in message
 
 
 def test_search_normalizes_rows():

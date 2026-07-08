@@ -136,12 +136,17 @@ class TrackingPanel(QWidget):
         self.table.setMinimumWidth(300)
         layout.addWidget(self.table, 1)
 
-        self.plot = pg.PlotWidget()
+        # useOpenGL=False: a GL viewport created while this panel is hidden in a
+        # splitter renders solid black on many Windows drivers (the app enables
+        # GL globally for the big image canvas); this small scatter plot gains
+        # nothing from GL, so render it in software unconditionally.
+        self.plot = pg.PlotWidget(useOpenGL=False)
         self.plot.setLabel("bottom", "t (s since first pick)")
         self.plot.setLabel("left", "Height (R☉)")
         self.plot.showGrid(x=True, y=True, alpha=0.25)
         self.plot.setMenuEnabled(False)
         self.plot.hideButtons()
+        self.plot.setMinimumHeight(160)
         self._scatter = pg.ScatterPlotItem(
             symbol="o", size=8, pen=pg.mkPen("#e8a33d"), brush=pg.mkBrush("#e8a33d")
         )
@@ -149,6 +154,7 @@ class TrackingPanel(QWidget):
         self.plot.addItem(self._scatter)
         self.plot.addItem(self._fit_line)
         layout.addWidget(self.plot, 1)
+        self.apply_theme(dark=self._detect_dark())
 
         self.speed_label = QLabel("Click the CME front on each frame.")
         self.speed_label.setWordWrap(True)
@@ -173,6 +179,29 @@ class TrackingPanel(QWidget):
         layout.addLayout(buttons)
 
         self._entries: list[tuple] = []
+
+    @staticmethod
+    def _detect_dark() -> bool:
+        """Match the app theme from the palette (same heuristic as the canvases)."""
+        try:
+            from PySide6.QtWidgets import QApplication
+
+            app = QApplication.instance()
+            if app is None:
+                return False
+            return app.palette().window().color().lightness() < 128
+        except Exception:
+            return False
+
+    def apply_theme(self, *, dark: bool) -> None:
+        """Light/dark styling so the graph never renders as a black hole."""
+        background = (12, 12, 12) if dark else (250, 252, 255)
+        foreground = (220, 224, 228) if dark else (40, 44, 52)
+        self.plot.setBackground(background)
+        for axis_name in ("left", "bottom"):
+            axis = self.plot.getAxis(axis_name)
+            axis.setPen(pg.mkPen(foreground))
+            axis.setTextPen(pg.mkPen(foreground))
 
     def refresh(self, picks: dict[int, tuple]) -> None:
         """Rebuild the table and the live plot from the controller's picks."""
@@ -216,6 +245,7 @@ class TrackingPanel(QWidget):
         else:
             self._fit_line.setData(x=[], y=[])
             self.speed_label.setText("1 pick — step to the next frame and click the front again.")
+        self.plot.autoRange()
 
     def show_fit(self, fit: HeightTimeFit) -> None:
         """Render a full height–time fit into the embedded graph (no dialogs)."""
@@ -533,3 +563,6 @@ class MeasurementController(QObject):
             return
         existing = panel.toPlainText().strip()
         panel.setPlainText(f"{existing}\n{text}".strip() if existing else text)
+        # Newest result must be the visible one, not buried below the fold.
+        scrollbar = panel.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())

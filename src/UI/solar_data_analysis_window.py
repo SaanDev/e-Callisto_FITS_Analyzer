@@ -1203,6 +1203,9 @@ class SolarDataAnalysisWindow(QMainWindow):
         details_layout.addWidget(self.details_toggle_btn)
         self.analysis_text = QTextEdit()
         self.analysis_text.setReadOnly(True)
+        # Never squeeze below ~4 readable lines while expanded; the splitter
+        # handle adjusts anything above that and the header collapses the rest.
+        self.analysis_text.setMinimumHeight(72)
         details_layout.addWidget(self.analysis_text, 1)
         self.details_container = details_container
 
@@ -2516,16 +2519,17 @@ class SolarDataAnalysisWindow(QMainWindow):
                 max_records=int(self.max_records_spin.value()),
             )
         if instrument == "SUVI":
-            # GOES/SUVI EUV imager (NOAA dataretriever): default GOES-16, L1b.
+            # GOES/SUVI EUV imager (NOAA dataretriever), L1b. GOES-18 carries the
+            # operational SUVI for current dates (16 retired to storage in 2025;
+            # 19 is not registered in sunpy 7.1's SUVIClient).
             return SunPyQuerySpec(
                 start_dt=start_dt,
                 end_dt=end_dt,
                 spacecraft="GOES",
                 instrument="SUVI",
                 wavelength_angstrom=float(value),
-                satellite_number=16,
+                satellite_number=18,
                 level="1b",
-                sample_seconds=sample_seconds if sample_seconds > 0 else None,
                 max_records=int(self.max_records_spin.value()),
             )
         return SunPyQuerySpec(
@@ -3050,7 +3054,16 @@ class SolarDataAnalysisWindow(QMainWindow):
         target = self._spec_target_label(result.spec)
         if not result.rows:
             self.archive_results_status_label.setText(f"No {target} archive records found for this query.")
-            self.analysis_text.setPlainText(f"No {target} records found for the selected time range.")
+            hint = (
+                "\nTip: the calibrated archives lag real time — SOHO/LASCO is often a year "
+                "or more behind — so recent windows can be empty even while the instrument "
+                "is observing. Use Data → Find Latest Available to jump to the newest records"
+            )
+            if str(result.spec.instrument or "").upper() == "LASCO":
+                hint += ", or the Live Preview button for near-real-time Helioviewer quicklooks"
+            self.analysis_text.setPlainText(
+                f"No {target} records found for the selected time range.{hint}."
+            )
             return
         if latest_mode:
             self._sync_time_fields_from_spec(result.spec)
@@ -3259,6 +3272,8 @@ class SolarDataAnalysisWindow(QMainWindow):
             )
         self._save_target_dir = None
         self.analysis_text.setPlainText(status + dropped_note)
+        details_bar = self.analysis_text.verticalScrollBar()
+        details_bar.setValue(details_bar.maximum())
         self._update_load_summary()
         self._apply_instrument_visibility()
 

@@ -195,6 +195,10 @@ class InstrumentRegistryEntry:
     supports_level: bool = False
     levels: tuple[str, ...] = ()
     default_level: str | None = None
+    # Whether the serving Fido client accepts a.Sample (cadence). VSO does; the
+    # sunpy dataretriever clients (GOES XRS/SUVI) reject the whole query if a
+    # Sample attr is present, yielding "not understood by any clients".
+    supports_sample: bool = True
 
 
 @dataclass(frozen=True)
@@ -339,8 +343,11 @@ INSTRUMENT_REGISTRY: tuple[InstrumentRegistryEntry, ...] = (
         supports_satellite=True,
         default_wavelength=None,
         default_detector=None,
-        default_satellite=16,
+        # GOES-16 was retired to storage in 2025; GOES-18 serves current data
+        # (sunpy 7.1's dataretriever clients know satellites up to 18 only).
+        default_satellite=18,
         wavelengths=(),
+        supports_sample=False,
     ),
     InstrumentRegistryEntry(
         key="goes_suvi",
@@ -354,11 +361,14 @@ INSTRUMENT_REGISTRY: tuple[InstrumentRegistryEntry, ...] = (
         supports_satellite=True,
         default_wavelength=171.0,
         default_detector=None,
-        default_satellite=16,
+        # GOES-18 (West) carries the operational SUVI for current dates; 16 is
+        # retired and 19 is not registered in sunpy 7.1's SUVIClient.
+        default_satellite=18,
         wavelengths=(94.0, 131.0, 171.0, 195.0, 284.0, 304.0),
         supports_level=True,
         levels=("1b", "2"),
         default_level="1b",
+        supports_sample=False,
     ),
     InstrumentRegistryEntry(
         key="proba2_swap",
@@ -469,7 +479,15 @@ def build_attrs(
             except Exception:
                 pass
 
-    if spec.sample_seconds and float(spec.sample_seconds) > 0 and hasattr(attrs_module, "Sample"):
+    # Cadence sub-sampling. Only for VSO-served targets: the sunpy dataretriever
+    # clients (GOES XRS/SUVI) refuse the whole query when a Sample attr is
+    # present, which surfaces as "not understood by any clients".
+    if (
+        entry.supports_sample
+        and spec.sample_seconds
+        and float(spec.sample_seconds) > 0
+        and hasattr(attrs_module, "Sample")
+    ):
         out.append(attrs_module.Sample(float(spec.sample_seconds) * units_module.second))
 
     if spec.resolution is not None and hasattr(attrs_module, "Resolution"):
@@ -514,7 +532,20 @@ def search(
     if fido_client is None:
         fido_client = _import_fido()
 
-    raw_response = fido_client.search(*attrs)
+    try:
+        raw_response = fido_client.search(*attrs)
+    except Exception as exc:
+        # sunpy's NoMatchError means no Fido client accepted this attr set —
+        # e.g. a GOES satellite number the installed sunpy does not register.
+        if type(exc).__name__ == "NoMatchError":
+            raise RuntimeError(
+                f"No archive client understands this query "
+                f"({spec.spacecraft}/{spec.instrument}"
+                + (f", satellite {spec.satellite_number}" if spec.satellite_number else "")
+                + "). GOES SUVI/XRS support satellites 16-18 with the installed "
+                "sunpy; try one of those, or upgrade sunpy for newer satellites."
+            ) from exc
+        raise
     rows, row_index_map = _normalize_search_rows(raw_response, spec, max_records=int(spec.max_records or 0))
 
     return SunPySearchResult(
