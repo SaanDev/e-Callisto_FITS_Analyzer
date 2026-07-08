@@ -336,6 +336,26 @@ def test_hi_jmap_builds_dialog():
     win.close()
 
 
+def test_tracking_panel_plot_never_uses_opengl_viewport():
+    """The height-time graph must render in software even when the app enables
+    OpenGL globally (a GL viewport created hidden-in-a-splitter draws solid
+    black on many Windows drivers). PlotWidget(useOpenGL=...) is a decoy — the
+    kwarg goes to the PlotItem — so this pins the actual viewport type."""
+    _app()
+    import pyqtgraph as pg
+
+    from src.UI.solar_measure_tools import TrackingPanel
+
+    old = pg.getConfigOption("useOpenGL")
+    try:
+        pg.setConfigOptions(useOpenGL=True)  # what real app runs do
+        panel = TrackingPanel()
+        viewport_type = type(panel.plot.viewport()).__name__
+        assert "GL" not in viewport_type, f"height-time plot got a GL viewport: {viewport_type}"
+    finally:
+        pg.setConfigOptions(useOpenGL=bool(old))
+
+
 def test_canvas_click_callback_forwarding():
     _app()
     from src.UI.sunpy_plot_window import SunPyPlotCanvas

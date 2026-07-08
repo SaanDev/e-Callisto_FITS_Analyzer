@@ -136,11 +136,18 @@ class TrackingPanel(QWidget):
         self.table.setMinimumWidth(300)
         layout.addWidget(self.table, 1)
 
-        # useOpenGL=False: a GL viewport created while this panel is hidden in a
-        # splitter renders solid black on many Windows drivers (the app enables
-        # GL globally for the big image canvas); this small scatter plot gains
-        # nothing from GL, so render it in software unconditionally.
-        self.plot = pg.PlotWidget(useOpenGL=False)
+        # A GL viewport created while this panel is hidden in a splitter renders
+        # solid black on many Windows drivers (the app enables OpenGL globally
+        # for the big image canvas). NOTE: PlotWidget(useOpenGL=...) does NOT
+        # work — PlotWidget forwards extra kwargs to its PlotItem, not the view,
+        # and the view falls back to the global config. The view's useOpenGL()
+        # METHOD is the only reliable opt-out: it swaps the viewport for a
+        # software-rendered widget. This small scatter plot needs no GL anyway.
+        self.plot = pg.PlotWidget()
+        try:
+            self.plot.useOpenGL(False)
+        except Exception:
+            pass
         self.plot.setLabel("bottom", "t (s since first pick)")
         self.plot.setLabel("left", "Height (R☉)")
         self.plot.showGrid(x=True, y=True, alpha=0.25)
