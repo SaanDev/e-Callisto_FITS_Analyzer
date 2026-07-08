@@ -508,13 +508,20 @@ def test_canvas_pixel_arcsec_roundtrip_and_hover_readout():
 def test_sidebar_master_collapse_and_restore():
     _app()
     win = SolarDataAnalysisWindow()
+    win.show()
+    QApplication.processEvents()
     assert getattr(win, "_sidebar_collapsed", False) is False
 
     win._set_sidebar_collapsed(True, animate=False)
     assert win.controls_scroll.maximumWidth() == 0
+    # The splitter pane is pinned to zero, so the collapse is guaranteed
+    # visually and not just via the max-width constraint.
+    assert win.main_splitter.sizes()[0] == 0
+
     win._set_sidebar_collapsed(False, animate=False)
     assert win.controls_scroll.maximumWidth() == 680
     assert win.controls_scroll.minimumWidth() == 520
+    assert win.main_splitter.sizes()[0] > 0
     win.close()
 
 

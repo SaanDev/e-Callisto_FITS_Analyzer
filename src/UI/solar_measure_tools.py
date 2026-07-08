@@ -71,41 +71,6 @@ class LineProfileDialog(QDialog):
         self.canvas.draw_idle()
 
 
-class HeightTimeDialog(QDialog):
-    """CME height–time points with the linear (speed) fit overlaid."""
-
-    def __init__(self, fit: HeightTimeFit, *, title: str, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("CME Height–Time")
-        self.resize(720, 460)
-        layout = QVBoxLayout(self)
-        self._figure = Figure(figsize=(6.4, 3.8))
-        self.canvas = FigureCanvas(self._figure)
-        layout.addWidget(self.canvas)
-
-        heights_rsun = fit.heights_km / RSUN_KM
-        ax = self._figure.add_subplot(111)
-        ax.plot(fit.times_s / 60.0, heights_rsun, "o", markersize=5, color="#e8a33d",
-                label="Leading-edge picks")
-        # Linear fit line (speed) across the sampled interval.
-        t_line = np.linspace(fit.times_s.min(), fit.times_s.max(), 50)
-        h_line = (fit.intercept_km + fit.speed_km_s * t_line) / RSUN_KM
-        ax.plot(t_line / 60.0, h_line, "--", linewidth=1.2, color="#5a8fd6",
-                label=f"Linear fit: {fit.speed_km_s:,.0f} km/s")
-        ax.set_xlabel("Time since first pick (min)")
-        ax.set_ylabel("Plane-of-sky height (R☉)")
-        accel_text = (
-            f"  ·  a = {fit.acceleration_km_s2 * 1000.0:+,.1f} m/s²"
-            if np.isfinite(fit.acceleration_km_s2)
-            else ""
-        )
-        ax.set_title(f"{title}  ·  v = {fit.speed_km_s:,.0f} km/s{accel_text}", fontsize=10)
-        ax.grid(alpha=0.25)
-        ax.legend(fontsize=8, loc="best")
-        self._figure.tight_layout()
-        self.canvas.draw_idle()
-
-
 class JMapDialog(QDialog):
     """Time–elongation (J-map) image for the Heliospheric Imagers."""
 
@@ -192,16 +157,29 @@ class TrackingPanel(QWidget):
         buttons = QHBoxLayout()
         self.fit_btn = QPushButton("Fit Height–Time")
         self.fit_btn.setEnabled(False)
+        self.fit_btn.setToolTip(
+            "Fit the picks: the fitted line is drawn in the graph above and the\n"
+            "plane-of-sky speed and acceleration appear below it."
+        )
         self.clear_btn = QPushButton("Clear Picks")
         self.clear_btn.setEnabled(False)
+        self.export_btn = QPushButton("Export CSV")
+        self.export_btn.setEnabled(False)
+        self.export_btn.setToolTip("Save the tracking table (UT, t, height, PA) to a CSV file.")
+        self.export_btn.clicked.connect(self.export_csv)
         buttons.addWidget(self.fit_btn)
         buttons.addWidget(self.clear_btn)
+        buttons.addWidget(self.export_btn)
         layout.addLayout(buttons)
+
+        self._entries: list[tuple] = []
 
     def refresh(self, picks: dict[int, tuple]) -> None:
         """Rebuild the table and the live plot from the controller's picks."""
         entries = sorted(picks.values(), key=lambda item: item[0])
+        self._entries = entries
         self.table.setRowCount(len(entries))
+        self.export_btn.setEnabled(bool(entries))
         if not entries:
             self._scatter.setData(x=[], y=[])
             self._fit_line.setData(x=[], y=[])
@@ -238,6 +216,44 @@ class TrackingPanel(QWidget):
         else:
             self._fit_line.setData(x=[], y=[])
             self.speed_label.setText("1 pick — step to the next frame and click the front again.")
+
+    def show_fit(self, fit: HeightTimeFit) -> None:
+        """Render a full height–time fit into the embedded graph (no dialogs)."""
+        t_line = np.linspace(float(fit.times_s.min()), float(fit.times_s.max()), 64)
+        h_line = (fit.intercept_km + fit.speed_km_s * t_line) / RSUN_KM
+        self._fit_line.setData(x=t_line, y=h_line)
+        accel_text = (
+            f"  ·  a = {fit.acceleration_km_s2 * 1000.0:+,.1f} m/s²"
+            if np.isfinite(fit.acceleration_km_s2)
+            else "  ·  a: needs ≥3 picks"
+        )
+        self.speed_label.setText(
+            f"Fit ({fit.times_s.size} picks):  v = {fit.speed_km_s:,.0f} km/s{accel_text}"
+        )
+
+    def export_csv(self) -> None:
+        """Save the tracking table to CSV (UT, seconds, height, position angle)."""
+        if not self._entries:
+            return
+        from PySide6.QtWidgets import QFileDialog
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export CME Tracking CSV", "cme_tracking.csv", "CSV (*.csv)"
+        )
+        if not path:
+            return
+        import csv
+
+        t0 = self._entries[0][0]
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["time_utc", "t_seconds", "height_rsun", "position_angle_deg"])
+            for entry in self._entries:
+                when, height = entry[0], float(entry[1])
+                pa = float(entry[4]) if len(entry) > 4 else float("nan")
+                writer.writerow(
+                    [when.isoformat(), f"{(when - t0).total_seconds():.1f}", f"{height:.4f}", f"{pa:.2f}"]
+                )
 
 
 class MeasurementController(QObject):
@@ -394,7 +410,7 @@ class MeasurementController(QObject):
             win.frame_slider.setValue(idx + 1)
 
     def finish_height_time(self) -> None:
-        """Fit the collected picks and show the speed/acceleration dialog."""
+        """Fit the collected picks; the result renders inside the tracking panel."""
         win = self.window
         if len(self.picks) < 2:
             self._status("Height–time needs picks on at least two frames.")
@@ -404,9 +420,9 @@ class MeasurementController(QObject):
         heights_km = [entry[1] * RSUN_KM for entry in entries]
         fit = fit_height_time(times, heights_km)
 
-        dialog = HeightTimeDialog(fit, title=win._frames_word(), parent=win)
-        win._height_time_dialog = dialog
-        dialog.show()
+        panel = getattr(win, "tracking_panel", None)
+        if panel is not None:
+            panel.show_fit(fit)
 
         accel = (
             f"{fit.acceleration_km_s2 * 1000.0:+,.1f} m/s²"

@@ -143,8 +143,11 @@ def test_height_time_picks_and_fit():
     assert win.ht_fit_btn.isEnabled()
     win._measure.finish_height_time()
 
-    dialog = getattr(win, "_height_time_dialog", None)
-    assert dialog is not None
+    # The fit renders INSIDE the tracking panel (no separate window): the
+    # embedded graph gets the fitted line and the label reports v (and a).
+    fit_x, fit_y = win.tracking_panel._fit_line.getData()
+    assert fit_x is not None and len(fit_x) >= 2
+    assert "km/s" in win.tracking_panel.speed_label.text()
     text = win.analysis_text.toPlainText()
     assert "plane-of-sky speed" in text
     # 0.5 Rsun per 600 s = 4 Rsun/h -> ~580 km/s; check the right magnitude.

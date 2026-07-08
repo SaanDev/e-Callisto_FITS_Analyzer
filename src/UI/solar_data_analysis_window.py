@@ -1074,18 +1074,27 @@ class SolarDataAnalysisWindow(QMainWindow):
         controls_layout.addStretch(1)
 
         plot_group = QGroupBox("Time-Lapse")
-        plot_layout = QVBoxLayout(plot_group)
-
-        top_row = QHBoxLayout()
-        # Master sidebar toggle: slides the whole controls panel away so the
-        # plot + tracking panel get the full window width.
+        # Left edge of the plot pane: a full-height collapse handle for the
+        # sidebar (VS Code style) — impossible to miss, one click either way.
+        outer_layout = QHBoxLayout(plot_group)
+        outer_layout.setContentsMargins(4, 8, 8, 8)
+        outer_layout.setSpacing(4)
         self.sidebar_toggle_btn = QToolButton()
+        self.sidebar_toggle_btn.setObjectName("SolarSidebarHandle")
         self.sidebar_toggle_btn.setArrowType(Qt.LeftArrow)
         self.sidebar_toggle_btn.setAutoRaise(True)
+        self.sidebar_toggle_btn.setFixedWidth(18)
+        self.sidebar_toggle_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self.sidebar_toggle_btn.setCursor(Qt.PointingHandCursor)
         self.sidebar_toggle_btn.setToolTip("Hide the controls sidebar")
         self.sidebar_toggle_btn.clicked.connect(
             lambda: self._set_sidebar_collapsed(not getattr(self, "_sidebar_collapsed", False))
         )
+        outer_layout.addWidget(self.sidebar_toggle_btn)
+        plot_layout = QVBoxLayout()
+        outer_layout.addLayout(plot_layout, 1)
+
+        top_row = QHBoxLayout()
         self.plot_title_label = QLabel("No image data loaded.")
         self.plot_title_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         # Live cursor position: R☉ + position angle + pixel.
@@ -1094,7 +1103,6 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.coord_readout_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.quick_mp4_btn = QPushButton("MP4")
         self.quick_mp4_btn.setEnabled(False)
-        top_row.addWidget(self.sidebar_toggle_btn)
         top_row.addWidget(self.plot_title_label, 1)
         top_row.addWidget(self.coord_readout_label)
         top_row.addWidget(self.quick_mp4_btn)
@@ -1172,7 +1180,40 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.plot_splitter.setStretchFactor(0, 1)
         self.plot_splitter.setStretchFactor(1, 0)
         self.plot_splitter.setSizes([900, 330])
-        plot_layout.addWidget(self.plot_splitter, 1)
+
+        # Details drawer: an IDE-style output panel under the canvas. The header
+        # is always visible; the body collapses with the arrow and its height is
+        # drag-adjustable through the vertical splitter handle.
+        details_container = QWidget()
+        details_layout = QVBoxLayout(details_container)
+        details_layout.setContentsMargins(0, 0, 0, 0)
+        details_layout.setSpacing(2)
+        self.details_toggle_btn = QToolButton()
+        self.details_toggle_btn.setText("Details")
+        self.details_toggle_btn.setCheckable(True)
+        self.details_toggle_btn.setChecked(True)
+        self.details_toggle_btn.setArrowType(Qt.DownArrow)
+        self.details_toggle_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.details_toggle_btn.setAutoRaise(True)
+        self.details_toggle_btn.setToolTip(
+            "Operation results and warnings. Drag the divider above to resize; "
+            "click to collapse."
+        )
+        self.details_toggle_btn.toggled.connect(self._on_details_toggled)
+        details_layout.addWidget(self.details_toggle_btn)
+        self.analysis_text = QTextEdit()
+        self.analysis_text.setReadOnly(True)
+        details_layout.addWidget(self.analysis_text, 1)
+        self.details_container = details_container
+
+        self.content_splitter = QSplitter(Qt.Vertical)
+        self.content_splitter.addWidget(self.plot_splitter)
+        self.content_splitter.addWidget(details_container)
+        self.content_splitter.setStretchFactor(0, 1)
+        self.content_splitter.setStretchFactor(1, 0)
+        self.content_splitter.setCollapsible(0, False)
+        self.content_splitter.setSizes([760, 110])
+        plot_layout.addWidget(self.content_splitter, 1)
 
         self.progress_panel = DownloadProgressPanel(self)
         self.progress_panel.setVisible(False)
@@ -1181,28 +1222,12 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.progress = self.progress_panel.bar
         plot_layout.addWidget(self.progress_panel)
 
-        # Collapsible details strip: operation results/warnings live here. The
-        # header stays visible even when collapsed so the panel is discoverable
-        # on small screens (previously it was easy to lose below the plot).
-        self.details_toggle_btn = QToolButton()
-        self.details_toggle_btn.setText("Details")
-        self.details_toggle_btn.setCheckable(True)
-        self.details_toggle_btn.setChecked(True)
-        self.details_toggle_btn.setArrowType(Qt.DownArrow)
-        self.details_toggle_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self.details_toggle_btn.setAutoRaise(True)
-        self.details_toggle_btn.toggled.connect(self._on_details_toggled)
-        plot_layout.addWidget(self.details_toggle_btn)
-        self.analysis_text = QTextEdit()
-        self.analysis_text.setReadOnly(True)
-        self.analysis_text.setMaximumHeight(120)
-        plot_layout.addWidget(self.analysis_text)
-
         splitter.addWidget(self.controls_scroll)
         splitter.addWidget(plot_group)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([560, 1040])
+        self.main_splitter = splitter
         self._make_sidebar_groups_collapsible()
         self._apply_sidebar_style()
 
@@ -1247,9 +1272,15 @@ class SolarDataAnalysisWindow(QMainWindow):
         end_width = 0 if collapsed else 680
 
         def _finish() -> None:
-            if not collapsed:
+            # Belt-and-braces: pin the splitter panes so the collapse holds even
+            # where max-width alone would not move the splitter.
+            total = max(1, sum(self.main_splitter.sizes()))
+            if collapsed:
+                self.main_splitter.setSizes([0, total])
+            else:
                 self.controls_scroll.setMinimumWidth(520)
                 self.controls_scroll.setMaximumWidth(680)
+                self.main_splitter.setSizes([560, max(total - 560, 1)])
 
         if animate:
             animation = QPropertyAnimation(self.controls_scroll, b"maximumWidth", self)
@@ -3712,8 +3743,17 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.tracking_panel.setVisible(show)
 
     def _on_details_toggled(self, expanded: bool) -> None:
-        self.analysis_text.setVisible(bool(expanded))
+        expanded = bool(expanded)
+        self.analysis_text.setVisible(expanded)
         self.details_toggle_btn.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        if expanded:
+            # Free the drawer and give it back a sensible share of the height.
+            self.details_container.setMaximumHeight(16777215)
+            total = max(1, sum(self.content_splitter.sizes()))
+            self.content_splitter.setSizes([max(total - 110, 1), 110])
+        else:
+            # Pin the drawer to its header so the canvas gets all the space.
+            self.details_container.setMaximumHeight(self.details_toggle_btn.sizeHint().height() + 4)
 
     def clear_all_measurements(self) -> None:
         """Clear and reset every measurement (toolbar Clear button)."""
