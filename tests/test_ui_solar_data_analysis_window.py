@@ -402,6 +402,108 @@ def test_export_basename_and_frames_word_for_cor2():
     win.close()
 
 
+def test_apply_instrument_visibility_matrix():
+    _app()
+    win = SolarDataAnalysisWindow()
+
+    def _select(label):
+        idx = win.wavelength_combo.findText(label)
+        assert idx >= 0, label
+        win.wavelength_combo.setCurrentIndex(idx)
+        QApplication.processEvents()
+
+    # AIA (disk EUV): disk tools visible, coronagraph/HI/vector groups hidden.
+    _select("AIA 193 A")
+    assert win.coronagraph_group.isHidden()
+    assert win.hi_group.isHidden()
+    assert win.vector_group.isHidden()
+    assert not win.composite_btn.isHidden()
+    assert not win.region_group.isHidden()
+
+    # HMI (magnetograph): vector group appears.
+    _select("HMI Magnetogram")
+    assert not win.vector_group.isHidden()
+    assert win.coronagraph_group.isHidden()
+
+    # STEREO COR2 (coronagraph): coronagraph tools appear, disk tools vanish.
+    _select("STEREO-A/COR2")
+    assert not win.coronagraph_group.isHidden()
+    assert win.hi_group.isHidden()
+    assert win.vector_group.isHidden()
+    assert win.composite_btn.isHidden()
+    assert win.detect_regions_btn.isHidden()
+    assert win.region_group.isHidden()
+
+    # STEREO HI1 (heliospheric): J-map group appears.
+    _select("STEREO-A/HI1")
+    assert not win.hi_group.isHidden()
+    assert win.coronagraph_group.isHidden()
+
+    # LASCO: coronagraph tools + the Helioviewer live preview.
+    _select("SOHO/LASCO C2")
+    assert not win.coronagraph_group.isHidden()
+    assert not win.live_preview_btn.isHidden()
+    _select("AIA 193 A")
+    assert win.live_preview_btn.isHidden()
+    win.close()
+
+
+def test_visibility_follows_loaded_frames_over_observable():
+    _app()
+    win = SolarDataAnalysisWindow()
+    # Observable stays AIA, but COR2 frames are loaded: loaded data wins.
+    frames = [
+        _CorFakeMap(np.ones((8, 8)), polar=1001.0, date="2012-07-12T16:00:00"),
+        _CorFakeMap(np.ones((8, 8)), polar=1001.0, date="2012-07-12T16:15:00"),
+    ]
+    win._apply_loaded_frames(frames, paths=["a.fts", "b.fts"], metadata={})
+    QApplication.processEvents()
+    assert not win.coronagraph_group.isHidden()
+    assert win.composite_btn.isHidden()
+    win.close()
+
+
+def test_load_summary_label_text():
+    _app()
+    win = SolarDataAnalysisWindow()
+    assert win.load_summary_label.text() == "No data loaded."
+    frames = [
+        _CorFakeMap(np.ones((8, 8)), polar=1001.0, date="2012-07-12T16:00:00"),
+        _CorFakeMap(np.ones((8, 8)), polar=1001.0, date="2012-07-12T16:15:00"),
+    ]
+    win._apply_loaded_frames(frames, paths=["a.fts", "b.fts"], metadata={})
+    text = win.load_summary_label.text()
+    assert "STEREO-A COR2" in text
+    assert "2 frame(s)" in text
+    assert "total-brightness" in text
+    win.close()
+
+
+def test_canvas_pixel_arcsec_roundtrip_and_hover_readout():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames(
+        [FakeWcsMap(np.arange(100, dtype=float).reshape(10, 10))], paths=["a.fits"], metadata={}
+    )
+    # Roundtrip through the canvas transforms is exact.
+    x_arc, y_arc = win.pyqt_canvas.map_arcsec_from_pixel(3.0, 7.0)
+    x_pix, y_pix = win.pyqt_canvas.map_pixel_from_arcsec(x_arc, y_arc)
+    assert (x_pix, y_pix) == pytest.approx((3.0, 7.0))
+
+    # Hover over disk centre: both px and arcsec appear in the readout.
+    win._on_canvas_hover(0.0, 0.0)
+    text = win.coord_readout_label.text()
+    assert "px" in text and "″" in text
+
+    # Leaving the image clears the readout.
+    win._on_canvas_hover(None, None)
+    assert win.coord_readout_label.text() == ""
+    # Far outside the image also clears it.
+    win._on_canvas_hover(1e6, 1e6)
+    assert win.coord_readout_label.text() == ""
+    win.close()
+
+
 def test_solar_data_window_warns_before_large_high_resolution_download(monkeypatch):
     _app()
     start = datetime(2026, 2, 10, 1, 0, 0)

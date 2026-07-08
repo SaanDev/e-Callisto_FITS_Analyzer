@@ -990,6 +990,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.use_analyzer_time_window(auto_query=False)
         self._set_loaded_state(False)
         self._apply_observable_download_gating()
+        self._apply_instrument_visibility()
         self._update_size_estimate()
         self.statusBar().showMessage("Ready.")
 
@@ -1023,6 +1024,8 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._build_timeline_group(controls_layout)
         self._build_movie_group(controls_layout)
         self._build_plot_controls_group(controls_layout)
+        self._build_coronagraph_group(controls_layout)
+        self._build_hi_group(controls_layout)
         self._build_vector_field_group(controls_layout)
         self._build_region_group(controls_layout)
         controls_layout.addStretch(1)
@@ -1033,15 +1036,21 @@ class SolarDataAnalysisWindow(QMainWindow):
         top_row = QHBoxLayout()
         self.plot_title_label = QLabel("No image data loaded.")
         self.plot_title_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        # Live cursor position in pixels + helioprojective arcsec.
+        self.coord_readout_label = QLabel("")
+        self.coord_readout_label.setObjectName("SolarCoordReadout")
+        self.coord_readout_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.quick_mp4_btn = QPushButton("MP4")
         self.quick_mp4_btn.setEnabled(False)
         top_row.addWidget(self.plot_title_label, 1)
+        top_row.addWidget(self.coord_readout_label)
         top_row.addWidget(self.quick_mp4_btn)
         plot_layout.addLayout(top_row)
 
         self.pyqt_canvas = SunPyPlotCanvas(theme=self.theme, enable_colorbar=True)
         self.pyqt_canvas.map_plot.showGrid(x=True, y=True, alpha=0.25)
         self.pyqt_canvas.set_roi_callback(self._on_crop_roi_selected)
+        self.pyqt_canvas.set_hover_callback(self._on_canvas_hover)
         self.matplotlib_canvas = SolarMatplotlibCanvas(theme=self.theme)
         self.canvas = self.pyqt_canvas
         self.plot_canvas_stack = QStackedWidget()
@@ -1518,10 +1527,16 @@ class SolarDataAnalysisWindow(QMainWindow):
 
     def _build_mode_group(self, parent_layout: QVBoxLayout) -> None:
         group = QGroupBox("Analysis Modes")
+        self.mode_group = group
         layout = QGridLayout(group)
         layout.setHorizontalSpacing(8)
         layout.setVerticalSpacing(8)
         parent_layout.addWidget(group)
+
+        # What is actually in memory right now (instrument, frame count, config).
+        self.load_summary_label = QLabel("No data loaded.")
+        self.load_summary_label.setObjectName("SolarLoadSummary")
+        self.load_summary_label.setWordWrap(True)
 
         self.plot_mode_btn = QPushButton("Plot")
         self.plot_mode_btn.setObjectName("SolarPrimaryAction")
@@ -1553,16 +1568,17 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.detect_regions_btn = QPushButton("Active Regions")
         self.fetch_labels_btn = QPushButton("NOAA/HEK Labels")
         self.reset_loaded_btn = QPushButton("Reset Frames")
-        layout.addWidget(self.plot_mode_btn, 0, 0, 1, 2)
-        layout.addWidget(self.difference_mode_btn, 1, 0)
-        layout.addWidget(self.base_diff_btn, 1, 1)
-        layout.addWidget(self.composite_btn, 2, 0)
-        layout.addWidget(self.lightcurve_btn, 2, 1)
-        layout.addWidget(self.magnetogram_btn, 3, 0)
-        layout.addWidget(self.mag_threshold_spin, 3, 1)
-        layout.addWidget(self.detect_regions_btn, 4, 0)
-        layout.addWidget(self.fetch_labels_btn, 4, 1)
-        layout.addWidget(self.reset_loaded_btn, 5, 0, 1, 2)
+        layout.addWidget(self.load_summary_label, 0, 0, 1, 2)
+        layout.addWidget(self.plot_mode_btn, 1, 0, 1, 2)
+        layout.addWidget(self.difference_mode_btn, 2, 0)
+        layout.addWidget(self.base_diff_btn, 2, 1)
+        layout.addWidget(self.composite_btn, 3, 0)
+        layout.addWidget(self.lightcurve_btn, 3, 1)
+        layout.addWidget(self.magnetogram_btn, 4, 0)
+        layout.addWidget(self.mag_threshold_spin, 4, 1)
+        layout.addWidget(self.detect_regions_btn, 5, 0)
+        layout.addWidget(self.fetch_labels_btn, 5, 1)
+        layout.addWidget(self.reset_loaded_btn, 6, 0, 1, 2)
 
     def _build_timeline_group(self, parent_layout: QVBoxLayout) -> None:
         group = QGroupBox("Timeline")
@@ -1704,8 +1720,88 @@ class SolarDataAnalysisWindow(QMainWindow):
         layout.addWidget(self.colorbar_check, 10, 0)
         layout.addWidget(self.region_overlay_check, 10, 1)
 
+    def _build_coronagraph_group(self, parent_layout: QVBoxLayout) -> None:
+        """White-light coronagraph tools (STEREO COR1/COR2, SOHO/LASCO):
+        NRGF radial filtering and CME height-time measurement. Shown only when
+        a coronagraph observable is selected or coronagraph frames are loaded."""
+        group = QGroupBox("Coronagraph Tools")
+        self.coronagraph_group = group
+        layout = QGridLayout(group)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(8)
+        parent_layout.addWidget(group)
+
+        self.nrgf_check = QCheckBox("NRGF radial filter")
+        self.nrgf_check.setToolTip(
+            "Normalizing-Radial-Graded Filter: flattens the corona's steep radial\n"
+            "brightness fall-off so faint CME fronts become visible at all heights.\n"
+            "Applies to the plain frame view (differences already remove the background)."
+        )
+        self.nrgf_check.setEnabled(False)
+        self.height_time_btn = QPushButton("Pick CME Height–Time")
+        self.height_time_btn.setCheckable(True)
+        self.height_time_btn.setEnabled(False)
+        self.height_time_btn.setToolTip(
+            "Click the CME leading edge on successive frames (use the timeline to\n"
+            "step through them); each click records the plane-of-sky height at that\n"
+            "frame's time."
+        )
+        self.ht_fit_btn = QPushButton("Fit Height–Time")
+        self.ht_fit_btn.setEnabled(False)
+        self.ht_fit_btn.setToolTip(
+            "Fit the picked height–time points: plane-of-sky speed (linear) and\n"
+            "acceleration (quadratic), with the fitted curve plotted."
+        )
+        self.ht_clear_btn = QPushButton("Clear Picks")
+        self.ht_clear_btn.setEnabled(False)
+        layout.addWidget(self.nrgf_check, 0, 0, 1, 2)
+        layout.addWidget(self.height_time_btn, 1, 0, 1, 2)
+        layout.addWidget(self.ht_fit_btn, 2, 0)
+        layout.addWidget(self.ht_clear_btn, 2, 1)
+        group.setVisible(False)
+
+    def _build_hi_group(self, parent_layout: QVBoxLayout) -> None:
+        """Heliospheric Imager tools (STEREO HI1/HI2): starfield/F-corona
+        background subtraction and time-elongation J-maps. Shown only for HI."""
+        group = QGroupBox("Heliospheric Imager (J-map)")
+        self.hi_group = group
+        layout = QGridLayout(group)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(8)
+        parent_layout.addWidget(group)
+
+        self.hi_background_combo = QComboBox()
+        self.hi_background_combo.addItem("Median background", userData="median")
+        self.hi_background_combo.addItem("Previous frame", userData="previous")
+        self.hi_background_combo.setToolTip(
+            "Background removal before the J-map: the per-pixel temporal median\n"
+            "removes the static F-corona and star field; 'previous frame' is a\n"
+            "plain running difference."
+        )
+        self.hi_pa_spin = QSpinBox()
+        self.hi_pa_spin.setRange(0, 359)
+        self.hi_pa_spin.setValue(90)
+        self.hi_pa_spin.setSuffix("°")
+        self.hi_pa_spin.setToolTip(
+            "Position angle of the J-map slit, counter-clockwise from image +x\n"
+            "(90° points up). Track the CME direction."
+        )
+        self.hi_jmap_btn = QPushButton("Build J-map")
+        self.hi_jmap_btn.setEnabled(False)
+        self.hi_jmap_btn.setToolTip(
+            "Stack per-frame slit profiles into a time–elongation map; an outward-\n"
+            "moving CME appears as a slanted bright track."
+        )
+        layout.addWidget(QLabel("Background"), 0, 0)
+        layout.addWidget(self.hi_background_combo, 0, 1)
+        layout.addWidget(QLabel("Position angle"), 1, 0)
+        layout.addWidget(self.hi_pa_spin, 1, 1)
+        layout.addWidget(self.hi_jmap_btn, 2, 0, 1, 2)
+        group.setVisible(False)
+
     def _build_vector_field_group(self, parent_layout: QVBoxLayout) -> None:
         group = QGroupBox("Magnetic Vector Field (HMI)")
+        self.vector_group = group
         layout = QGridLayout(group)
         layout.setHorizontalSpacing(8)
         layout.setVerticalSpacing(8)
@@ -1776,6 +1872,7 @@ class SolarDataAnalysisWindow(QMainWindow):
 
     def _build_region_group(self, parent_layout: QVBoxLayout) -> None:
         group = QGroupBox("Active Regions")
+        self.region_group = group
         layout = QVBoxLayout(group)
         parent_layout.addWidget(group)
 
@@ -2928,6 +3025,26 @@ class SolarDataAnalysisWindow(QMainWindow):
             )
         self._save_target_dir = None
         self.analysis_text.setPlainText(status + dropped_note)
+        self._update_load_summary()
+        self._apply_instrument_visibility()
+
+    def _update_load_summary(self) -> None:
+        """Refresh the always-visible 'what is loaded' line in the sidebar."""
+        if not hasattr(self, "load_summary_label"):
+            return
+        if not self._map_frames:
+            self.load_summary_label.setText("No data loaded.")
+            return
+        parts = [f"Loaded: {self._loaded_instrument_label()}", f"{len(self._map_frames)} frame(s)"]
+        key = self._loaded_config_key
+        if key is not None and self._loaded_instrument_class() == CORONAGRAPH:
+            polar_state = key[3]
+            parts.append(
+                "total-brightness" if polar_state == "total" else f"polarizer {polar_state[3:]}°"
+            )
+        if self._exposure_varies:
+            parts.append("differences in DN/s")
+        self.load_summary_label.setText(" · ".join(parts))
 
     def _loaded_instrument_label(self, frames: list[Any] | None = None) -> str:
         """Short instrument label for status text, e.g. 'AIA', 'HMI', 'LASCO C2',
@@ -3259,10 +3376,65 @@ class SolarDataAnalysisWindow(QMainWindow):
                 self.frame_size_combo.blockSignals(was)
             self.cutout_widget.setVisible(False)
 
+    def _apply_instrument_visibility(self) -> None:
+        """Show only the tool groups that apply to the effective instrument.
+
+        The sidebar serves six missions; showing every group at once buries the
+        relevant tools. Loaded data wins over the selected observable so the
+        panel matches what is actually on screen.
+        """
+        if not hasattr(self, "coronagraph_group"):
+            return
+        cls = self._effective_instrument_class()
+        self.vector_group.setVisible(cls == MAGNETOGRAPH)
+        self.region_group.setVisible(cls in (DISK_EUV, MAGNETOGRAPH, UNKNOWN))
+        self.coronagraph_group.setVisible(cls == CORONAGRAPH)
+        self.hi_group.setVisible(cls == HELIOSPHERIC)
+        # Disk-only mode buttons vanish for coronagraph/heliospheric work
+        # (they are also disabled — see _set_loaded_state — so tests that only
+        # check enabled state keep passing).
+        disk_visible = cls in (DISK_EUV, MAGNETOGRAPH, UNKNOWN)
+        for widget in (
+            self.composite_btn,
+            self.magnetogram_btn,
+            self.mag_threshold_spin,
+            self.detect_regions_btn,
+            self.fetch_labels_btn,
+        ):
+            widget.setVisible(disk_visible)
+        # Helioviewer quicklook only exists for SOHO/LASCO.
+        is_lasco_observable = self._current_observable()[0] == "LASCO"
+        self.live_preview_btn.setVisible(is_lasco_observable)
+
+    def _on_canvas_hover(self, x_arcsec: float | None, y_arcsec: float | None) -> None:
+        """Live px/arcsec coordinate readout as the cursor moves over the map.
+
+        The pyqtgraph canvas plots in arcsec view coordinates, so the hover
+        callback delivers arcsec directly; pixels come from the inverse axis
+        transform and are only shown while the cursor is over the image.
+        """
+        if x_arcsec is None or y_arcsec is None or self._current_map_data is None:
+            self.coord_readout_label.setText("")
+            return
+        try:
+            x_pix, y_pix = self.pyqt_canvas.map_pixel_from_arcsec(float(x_arcsec), float(y_arcsec))
+        except Exception:
+            self.coord_readout_label.setText("")
+            return
+        ny, nx = self._current_map_data.shape[:2]
+        if not (0 <= x_pix < nx and 0 <= y_pix < ny):
+            self.coord_readout_label.setText("")
+            return
+        self.coord_readout_label.setText(
+            f"x={int(x_pix)} px  y={int(y_pix)} px  ·  X={x_arcsec:+.1f}″  Y={y_arcsec:+.1f}″"
+        )
+
     def _on_query_wavelength_changed(self, _index: int) -> None:
         # High-resolution VSO / JSOC / composite only apply to SDO; gate the
-        # SDO-only download controls for HMI and SOHO/LASCO observables.
+        # SDO-only download controls for HMI and SOHO/LASCO observables, and
+        # adapt the visible tool groups to the selected instrument.
         self._apply_observable_download_gating()
+        self._apply_instrument_visibility()
         if self._map_frames:
             return
         self._select_default_colormap_for_wavelength()
@@ -3572,6 +3744,8 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._reset_canvas_views()
         self._render_current_frame()
         self.analysis_text.setPlainText(self._loaded_frame_status_text("Restored", self._map_frames))
+        self._update_load_summary()
+        self._apply_instrument_visibility()
 
     def reset_all(self):
         """Return the tool to a clean slate: clear data + UI defaults + cache."""
@@ -3598,6 +3772,8 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._loaded_paths = []
         self._original_frames = []
         self._map_frames = []
+        self._loaded_config_key = None
+        self._exposure_varies = False
         self._map_metadata = {}
         self._regions = []
         self._metadata_regions = []
@@ -3664,6 +3840,8 @@ class SolarDataAnalysisWindow(QMainWindow):
                 pass
         self.plot_title_label.setText("No image data loaded.")
         self.analysis_text.clear()
+        self._update_load_summary()
+        self._apply_instrument_visibility()
         self._update_size_estimate()
 
         # 4) Delete the download cache.

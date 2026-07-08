@@ -289,6 +289,36 @@ class SunPyPlotCanvas(QWidget):
     def set_roi_callback(self, callback):
         self._roi_callback = callback
 
+    def set_hover_callback(self, callback) -> None:
+        """Report the data-space (arcsec) position under the mouse.
+
+        ``callback(x_arcsec, y_arcsec)`` fires as the cursor moves over the map;
+        ``callback(None, None)`` fires when it leaves the view, so consumers can
+        clear a coordinate readout. Connected lazily so canvases that never ask
+        for hover pay nothing.
+        """
+        self._hover_callback = callback
+        if callback is not None and not getattr(self, "_hover_connected", False):
+            try:
+                self.map_plot.scene().sigMouseMoved.connect(self._on_scene_mouse_moved)
+                self._hover_connected = True
+            except Exception:
+                self._hover_connected = False
+
+    def _on_scene_mouse_moved(self, scene_pos) -> None:
+        callback = getattr(self, "_hover_callback", None)
+        if callback is None:
+            return
+        try:
+            vb = self.map_plot.getViewBox()
+            if not vb.sceneBoundingRect().contains(scene_pos):
+                callback(None, None)
+                return
+            view = vb.mapSceneToView(scene_pos)
+            callback(float(view.x()), float(view.y()))
+        except Exception:
+            callback(None, None)
+
     def set_colormap_name(self, name: str) -> None:
         text = str(name or "").strip() or "inferno"
         try:
@@ -775,6 +805,15 @@ class SunPyPlotCanvas(QWidget):
         x_arc = tx["x_ref_arcsec"] + (float(x_pix) - tx["x_ref_pix"]) * tx["x_scale_arcsec_per_pix"]
         y_arc = tx["y_ref_arcsec"] + (float(y_pix) - tx["y_ref_pix"]) * tx["y_scale_arcsec_per_pix"]
         return float(x_arc), float(y_arc)
+
+    def map_pixel_from_arcsec(self, x_arcsec: float, y_arcsec: float) -> tuple[float, float]:
+        """Exact inverse of :meth:`map_arcsec_from_pixel`."""
+        tx = self._axis_transform
+        x_scale = float(tx["x_scale_arcsec_per_pix"]) or 1.0
+        y_scale = float(tx["y_scale_arcsec_per_pix"]) or 1.0
+        x_pix = tx["x_ref_pix"] + (float(x_arcsec) - tx["x_ref_arcsec"]) / x_scale
+        y_pix = tx["y_ref_pix"] + (float(y_arcsec) - tx["y_ref_arcsec"]) / y_scale
+        return float(x_pix), float(y_pix)
 
     def map_view_rect(self) -> tuple[float, float, float, float]:
         rect = self.map_plot.getViewBox().viewRect()
