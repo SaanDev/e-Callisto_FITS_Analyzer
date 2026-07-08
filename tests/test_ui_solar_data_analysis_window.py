@@ -490,10 +490,11 @@ def test_canvas_pixel_arcsec_roundtrip_and_hover_readout():
     x_pix, y_pix = win.pyqt_canvas.map_pixel_from_arcsec(x_arc, y_arc)
     assert (x_pix, y_pix) == pytest.approx((3.0, 7.0))
 
-    # Hover over disk centre: both px and arcsec appear in the readout.
+    # Hover over disk centre: solar measures (R☉ + position angle) + pixels.
     win._on_canvas_hover(0.0, 0.0)
     text = win.coord_readout_label.text()
-    assert "px" in text and "″" in text
+    assert "R☉" in text and "PA" in text and "px" in text
+    assert "r = 0.00" in text  # disk centre is zero solar radii out
 
     # Leaving the image clears the readout.
     win._on_canvas_hover(None, None)
@@ -501,6 +502,48 @@ def test_canvas_pixel_arcsec_roundtrip_and_hover_readout():
     # Far outside the image also clears it.
     win._on_canvas_hover(1e6, 1e6)
     assert win.coord_readout_label.text() == ""
+    win.close()
+
+
+def test_sidebar_master_collapse_and_restore():
+    _app()
+    win = SolarDataAnalysisWindow()
+    assert getattr(win, "_sidebar_collapsed", False) is False
+
+    win._set_sidebar_collapsed(True, animate=False)
+    assert win.controls_scroll.maximumWidth() == 0
+    win._set_sidebar_collapsed(False, animate=False)
+    assert win.controls_scroll.maximumWidth() == 680
+    assert win.controls_scroll.minimumWidth() == 520
+    win.close()
+
+
+def test_sidebar_group_accordion_collapses_and_regates():
+    _app()
+    win = SolarDataAnalysisWindow()
+    assert win.mode_group.isCheckable()
+
+    win.mode_group.setChecked(False)  # collapse Analysis Modes
+    assert win.plot_mode_btn.isHidden()
+    win.mode_group.setChecked(True)  # expand again
+    assert not win.plot_mode_btn.isHidden()
+    # Expanding a checkable group re-enables children wholesale; the re-gate
+    # must restore the unloaded state (nothing loaded -> tools disabled).
+    assert not win.difference_mode_btn.isEnabled()
+    assert not win.lightcurve_btn.isEnabled()
+    win.close()
+
+
+def test_details_panel_toggle():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win.show()
+    QApplication.processEvents()
+    assert not win.analysis_text.isHidden()
+    win.details_toggle_btn.setChecked(False)
+    assert win.analysis_text.isHidden()
+    win.details_toggle_btn.setChecked(True)
+    assert not win.analysis_text.isHidden()
     win.close()
 
 

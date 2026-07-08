@@ -25,7 +25,7 @@ from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 from pyqtgraph.exporters import SVGExporter
-from PySide6.QtCore import QDateTime, QObject, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QDateTime, QEasingCurve, QObject, QPropertyAnimation, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QPainter, QPdfWriter
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QSizePolicy,
     QWidget,
@@ -81,6 +82,7 @@ from src.Backend.solar_data_analysis import (
     write_cropped_fits,
 )
 from src.Backend.download_manager import format_bytes, format_eta
+from src.Backend.image_measure import ruler_measurement
 from src.Backend.instrument_profiles import (
     CORONAGRAPH,
     DISK_EUV,
@@ -1024,6 +1026,14 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._apply_observable_download_gating()
         self._apply_instrument_visibility()
         self._update_size_estimate()
+        # Restore the sidebar collapse choice from the previous session.
+        try:
+            collapsed = self._app_settings().value("solar_analysis/sidebar_collapsed", False)
+            collapsed = str(collapsed).strip().lower() in ("true", "1", "yes")
+        except Exception:
+            collapsed = False
+        if collapsed:
+            self._set_sidebar_collapsed(True, animate=False)
         self.statusBar().showMessage("Ready.")
 
     def _build_ui(self):
@@ -1045,6 +1055,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         controls_panel = QWidget()
         controls_panel.setObjectName("SolarControlsPanel")
         controls_panel.setMinimumWidth(500)
+        self.controls_panel = controls_panel
         self.controls_scroll.setWidget(controls_panel)
         controls_layout = QVBoxLayout(controls_panel)
         controls_layout.setContentsMargins(12, 10, 12, 12)
@@ -1066,14 +1077,24 @@ class SolarDataAnalysisWindow(QMainWindow):
         plot_layout = QVBoxLayout(plot_group)
 
         top_row = QHBoxLayout()
+        # Master sidebar toggle: slides the whole controls panel away so the
+        # plot + tracking panel get the full window width.
+        self.sidebar_toggle_btn = QToolButton()
+        self.sidebar_toggle_btn.setArrowType(Qt.LeftArrow)
+        self.sidebar_toggle_btn.setAutoRaise(True)
+        self.sidebar_toggle_btn.setToolTip("Hide the controls sidebar")
+        self.sidebar_toggle_btn.clicked.connect(
+            lambda: self._set_sidebar_collapsed(not getattr(self, "_sidebar_collapsed", False))
+        )
         self.plot_title_label = QLabel("No image data loaded.")
         self.plot_title_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        # Live cursor position in pixels + helioprojective arcsec.
+        # Live cursor position: R☉ + position angle + pixel.
         self.coord_readout_label = QLabel("")
         self.coord_readout_label.setObjectName("SolarCoordReadout")
         self.coord_readout_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.quick_mp4_btn = QPushButton("MP4")
         self.quick_mp4_btn.setEnabled(False)
+        top_row.addWidget(self.sidebar_toggle_btn)
         top_row.addWidget(self.plot_title_label, 1)
         top_row.addWidget(self.coord_readout_label)
         top_row.addWidget(self.quick_mp4_btn)
@@ -1099,12 +1120,29 @@ class SolarDataAnalysisWindow(QMainWindow):
             "the intensity-weighted centroid (arcsec). Enable Rectangle crop to\n"
             "choose the region first."
         )
-        for btn in (self.ruler_tool_btn, self.profile_tool_btn, self.stats_tool_btn):
+        self.height_time_btn = QPushButton("Track CME")
+        self.height_time_btn.setCheckable(True)
+        self.height_time_btn.setToolTip(
+            "Continuous CME tracking: click the leading edge; the frame advances\n"
+            "automatically and each pick lands in the tracking table with a live\n"
+            "height–time fit. Works on any imager (EUVI/AIA/SUVI/COR/LASCO/HI)."
+        )
+        self.clear_measure_btn = QPushButton("Clear")
+        self.clear_measure_btn.setToolTip("Clear and reset all measurements: picks, table and overlays.")
+        for btn in (
+            self.ruler_tool_btn,
+            self.profile_tool_btn,
+            self.stats_tool_btn,
+            self.height_time_btn,
+            self.clear_measure_btn,
+        ):
             btn.setEnabled(False)
         measure_row.addWidget(QLabel("Measure:"))
         measure_row.addWidget(self.ruler_tool_btn)
         measure_row.addWidget(self.profile_tool_btn)
         measure_row.addWidget(self.stats_tool_btn)
+        measure_row.addWidget(self.height_time_btn)
+        measure_row.addWidget(self.clear_measure_btn)
         measure_row.addStretch(1)
         plot_layout.addLayout(measure_row)
 
@@ -1117,7 +1155,24 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.plot_canvas_stack = QStackedWidget()
         self.plot_canvas_stack.addWidget(self.pyqt_canvas)
         self.plot_canvas_stack.addWidget(self.matplotlib_canvas)
-        plot_layout.addWidget(self.plot_canvas_stack, 1)
+
+        # Canvas | CME-tracking panel (table + live height-time plot). The panel
+        # only appears while tracking, in a splitter so it can be resized.
+        from src.UI.solar_measure_tools import TrackingPanel
+
+        self.tracking_panel = TrackingPanel(self)
+        self.tracking_panel.setVisible(False)
+        # Back-compat aliases: the fit/clear controls used to live in the
+        # Coronagraph Tools group and are referenced by name elsewhere.
+        self.ht_fit_btn = self.tracking_panel.fit_btn
+        self.ht_clear_btn = self.tracking_panel.clear_btn
+        self.plot_splitter = QSplitter(Qt.Horizontal)
+        self.plot_splitter.addWidget(self.plot_canvas_stack)
+        self.plot_splitter.addWidget(self.tracking_panel)
+        self.plot_splitter.setStretchFactor(0, 1)
+        self.plot_splitter.setStretchFactor(1, 0)
+        self.plot_splitter.setSizes([900, 330])
+        plot_layout.addWidget(self.plot_splitter, 1)
 
         self.progress_panel = DownloadProgressPanel(self)
         self.progress_panel.setVisible(False)
@@ -1126,9 +1181,21 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.progress = self.progress_panel.bar
         plot_layout.addWidget(self.progress_panel)
 
+        # Collapsible details strip: operation results/warnings live here. The
+        # header stays visible even when collapsed so the panel is discoverable
+        # on small screens (previously it was easy to lose below the plot).
+        self.details_toggle_btn = QToolButton()
+        self.details_toggle_btn.setText("Details")
+        self.details_toggle_btn.setCheckable(True)
+        self.details_toggle_btn.setChecked(True)
+        self.details_toggle_btn.setArrowType(Qt.DownArrow)
+        self.details_toggle_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.details_toggle_btn.setAutoRaise(True)
+        self.details_toggle_btn.toggled.connect(self._on_details_toggled)
+        plot_layout.addWidget(self.details_toggle_btn)
         self.analysis_text = QTextEdit()
         self.analysis_text.setReadOnly(True)
-        self.analysis_text.setMaximumHeight(90)
+        self.analysis_text.setMaximumHeight(120)
         plot_layout.addWidget(self.analysis_text)
 
         splitter.addWidget(self.controls_scroll)
@@ -1136,7 +1203,70 @@ class SolarDataAnalysisWindow(QMainWindow):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([560, 1040])
+        self._make_sidebar_groups_collapsible()
         self._apply_sidebar_style()
+
+    def _make_sidebar_groups_collapsible(self) -> None:
+        """Accordion behaviour: each sidebar group collapses to its title.
+
+        Qt's checkable QGroupBox provides the click affordance; unchecking hides
+        the group's children so the box shrinks to a single row.
+        """
+        for group in self.controls_panel.findChildren(QGroupBox, options=Qt.FindDirectChildrenOnly):
+            group.setCheckable(True)
+            group.setChecked(True)
+            group.toggled.connect(
+                lambda expanded, g=group: self._on_sidebar_group_toggled(g, expanded)
+            )
+
+    def _on_sidebar_group_toggled(self, group: QGroupBox, expanded: bool) -> None:
+        for child in group.findChildren(QWidget, options=Qt.FindDirectChildrenOnly):
+            child.setVisible(bool(expanded))
+        if expanded:
+            # A checkable QGroupBox re-enables every child wholesale when it is
+            # re-checked, so restore the real gating/visibility state.
+            self._reapply_gating()
+
+    def _reapply_gating(self) -> None:
+        """Re-derive every enable/visibility rule from the current state."""
+        self._set_loaded_state(bool(self._map_frames))
+        self._apply_observable_download_gating()
+        self._apply_instrument_visibility()
+        self._sync_nrgf_enabled()
+
+    def _set_sidebar_collapsed(self, collapsed: bool, *, animate: bool = True) -> None:
+        """Slide the controls sidebar away (or back) to maximise the plot area."""
+        collapsed = bool(collapsed)
+        self._sidebar_collapsed = collapsed
+        self.sidebar_toggle_btn.setArrowType(Qt.RightArrow if collapsed else Qt.LeftArrow)
+        self.sidebar_toggle_btn.setToolTip(
+            "Show the controls sidebar" if collapsed else "Hide the controls sidebar"
+        )
+        if collapsed:
+            self.controls_scroll.setMinimumWidth(0)
+        end_width = 0 if collapsed else 680
+
+        def _finish() -> None:
+            if not collapsed:
+                self.controls_scroll.setMinimumWidth(520)
+                self.controls_scroll.setMaximumWidth(680)
+
+        if animate:
+            animation = QPropertyAnimation(self.controls_scroll, b"maximumWidth", self)
+            animation.setDuration(220)
+            animation.setStartValue(self.controls_scroll.width())
+            animation.setEndValue(end_width)
+            animation.setEasingCurve(QEasingCurve.InOutCubic)
+            animation.finished.connect(_finish)
+            self._sidebar_animation = animation  # keep alive for the duration
+            animation.start()
+        else:
+            self.controls_scroll.setMaximumWidth(end_width)
+            _finish()
+        try:
+            self._app_settings().setValue("solar_analysis/sidebar_collapsed", collapsed)
+        except Exception:
+            pass
 
     def _build_menu_bar(self) -> None:
         self.data_menu = self.menuBar().addMenu("Data")
@@ -1350,6 +1480,7 @@ class SolarDataAnalysisWindow(QMainWindow):
 
     def _build_data_source_group(self, parent_layout: QVBoxLayout) -> None:
         group = QGroupBox("Data Source")
+        self.data_source_group = group
         layout = QGridLayout(group)
         layout.setHorizontalSpacing(8)
         layout.setVerticalSpacing(8)
@@ -1771,9 +1902,11 @@ class SolarDataAnalysisWindow(QMainWindow):
         layout.addWidget(self.region_overlay_check, 10, 1)
 
     def _build_coronagraph_group(self, parent_layout: QVBoxLayout) -> None:
-        """White-light coronagraph tools (STEREO COR1/COR2, SOHO/LASCO):
-        NRGF radial filtering and CME height-time measurement. Shown only when
-        a coronagraph observable is selected or coronagraph frames are loaded."""
+        """White-light coronagraph tools (STEREO COR1/COR2, SOHO/LASCO).
+
+        CME height-time tracking lives in the Measure toolbar (it applies to
+        every imager); this group keeps the coronagraph-specific display tool.
+        """
         group = QGroupBox("Coronagraph Tools")
         self.coronagraph_group = group
         layout = QGridLayout(group)
@@ -1788,26 +1921,7 @@ class SolarDataAnalysisWindow(QMainWindow):
             "Applies to the plain frame view (differences already remove the background)."
         )
         self.nrgf_check.setEnabled(False)
-        self.height_time_btn = QPushButton("Pick CME Height–Time")
-        self.height_time_btn.setCheckable(True)
-        self.height_time_btn.setEnabled(False)
-        self.height_time_btn.setToolTip(
-            "Click the CME leading edge on successive frames (use the timeline to\n"
-            "step through them); each click records the plane-of-sky height at that\n"
-            "frame's time."
-        )
-        self.ht_fit_btn = QPushButton("Fit Height–Time")
-        self.ht_fit_btn.setEnabled(False)
-        self.ht_fit_btn.setToolTip(
-            "Fit the picked height–time points: plane-of-sky speed (linear) and\n"
-            "acceleration (quadratic), with the fitted curve plotted."
-        )
-        self.ht_clear_btn = QPushButton("Clear Picks")
-        self.ht_clear_btn.setEnabled(False)
         layout.addWidget(self.nrgf_check, 0, 0, 1, 2)
-        layout.addWidget(self.height_time_btn, 1, 0, 1, 2)
-        layout.addWidget(self.ht_fit_btn, 2, 0)
-        layout.addWidget(self.ht_clear_btn, 2, 1)
         group.setVisible(False)
 
     def _build_hi_group(self, parent_layout: QVBoxLayout) -> None:
@@ -2012,8 +2126,11 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.profile_tool_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("profile", on))
         self.stats_tool_btn.clicked.connect(lambda: self._measure.report_region_stats())
         self.height_time_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("height_time", on))
+        self.clear_measure_btn.clicked.connect(self.clear_all_measurements)
         self.ht_fit_btn.clicked.connect(lambda: self._measure.finish_height_time())
-        self.ht_clear_btn.clicked.connect(lambda: self._measure.clear_height_time())
+        self.ht_clear_btn.clicked.connect(
+            lambda: (self._measure.clear_height_time(), self._sync_tracking_panel_visibility())
+        )
         self.nrgf_check.toggled.connect(lambda _checked: self._render_current_frame())
         self.movie_content_combo.currentTextChanged.connect(lambda _t: self._sync_nrgf_enabled())
         self.hi_jmap_btn.clicked.connect(self.build_hi_jmap)
@@ -2157,7 +2274,12 @@ class SolarDataAnalysisWindow(QMainWindow):
         # Measurement tools follow the loaded state; height-time additionally
         # needs a time sequence, and NRGF a raw-mode coronagraph view.
         many = bool(loaded) and len(self._map_frames) >= 2
-        for widget in (self.ruler_tool_btn, self.profile_tool_btn, self.stats_tool_btn):
+        for widget in (
+            self.ruler_tool_btn,
+            self.profile_tool_btn,
+            self.stats_tool_btn,
+            self.clear_measure_btn,
+        ):
             widget.setEnabled(bool(loaded))
         self.height_time_btn.setEnabled(many)
         self.hi_jmap_btn.setEnabled(many)
@@ -2170,6 +2292,7 @@ class SolarDataAnalysisWindow(QMainWindow):
                     btn.blockSignals(False)
             self._measure.set_mode(None)
             self._measure.clear_height_time()
+            self._sync_tracking_panel_visibility()
         # White-light coronagraph / heliospheric frames have no EUV RGB
         # composite, HMI overlay or disk active-region concept — keep those
         # disk-only tools disabled (LASCO, STEREO COR1/COR2, HI1/HI2).
@@ -3497,8 +3620,10 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.hi_group.setVisible(cls == HELIOSPHERIC)
         # Disk-only mode buttons vanish for coronagraph/heliospheric work
         # (they are also disabled — see _set_loaded_state — so tests that only
-        # check enabled state keep passing).
-        disk_visible = cls in (DISK_EUV, MAGNETOGRAPH, UNKNOWN)
+        # check enabled state keep passing). Never re-show a widget inside a
+        # collapsed accordion group.
+        mode_expanded = not self.mode_group.isCheckable() or self.mode_group.isChecked()
+        disk_visible = cls in (DISK_EUV, MAGNETOGRAPH, UNKNOWN) and mode_expanded
         for widget in (
             self.composite_btn,
             self.magnetogram_btn,
@@ -3508,15 +3633,19 @@ class SolarDataAnalysisWindow(QMainWindow):
         ):
             widget.setVisible(disk_visible)
         # Helioviewer quicklook only exists for SOHO/LASCO.
+        source_expanded = (
+            not self.data_source_group.isCheckable() or self.data_source_group.isChecked()
+        )
         is_lasco_observable = self._current_observable()[0] == "LASCO"
-        self.live_preview_btn.setVisible(is_lasco_observable)
+        self.live_preview_btn.setVisible(is_lasco_observable and source_expanded)
 
     def _on_canvas_hover(self, x_arcsec: float | None, y_arcsec: float | None) -> None:
-        """Live px/arcsec coordinate readout as the cursor moves over the map.
+        """Live solar coordinate readout as the cursor moves over the map.
 
-        The pyqtgraph canvas plots in arcsec view coordinates, so the hover
-        callback delivers arcsec directly; pixels come from the inverse axis
-        transform and are only shown while the cursor is over the image.
+        Shows the physically meaningful measures — distance from Sun centre in
+        solar radii and the position angle (N→E) — plus the pixel position. The
+        canvas plots in helioprojective view coordinates where disk centre is
+        (0, 0), so radius and PA follow directly from the hover position.
         """
         if x_arcsec is None or y_arcsec is None or self._current_map_data is None:
             self.coord_readout_label.setText("")
@@ -3530,8 +3659,16 @@ class SolarDataAnalysisWindow(QMainWindow):
         if not (0 <= x_pix < nx and 0 <= y_pix < ny):
             self.coord_readout_label.setText("")
             return
+        frame = (
+            self._map_frames[max(0, min(self._current_frame_index, len(self._map_frames) - 1))]
+            if self._map_frames
+            else None
+        )
+        rsun = self._solar_radius_arcsec(frame) if frame is not None else 960.0
+        r_rsun = float(np.hypot(x_arcsec, y_arcsec)) / rsun if rsun > 0 else float("nan")
+        pa_deg = ruler_measurement((0.0, 0.0), (x_arcsec, y_arcsec)).position_angle_deg
         self.coord_readout_label.setText(
-            f"x={int(x_pix)} px  y={int(y_pix)} px  ·  X={x_arcsec:+.1f}″  Y={y_arcsec:+.1f}″"
+            f"r = {r_rsun:.2f} R☉  ·  PA {pa_deg:.1f}°  ·  x={int(x_pix)} y={int(y_pix)} px"
         )
 
     def _on_measure_tool_toggled(self, mode: str, on: bool) -> None:
@@ -3545,6 +3682,8 @@ class SolarDataAnalysisWindow(QMainWindow):
         if not on:
             if self._measure.mode == mode:
                 self._measure.set_mode(None)
+            if mode == "height_time":
+                self._sync_tracking_panel_visibility()
             return
         for other_mode, btn in buttons.items():
             if other_mode != mode and btn.isChecked():
@@ -3554,12 +3693,38 @@ class SolarDataAnalysisWindow(QMainWindow):
         if self.crop_check.isChecked():
             self._set_crop_mode_checked(False)
         self._measure.set_mode(mode)
+        self._sync_tracking_panel_visibility()
         hints = {
             "ruler": "Ruler: click the first point on the image.",
             "profile": "Profile: click the start of the cut.",
-            "height_time": "Height–time: click the CME leading edge on this frame, then step frames.",
+            "height_time": (
+                "Tracking: click the CME leading edge — the frame auto-advances and "
+                "each pick lands in the table."
+            ),
         }
         self.statusBar().showMessage(hints[mode], 8000)
+
+    def _sync_tracking_panel_visibility(self) -> None:
+        """The tracking table/plot shows while tracking is active or picks exist."""
+        show = bool(
+            self._measure.mode == "height_time" or getattr(self._measure, "picks", None)
+        )
+        self.tracking_panel.setVisible(show)
+
+    def _on_details_toggled(self, expanded: bool) -> None:
+        self.analysis_text.setVisible(bool(expanded))
+        self.details_toggle_btn.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+
+    def clear_all_measurements(self) -> None:
+        """Clear and reset every measurement (toolbar Clear button)."""
+        for btn in (self.ruler_tool_btn, self.profile_tool_btn, self.height_time_btn):
+            if btn.isChecked():
+                btn.blockSignals(True)
+                btn.setChecked(False)
+                btn.blockSignals(False)
+        self._measure.set_mode(None)
+        self._measure.clear_all()
+        self._sync_tracking_panel_visibility()
 
     def _sync_nrgf_enabled(self) -> None:
         """NRGF applies to plain frames only — differences already remove the

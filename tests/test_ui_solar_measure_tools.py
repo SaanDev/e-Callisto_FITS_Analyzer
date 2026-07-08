@@ -166,12 +166,75 @@ def test_height_time_replaces_pick_on_same_frame():
     ]
     _load(win, frames)
     win.height_time_btn.setChecked(True)
+    # Disable continuous tracking so both clicks land on the same frame.
+    win.tracking_panel.auto_advance_check.setChecked(False)
     win._measure.on_canvas_click(4.0, 0.0, "left")
     win._measure.on_canvas_click(6.0, 0.0, "left")  # same frame: replaces
     assert len(win._measure.picks) == 1
     win._measure.clear_height_time()
     assert len(win._measure.picks) == 0
     assert not win.ht_fit_btn.isEnabled()
+    win.close()
+
+
+def test_height_time_auto_advances_frames():
+    _app()
+    win = SolarDataAnalysisWindow()
+    frames = [
+        CorWcsMap(np.ones((11, 11)), date="2012-07-12T16:00:00"),
+        CorWcsMap(np.ones((11, 11)), date="2012-07-12T16:10:00"),
+        CorWcsMap(np.ones((11, 11)), date="2012-07-12T16:20:00"),
+    ]
+    _load(win, frames)
+    win.height_time_btn.setChecked(True)
+    assert win.tracking_panel.auto_advance_check.isChecked()  # default on
+    assert not win.tracking_panel.isHidden()  # panel appears when tracking
+
+    # Three clicks without touching the slider: the frame advances itself.
+    win._measure.on_canvas_click(4.0, 0.0, "left")
+    QApplication.processEvents()
+    assert win._current_frame_index == 1
+    win._measure.on_canvas_click(6.0, 0.0, "left")
+    QApplication.processEvents()
+    assert win._current_frame_index == 2
+    win._measure.on_canvas_click(8.0, 0.0, "left")
+    QApplication.processEvents()
+    assert win._current_frame_index == 2  # last frame: stays put
+    assert len(win._measure.picks) == 3
+
+    # The tracking table filled in real time: t(s) relative to the first pick.
+    table = win.tracking_panel.table
+    assert table.rowCount() == 3
+    assert table.item(0, 1).text() == "0"
+    assert table.item(1, 1).text() == "600"
+    assert table.item(2, 1).text() == "1200"
+    # Heights: 4/8, 6/8, 8/8 arcsec/rsun -> 0.5, 0.75, 1.0 R☉ toward the west.
+    assert table.item(0, 2).text() == "0.500"
+    assert table.item(2, 2).text() == "1.000"
+    assert table.item(0, 3).text() == "270.0"  # PA of due-west picks
+    # And the live plot has both the picks and a fit line.
+    assert len(win.tracking_panel._scatter.data) == 3
+    win.close()
+
+
+def test_clear_all_measurements_resets_everything():
+    _app()
+    win = SolarDataAnalysisWindow()
+    frames = [
+        CorWcsMap(np.ones((11, 11)), date="2012-07-12T16:00:00"),
+        CorWcsMap(np.ones((11, 11)), date="2012-07-12T16:10:00"),
+    ]
+    _load(win, frames)
+    win.height_time_btn.setChecked(True)
+    win._measure.on_canvas_click(4.0, 0.0, "left")
+    assert len(win._measure.picks) == 1
+
+    win.clear_all_measurements()
+    assert len(win._measure.picks) == 0
+    assert win._measure.mode is None
+    assert not win.height_time_btn.isChecked()
+    assert win.tracking_panel.isHidden()
+    assert win.tracking_panel.table.rowCount() == 0
     win.close()
 
 

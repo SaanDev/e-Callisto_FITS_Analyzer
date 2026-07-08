@@ -19,11 +19,23 @@ from datetime import datetime
 from typing import Any
 
 import numpy as np
+import pyqtgraph as pg
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from PySide6.QtCore import QObject, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
-from PySide6.QtWidgets import QDialog, QVBoxLayout
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QDialog,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
 
 from src.Backend.coronagraph import (
     HeightTimeFit,
@@ -120,6 +132,114 @@ class JMapDialog(QDialog):
         self.canvas.draw_idle()
 
 
+class TrackingPanel(QWidget):
+    """CME tracking side panel: picks table + live height–time plot.
+
+    Sits right of the map canvas while continuous tracking is active. Every
+    leading-edge click adds a row (Time UT, seconds since the first pick,
+    height in R☉, position angle) and updates the height–time scatter/fit in
+    real time, so the kinematics emerge while you are still clicking.
+    """
+
+    def __init__(self, parent: Any = None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 0, 0, 0)
+        layout.setSpacing(6)
+
+        header = QHBoxLayout()
+        title = QLabel("CME Tracking")
+        title.setStyleSheet("font-weight: 600;")
+        header.addWidget(title)
+        header.addStretch(1)
+        layout.addLayout(header)
+
+        self.auto_advance_check = QCheckBox("Auto-advance frame after each pick")
+        self.auto_advance_check.setChecked(True)
+        self.auto_advance_check.setToolTip(
+            "After you click the CME front, jump straight to the next frame so a\n"
+            "whole sequence can be tracked with one click per frame."
+        )
+        layout.addWidget(self.auto_advance_check)
+
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["Time (UT)", "t (s)", "Height (R☉)", "PA (°)"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setMinimumWidth(300)
+        layout.addWidget(self.table, 1)
+
+        self.plot = pg.PlotWidget()
+        self.plot.setLabel("bottom", "t (s since first pick)")
+        self.plot.setLabel("left", "Height (R☉)")
+        self.plot.showGrid(x=True, y=True, alpha=0.25)
+        self.plot.setMenuEnabled(False)
+        self.plot.hideButtons()
+        self._scatter = pg.ScatterPlotItem(
+            symbol="o", size=8, pen=pg.mkPen("#e8a33d"), brush=pg.mkBrush("#e8a33d")
+        )
+        self._fit_line = pg.PlotCurveItem(pen=pg.mkPen("#5a8fd6", width=1.6, style=Qt.DashLine))
+        self.plot.addItem(self._scatter)
+        self.plot.addItem(self._fit_line)
+        layout.addWidget(self.plot, 1)
+
+        self.speed_label = QLabel("Click the CME front on each frame.")
+        self.speed_label.setWordWrap(True)
+        layout.addWidget(self.speed_label)
+
+        buttons = QHBoxLayout()
+        self.fit_btn = QPushButton("Fit Height–Time")
+        self.fit_btn.setEnabled(False)
+        self.clear_btn = QPushButton("Clear Picks")
+        self.clear_btn.setEnabled(False)
+        buttons.addWidget(self.fit_btn)
+        buttons.addWidget(self.clear_btn)
+        layout.addLayout(buttons)
+
+    def refresh(self, picks: dict[int, tuple]) -> None:
+        """Rebuild the table and the live plot from the controller's picks."""
+        entries = sorted(picks.values(), key=lambda item: item[0])
+        self.table.setRowCount(len(entries))
+        if not entries:
+            self._scatter.setData(x=[], y=[])
+            self._fit_line.setData(x=[], y=[])
+            self.speed_label.setText("Click the CME front on each frame.")
+            return
+
+        t0 = entries[0][0]
+        seconds = [(entry[0] - t0).total_seconds() for entry in entries]
+        heights = [float(entry[1]) for entry in entries]
+        for row, (entry, t_s) in enumerate(zip(entries, seconds)):
+            when, height_rsun = entry[0], float(entry[1])
+            pa_deg = float(entry[4]) if len(entry) > 4 else float("nan")
+            cells = (
+                f"{when:%H:%M:%S}",
+                f"{t_s:.0f}",
+                f"{height_rsun:.3f}",
+                f"{pa_deg:.1f}" if np.isfinite(pa_deg) else "—",
+            )
+            for col, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                item.setTextAlignment(Qt.AlignCenter)
+                self.table.setItem(row, col, item)
+
+        self._scatter.setData(x=seconds, y=heights)
+        if len(entries) >= 2:
+            # Live linear fit: the plane-of-sky speed appears while clicking.
+            coeffs = np.polyfit(seconds, heights, 1)
+            t_line = np.linspace(min(seconds), max(seconds), 32)
+            self._fit_line.setData(x=t_line, y=np.polyval(coeffs, t_line))
+            speed_km_s = coeffs[0] * RSUN_KM
+            self.speed_label.setText(
+                f"{len(entries)} picks  ·  live linear fit: {speed_km_s:,.0f} km/s plane-of-sky"
+            )
+        else:
+            self._fit_line.setData(x=[], y=[])
+            self.speed_label.setText("1 pick — step to the next frame and click the front again.")
+
+
 class MeasurementController(QObject):
     """Click state machine behind the canvas measurement tools.
 
@@ -136,8 +256,8 @@ class MeasurementController(QObject):
         self.window = window
         self.mode: str | None = None
         self._pending: tuple[float, float] | None = None  # first pick (arcsec)
-        # Height-time picks: frame_index -> (time, height_rsun, x_arc, y_arc)
-        self.picks: dict[int, tuple[datetime, float, float, float]] = {}
+        # Height-time picks: frame_index -> (time, height_rsun, x_arc, y_arc, pa_deg)
+        self.picks: dict[int, tuple[datetime, float, float, float, float]] = {}
         self._escape = QShortcut(QKeySequence(Qt.Key_Escape), window)
         self._escape.setContext(Qt.WidgetWithChildrenShortcut)
         self._escape.activated.connect(self.cancel)
@@ -251,14 +371,27 @@ class MeasurementController(QObject):
         rsun_arcsec = win._solar_radius_arcsec(frame)
         height_rsun = pixel_radius_to_rsun(radius_px, scale, rsun_arcsec)
 
+        # Position angle of the pick, seen from disk centre (N→E convention).
+        pa_deg = ruler_measurement((0.0, 0.0), (x_arc, y_arc)).position_angle_deg
+
         idx = int(getattr(win, "_current_frame_index", 0))
-        self.picks[idx] = (when, height_rsun, x_arc, y_arc)
+        self.picks[idx] = (when, height_rsun, x_arc, y_arc, pa_deg)
         self._refresh_overlay()
         self._sync_ht_buttons()
+        self._refresh_tracking_panel()
         self._status(
-            f"Height–time: frame {idx + 1} at {when:%H:%M:%S} → {height_rsun:.2f} R☉ "
-            f"({len(self.picks)} pick(s); step frames and keep clicking, then Fit)."
+            f"Height–time: frame {idx + 1} at {when:%H:%M:%S} → {height_rsun:.2f} R☉, "
+            f"PA {pa_deg:.0f}° ({len(self.picks)} pick(s))."
         )
+
+        # Continuous tracking: one click per frame, the timeline advances itself.
+        panel = getattr(win, "tracking_panel", None)
+        if (
+            panel is not None
+            and panel.auto_advance_check.isChecked()
+            and idx < len(getattr(win, "_map_frames", [])) - 1
+        ):
+            win.frame_slider.setValue(idx + 1)
 
     def finish_height_time(self) -> None:
         """Fit the collected picks and show the speed/acceleration dialog."""
@@ -291,7 +424,24 @@ class MeasurementController(QObject):
         self.picks.clear()
         self._refresh_overlay()
         self._sync_ht_buttons()
+        self._refresh_tracking_panel()
         self._status("Height–time picks cleared.")
+
+    def clear_all(self) -> None:
+        """Reset every measurement: pending picks, tracking table and overlays."""
+        self._pending = None
+        self.picks.clear()
+        self._sync_ht_buttons()
+        self._refresh_tracking_panel()
+        canvas = getattr(self.window, "pyqt_canvas", None)
+        if canvas is not None:
+            canvas.clear_measurement_overlay()
+        self._status("All measurements cleared.")
+
+    def _refresh_tracking_panel(self) -> None:
+        panel = getattr(self.window, "tracking_panel", None)
+        if panel is not None:
+            panel.refresh(self.picks)
 
     # ------------------------------------------------------------ region stats
     def report_region_stats(self) -> None:
