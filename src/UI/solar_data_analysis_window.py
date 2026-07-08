@@ -190,6 +190,33 @@ def _suvi_colormap_name(wavelength: Any | None) -> str:
     return f"goes-rsuvi{rounded}" if rounded in SUVI_WAVELENGTHS else "goes-rsuvi171"
 
 
+def populate_observable_combo(combo: Any) -> None:
+    """Fill a QComboBox with every supported observable.
+
+    userData is a tuple: ("AIA", wavelength_float), ("HMI", product_str),
+    ("LASCO", "C2"/"C3"), ("SECCHI", (spacecraft, detector, wavelength_or_None))
+    or ("SUVI", wavelength_float). Shared by the main Data Source selector and
+    the Compare Viewpoint dialog so both always offer the same missions.
+    """
+    for value in AIA_WAVELENGTHS:
+        combo.addItem(f"AIA {value} A", userData=("AIA", float(value)))
+    combo.insertSeparator(combo.count())
+    for product, label in HMI_OBSERVABLES:
+        combo.addItem(label, userData=("HMI", product))
+    combo.insertSeparator(combo.count())
+    for detector, label in LASCO_DETECTORS:
+        combo.addItem(label, userData=("LASCO", detector))
+    combo.insertSeparator(combo.count())
+    for sc_code, sc_label in STEREO_SPACECRAFT:
+        for wl in STEREO_EUVI_WAVELENGTHS:
+            combo.addItem(f"{sc_label}/EUVI {wl} A", userData=("SECCHI", (sc_code, "EUVI", float(wl))))
+        for det_code, det_label in STEREO_WHITE_LIGHT_DETECTORS:
+            combo.addItem(f"{sc_label}/{det_label}", userData=("SECCHI", (sc_code, det_code, None)))
+    combo.insertSeparator(combo.count())
+    for wl in SUVI_WAVELENGTHS:
+        combo.addItem(f"GOES/SUVI {wl} A", userData=("SUVI", float(wl)))
+
+
 class SolarMetadataWorker(QObject):
     progress = Signal(object, object)
     finished = Signal(object)
@@ -1142,6 +1169,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.composite_action = QAction("Composite", self)
         self.detect_regions_action = QAction("Identify Active Regions", self)
         self.labels_action = QAction("Fetch NOAA/HEK Labels", self)
+        self.compare_viewpoint_action = QAction("Compare Viewpoint…", self)
         self.reset_frames_action = QAction("Reset Loaded Frames", self)
         for action in (
             self.plot_action,
@@ -1149,6 +1177,7 @@ class SolarDataAnalysisWindow(QMainWindow):
             self.composite_action,
             self.detect_regions_action,
             self.labels_action,
+            self.compare_viewpoint_action,
             self.reset_frames_action,
         ):
             self.analysis_menu.addAction(action)
@@ -1358,27 +1387,7 @@ class SolarDataAnalysisWindow(QMainWindow):
             "SOHO/LASCO coronagraph, a STEREO/SECCHI detector (EUVI/COR1/COR2/HI1/HI2) "
             "or a GOES/SUVI passband."
         )
-        for value in AIA_WAVELENGTHS:
-            self.wavelength_combo.addItem(f"AIA {value} A", userData=("AIA", float(value)))
-        self.wavelength_combo.insertSeparator(self.wavelength_combo.count())
-        for product, label in HMI_OBSERVABLES:
-            self.wavelength_combo.addItem(label, userData=("HMI", product))
-        self.wavelength_combo.insertSeparator(self.wavelength_combo.count())
-        for detector, label in LASCO_DETECTORS:
-            self.wavelength_combo.addItem(label, userData=("LASCO", detector))
-        self.wavelength_combo.insertSeparator(self.wavelength_combo.count())
-        for sc_code, sc_label in STEREO_SPACECRAFT:
-            for wl in STEREO_EUVI_WAVELENGTHS:
-                self.wavelength_combo.addItem(
-                    f"{sc_label}/EUVI {wl} A", userData=("SECCHI", (sc_code, "EUVI", float(wl)))
-                )
-            for det_code, det_label in STEREO_WHITE_LIGHT_DETECTORS:
-                self.wavelength_combo.addItem(
-                    f"{sc_label}/{det_label}", userData=("SECCHI", (sc_code, det_code, None))
-                )
-        self.wavelength_combo.insertSeparator(self.wavelength_combo.count())
-        for wl in SUVI_WAVELENGTHS:
-            self.wavelength_combo.addItem(f"GOES/SUVI {wl} A", userData=("SUVI", float(wl)))
+        populate_observable_combo(self.wavelength_combo)
         self.wavelength_combo.setCurrentText("AIA 193 A")
 
         now = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
@@ -1601,6 +1610,12 @@ class SolarDataAnalysisWindow(QMainWindow):
         )
         self.detect_regions_btn = QPushButton("Active Regions")
         self.fetch_labels_btn = QPushButton("NOAA/HEK Labels")
+        self.compare_viewpoint_btn = QPushButton("Compare Viewpoint…")
+        self.compare_viewpoint_btn.setToolTip(
+            "Fetch a second observable near this frame's time (e.g. STEREO vs the\n"
+            "Earth view), reproject it onto the current view and compare side-by-side\n"
+            "with a blink toggle."
+        )
         self.reset_loaded_btn = QPushButton("Reset Frames")
         layout.addWidget(self.load_summary_label, 0, 0, 1, 2)
         layout.addWidget(self.plot_mode_btn, 1, 0, 1, 2)
@@ -1612,7 +1627,8 @@ class SolarDataAnalysisWindow(QMainWindow):
         layout.addWidget(self.mag_threshold_spin, 4, 1)
         layout.addWidget(self.detect_regions_btn, 5, 0)
         layout.addWidget(self.fetch_labels_btn, 5, 1)
-        layout.addWidget(self.reset_loaded_btn, 6, 0, 1, 2)
+        layout.addWidget(self.compare_viewpoint_btn, 6, 0, 1, 2)
+        layout.addWidget(self.reset_loaded_btn, 7, 0, 1, 2)
 
     def _build_timeline_group(self, parent_layout: QVBoxLayout) -> None:
         group = QGroupBox("Timeline")
@@ -1973,6 +1989,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.magnetogram_btn.clicked.connect(self.load_magnetogram_overlay)
         self.detect_regions_btn.clicked.connect(self.detect_active_regions)
         self.fetch_labels_btn.clicked.connect(self.fetch_active_region_labels)
+        self.compare_viewpoint_btn.clicked.connect(self.open_multiview_dialog)
         self.reset_loaded_btn.clicked.connect(self.reset_loaded_frames)
         self.frame_slider.valueChanged.connect(self._on_frame_slider_changed)
         self.rewind_btn.clicked.connect(self.rewind_frames)
@@ -2030,6 +2047,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.composite_action.triggered.connect(self.show_composite_plot)
         self.detect_regions_action.triggered.connect(self.detect_active_regions)
         self.labels_action.triggered.connect(self.fetch_active_region_labels)
+        self.compare_viewpoint_action.triggered.connect(self.open_multiview_dialog)
         self.reset_frames_action.triggered.connect(self.reset_loaded_frames)
         self.rewind_action.triggered.connect(self.rewind_frames)
         self.previous_action.triggered.connect(self.previous_frame)
@@ -2112,6 +2130,7 @@ class SolarDataAnalysisWindow(QMainWindow):
             self.mag_threshold_spin,
             self.detect_regions_btn,
             self.fetch_labels_btn,
+            self.compare_viewpoint_btn,
             self.reset_loaded_btn,
             self.frame_slider,
             self.rewind_btn,
@@ -2224,6 +2243,7 @@ class SolarDataAnalysisWindow(QMainWindow):
             self.composite_action,
             self.detect_regions_action,
             self.labels_action,
+            self.compare_viewpoint_action,
             self.reset_frames_action,
             self.rewind_action,
             self.previous_action,
@@ -3583,6 +3603,29 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._jmap_dialog = dialog
         dialog.show()
         self.statusBar().showMessage("J-map built from the loaded HI sequence.", 6000)
+
+    def open_multiview_dialog(self) -> None:
+        """Compare the loaded view against a second observable's viewpoint."""
+        if not self._map_frames:
+            QMessageBox.information(self, "Compare Viewpoint", "Load frames first.")
+            return
+        from src.UI.multiview_dialog import MultiViewpointDialog
+
+        # Pass the original loader outputs: crop/composite replace _map_frames
+        # with derived wrappers that cannot be reprojected (no reproject_to).
+        reference = self._original_frames or self._map_frames
+        index = max(0, min(self._current_frame_index, len(reference) - 1))
+        dialog = MultiViewpointDialog(
+            self,
+            reference_frames=reference,
+            reference_index=index,
+            reference_label=self._frames_word(),
+            cache_dir=self.cache_dir,
+            jsoc_email=str(self.jsoc_email_edit.text() or "").strip(),
+            theme=self.theme,
+        )
+        self._multiview_dialog = dialog
+        dialog.show()
 
     def _on_query_wavelength_changed(self, _index: int) -> None:
         # High-resolution VSO / JSOC / composite only apply to SDO; gate the
