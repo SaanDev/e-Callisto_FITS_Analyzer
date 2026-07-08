@@ -319,6 +319,74 @@ class SunPyPlotCanvas(QWidget):
         except Exception:
             callback(None, None)
 
+    def set_click_callback(self, callback) -> None:
+        """Report mouse clicks on the map in data-space (arcsec) coordinates.
+
+        ``callback(x_arcsec, y_arcsec, button)`` with ``button`` in
+        {"left", "right", "other"}. Used by the measurement tools (ruler,
+        profile, CME height-time picking). Connected lazily.
+        """
+        self._click_callback = callback
+        if callback is not None and not getattr(self, "_click_connected", False):
+            try:
+                self.map_plot.scene().sigMouseClicked.connect(self._on_scene_mouse_clicked)
+                self._click_connected = True
+            except Exception:
+                self._click_connected = False
+
+    def _on_scene_mouse_clicked(self, ev) -> None:
+        callback = getattr(self, "_click_callback", None)
+        if callback is None:
+            return
+        try:
+            vb = self.map_plot.getViewBox()
+            scene_pos = ev.scenePos()
+            if not vb.sceneBoundingRect().contains(scene_pos):
+                return
+            view = vb.mapSceneToView(scene_pos)
+            qt_button = ev.button()
+            if qt_button == Qt.LeftButton:
+                button = "left"
+            elif qt_button == Qt.RightButton:
+                button = "right"
+            else:
+                button = "other"
+            callback(float(view.x()), float(view.y()), button)
+            ev.accept()
+        except Exception:
+            pass
+
+    def set_measurement_overlay(self, xs_arcsec, ys_arcsec, *, connect: bool = True) -> None:
+        """Draw the measurement pick markers (crosses) and connecting segment.
+
+        Coordinates are data-space arcsec (the view coordinates the canvas plots
+        in). A single reused curve + scatter pair keeps repeated calls cheap.
+        """
+        xs = np.asarray(list(xs_arcsec), dtype=float)
+        ys = np.asarray(list(ys_arcsec), dtype=float)
+        if not hasattr(self, "_measure_curve"):
+            pen = pg.mkPen((255, 210, 60), width=1.6, style=Qt.DashLine)
+            self._measure_curve = pg.PlotCurveItem(pen=pen)
+            self._measure_curve.setZValue(40)
+            self._measure_points = pg.ScatterPlotItem(
+                symbol="+", size=14, pen=pg.mkPen((255, 210, 60), width=1.6), brush=None
+            )
+            self._measure_points.setZValue(41)
+            self.map_plot.addItem(self._measure_curve)
+            self.map_plot.addItem(self._measure_points)
+        self._measure_points.setData(x=xs, y=ys)
+        if connect and xs.size >= 2:
+            self._measure_curve.setData(x=xs, y=ys)
+            self._measure_curve.show()
+        else:
+            self._measure_curve.setData(x=[], y=[])
+        self._measure_points.show()
+
+    def clear_measurement_overlay(self) -> None:
+        if hasattr(self, "_measure_curve"):
+            self._measure_curve.setData(x=[], y=[])
+            self._measure_points.setData(x=[], y=[])
+
     def set_colormap_name(self, name: str) -> None:
         text = str(name or "").strip() or "inferno"
         try:

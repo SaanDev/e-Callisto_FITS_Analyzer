@@ -978,6 +978,11 @@ class SolarDataAnalysisWindow(QMainWindow):
 
         self._build_ui()
         self._build_menu_bar()
+        # Click-driven measurement tools (ruler / profile / height-time / stats).
+        from src.UI.solar_measure_tools import MeasurementController
+
+        self._measure = MeasurementController(self)
+        self.pyqt_canvas.set_click_callback(self._measure.on_canvas_click)
         self._connect_signals()
         self._restore_jsoc_settings()
         self.jsoc_email_edit.editingFinished.connect(self._save_jsoc_settings)
@@ -1046,6 +1051,35 @@ class SolarDataAnalysisWindow(QMainWindow):
         top_row.addWidget(self.coord_readout_label)
         top_row.addWidget(self.quick_mp4_btn)
         plot_layout.addLayout(top_row)
+
+        # Measurement toolbar: click-driven tools on the displayed map.
+        measure_row = QHBoxLayout()
+        self.ruler_tool_btn = QPushButton("Ruler")
+        self.ruler_tool_btn.setCheckable(True)
+        self.ruler_tool_btn.setToolTip(
+            "Click two points to measure the plane-of-sky distance (arcsec / Mm / R☉)\n"
+            "and position angle (N→E)."
+        )
+        self.profile_tool_btn = QPushButton("Profile")
+        self.profile_tool_btn.setCheckable(True)
+        self.profile_tool_btn.setToolTip(
+            "Click two points to plot the intensity along the cut (e.g. across a\n"
+            "loop, filament or CME front)."
+        )
+        self.stats_tool_btn = QPushButton("Region Stats")
+        self.stats_tool_btn.setToolTip(
+            "Summarise the crop rectangle: pixel count, mean/median/min/max/σ and\n"
+            "the intensity-weighted centroid (arcsec). Enable Rectangle crop to\n"
+            "choose the region first."
+        )
+        for btn in (self.ruler_tool_btn, self.profile_tool_btn, self.stats_tool_btn):
+            btn.setEnabled(False)
+        measure_row.addWidget(QLabel("Measure:"))
+        measure_row.addWidget(self.ruler_tool_btn)
+        measure_row.addWidget(self.profile_tool_btn)
+        measure_row.addWidget(self.stats_tool_btn)
+        measure_row.addStretch(1)
+        plot_layout.addLayout(measure_row)
 
         self.pyqt_canvas = SunPyPlotCanvas(theme=self.theme, enable_colorbar=True)
         self.pyqt_canvas.map_plot.showGrid(x=True, y=True, alpha=0.25)
@@ -1956,6 +1990,16 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.crop_check.toggled.connect(self._on_crop_toggled)
         self.apply_crop_btn.clicked.connect(self.apply_axis_crop)
         self.solar_limb_check.toggled.connect(lambda _checked: self._render_current_frame())
+        # Measurement tools (controller owns the click state machine).
+        self.ruler_tool_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("ruler", on))
+        self.profile_tool_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("profile", on))
+        self.stats_tool_btn.clicked.connect(lambda: self._measure.report_region_stats())
+        self.height_time_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("height_time", on))
+        self.ht_fit_btn.clicked.connect(lambda: self._measure.finish_height_time())
+        self.ht_clear_btn.clicked.connect(lambda: self._measure.clear_height_time())
+        self.nrgf_check.toggled.connect(lambda _checked: self._render_current_frame())
+        self.movie_content_combo.currentTextChanged.connect(lambda _t: self._sync_nrgf_enabled())
+        self.hi_jmap_btn.clicked.connect(self.build_hi_jmap)
         self.vector_load_btn.clicked.connect(self.load_vector_field_files)
         self.vector_download_btn.clicked.connect(self.download_vector_field)
         self.vector_show_check.toggled.connect(lambda _checked: self._refresh_vector_overlay())
@@ -2091,6 +2135,22 @@ class SolarDataAnalysisWindow(QMainWindow):
             self._set_crop_mode_checked(False)
         # A light curve is a time profile: it needs at least two frames.
         self.lightcurve_btn.setEnabled(bool(loaded) and len(self._map_frames) >= 2)
+        # Measurement tools follow the loaded state; height-time additionally
+        # needs a time sequence, and NRGF a raw-mode coronagraph view.
+        many = bool(loaded) and len(self._map_frames) >= 2
+        for widget in (self.ruler_tool_btn, self.profile_tool_btn, self.stats_tool_btn):
+            widget.setEnabled(bool(loaded))
+        self.height_time_btn.setEnabled(many)
+        self.hi_jmap_btn.setEnabled(many)
+        self._sync_nrgf_enabled()
+        if not loaded and hasattr(self, "_measure"):
+            for btn in (self.ruler_tool_btn, self.profile_tool_btn, self.height_time_btn):
+                if btn.isChecked():
+                    btn.blockSignals(True)
+                    btn.setChecked(False)
+                    btn.blockSignals(False)
+            self._measure.set_mode(None)
+            self._measure.clear_height_time()
         # White-light coronagraph / heliospheric frames have no EUV RGB
         # composite, HMI overlay or disk active-region concept — keep those
         # disk-only tools disabled (LASCO, STEREO COR1/COR2, HI1/HI2).
@@ -3296,6 +3356,16 @@ class SolarDataAnalysisWindow(QMainWindow):
                 if differenced
                 else " (raw — no matching frame to difference)"
             )
+        elif (
+            mode == "raw"
+            and getattr(self, "nrgf_check", None) is not None
+            and self.nrgf_check.isChecked()
+            and self._effective_instrument_class() == CORONAGRAPH
+        ):
+            # NRGF flattens the corona's radial fall-off on plain frames only;
+            # difference modes already remove the static background.
+            current = self._nrgf_filter_frame(frame, current)
+            title += " (NRGF)"
 
         # Shared with the movie exporter so the preview and the exported video
         # use identical scaling.
@@ -3325,6 +3395,21 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._refresh_limb_overlay()
         self._refresh_region_overlays()
         self._refresh_vector_overlay()
+        if hasattr(self, "_measure"):
+            self._measure.on_frame_changed()
+
+    def _nrgf_filter_frame(self, frame: Any, current: np.ndarray) -> np.ndarray:
+        """NRGF-filter a coronagraph frame; fall back to the raw array on error."""
+        try:
+            from src.Backend.coronagraph import nrgf, solar_center_from_meta
+
+            center = solar_center_from_meta(getattr(frame, "meta", None), data_shape=current.shape)
+            filtered = nrgf(current, center)
+            if np.isfinite(filtered).any():
+                return filtered
+        except Exception:
+            pass
+        return current
 
     def _movie_mode(self) -> str:
         text = self.movie_content_combo.currentText().lower()
@@ -3428,6 +3513,76 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.coord_readout_label.setText(
             f"x={int(x_pix)} px  y={int(y_pix)} px  ·  X={x_arcsec:+.1f}″  Y={y_arcsec:+.1f}″"
         )
+
+    def _on_measure_tool_toggled(self, mode: str, on: bool) -> None:
+        """Keep the checkable measurement tools mutually exclusive (and exclusive
+        with the crop-ROI drag, which also consumes canvas mouse input)."""
+        buttons = {
+            "ruler": self.ruler_tool_btn,
+            "profile": self.profile_tool_btn,
+            "height_time": self.height_time_btn,
+        }
+        if not on:
+            if self._measure.mode == mode:
+                self._measure.set_mode(None)
+            return
+        for other_mode, btn in buttons.items():
+            if other_mode != mode and btn.isChecked():
+                btn.blockSignals(True)
+                btn.setChecked(False)
+                btn.blockSignals(False)
+        if self.crop_check.isChecked():
+            self._set_crop_mode_checked(False)
+        self._measure.set_mode(mode)
+        hints = {
+            "ruler": "Ruler: click the first point on the image.",
+            "profile": "Profile: click the start of the cut.",
+            "height_time": "Height–time: click the CME leading edge on this frame, then step frames.",
+        }
+        self.statusBar().showMessage(hints[mode], 8000)
+
+    def _sync_nrgf_enabled(self) -> None:
+        """NRGF applies to plain frames only — differences already remove the
+        radial background, so the toggle greys out in difference modes."""
+        is_raw = self._movie_mode() == "raw"
+        is_coronagraph = self._effective_instrument_class() == CORONAGRAPH
+        self.nrgf_check.setEnabled(bool(self._map_frames) and is_raw and is_coronagraph)
+        if not is_raw and self.nrgf_check.isChecked():
+            self.nrgf_check.blockSignals(True)
+            self.nrgf_check.setChecked(False)
+            self.nrgf_check.blockSignals(False)
+            self._render_current_frame()
+
+    def build_hi_jmap(self) -> None:
+        """Background-subtract the HI sequence and show its time–elongation J-map."""
+        from src.Backend.hi_jmap import build_jmap, subtract_background
+        from src.Backend.coronagraph import solar_center_from_meta
+        from src.UI.solar_measure_tools import JMapDialog
+
+        if len(self._map_frames) < 2:
+            QMessageBox.information(self, "HI J-map", "Load at least two HI frames first.")
+            return
+        try:
+            arrays = [np.asarray(getattr(f, "data"), dtype=float) for f in self._map_frames]
+            method = str(self.hi_background_combo.currentData() or "median")
+            subtracted = subtract_background(arrays, method=method)
+            frame0 = self._map_frames[0]
+            try:
+                center = solar_center_from_meta(getattr(frame0, "meta", None), data_shape=arrays[0].shape)
+            except Exception:
+                ny, nx = arrays[0].shape
+                center = ((nx - 1) / 2.0, (ny - 1) / 2.0)
+            jmap = build_jmap(subtracted, center, float(self.hi_pa_spin.value()), half_width=1)
+            scale = abs(float(self._current_axis_transform.get("x_scale_arcsec_per_pix", 1.0))) or 1.0
+            radii_arcsec = jmap.radii_pixels * scale
+        except Exception as exc:
+            QMessageBox.critical(self, "HI J-map", f"Could not build the J-map:\n{exc}")
+            return
+        title = f"{self._frames_word()}  ·  PA {int(self.hi_pa_spin.value())}°  ·  {method} background"
+        dialog = JMapDialog(jmap.image, radii_arcsec, title=title, parent=self)
+        self._jmap_dialog = dialog
+        dialog.show()
+        self.statusBar().showMessage("J-map built from the loaded HI sequence.", 6000)
 
     def _on_query_wavelength_changed(self, _index: int) -> None:
         # High-resolution VSO / JSOC / composite only apply to SDO; gate the
@@ -3602,6 +3757,15 @@ class SolarDataAnalysisWindow(QMainWindow):
         if self._current_map_data is None:
             self._set_crop_mode_checked(False)
             return
+        # Crop-ROI dragging and click-measurement modes both consume canvas
+        # mouse input — turning one on turns the other off.
+        if hasattr(self, "_measure") and self._measure.mode is not None:
+            for btn in (self.ruler_tool_btn, self.profile_tool_btn, self.height_time_btn):
+                if btn.isChecked():
+                    btn.blockSignals(True)
+                    btn.setChecked(False)
+                    btn.blockSignals(False)
+            self._measure.set_mode(None)
         if self._active_canvas() is not self.pyqt_canvas:
             self.renderer_combo.setCurrentText("PyQtGraph")
         self.pyqt_canvas.enable_roi_selector()
