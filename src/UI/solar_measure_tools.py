@@ -16,7 +16,7 @@ All science math lives in the pure backends (``image_measure``, ``coronagraph``)
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 import pyqtgraph as pg
@@ -490,6 +490,18 @@ class MeasurementController(QObject):
         if canvas is not None:
             canvas.clear_measurement_overlay()
         self._status("All measurements cleared.")
+
+    def restore_picks(self, picks: Mapping[int, Any]) -> None:
+        """Replace the current height-time picks with a saved set (session open).
+
+        Picks are stored exactly as clicked — ``{frame_index: (when, height_rsun,
+        x_arc, y_arc, pa_deg)}`` — so the tracking table, overlay and fit all pick
+        up where the saved analysis left off.
+        """
+        self.picks = {int(idx): tuple(entry) for idx, entry in dict(picks or {}).items()}
+        self._refresh_tracking_panel()
+        self._sync_ht_buttons()
+        self._refresh_overlay()
 
     def _refresh_tracking_panel(self) -> None:
         panel = getattr(self.window, "tracking_panel", None)

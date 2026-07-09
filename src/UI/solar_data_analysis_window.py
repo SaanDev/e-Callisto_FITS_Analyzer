@@ -83,6 +83,15 @@ from src.Backend.solar_data_analysis import (
 )
 from src.Backend.download_manager import format_bytes, format_eta
 from src.Backend.image_measure import ruler_measurement
+from src.Backend.solar_session import (
+    SolarSessionError,
+    deserialize_picks,
+    read_solar_session,
+    serialize_picks,
+    session_frame_count,
+    session_pick_count,
+    write_solar_session,
+)
 from src.Backend.solar_grid import (
     FRAME_DISPLAY_NAMES as SOLAR_FRAME_DISPLAY_NAMES,
     FRAME_KEYS as SOLAR_FRAME_KEYS,
@@ -1015,6 +1024,16 @@ class SolarDataAnalysisWindow(QMainWindow):
 
         self._search_result: SunPySearchResult | None = None
         self._loaded_paths: list[str] = []
+        # Self-contained analysis session (.ecsolar) state. When opening a
+        # session the frame load is asynchronous, so the restore payload is
+        # stashed here and applied once _apply_loaded_frames lands.
+        self._session_path: str | None = None
+        self._pending_session_restore: dict[str, Any] | None = None
+        # Whether the loaded frames are currently cropped, and the arcsec bounds
+        # that were applied (frozen at Apply Crop time so a session restores the
+        # exact crop even if the spin fields are edited afterwards).
+        self._crop_applied = False
+        self._applied_crop_arcsec: list[float] | None = None
         self._original_frames: list[Any] = []
         self._map_frames: list[Any] = []
         self._map_metadata: dict[str, Any] = {}
@@ -1473,6 +1492,17 @@ class SolarDataAnalysisWindow(QMainWindow):
             pass
 
     def _build_menu_bar(self) -> None:
+        self.session_menu = self.menuBar().addMenu("Session")
+        self.open_session_action = QAction("Open Session…", self)
+        self.save_session_action = QAction("Save Session", self)
+        self.save_session_action.setShortcut("Ctrl+S")
+        self.save_session_as_action = QAction("Save Session As…", self)
+        self.save_session_as_action.setShortcut("Ctrl+Shift+S")
+        self.session_menu.addAction(self.open_session_action)
+        self.session_menu.addSeparator()
+        self.session_menu.addAction(self.save_session_action)
+        self.session_menu.addAction(self.save_session_as_action)
+
         self.data_menu = self.menuBar().addMenu("Data")
         self.fetch_action = QAction("Fetch Archive Records", self)
         self.find_latest_action = QAction("Find Latest Available", self)
@@ -2625,6 +2655,9 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.export_regions_btn.clicked.connect(self.export_regions_csv)
         self.export_movie_btn.clicked.connect(self.export_movie)
         self.quick_mp4_btn.clicked.connect(lambda: self.export_movie(default_suffix=".mp4"))
+        self.open_session_action.triggered.connect(self.open_session)
+        self.save_session_action.triggered.connect(self.save_session)
+        self.save_session_as_action.triggered.connect(self.save_session_as)
         self.fetch_action.triggered.connect(self.search_archives)
         self.find_latest_action.triggered.connect(self.find_latest_data)
         self.live_preview_action.triggered.connect(self.open_helioviewer_preview)
@@ -2830,6 +2863,11 @@ class SolarDataAnalysisWindow(QMainWindow):
         busy = bool(getattr(self, "_busy", False))
         has_results = bool(self._search_result and self._search_result.rows)
         has_regions = bool(self._regions)
+        if hasattr(self, "open_session_action"):
+            self.open_session_action.setEnabled(not busy)
+            # Saving a session embeds the loaded FITS, so it needs loaded frames.
+            self.save_session_action.setEnabled((not busy) and bool(loaded))
+            self.save_session_as_action.setEnabled((not busy) and bool(loaded))
         for action in (self.fetch_action, self.find_latest_action, self.upload_action, self.use_analyzer_action):
             action.setEnabled(not busy)
         self.load_selected_action.setEnabled((not busy) and has_results)
@@ -3418,6 +3456,8 @@ class SolarDataAnalysisWindow(QMainWindow):
 
     @Slot(str)
     def _on_worker_failed(self, tb_text: str):
+        # A failed load must not leave a session restore pending for the next one.
+        self._pending_session_restore = None
         short = str(tb_text).strip().splitlines()[-1] if tb_text else "Unknown error"
         self.statusBar().showMessage("Solar data operation failed.", 5000)
         self.analysis_text.setPlainText("Operation failed.\n\n" + short)
@@ -3434,6 +3474,7 @@ class SolarDataAnalysisWindow(QMainWindow):
 
     @Slot()
     def _on_worker_cancelled(self):
+        self._pending_session_restore = None
         self.statusBar().showMessage("Operation cancelled.", 5000)
         self.analysis_text.setPlainText("Operation cancelled by user.")
 
@@ -3688,6 +3729,8 @@ class SolarDataAnalysisWindow(QMainWindow):
         # Differencing frames with unequal exposure times in raw DN creates
         # false signal, so remember whether normalisation to DN/s is needed.
         self._exposure_varies = exposures_differ(frames)
+        self._crop_applied = False
+        self._applied_crop_arcsec = None
         self._loaded_paths = list(paths or [])
         self._original_frames = list(frames)
         self._map_frames = list(frames)
@@ -3721,6 +3764,19 @@ class SolarDataAnalysisWindow(QMainWindow):
         details_bar.setValue(details_bar.maximum())
         self._update_load_summary()
         self._apply_instrument_visibility()
+        # If these frames were loaded to restore a saved session, replay the
+        # saved display state and CME picks now that the sequence is in memory.
+        if self._pending_session_restore is not None:
+            pending, self._pending_session_restore = self._pending_session_restore, None
+            try:
+                self._apply_session_restore(pending)
+            except Exception as exc:  # noqa: BLE001 - a bad session must not crash the load
+                QMessageBox.warning(
+                    self,
+                    "Open Session",
+                    f"Frames loaded, but the saved analysis state could not be fully "
+                    f"restored:\n{exc}",
+                )
 
     def _update_load_summary(self) -> None:
         """Refresh the always-visible 'what is loaded' line in the sidebar."""
@@ -4618,6 +4674,14 @@ class SolarDataAnalysisWindow(QMainWindow):
             self._reset_canvas_views()
             self._render_current_frame()
             self._set_crop_mode_checked(False)
+            # Remember the applied crop so a saved session can reproduce it.
+            self._crop_applied = True
+            self._applied_crop_arcsec = [
+                float(self.crop_x0_spin.value()),
+                float(self.crop_x1_spin.value()),
+                float(self.crop_y0_spin.value()),
+                float(self.crop_y1_spin.value()),
+            ]
             self.analysis_text.setPlainText(
                 f"Applied crop x=[{bounds[0]},{bounds[1]}], y=[{bounds[2]},{bounds[3]}].\n"
                 + self._frame_resolution_status(self._map_frames)
@@ -4638,6 +4702,8 @@ class SolarDataAnalysisWindow(QMainWindow):
         if not self._original_frames:
             return
         self._map_frames = list(self._original_frames)
+        self._crop_applied = False
+        self._applied_crop_arcsec = None
         self._regions = []
         self.region_table.setRowCount(0)
         self._current_frame_index = 0
@@ -5187,6 +5253,272 @@ class SolarDataAnalysisWindow(QMainWindow):
             self.analysis_text.setPlainText(note)
         except Exception as exc:
             QMessageBox.critical(self, "Composite Plot", str(exc))
+
+    # ------------------------------------------------------------ sessions
+    def _session_extract_dir(self, session_path: str) -> Path:
+        """A per-session folder under the cache to unpack embedded frames into."""
+        stem = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(session_path).stem) or "session"
+        return Path(self.cache_dir) / "sessions" / stem
+
+    def _default_session_name(self) -> str:
+        label = re.sub(r"[^A-Za-z0-9]+", "_", self._loaded_instrument_label() or "solar").strip("_")
+        label = label or "solar"
+        stamp = ""
+        if self._map_frames:
+            try:
+                when = frame_observation_time(self._map_frames[0])
+                if isinstance(when, datetime):
+                    stamp = when.strftime("_%Y%m%d_%H%M")
+            except Exception:
+                stamp = ""
+        return f"{label}{stamp}.ecsolar"
+
+    def _collect_session_meta(self) -> dict[str, Any]:
+        """Snapshot the display state and CME picks for a saved session.
+
+        The FITS frames themselves are embedded separately by the writer; this
+        captures only what cannot be re-derived from the files.
+        """
+        picks = getattr(getattr(self, "_measure", None), "picks", {}) or {}
+        frame_times: list[str | None] = []
+        for frame in self._map_frames:
+            when = None
+            try:
+                when = frame_observation_time(frame)
+            except Exception:
+                when = None
+            frame_times.append(when.isoformat() if isinstance(when, datetime) else None)
+        view = {
+            "renderer": self.renderer_combo.currentText(),
+            "colormap": self.colormap_combo.currentText(),
+            "scale": self.scale_combo.currentText(),
+            "clip_low": float(self.clip_low_slider.value()),
+            "clip_high": float(self.clip_high_slider.value()),
+            "difference_mode": self.movie_content_combo.currentText(),
+            "movie_format": self.movie_format_combo.currentText(),
+            "nrgf": bool(self.nrgf_check.isChecked()),
+            "fps": float(self.fps_spin.value()),
+            "solar_limb": bool(self.solar_limb_check.isChecked()),
+            "grid": bool(self.grid_check.isChecked()),
+            "grid_frame": self.grid_frame_combo.currentText(),
+            "colorbar": bool(self.colorbar_check.isChecked()),
+            "region_overlay": bool(self.region_overlay_check.isChecked()),
+            "mag_threshold": int(self.mag_threshold_spin.value()),
+            "crop_applied": bool(self._crop_applied),
+            "crop_bounds": list(self._applied_crop_arcsec) if self._applied_crop_arcsec else None,
+            "current_frame_index": int(self._current_frame_index),
+            "frame_count": len(self._map_frames),
+        }
+        source = {
+            "instrument_label": self._loaded_instrument_label(),
+            "observable_index": int(self.wavelength_combo.currentIndex()),
+            "observable_text": self.wavelength_combo.currentText(),
+            "start": self.start_dt_edit.dateTime().toPython().replace(tzinfo=None).isoformat(),
+            "end": self.end_dt_edit.dateTime().toPython().replace(tzinfo=None).isoformat(),
+            "sample_seconds": int(self.sample_seconds_spin.value()),
+            "max_records": int(self.max_records_spin.value()),
+            "high_resolution": bool(self.high_resolution_check.isChecked()),
+            "exposure_varies": bool(self._exposure_varies),
+            "frame_count": len(self._map_frames),
+            "frame_times": frame_times,
+        }
+        return {
+            "source": source,
+            "view": view,
+            "measurements": {"height_time_picks": serialize_picks(picks)},
+        }
+
+    def save_session(self) -> bool:
+        """Save to the current session file, or prompt if there isn't one yet."""
+        if self._session_path:
+            return self._write_session_to(self._session_path)
+        return self.save_session_as()
+
+    def save_session_as(self) -> bool:
+        if not self._map_frames or not self._loaded_paths:
+            QMessageBox.information(
+                self,
+                "Save Session",
+                "Load or upload solar frames before saving a session.",
+            )
+            return False
+        default = self._default_session_name()
+        if self._session_path:
+            default = str(Path(self._session_path).with_name(default))
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Solar Session", default, "Solar session (*.ecsolar)"
+        )
+        if not path:
+            return False
+        if not path.lower().endswith(".ecsolar"):
+            path += ".ecsolar"
+        return self._write_session_to(path)
+
+    def _write_session_to(self, path: str) -> bool:
+        try:
+            meta = self._collect_session_meta()
+            count = write_solar_session(path, meta=meta, frame_paths=self._loaded_paths)
+        except SolarSessionError as exc:
+            QMessageBox.critical(self, "Save Session Failed", str(exc))
+            return False
+        except Exception as exc:  # noqa: BLE001 - surface any I/O failure to the user
+            QMessageBox.critical(self, "Save Session Failed", f"Could not save session:\n{exc}")
+            return False
+        self._session_path = path
+        picks = session_pick_count(meta)
+        self.statusBar().showMessage(
+            f"Session saved: {Path(path).name}  ·  {count} frame(s), {picks} CME pick(s) embedded.",
+            7000,
+        )
+        return True
+
+    def open_session(self) -> None:
+        if self._busy or self.is_operation_running():
+            QMessageBox.information(
+                self, "Open Session", "Wait for the current operation to finish before opening a session."
+            )
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Solar Session", "", "Solar session (*.ecsolar);;All files (*)"
+        )
+        if not path:
+            return
+        extract_dir = self._session_extract_dir(path)
+        try:
+            # Start from a clean extraction folder so a re-open never mixes in
+            # stale frames from a previous session with the same name.
+            if extract_dir.exists():
+                shutil.rmtree(extract_dir, ignore_errors=True)
+            result = read_solar_session(path, extract_dir=str(extract_dir))
+        except SolarSessionError as exc:
+            QMessageBox.critical(self, "Open Session Failed", str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 - surface any I/O failure to the user
+            QMessageBox.critical(self, "Open Session Failed", f"Could not open session:\n{exc}")
+            return
+        self._session_path = path
+        self._pending_session_restore = result.meta
+        self.statusBar().showMessage(
+            f"Opening session: {session_frame_count(result.meta)} frame(s), "
+            f"{session_pick_count(result.meta)} CME pick(s)…",
+            6000,
+        )
+        # Frames load asynchronously; _apply_loaded_frames applies the restore.
+        self.load_local_paths(result.frame_paths)
+
+    def _apply_session_restore(self, meta: dict[str, Any]) -> None:
+        """Replay saved display state and CME picks after the frames reload."""
+        view = dict(meta.get("view") or {})
+        source = dict(meta.get("source") or {})
+        n = len(self._map_frames)
+
+        saved_count = int(source.get("frame_count") or view.get("frame_count") or 0)
+        if saved_count and saved_count != n:
+            self.statusBar().showMessage(
+                f"Session had {saved_count} frame(s) but {n} reloaded — "
+                "picks are realigned by frame index.",
+                8000,
+            )
+
+        self._restore_source_widgets(source)
+        self._restore_view_widgets(view)
+
+        # Frames always reload uncropped, so re-apply the saved crop.
+        if view.get("crop_applied"):
+            bounds = view.get("crop_bounds") or []
+            if len(bounds) == 4:
+                spins = (self.crop_x0_spin, self.crop_x1_spin, self.crop_y0_spin, self.crop_y1_spin)
+                for spin, value in zip(spins, bounds):
+                    was = spin.blockSignals(True)
+                    spin.setValue(float(value))
+                    spin.blockSignals(was)
+                self.apply_axis_crop()
+                n = len(self._map_frames)
+
+        # Restore height-time picks, dropping any that fall outside the range.
+        picks = deserialize_picks((meta.get("measurements") or {}).get("height_time_picks"))
+        picks = {idx: entry for idx, entry in picks.items() if 0 <= idx < n}
+        if hasattr(self, "_measure"):
+            self._measure.restore_picks(picks)
+        self._sync_tracking_panel_visibility()
+
+        # Land on the saved frame and render with the restored display state.
+        target = int(view.get("current_frame_index", 0) or 0)
+        self._set_frame_index(max(0, min(target, max(0, n - 1))))
+        self._refresh_graticule_overlay()
+        self._refresh_region_overlays()
+
+        # Recompute the fit so the tracking panel shows the CME kinematics again.
+        if len(picks) >= 2 and hasattr(self, "_measure"):
+            self._measure.finish_height_time()
+
+        self.statusBar().showMessage(
+            f"Session restored: {n} frame(s), {len(picks)} CME pick(s).", 7000
+        )
+
+    def _restore_source_widgets(self, source: dict[str, Any]) -> None:
+        idx = source.get("observable_index")
+        if isinstance(idx, int) and 0 <= idx < self.wavelength_combo.count():
+            was = self.wavelength_combo.blockSignals(True)
+            self.wavelength_combo.setCurrentIndex(idx)
+            self.wavelength_combo.blockSignals(was)
+        for key, edit in (("start", self.start_dt_edit), ("end", self.end_dt_edit)):
+            text = source.get(key)
+            if not text:
+                continue
+            try:
+                dt = datetime.fromisoformat(str(text)).replace(tzinfo=None)
+            except ValueError:
+                continue
+            was = edit.blockSignals(True)
+            edit.setDateTime(QDateTime(dt))
+            edit.blockSignals(was)
+
+    def _restore_view_widgets(self, view: dict[str, Any]) -> None:
+        for combo, text in (
+            (self.renderer_combo, view.get("renderer")),
+            (self.colormap_combo, view.get("colormap")),
+            (self.scale_combo, view.get("scale")),
+            (self.movie_content_combo, view.get("difference_mode")),
+            (self.movie_format_combo, view.get("movie_format")),
+            (self.grid_frame_combo, view.get("grid_frame")),
+        ):
+            if text:
+                was = combo.blockSignals(True)
+                combo.setCurrentText(str(text))
+                combo.blockSignals(was)
+        for check, value in (
+            (self.grid_check, view.get("grid")),
+            (self.colorbar_check, view.get("colorbar")),
+            (self.region_overlay_check, view.get("region_overlay")),
+            (self.solar_limb_check, view.get("solar_limb")),
+            (self.nrgf_check, view.get("nrgf")),
+        ):
+            if value is not None:
+                was = check.blockSignals(True)
+                check.setChecked(bool(value))
+                check.blockSignals(was)
+        for slider, value in (
+            (self.clip_low_slider, view.get("clip_low")),
+            (self.clip_high_slider, view.get("clip_high")),
+        ):
+            if value is not None:
+                was = slider.blockSignals(True)
+                slider.setValue(float(value))
+                slider.blockSignals(was)
+        for spin, value in (
+            (self.fps_spin, view.get("fps")),
+            (self.mag_threshold_spin, view.get("mag_threshold")),
+        ):
+            if value is not None:
+                was = spin.blockSignals(True)
+                spin.setValue(type(spin.value())(value))
+                spin.blockSignals(was)
+        # Swap to the saved renderer and push colorbar/colormap/grid onto the
+        # now-active canvas (their toggle handlers were bypassed above).
+        self._on_renderer_changed(self.renderer_combo.currentText())
+        self._on_colorbar_toggled(self.colorbar_check.isChecked())
+        self._sync_nrgf_enabled()
 
     def export_plot(self):
         canvas = self._active_canvas()
