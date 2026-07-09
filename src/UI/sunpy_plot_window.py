@@ -161,6 +161,7 @@ class SunPyPlotCanvas(QWidget):
         self._axis_transform: dict[str, float] = self._default_axis_transform()
         self._last_map_bounds: tuple[float, float, float, float] | None = None
         self._region_overlay_items: list[Any] = []
+        self._graticule_items: list[Any] = []
         self._map_square_enabled = True
         self._colorbar_visible = True
         self._last_map_levels: tuple[float, float] | None = None
@@ -692,7 +693,64 @@ class SunPyPlotCanvas(QWidget):
         return self.map_image.image is not None
 
     def set_grid_visible(self, visible: bool) -> None:
-        self.map_plot.showGrid(x=bool(visible), y=bool(visible), alpha=0.25 if visible else 0.0)
+        # The "Coordinate Grid" control now draws a curvilinear solar-coordinate
+        # graticule (see set_solar_graticule); the plain rectilinear arcsec grid
+        # is intentionally left off so the two do not overlap.
+        self.map_plot.showGrid(x=False, y=False, alpha=0.0)
+
+    def clear_solar_graticule(self) -> None:
+        for item in list(getattr(self, "_graticule_items", [])):
+            try:
+                self.map_plot.removeItem(item)
+            except Exception:
+                pass
+        self._graticule_items = []
+
+    def set_solar_graticule(
+        self,
+        polylines: Sequence[tuple[np.ndarray, np.ndarray]] | None,
+        labels: Sequence[tuple[str, float, float]] | None = None,
+        *,
+        visible: bool = True,
+    ) -> None:
+        """Draw the solar-coordinate graticule (arcsec view coordinates).
+
+        ``polylines`` are (x_arcsec, y_arcsec) arrays with NaN where a point is on
+        the far hemisphere, so the meridians/parallels break cleanly at the limb.
+        """
+        self.clear_solar_graticule()
+        if not visible or not polylines:
+            return
+        pen = pg.mkPen((150, 200, 255, 150), width=1.0, style=Qt.DashLine)
+        for xs, ys in polylines:
+            x = np.asarray(xs, dtype=float)
+            y = np.asarray(ys, dtype=float)
+            if x.size < 2 or x.size != y.size:
+                continue
+            if not np.any(np.isfinite(x) & np.isfinite(y)):
+                continue
+            curve = pg.PlotCurveItem(pen=pen, antialias=True)
+            curve.setData(x, y, connect="finite")
+            curve.setZValue(18)
+            self.map_plot.addItem(curve)
+            self._graticule_items.append(curve)
+        for label in labels or []:
+            try:
+                text, lx, ly = label
+                lx = float(lx)
+                ly = float(ly)
+            except Exception:
+                continue
+            if not (np.isfinite(lx) and np.isfinite(ly)):
+                continue
+            item = pg.TextItem(str(text), color=(170, 210, 255), anchor=(0.5, 0.5))
+            item.setZValue(19)
+            item.setPos(lx, ly)
+            self.map_plot.addItem(item)
+            self._graticule_items.append(item)
+
+    def has_solar_graticule(self) -> bool:
+        return bool(getattr(self, "_graticule_items", []))
 
     def enable_roi_selector(self):
         """Show an interactive ROI box (default: central quarter) and emit its

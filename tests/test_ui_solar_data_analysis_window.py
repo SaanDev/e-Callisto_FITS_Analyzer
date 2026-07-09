@@ -512,6 +512,61 @@ def test_canvas_pixel_arcsec_roundtrip_and_hover_readout():
     win.close()
 
 
+def _real_disk_map():
+    """A real Earth-view full-disk helioprojective sunpy Map (offline)."""
+    astropy_units = pytest.importorskip("astropy.units")
+    pytest.importorskip("sunpy.map")
+    from astropy.coordinates import SkyCoord
+    import sunpy.map
+    from sunpy.coordinates import get_earth
+    from sunpy.map.header_helper import make_fitswcs_header
+
+    obstime = "2020-01-01T00:00:00"
+    data = np.zeros((64, 64))
+    ref = SkyCoord(
+        0 * astropy_units.arcsec,
+        0 * astropy_units.arcsec,
+        obstime=obstime,
+        observer=get_earth(obstime),
+        frame="helioprojective",
+    )
+    header = make_fitswcs_header(data, ref, scale=[40, 40] * astropy_units.arcsec / astropy_units.pix)
+    return sunpy.map.Map(data, header)
+
+
+def test_solar_coordinate_graticule_and_hci_hover():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames([_real_disk_map()], paths=["disk.fits"], metadata={})
+    win._render_current_frame()
+
+    # Grid is on by default -> the curvilinear graticule is drawn on the canvas.
+    assert win.grid_check.isChecked()
+    assert win.pyqt_canvas.has_solar_graticule()
+
+    # Hovering the disk centre adds the HCI longitude/latitude to the readout.
+    win._on_canvas_hover(0.0, 0.0)
+    text = win.coord_readout_label.text()
+    assert "HCI lon=" in text and "lat=" in text
+    assert "R☉" in text and "PA" in text and "px" in text
+
+    # Switching the frame relabels the readout (Stonyhurst -> HGS).
+    win.grid_frame_combo.setCurrentText(solar_mod.SOLAR_FRAME_DISPLAY_NAMES["HGS"])
+    win._hover_lonlat_key = None  # bypass the per-pixel cache for the assertion
+    win._on_canvas_hover(0.0, 0.0)
+    assert "HGS lon=" in win.coord_readout_label.text()
+
+    # The graticule follows a renderer switch onto the Matplotlib canvas.
+    win.renderer_combo.setCurrentText("Matplotlib")
+    QApplication.processEvents()
+    assert win.matplotlib_canvas.has_solar_graticule()
+
+    # Turning the grid off hides the graticule on the active canvas.
+    win.grid_check.setChecked(False)
+    assert not win.matplotlib_canvas.has_solar_graticule()
+    win.close()
+
+
 def test_sidebar_master_collapse_and_restore():
     _app()
     win = SolarDataAnalysisWindow()

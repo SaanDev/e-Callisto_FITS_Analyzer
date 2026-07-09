@@ -83,6 +83,14 @@ from src.Backend.solar_data_analysis import (
 )
 from src.Backend.download_manager import format_bytes, format_eta
 from src.Backend.image_measure import ruler_measurement
+from src.Backend.solar_grid import (
+    FRAME_DISPLAY_NAMES as SOLAR_FRAME_DISPLAY_NAMES,
+    FRAME_KEYS as SOLAR_FRAME_KEYS,
+    FRAME_LABELS as SOLAR_FRAME_LABELS,
+    frame_key_from_display as solar_frame_key_from_display,
+    graticule_arcsec,
+    point_lonlat,
+)
 from src.Backend.instrument_profiles import (
     CORONAGRAPH,
     DISK_EUV,
@@ -481,6 +489,9 @@ class SolarMatplotlibCanvas(QWidget):
         self._limb_y: np.ndarray | None = None
         self._limb_visible = False
         self._vector_geometry: Any | None = None
+        self._graticule_polylines: list[tuple[np.ndarray, np.ndarray]] = []
+        self._graticule_labels: list[tuple[str, float, float]] = []
+        self._graticule_visible = False
         self._last_plot: dict[str, Any] | None = None
 
         layout = QVBoxLayout(self)
@@ -541,13 +552,11 @@ class SolarMatplotlibCanvas(QWidget):
         return None
 
     def set_grid_visible(self, visible: bool) -> None:
+        # The "Coordinate Grid" control now draws the curvilinear solar-coordinate
+        # graticule (see set_solar_graticule); keep the plain rectilinear grid off
+        # so the two do not overlap.
         if getattr(self, "ax", None) is not None:
-            # Passing line styling together with grid(False) makes matplotlib
-            # warn and enable the grid anyway, so only style when turning it on.
-            if visible:
-                self.ax.grid(True, color="#7f8fa3" if self._is_dark_ui() else "#b8c4d2", alpha=0.25)
-            else:
-                self.ax.grid(False)
+            self.ax.grid(False)
             self.canvas.draw_idle()
 
     def clear_plot(self) -> None:
@@ -622,7 +631,9 @@ class SolarMatplotlibCanvas(QWidget):
         self.ax.tick_params(colors=fg)
         for spine in self.ax.spines.values():
             spine.set_color(fg)
-        self.ax.grid(True, color="#7f8fa3" if dark else "#b8c4d2", alpha=0.25)
+        # The rectilinear grid is replaced by the solar-coordinate graticule,
+        # which is drawn (when enabled) as part of _draw_overlays below.
+        self.ax.grid(False)
         # Square the view around the data centre so the equal-aspect image, the
         # square box and the axis limits all agree (otherwise matplotlib warns
         # and drops the y-limits to satisfy the fixed data aspect).
@@ -702,6 +713,29 @@ class SolarMatplotlibCanvas(QWidget):
         self._draw_overlays()
         self.canvas.draw_idle()
 
+    def set_solar_graticule(
+        self,
+        polylines: Any | None,
+        labels: Any | None = None,
+        *,
+        visible: bool = True,
+    ) -> None:
+        if visible and polylines:
+            self._graticule_polylines = [
+                (np.asarray(xs, dtype=float), np.asarray(ys, dtype=float)) for xs, ys in polylines
+            ]
+            self._graticule_labels = list(labels or [])
+            self._graticule_visible = True
+        else:
+            self._graticule_polylines = []
+            self._graticule_labels = []
+            self._graticule_visible = False
+        self._draw_overlays()
+        self.canvas.draw_idle()
+
+    def has_solar_graticule(self) -> bool:
+        return bool(self._graticule_visible and self._graticule_polylines)
+
     def has_vector_field_overlay(self) -> bool:
         geometry = self._vector_geometry
         if geometry is None:
@@ -723,6 +757,24 @@ class SolarMatplotlibCanvas(QWidget):
             except Exception:
                 pass
         self._overlay_artists = []
+        if self._graticule_visible and self._graticule_polylines:
+            for xs, ys in self._graticule_polylines:
+                if xs.size < 2 or xs.size != ys.size or not np.any(np.isfinite(xs) & np.isfinite(ys)):
+                    continue
+                # NaN gaps break the curve cleanly at the limb (near/far side).
+                (line,) = self.ax.plot(xs, ys, color="#96c8ff", linewidth=0.8, linestyle=":", alpha=0.6, zorder=2)
+                self._overlay_artists.append(line)
+            for label in self._graticule_labels:
+                try:
+                    text, lx, ly = label
+                    lx = float(lx)
+                    ly = float(ly)
+                except Exception:
+                    continue
+                if not (np.isfinite(lx) and np.isfinite(ly)):
+                    continue
+                item = self.ax.text(lx, ly, str(text), color="#aad2ff", fontsize=7, ha="center", va="center", zorder=2)
+                self._overlay_artists.append(item)
         if self._limb_visible and self._limb_x is not None and self._limb_y is not None:
             (line,) = self.ax.plot(self._limb_x, self._limb_y, color="#45ff9a", linewidth=1.4)
             self._overlay_artists.append(line)
@@ -1044,7 +1096,7 @@ class SolarDataAnalysisWindow(QMainWindow):
             "  2. Archive Results — check the rows you want and click Load Selected.\n"
             "  3. Analysis — plot, difference, composite, measure and track CMEs;\n"
             "     use the playback bar under the image to step through the sequence.\n"
-            "Tip: hover the image for solar coordinates (R☉, position angle, pixel)."
+            "Tip: hover the image for solar coordinates (HCI lon/lat, R☉, position angle, pixel)."
         )
         self.statusBar().showMessage("Ready.")
 
@@ -2248,6 +2300,18 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.solar_limb_check = QCheckBox("Solar Limb")
         self.grid_check = QCheckBox("Coordinate Grid")
         self.grid_check.setChecked(True)
+        self.grid_check.setToolTip(
+            "Overlay a solar-coordinate graticule (meridians and parallels) on the\n"
+            "disk, projected from the selected reference frame."
+        )
+        self.grid_frame_combo = QComboBox()
+        self.grid_frame_combo.addItems([SOLAR_FRAME_DISPLAY_NAMES[key] for key in SOLAR_FRAME_KEYS])
+        self.grid_frame_combo.setCurrentText(SOLAR_FRAME_DISPLAY_NAMES["HCI"])
+        self.grid_frame_combo.setToolTip(
+            "Reference frame for the coordinate grid and the live hover readout:\n"
+            "  • HCI  — Heliocentric Inertial (fixed in space)\n"
+            "  • Stonyhurst / Carrington — heliographic longitude systems"
+        )
         self.colorbar_check = QCheckBox("Colorbar")
         self.colorbar_check.setChecked(True)
         self.region_overlay_check = QCheckBox("Region Overlays")
@@ -2274,6 +2338,9 @@ class SolarDataAnalysisWindow(QMainWindow):
         row += 1
         layout.addWidget(self.solar_limb_check, row, 0)
         layout.addWidget(self.grid_check, row, 1)
+        row += 1
+        layout.addWidget(self._field_label("Grid frame"), row, 0)
+        layout.addWidget(self.grid_frame_combo, row, 1)
         row += 1
         layout.addWidget(self.colorbar_check, row, 0)
         layout.addWidget(self.region_overlay_check, row, 1)
@@ -2550,6 +2617,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.vector_spacing_spin.valueChanged.connect(lambda _value: self._refresh_vector_overlay())
         self.vector_threshold_spin.valueChanged.connect(lambda _value: self._refresh_vector_overlay())
         self.grid_check.toggled.connect(self._on_grid_toggled)
+        self.grid_frame_combo.currentTextChanged.connect(lambda _text: self._refresh_graticule_overlay())
         self.colorbar_check.toggled.connect(self._on_colorbar_toggled)
         self.region_overlay_check.toggled.connect(self._refresh_region_overlays)
         self.export_plot_btn.clicked.connect(self.export_plot)
@@ -3960,6 +4028,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.plot_title_label.setText(title)
         self._refresh_limb_overlay()
         self._refresh_region_overlays()
+        self._refresh_graticule_overlay()
         self._refresh_vector_overlay()
         if hasattr(self, "_measure"):
             self._measure.on_frame_changed()
@@ -4065,10 +4134,12 @@ class SolarDataAnalysisWindow(QMainWindow):
     def _on_canvas_hover(self, x_arcsec: float | None, y_arcsec: float | None) -> None:
         """Live solar coordinate readout as the cursor moves over the map.
 
-        Shows the physically meaningful measures — distance from Sun centre in
-        solar radii and the position angle (N→E) — plus the pixel position. The
-        canvas plots in helioprojective view coordinates where disk centre is
-        (0, 0), so radius and PA follow directly from the hover position.
+        Shows the point's heliographic longitude/latitude in the selected frame
+        (HCI by default) when it lands on the disk, alongside the distance from
+        Sun centre in solar radii, the position angle (N→E) and the pixel
+        position. The canvas plots in helioprojective view coordinates where disk
+        centre is (0, 0), so radius and PA follow directly from the hover
+        position; lon/lat comes from projecting the point onto the solar surface.
         """
         if x_arcsec is None or y_arcsec is None or self._current_map_data is None:
             self.coord_readout_label.setText("")
@@ -4090,9 +4161,36 @@ class SolarDataAnalysisWindow(QMainWindow):
         rsun = self._solar_radius_arcsec(frame) if frame is not None else 960.0
         r_rsun = float(np.hypot(x_arcsec, y_arcsec)) / rsun if rsun > 0 else float("nan")
         pa_deg = ruler_measurement((0.0, 0.0), (x_arcsec, y_arcsec)).position_angle_deg
+        lonlat_text = self._hover_lonlat_text(frame, float(x_arcsec), float(y_arcsec), int(x_pix), int(y_pix))
         self.coord_readout_label.setText(
-            f"r = {r_rsun:.2f} R☉  ·  PA {pa_deg:.1f}°  ·  x={int(x_pix)} y={int(y_pix)} px"
+            f"{lonlat_text}r = {r_rsun:.2f} R☉  ·  PA {pa_deg:.1f}°  ·  x={int(x_pix)} y={int(y_pix)} px"
         )
+
+    def _hover_lonlat_text(self, frame: Any, x_arcsec: float, y_arcsec: float, x_pix: int, y_pix: int) -> str:
+        """Selected-frame lon/lat prefix for the hover readout ('' when off-disk).
+
+        The heliographic transform is comparatively expensive, so its result is
+        cached per (frame, frame key, integer pixel) — the readout only recomputes
+        when the cursor actually crosses into a new pixel.
+        """
+        if frame is None:
+            return ""
+        frame_key = self._grid_frame_key()
+        cache_key = (id(frame), frame_key, x_pix, y_pix)
+        if getattr(self, "_hover_lonlat_key", None) == cache_key:
+            return self._hover_lonlat_value
+        try:
+            lonlat = point_lonlat(x_arcsec, y_arcsec, frame, frame_key=frame_key)
+        except Exception:
+            lonlat = None
+        if lonlat is None:
+            text = ""
+        else:
+            lon, lat = lonlat
+            text = f"{SOLAR_FRAME_LABELS.get(frame_key, frame_key)} lon={lon:.1f}° lat={lat:.1f}°  ·  "
+        self._hover_lonlat_key = cache_key
+        self._hover_lonlat_value = text
+        return text
 
     def _on_measure_tool_toggled(self, mode: str, on: bool) -> None:
         """Keep the checkable measurement tools mutually exclusive (and exclusive
@@ -4380,11 +4478,14 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._render_current_frame()
 
     def _on_grid_toggled(self, checked: bool) -> None:
+        # Keep the plain rectilinear grid off on both canvases (it is replaced by
+        # the solar-coordinate graticule) and (re)draw the graticule itself.
         for canvas in self._all_plot_canvases():
             if hasattr(canvas, "set_grid_visible"):
-                canvas.set_grid_visible(bool(checked))
-            elif hasattr(canvas, "map_plot"):
-                canvas.map_plot.showGrid(x=bool(checked), y=bool(checked), alpha=0.25)
+                canvas.set_grid_visible(False)
+        # The frame combo also selects the frame for the live hover readout, so it
+        # stays enabled even when the graticule itself is hidden.
+        self._refresh_graticule_overlay()
 
     def _on_colorbar_toggled(self, checked: bool) -> None:
         for canvas in self._all_plot_canvases():
@@ -4732,6 +4833,41 @@ class SolarDataAnalysisWindow(QMainWindow):
         radius = self._solar_radius_arcsec(frame)
         theta = np.linspace(0.0, 2.0 * np.pi, 720)
         self._active_canvas().set_aia_limb_overlay(radius * np.cos(theta), radius * np.sin(theta), visible=True)
+
+    def _grid_frame_key(self) -> str:
+        return solar_frame_key_from_display(self.grid_frame_combo.currentText())
+
+    def _refresh_graticule_overlay(self) -> None:
+        """Draw the solar-coordinate graticule for the current frame and frame key.
+
+        Degrades silently (hides the graticule) for frames without a usable solar
+        coordinate system, mirroring how the limb overlay handles non-solar data.
+        """
+        canvas = self._active_canvas()
+        if not hasattr(canvas, "set_solar_graticule"):
+            return
+        if not self.grid_check.isChecked() or not self._map_frames:
+            canvas.set_solar_graticule(None, None, visible=False)
+            return
+        frame = self._map_frames[self._current_frame_index]
+        frame_key = self._grid_frame_key()
+        # Cache per (frame, frame key) so stepping/playing a sequence with the grid
+        # on does not recompute the ~dozens of coordinate transforms each render.
+        cache = getattr(self, "_graticule_cache", None)
+        if cache is None:
+            cache = self._graticule_cache = {}
+        cache_key = (id(frame), frame_key)
+        if cache_key in cache:
+            polylines, labels = cache[cache_key]
+        else:
+            try:
+                polylines, labels = graticule_arcsec(frame, frame_key=frame_key)
+            except Exception:
+                polylines, labels = [], []
+            if len(cache) > 128:
+                cache.clear()
+            cache[cache_key] = (polylines, labels)
+        canvas.set_solar_graticule(polylines, labels, visible=bool(polylines))
 
     def _solar_radius_arcsec(self, frame: Any) -> float:
         for attr in ("rsun_obs", "rsun_arcseconds"):
