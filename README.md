@@ -7,11 +7,15 @@ A desktop application for visualizing, processing, and analyzing e-CALLISTO sola
 
 Compared with v2.6.0, this release adds the following capabilities:
 
-### Solar Data Analysis
-- **Dedicated SDO/AIA workspace:** open **Analysis -> Solar Data Analysis** to search/load AIA image sequences without changing the existing SunPy Multi-Mission Explorer.
-- **Image analysis tools:** plot AIA frames, crop by ROI, render running/base differences, detect bright active-region candidates, and optionally fetch NOAA/HEK active-region labels.
-- **Composite and movie exports:** create simple AIA RGB composites, export plot/cropped FITS/region CSV outputs, and save AIA movies as GIF or MP4.
-- **Local and archive inputs:** load local AIA FITS/FITS.GZ files or reuse the existing SunPy archive search/download/cache pipeline.
+### Solar Image Analysis workspace
+- **Multi-mission imaging:** the former SDO/AIA workspace has grown into **Analysis → Solar Image Analysis (SDO · SOHO/LASCO · STEREO · GOES/SUVI)**, supporting SDO/AIA and HMI, SOHO/LASCO C2/C3, STEREO-A/B SECCHI (EUVI, COR1, COR2, HI1, HI2), and GOES/SUVI — searched and downloaded through the shared SunPy cache or loaded from local FITS/FITS.GZ files.
+- **Instrument-adaptive interface:** the sidebar shows only the tools relevant to each observable (disk EUV, coronagraph, heliospheric, magnetograph), with a load-summary label, a live solar-coordinate cursor readout (R☉ · position angle), and an optional solar-coordinate graticule overlay.
+- **Measurement tools:** ruler, intensity profile, ROI region statistics, and CME height-time tracking with a live fit panel and one-click-per-frame auto-advance.
+- **Coronagraph, heliospheric, and magnetogram science:** NRGF and radial-graded normalization, radial cuts, HI time-elongation J-maps, and HMI vector-field processing.
+- **Correct differences across mixed frames:** running/base differences partition mixed observing configurations (for example COR2 polarizer vs total-brightness frames) and exposure-normalize to DN/s so cross-configuration differences render accurately.
+- **Compare Viewpoint:** fetch a second viewpoint near the same time and reproject it onto the primary view for blink comparison.
+- **Helioviewer previews** for quick SOHO/LASCO context, plus AIA RGB composites and plot/cropped-FITS/region-CSV/GIF/MP4 exports.
+- **Self-contained sessions:** save and reopen the full workspace as an `.ecsolar` file (Session menu, `Ctrl+S`) that embeds the original FITS bytes and restores frames, view state, crop, and CME height-time picks exactly.
 
 ### Multi-station analysis
 - **Multi-Station Comparison workspace:** open multiple FITS files in stacked synchronized panels, align them by UT clock or seconds from file start, and automatically combine compatible time/frequency files per station.
@@ -29,9 +33,14 @@ Compared with v2.6.0, this release adds the following capabilities:
 - **Focus-code overview tabs:** generate previews for every available receiver/focus code for the selected station and date, or regenerate one selected code.
 - **median_dB processing:** use the median_dB digit-to-dB scale and display range in batch processing, spectral overviews, and downloader previews.
 
+### In-app help and small screens
+- **Help → User Guide** (F1) opens the full feature walkthrough inside the app.
+- Dialogs and the main window now fit-to-screen with clamped minimum sizes so the app remains usable on small or low-resolution displays.
+
 ### Reliability and packaging
 - Fixed FITS-load default preset application so configured defaults apply without unintended intermediate replots.
 - Improved multi-station rendering, noise previews, station/date labels, automatic combination, and visible/grid export layouts.
+- Hardened the multi-mission pipeline: STEREO/SECCHI archive routing, GOES/SUVI ingestion of malformed `CONTINUE`-card headers, sensible default GOES satellites, and a Windows fix for solar image panels rendering solid black under hardware OpenGL.
 - Added Windows PySide6 environment repair and validation tooling, packaged the new v2.7.0 modules across platforms, and added an opt-in Linux XCB fallback for affected Wayland setups.
 
 ---
