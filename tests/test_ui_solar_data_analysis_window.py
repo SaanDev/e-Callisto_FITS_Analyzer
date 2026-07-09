@@ -84,6 +84,42 @@ def test_solar_data_window_sidebar_keeps_plot_action_visible():
     win.close()
 
 
+def test_solar_data_window_title_flags_experimental_beta():
+    _app()
+    win = SolarDataAnalysisWindow()
+    assert win.windowTitle() == "Solar Image Analysis (Experimental) Beta v1.0"
+    win.close()
+
+
+def test_solar_data_window_about_dialog_points_to_github_issues():
+    _app()
+    win = SolarDataAnalysisWindow()
+
+    menu_titles = [action.text() for action in win.menuBar().actions()]
+    assert "Help" in menu_titles
+    assert win.about_action.text() == "About Solar Image Analysis…"
+
+    captured = {}
+
+    def fake_exec(self):
+        captured["text"] = self.text()
+        captured["informative"] = self.informativeText()
+        return None
+
+    monkeypatched = pytest.MonkeyPatch()
+    monkeypatched.setattr(solar_mod.QMessageBox, "exec", fake_exec, raising=False)
+    try:
+        win.about_action.trigger()
+    finally:
+        monkeypatched.undo()
+
+    body = captured["text"] + captured["informative"]
+    assert "Solar Image Analysis" in body
+    assert "experimental beta" in body.lower()
+    assert "github.com/SaanDev/e-Callisto_FITS_Analyzer/issues" in body
+    win.close()
+
+
 def test_solar_data_window_menu_bar_exposes_secondary_actions():
     _app()
     win = SolarDataAnalysisWindow()

@@ -140,6 +140,13 @@ from src.UI.sunpy_plot_window import SunPyPlotCanvas
 from src.UI.sunpy_solar_viewer import SunPyWorker, _default_cache_dir, _get_theme
 
 
+# The solar image analysis window is a young, experimental feature; the title
+# and About dialog flag it as a beta so users calibrate their expectations and
+# know where to report problems.
+SOLAR_WINDOW_VERSION = "Beta v1.0"
+SOLAR_WINDOW_TITLE = f"Solar Image Analysis (Experimental) {SOLAR_WINDOW_VERSION}"
+SOLAR_ISSUES_URL = "https://github.com/SaanDev/e-Callisto_FITS_Analyzer/issues"
+
 AIA_WAVELENGTHS = (94, 131, 171, 193, 211, 304, 335, 1600, 1700)
 AIA_COLORMAPS = tuple(f"sdoaia{value}" for value in AIA_WAVELENGTHS)
 AIA_FULL_RESOLUTION = 1.0
@@ -1016,7 +1023,7 @@ class RegionLightcurveDialog(QDialog):
 class SolarDataAnalysisWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Solar Image Analysis (SDO · SOHO/LASCO · STEREO · GOES/SUVI)")
+        self.setWindowTitle(SOLAR_WINDOW_TITLE)
         fit_window_to_screen(self, 1440, 900)
 
         self.theme = _get_theme()
@@ -1575,7 +1582,38 @@ class SolarDataAnalysisWindow(QMainWindow):
             self.quick_mp4_action,
         ):
             self.export_menu.addAction(action)
+
+        self.help_menu = self.menuBar().addMenu("Help")
+        self.about_action = QAction("About Solar Image Analysis…", self)
+        self.about_action.triggered.connect(self._show_about_dialog)
+        self.help_menu.addAction(self.about_action)
+
         self._sync_menu_action_state(loaded=False)
+
+    def _show_about_dialog(self) -> None:
+        """Beta notice for the solar image analysis window with a link to report
+        issues on GitHub."""
+        box = QMessageBox(self)
+        box.setWindowTitle("About Solar Image Analysis")
+        box.setIcon(QMessageBox.Information)
+        box.setTextFormat(Qt.RichText)
+        box.setText(f"<b>Solar Image Analysis</b><br>{SOLAR_WINDOW_VERSION} (Experimental)")
+        box.setInformativeText(
+            "<p>This window is an <b>experimental beta</b> feature. Some tools may be "
+            "incomplete, change between releases, or behave unexpectedly &mdash; please "
+            "double-check any results before relying on them for scientific work.</p>"
+            "<p>Found a bug or have a suggestion? Please submit it via GitHub issues at "
+            f'<a href="{SOLAR_ISSUES_URL}">{SOLAR_ISSUES_URL}</a>. '
+            "Including the steps to reproduce and, where possible, the data you were "
+            "working with helps a great deal.</p>"
+        )
+        # Make the issues link clickable and open in the user's browser.
+        label = box.findChild(QLabel, "qt_msgbox_informativelabel")
+        if label is not None:
+            label.setOpenExternalLinks(True)
+            label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        box.setStandardButtons(QMessageBox.Ok)
+        box.exec()
 
     def _apply_sidebar_style(self) -> None:
         """Theme-aware stylesheet for the whole window (sidebar + viewer)."""
