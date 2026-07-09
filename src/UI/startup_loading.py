@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QPixmap
+from PySide6.QtGui import QFont, QFontMetrics, QPixmap
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QProgressBar, QVBoxLayout, QWidget
 
 
@@ -31,7 +31,7 @@ class StartupLoadingScreen(QWidget):
         self.setObjectName("StartupLoadingScreen")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self.setFixedSize(540, 280)
+        self.setFixedSize(540, 300)
 
         self._status_text = "Starting application..."
         self._dismissed = False
@@ -57,7 +57,7 @@ class StartupLoadingScreen(QWidget):
             }
             QLabel#StartupTitle {
                 color: #f5fbff;
-                font-size: 30px;
+                font-size: 22px;
                 font-weight: 700;
             }
             QLabel#StartupVersion {
@@ -116,6 +116,10 @@ class StartupLoadingScreen(QWidget):
         title = QLabel(app_name)
         title.setObjectName("StartupTitle")
         title.setWordWrap(True)
+        # QLabel does not report a height-for-width, so a wrapped title would be
+        # clipped by the layout. Reserve room for two lines of the styled font.
+        title_metrics = QFontMetrics(self._title_font())
+        title.setMinimumHeight(title_metrics.lineSpacing() * 2 + 4)
 
         version_label = QLabel(f"Version {version}")
         version_label.setObjectName("StartupVersion")
@@ -149,15 +153,17 @@ class StartupLoadingScreen(QWidget):
         self._progress_bar.setFixedHeight(14)
         root.addWidget(self._progress_bar)
 
-        title_font = QFont(self.font())
-        title_font.setPointSize(22)
-        title_font.setBold(True)
-        title.setFont(title_font)
-
         logo_font = QFont(self.font())
         logo_font.setPointSize(30)
         logo_font.setBold(True)
         self._logo_label.setFont(logo_font)
+
+    def _title_font(self) -> QFont:
+        """Font matching the ``#StartupTitle`` stylesheet rule (kept in sync manually)."""
+        font = QFont(self.font())
+        font.setPixelSize(22)
+        font.setBold(True)
+        return font
 
     def _apply_logo(self, logo_path: str) -> None:
         if logo_path and os.path.exists(logo_path):
