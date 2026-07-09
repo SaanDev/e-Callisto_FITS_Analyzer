@@ -8,7 +8,7 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 from __future__ import annotations
 
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -40,9 +40,13 @@ def _qt_png_bytes() -> bytes:
 
 
 def _fake_preview(detector: str) -> HelioviewerPreview:
+    # The dialog renders the frame age relative to the wall clock (naive UTC,
+    # matching _still_status_text), so the fake observation time must be
+    # relative too — a fixed date would drift into "day(s) ago" over time.
+    observed = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=5)
     info = HelioviewerImageInfo(
         detector=detector, source_id=4 if detector == "C2" else 5,
-        date=datetime(2026, 7, 1, 5, 24, 23), name=f"LASCO {detector}",
+        date=observed, name=f"LASCO {detector}",
         scale=11.9, width=1024, height=1024,
     )
     return HelioviewerPreview(
@@ -101,7 +105,6 @@ def test_helioviewer_dialog_defaults_to_requested_detector(monkeypatch):
 
 def test_helioviewer_dialog_builds_and_plays_movie(monkeypatch):
     _app()
-    from datetime import timedelta
     from PySide6.QtCore import QDateTime
     from src.Backend.helioviewer import HelioviewerFrame
 

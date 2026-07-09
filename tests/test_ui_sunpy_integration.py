@@ -45,7 +45,7 @@ def test_main_window_exposes_solar_data_analysis_action_and_opens_window():
     _app()
     win = MainWindow(theme=None)
     assert hasattr(win, "open_solar_data_analysis_action")
-    assert win.open_solar_data_analysis_action.text() == "Solar Image Analysis (SDO · SOHO/LASCO)"
+    assert win.open_solar_data_analysis_action.text() == "Solar Image Analysis (SDO · SOHO/LASCO · STEREO · GOES/SUVI)"
 
     win.open_solar_data_analysis_action.trigger()
     QApplication.processEvents()
