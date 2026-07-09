@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.UI.dialogs.analyze_dialog import AnalyzeDialog
-from src.UI.gui_shared import MplCanvas, pick_export_path
+from src.UI.gui_shared import MplCanvas, fit_window_to_screen, pick_export_path
 from src.UI.mpl_style import style_axes
 from src.version import APP_NAME, APP_VERSION
 
@@ -50,7 +50,7 @@ class MaxIntensityPlotDialog(QDialog):
     ):
         super().__init__(parent)
         self.setWindowTitle("Maximum Intensities for Each Time Channel")
-        self.resize(1000, 700)
+        fit_window_to_screen(self, 1000, 700)
         self.filename = filename
         self.current_plot_type = "MaxIntensityPlot"
         self._analyzer_state = None

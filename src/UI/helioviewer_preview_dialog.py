@@ -44,6 +44,7 @@ from src.Backend.helioviewer import (
     fetch_frame_sequence,
     fetch_preview,
 )
+from src.UI.gui_shared import fit_window_to_screen, screen_available_geometry
 
 _PREVIEW_PX = 512
 
@@ -104,9 +105,10 @@ class HelioviewerPreviewDialog(QDialog):
         super().__init__(parent)
         self.theme = theme
         self.setWindowTitle("SOHO/LASCO Near-Real-Time Preview (Helioviewer)")
-        self.resize(640, 820)
+        fit_window_to_screen(self, 640, 820)
 
         self._preview: HelioviewerPreview | None = None
+        self._source_pixmap: QPixmap | None = None
         self._frames: list[HelioviewerFrame] = []
         self._frame_index = 0
         self._range_initialized = False
@@ -144,7 +146,13 @@ class HelioviewerPreviewDialog(QDialog):
 
         self.image_label = QLabel("Loading...")
         self.image_label.setAlignment(Qt.AlignCenter)
-        self.image_label.setMinimumSize(_PREVIEW_PX, _PREVIEW_PX)
+        # The full 512 px preview forces the dialog taller than a small laptop
+        # screen; let the label shrink and rescale the pixmap to fit instead.
+        avail = screen_available_geometry(self)
+        preview_min = _PREVIEW_PX
+        if avail is not None:
+            preview_min = max(280, min(_PREVIEW_PX, int(avail.height() * 0.45)))
+        self.image_label.setMinimumSize(preview_min, preview_min)
         self.image_label.setStyleSheet("QLabel { background: #000; color: #ccc; border-radius: 4px; }")
         layout.addWidget(self.image_label, 1)
 
@@ -445,13 +453,24 @@ class HelioviewerPreviewDialog(QDialog):
         pixmap = QPixmap()
         if not pixmap.loadFromData(png_bytes, "PNG"):
             return False
+        self._source_pixmap = pixmap
+        self._rescale_image_label()
+        return True
+
+    def _rescale_image_label(self) -> None:
+        pixmap = self._source_pixmap
+        if pixmap is None or pixmap.isNull():
+            return
         self.image_label.setPixmap(
             pixmap.scaled(
                 self.image_label.width(), self.image_label.height(),
                 Qt.KeepAspectRatio, Qt.SmoothTransformation,
             )
         )
-        return True
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._rescale_image_label()
 
     @Slot(str)
     def _on_fetch_failed(self, message: str) -> None:

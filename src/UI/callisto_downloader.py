@@ -28,7 +28,7 @@ from src.Backend.spectral_overview import (
     build_spectral_overview,
     render_spectral_overview_figure,
 )
-from src.UI.gui_shared import pick_export_path
+from src.UI.gui_shared import fit_window_to_screen, pick_export_path
 from urllib3.util.retry import Retry
 
 from PySide6.QtCore import (
@@ -745,7 +745,7 @@ class PreviewWindow(QDialog):
     def __init__(self, file_path: str, title: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"FITS Preview: {title}")
-        self.setMinimumSize(900, 600)
+        fit_window_to_screen(self, 900, 600, min_width=640, min_height=480)
 
         res = load_callisto_fits(file_path, memmap=False)
         fig, ax, cbar = _build_plotutil_preview_figure(res.data, res.freqs, res.time)

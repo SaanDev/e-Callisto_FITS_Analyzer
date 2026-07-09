@@ -32,6 +32,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.UI.gui_shared import fit_window_to_screen
+
 
 def _safe_text(value: Any) -> str:
     if value is None:
@@ -1105,7 +1107,7 @@ class SunPyPlotWindow(QMainWindow):
     def __init__(self, parent: QWidget | None = None, *, theme: Any | None = None):
         super().__init__(parent)
         self.setWindowTitle("SunPy Plot and Animation")
-        self.resize(980, 840)
+        fit_window_to_screen(self, 980, 840)
 
         self.theme = theme
         self._mode = "empty"

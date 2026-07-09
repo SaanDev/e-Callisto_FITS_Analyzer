@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.Backend.dst_index import load_dst_range
+from src.UI.gui_shared import fit_window_to_screen
 from src.UI.mpl_style import apply_origin_style, style_axes
 from src.UI.theme_manager import AppTheme
 
@@ -180,7 +181,7 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.setWindowTitle("Dst Index")
-        self.resize(1220, 760)
+        fit_window_to_screen(self, 1220, 760)
 
         self.theme = _get_theme()
         if self.theme:

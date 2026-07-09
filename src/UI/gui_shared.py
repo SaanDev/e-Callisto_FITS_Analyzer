@@ -12,6 +12,7 @@ import re
 import sys
 
 from PySide6.QtCore import QEvent, QObject, QTimer, Qt
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -64,6 +65,64 @@ def _install_linux_msgbox_fixer():
 
 def start_combine(self):
     QTimer.singleShot(100, self.combine_files)  # delays execution and avoids UI freeze
+
+
+def screen_available_geometry(widget=None):
+    """Available geometry of the screen the widget is (or will be) shown on."""
+    screen = None
+    try:
+        if widget is not None:
+            screen = widget.screen()
+    except Exception:
+        screen = None
+    if screen is None:
+        screen = QGuiApplication.primaryScreen()
+    return screen.availableGeometry() if screen is not None else None
+
+
+def clamp_minimum_size_to_screen(window, min_width: int, min_height: int, *, fraction: float = 0.90) -> None:
+    """Apply a minimum size that never exceeds the current screen.
+
+    Tool windows were designed against large desktop monitors; on laptop
+    displays (a MacBook Air is ~1280x832 logical) the designed minimums can be
+    bigger than the screen itself, leaving windows that cannot be shrunk or
+    even fully seen. Cap the minimum at a fraction of the available screen so
+    the user always keeps control of the window.
+    """
+    avail = screen_available_geometry(window)
+    if avail is not None:
+        min_width = min(int(min_width), max(320, int(avail.width() * fraction)))
+        min_height = min(int(min_height), max(240, int(avail.height() * fraction)))
+    window.setMinimumSize(int(min_width), int(min_height))
+
+
+def fit_window_to_screen(
+    window,
+    width: int,
+    height: int,
+    *,
+    min_width: int = 0,
+    min_height: int = 0,
+    width_fraction: float = 0.94,
+    height_fraction: float = 0.90,
+) -> None:
+    """Open *window* at (width, height), clamped to its screen.
+
+    The requested size is the design size for a large monitor; small displays
+    get the largest size that still fits with a margin for the menu bar/dock.
+    Optional minimums are clamped the same way so the window stays resizable.
+    """
+    avail = screen_available_geometry(window)
+    if avail is not None:
+        width = min(int(width), max(320, int(avail.width() * width_fraction)))
+        height = min(int(height), max(240, int(avail.height() * height_fraction)))
+    if min_width or min_height:
+        clamp_minimum_size_to_screen(
+            window,
+            min(int(min_width or width), int(width)),
+            min(int(min_height or height), int(height)),
+        )
+    window.resize(int(width), int(height))
 
 
 def resource_path(relative_path: str) -> str:

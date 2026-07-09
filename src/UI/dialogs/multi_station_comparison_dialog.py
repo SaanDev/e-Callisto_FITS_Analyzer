@@ -81,7 +81,7 @@ from src.UI.dialogs.comparison_export_dialog import (
     ComparisonExportOptions,
 )
 from src.UI.dialogs.display_range_dialog import DisplayRangeDialog
-from src.UI.gui_shared import MplCanvas, pick_export_path
+from src.UI.gui_shared import MplCanvas, fit_window_to_screen, pick_export_path
 from src.UI.widgets.measurement_readout import MeasurementReadout
 
 
@@ -130,7 +130,7 @@ class MultiStationComparisonDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Multi-Station Comparison")
         self.setModal(False)
-        self.resize(1400, 900)
+        fit_window_to_screen(self, 1400, 900)
 
         self._view_config_provider = view_config_provider
         self._plot_mode_provider = plot_mode_provider

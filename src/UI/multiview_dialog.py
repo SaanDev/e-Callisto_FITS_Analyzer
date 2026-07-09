@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
 from src.Backend.multiview import observer_separation_deg, reproject_map_to
 from src.Backend.solar_data_analysis import extract_map_frames, frame_observation_time
 from src.Backend.sunpy_archive import SunPyQuerySpec, SunPySearchRow
+from src.UI.gui_shared import fit_window_to_screen
 from src.UI.sunpy_plot_window import SunPyPlotCanvas
 
 
@@ -126,7 +127,7 @@ class MultiViewpointDialog(QDialog):
     ):
         super().__init__(parent)
         self.setWindowTitle("Compare Viewpoint")
-        self.resize(1080, 620)
+        fit_window_to_screen(self, 1080, 620)
 
         self._window_ref = parent
         self._reference_frames = list(reference_frames or [])

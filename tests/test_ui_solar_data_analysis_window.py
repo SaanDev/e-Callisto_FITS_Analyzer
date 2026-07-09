@@ -73,7 +73,10 @@ def test_solar_data_window_sidebar_keeps_plot_action_visible():
     win = SolarDataAnalysisWindow()
     QApplication.processEvents()
 
-    assert win.controls_scroll.minimumWidth() >= 520
+    # The sidebar minimum adapts to the screen (>= 360 on small displays,
+    # 520 on desktop monitors) and always matches the computed width.
+    assert win.controls_scroll.minimumWidth() == win._sidebar_min_width
+    assert win._sidebar_min_width >= 360
     assert win.controls_scroll.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
     assert win.plot_mode_btn.isHidden() is False
     assert win.plot_mode_btn.isEnabled() is True
@@ -523,8 +526,8 @@ def test_sidebar_master_collapse_and_restore():
     assert win.main_splitter.sizes()[0] == 0
 
     win._set_sidebar_collapsed(False, animate=False)
-    assert win.controls_scroll.maximumWidth() == 680
-    assert win.controls_scroll.minimumWidth() == 520
+    assert win.controls_scroll.maximumWidth() == win._sidebar_max_width
+    assert win.controls_scroll.minimumWidth() == win._sidebar_min_width
     assert win.main_splitter.sizes()[0] > 0
     win.close()
 

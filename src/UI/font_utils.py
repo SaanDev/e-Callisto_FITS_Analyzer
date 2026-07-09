@@ -84,6 +84,36 @@ def preferred_ui_font_family(*, available_families: Iterable[str] | None = None)
     return ""
 
 
+def preferred_monospace_font_family(*, available_families: Iterable[str] | None = None) -> str:
+    """A monospace family that actually exists on this platform.
+
+    Referencing a missing family (e.g. "Consolas" on macOS) in a stylesheet
+    makes Qt populate its font alias table on first lookup, which logs the
+    qt.qpa.fonts warning and costs tens of milliseconds.
+    """
+    families = {str(name) for name in (available_families or available_font_families()) if str(name).strip()}
+    if sys.platform == "darwin":
+        candidates = ("Menlo", "SF Mono", "Monaco", "Courier New")
+    elif sys.platform.startswith("win"):
+        candidates = ("Consolas", "Cascadia Mono", "Courier New")
+    else:
+        candidates = ("DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono", "Courier New")
+
+    for candidate in candidates:
+        normalized = normalize_font_family(candidate, available_families=families)
+        if normalized:
+            return normalized
+
+    try:
+        system_fixed = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont).family()
+        normalized = normalize_font_family(system_fixed, available_families=families)
+        if normalized:
+            return normalized
+    except Exception:
+        pass
+    return "monospace"
+
+
 def sanitize_application_font(app: QApplication | None) -> str:
     if app is None:
         return ""

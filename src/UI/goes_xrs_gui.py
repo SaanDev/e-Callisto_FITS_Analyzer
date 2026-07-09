@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 
 import tempfile, atexit, shutil
 from src.Backend.goes_overlay import fetch_goes_overlay, preferred_goes_satellite_numbers_for_time
+from src.UI.gui_shared import fit_window_to_screen
 
 CACHE_DIR = tempfile.mkdtemp(prefix="goes_xrs_cache_")
 @atexit.register
@@ -417,7 +418,7 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.setWindowTitle("GOES XRS Plotter")
-        self.resize(1250, 760)
+        fit_window_to_screen(self, 1250, 760)
 
         self.theme = _get_theme()
         if self.theme:

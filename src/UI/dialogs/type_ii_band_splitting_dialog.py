@@ -42,7 +42,7 @@ from src.Backend.type_ii_band_splitting import calculate_b_vs_r_profile, calcula
 from src.UI.accelerated_plot_widget import _mpl_cmap_to_lookup, _rgba_image_from_cmap, pg
 from src.UI.dialogs.type_ii_graph_settings_dialog import TypeIIGraphSettingsDialog
 from src.UI.font_utils import normalize_font_family
-from src.UI.gui_shared import pick_export_path, resource_path
+from src.UI.gui_shared import fit_window_to_screen, pick_export_path, resource_path
 
 
 class TypeIIBandSplittingDialog(QDialog):
@@ -66,7 +66,7 @@ class TypeIIBandSplittingDialog(QDialog):
     ):
         super().__init__(parent)
         self.setWindowTitle("Type II Band-splitting (Experimental)")
-        self.resize(1280, 760)
+        fit_window_to_screen(self, 1280, 760)
 
         self.spectrum_data = np.asarray(spectrum_data, dtype=float).copy()
         self.display_data = np.asarray(display_data if display_data is not None else spectrum_data, dtype=float).copy()

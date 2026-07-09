@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.UI.gui_shared import fit_window_to_screen
 from src.UI.utils.cme_launcher import LaunchResult, launch_cme_helper
 from src.UI.utils.cme_helper_client import CMEHelperClient, HelperOpenResult
 from src.UI.utils.url_opener import OpenResult, open_url_robust
@@ -492,7 +493,7 @@ class CMEViewer(QMainWindow):
         super().__init__(parent)
 
         self.setWindowTitle("SOHO/LASCO CME Catalog Tool")
-        self.resize(1400, 900)
+        fit_window_to_screen(self, 1400, 900)
 
         self._logger = _cme_logger()
         self._rows: List[CMECatalogRow] = []

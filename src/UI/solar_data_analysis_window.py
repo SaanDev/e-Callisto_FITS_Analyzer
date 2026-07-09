@@ -117,7 +117,8 @@ from src.Backend.sunpy_archive import (
     SunPySearchResult,
 )
 from src.UI.download_queue_panel import DownloadProgressPanel
-from src.UI.gui_shared import pick_export_path
+from src.UI.font_utils import preferred_monospace_font_family
+from src.UI.gui_shared import fit_window_to_screen, pick_export_path, screen_available_geometry
 from src.UI.sunpy_plot_window import SunPyPlotCanvas
 from src.UI.sunpy_solar_viewer import SunPyWorker, _default_cache_dir, _get_theme
 
@@ -955,7 +956,7 @@ class SolarDataAnalysisWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Solar Image Analysis (SDO · SOHO/LASCO · STEREO · GOES/SUVI)")
-        self.resize(1440, 900)
+        fit_window_to_screen(self, 1440, 900)
 
         self.theme = _get_theme()
         self.cache_dir = _default_cache_dir()
@@ -1057,15 +1058,23 @@ class SolarDataAnalysisWindow(QMainWindow):
         splitter.setChildrenCollapsible(False)
         root.addWidget(splitter)
 
+        # The sidebar was designed 520-680 px wide; on laptop screens that
+        # starves the plot, so scale it down with the available width.
+        avail = screen_available_geometry(self)
+        if avail is not None and avail.width() < 1440:
+            self._sidebar_min_width = max(360, int(avail.width() * 0.34))
+        else:
+            self._sidebar_min_width = 520
+        self._sidebar_max_width = self._sidebar_min_width + 160
         self.controls_scroll = QScrollArea(self)
         self.controls_scroll.setObjectName("SolarControlsScroll")
         self.controls_scroll.setWidgetResizable(True)
         self.controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.controls_scroll.setMinimumWidth(520)
-        self.controls_scroll.setMaximumWidth(680)
+        self.controls_scroll.setMinimumWidth(self._sidebar_min_width)
+        self.controls_scroll.setMaximumWidth(self._sidebar_max_width)
         controls_panel = QWidget()
         controls_panel.setObjectName("SolarControlsPanel")
-        controls_panel.setMinimumWidth(500)
+        controls_panel.setMinimumWidth(max(340, self._sidebar_min_width - 20))
         self.controls_panel = controls_panel
         self.controls_scroll.setWidget(controls_panel)
         controls_layout = QVBoxLayout(controls_panel)
@@ -1380,7 +1389,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         )
         if collapsed:
             self.controls_scroll.setMinimumWidth(0)
-        end_width = 0 if collapsed else 680
+        end_width = 0 if collapsed else self._sidebar_max_width
 
         def _finish() -> None:
             # Belt-and-braces: pin the splitter panes so the collapse holds even
@@ -1389,9 +1398,10 @@ class SolarDataAnalysisWindow(QMainWindow):
             if collapsed:
                 self.main_splitter.setSizes([0, total])
             else:
-                self.controls_scroll.setMinimumWidth(520)
-                self.controls_scroll.setMaximumWidth(680)
-                self.main_splitter.setSizes([560, max(total - 560, 1)])
+                self.controls_scroll.setMinimumWidth(self._sidebar_min_width)
+                self.controls_scroll.setMaximumWidth(self._sidebar_max_width)
+                open_width = self._sidebar_min_width + 40
+                self.main_splitter.setSizes([open_width, max(total - open_width, 1)])
 
         if animate:
             animation = QPropertyAnimation(self.controls_scroll, b"maximumWidth", self)
@@ -1523,6 +1533,7 @@ class SolarDataAnalysisWindow(QMainWindow):
             accent_soft = "#e3eeff"
             accent_muted = "#7ba3dd"
             hover = "#f0f5fc"
+        mono_font = preferred_monospace_font_family()
         central.setStyleSheet(
             f"""
             QScrollArea#SolarControlsScroll {{
@@ -1577,7 +1588,7 @@ class SolarDataAnalysisWindow(QMainWindow):
             }}
             QLabel#SolarCoordReadout {{
                 color: {muted};
-                font-family: "Consolas", "DejaVu Sans Mono", monospace;
+                font-family: "{mono_font}", monospace;
             }}
             QLabel#SolarFrameLabel,
             QLabel#SolarLoadSummary,

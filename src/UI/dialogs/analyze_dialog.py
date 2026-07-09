@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 from scipy.optimize import curve_fit
 from sklearn.metrics import mean_squared_error, r2_score
 
-from src.UI.gui_shared import MplCanvas, pick_export_path
+from src.UI.gui_shared import MplCanvas, fit_window_to_screen, pick_export_path
 from src.UI.mpl_style import style_axes
 
 class AnalyzeDialog(QDialog):
@@ -54,7 +54,7 @@ class AnalyzeDialog(QDialog):
         self.harmonic = harmonic
 
         self.setWindowTitle("Analyzer")
-        self.resize(1100, 700)
+        fit_window_to_screen(self, 1100, 700)
 
         self.time_channels = np.asarray(time_channels, dtype=float).reshape(-1)
         self.time_seconds = self._resolve_time_seconds(self.time_channels, time_seconds)

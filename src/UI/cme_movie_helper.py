@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.UI.gui_shared import fit_window_to_screen
 from src.UI.utils.cme_ipc_protocol import build_envelope, decode_envelope, encode_envelope
 from src.UI.utils.url_opener import open_url_robust
 
@@ -63,7 +64,7 @@ class CMEMovieHelperWindow(QMainWindow):
         self._status_lines: list[str] = []
 
         self.setWindowTitle(self.movie_title)
-        self.resize(1100, 760)
+        fit_window_to_screen(self, 1100, 760)
 
         central = QWidget(self)
         self.setCentralWidget(central)

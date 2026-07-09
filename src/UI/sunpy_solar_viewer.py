@@ -61,7 +61,7 @@ from src.Backend.sunpy_archive import (
     registry_spacecraft_list,
     search,
 )
-from src.UI.gui_shared import pick_export_path
+from src.UI.gui_shared import fit_window_to_screen, pick_export_path
 from src.UI.sunpy_plot_window import SunPyPlotWindow
 from src.version import APP_NAME, APP_ORG
 
@@ -262,7 +262,7 @@ class SunPySolarViewer(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("SunPy Multi-Mission Solar Explorer v1.0")
-        self.resize(1220, 900)
+        fit_window_to_screen(self, 1220, 900)
 
         self.theme = _get_theme()
         if self.theme and hasattr(self.theme, "themeChanged"):

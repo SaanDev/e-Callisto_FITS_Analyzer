@@ -21,12 +21,14 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from src.UI.gui_shared import fit_window_to_screen
+
 
 class FitsHeaderViewerDialog(QDialog):
     def __init__(self, header: fits.Header, *, title: str = "FITS Header", default_name: str = "fits_header.txt", parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.resize(900, 650)
+        fit_window_to_screen(self, 900, 650)
 
         self._header = header if header is not None else fits.Header()
         self._default_name = default_name or "fits_header.txt"

@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from src.UI.gui_shared import fit_window_to_screen
 from src.Backend.learmonth import (
     LearmonthArchiveError,
     LearmonthChunk,
@@ -141,7 +142,7 @@ class LearmonthDownloaderApp(QDialog):
         self._import_after_convert = False
 
         self.setWindowTitle("Learmonth Solar Radio Browser")
-        self.resize(960, 640)
+        fit_window_to_screen(self, 960, 640)
 
         self.init_ui()
         self._sync_action_state()

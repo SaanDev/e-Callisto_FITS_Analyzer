@@ -172,6 +172,7 @@ from src.UI.gui_shared import (
     MplCanvas,
     _ext_from_filter,
     _install_linux_msgbox_fixer,
+    clamp_minimum_size_to_screen,
     pick_export_path,
     resource_path,
 )
@@ -272,8 +273,10 @@ class MainWindow(QMainWindow):
         _install_linux_msgbox_fixer()
 
         self.setWindowTitle(f"{APP_NAME} {APP_VERSION}")
-        #self.resize(1000, 700)
-        self.setMinimumSize(1000, 700)
+        # Designed minimum is 1000x700, but never larger than the screen —
+        # laptop displays (e.g. MacBook Air, ~1280x832 logical) must keep the
+        # window shrinkable and fully visible.
+        clamp_minimum_size_to_screen(self, 1000, 700)
 
         self.use_utc = False
         self.ut_start_sec = None
