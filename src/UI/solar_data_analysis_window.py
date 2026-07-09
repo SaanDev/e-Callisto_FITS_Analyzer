@@ -1583,10 +1583,16 @@ class SolarDataAnalysisWindow(QMainWindow):
         ):
             self.export_menu.addAction(action)
 
-        self.help_menu = self.menuBar().addMenu("Help")
+        # "About" is its own top-level menu, sitting to the right of Export.
+        self.about_menu = self.menuBar().addMenu("About")
         self.about_action = QAction("About Solar Image Analysis…", self)
+        # macOS auto-relocates actions whose text looks like "About…" into the
+        # native application menu (the default TextHeuristicRole), which would
+        # make this vanish from the window's own menu bar. NoRole keeps it here,
+        # visibly under the About menu, on every platform.
+        self.about_action.setMenuRole(QAction.MenuRole.NoRole)
         self.about_action.triggered.connect(self._show_about_dialog)
-        self.help_menu.addAction(self.about_action)
+        self.about_menu.addAction(self.about_action)
 
         self._sync_menu_action_state(loaded=False)
 

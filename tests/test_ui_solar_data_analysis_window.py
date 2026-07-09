@@ -16,6 +16,7 @@ pytest.importorskip("PySide6")
 pytest.importorskip("pyqtgraph")
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication
 
 from src.Backend.jsoc_client import SIZE_BIN2, SIZE_CUTOUT, SIZE_FULL
@@ -96,8 +97,13 @@ def test_solar_data_window_about_dialog_points_to_github_issues():
     win = SolarDataAnalysisWindow()
 
     menu_titles = [action.text() for action in win.menuBar().actions()]
-    assert "Help" in menu_titles
+    # About is its own top-level menu, positioned immediately right of Export.
+    assert "About" in menu_titles
+    assert menu_titles.index("About") == menu_titles.index("Export") + 1
     assert win.about_action.text() == "About Solar Image Analysis…"
+    # NoRole keeps macOS from relocating an "About…" action into the app menu, so
+    # it stays visible in this window's own menu bar.
+    assert win.about_action.menuRole() == QAction.MenuRole.NoRole
 
     captured = {}
 
