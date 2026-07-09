@@ -62,6 +62,14 @@ def _safe_text(value: Any) -> str:
         return repr(value)
 
 
+# Upper bound on how many follow-up reflow passes a single resize may spawn
+# while squaring the solar map. A perfectly converging layout needs one or two;
+# the cap only ever bites when the target oscillates (e.g. a 1px wobble during a
+# macOS fullscreen transition), where it stops the reflow from re-arming a
+# zero-delay timer indefinitely and freezing the window.
+_MAX_SQUARE_REFLOW_PASSES = 8
+
+
 def _opengl_capable() -> bool:
     """True if the platform can actually create an OpenGL context.
 
@@ -166,6 +174,15 @@ class SunPyPlotCanvas(QWidget):
         self._colorbar_visible = True
         self._last_map_levels: tuple[float, float] | None = None
         self._square_reflow_pending = False
+        # Bounds the square-map reflow so it can't become a runaway feedback
+        # loop. Squaring works by setFixedSize() + a zero-delay reflow timer that
+        # re-checks after the layout settles. During a macOS maximize/fullscreen
+        # transition the target can oscillate by a pixel or two and never fully
+        # converge; unbounded, the reflow keeps re-arming that timer, starves the
+        # Qt event loop and freezes the whole window. _square_reflow_passes caps
+        # how many follow-up passes a single resize may spawn; the budget resets
+        # on the next real resize so genuine size changes always re-square.
+        self._square_reflow_passes = 0
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -480,6 +497,9 @@ class SunPyPlotCanvas(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        # A user-driven resize is a fresh convergence: replenish the (bounded)
+        # budget of follow-up reflow passes.
+        self._square_reflow_passes = 0
         self._enforce_square_map_plot()
 
     def _enforce_square_map_plot(self) -> None:
@@ -507,11 +527,23 @@ class SunPyPlotCanvas(QWidget):
         side = min(max(1, available_w - chrome_w), max(1, available_h - chrome_h))
         target_w = side + chrome_w
         target_h = side + chrome_h
-        if abs(int(self.map_plot.width()) - target_w) > 1 or abs(int(self.map_plot.height()) - target_h) > 1:
-            self.map_plot.setFixedSize(target_w, target_h)
-            if not self._square_reflow_pending:
-                self._square_reflow_pending = True
-                QTimer.singleShot(0, self._finish_square_reflow)
+        if abs(int(self.map_plot.width()) - target_w) <= 1 and abs(int(self.map_plot.height()) - target_h) <= 1:
+            # Converged: refill the budget so the next resize starts clean.
+            self._square_reflow_passes = 0
+            return
+        self.map_plot.setFixedSize(target_w, target_h)
+        # Re-check after the layout settles, but cap how many follow-up passes a
+        # single resize may spawn: a target that never fully converges (e.g. a
+        # 1px oscillation during a macOS fullscreen transition) must not keep
+        # re-arming this zero-delay timer, or it starves the event loop and
+        # freezes the window.
+        if self._square_reflow_pending:
+            return
+        if self._square_reflow_passes >= _MAX_SQUARE_REFLOW_PASSES:
+            return
+        self._square_reflow_passes += 1
+        self._square_reflow_pending = True
+        QTimer.singleShot(0, self._finish_square_reflow)
 
     def _finish_square_reflow(self) -> None:
         self._square_reflow_pending = False
