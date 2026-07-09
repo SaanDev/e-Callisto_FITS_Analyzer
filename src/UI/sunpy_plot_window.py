@@ -179,6 +179,7 @@ class SunPyPlotCanvas(QWidget):
         map_vb.setMouseEnabled(x=False, y=False)
         self._set_map_axis_labels()
         self.map_plot.setTitle("")
+        self._unclamp_title_min_width()
         map_left_axis = self.map_plot.getAxis("left")
         map_bottom_axis = self.map_plot.getAxis("bottom")
         for axis in (map_left_axis, map_bottom_axis):
@@ -512,6 +513,45 @@ class SunPyPlotCanvas(QWidget):
     def _finish_square_reflow(self) -> None:
         self._square_reflow_pending = False
         self._enforce_square_map_plot()
+
+    def _unclamp_title_min_width(self) -> None:
+        """A long plot title must never impose a minimum width on the plot.
+
+        pyqtgraph's LabelItem re-pins its minimum size to the rendered text
+        rect on every setText AND every resize (updateMin), so the plot's
+        minimum width ratchets up with the longest title seen — after which
+        the central layout clamps at that stale minimum and the square-map
+        enforcement can no longer shrink the plot. Wrap the title label's
+        updateMin so the width component is always released; a long title
+        then simply clips instead of blocking the layout.
+        """
+        try:
+            label = self.map_plot.getPlotItem().titleLabel
+        except Exception:
+            return
+        if not getattr(label, "_width_ratchet_removed", False):
+            original_update_min = label.updateMin
+
+            def update_min_without_width_ratchet():
+                original_update_min()
+                self._zero_label_min_width(label)
+
+            label.updateMin = update_min_without_width_ratchet
+            label._width_ratchet_removed = True
+        self._zero_label_min_width(label)
+
+    @staticmethod
+    def _zero_label_min_width(label: Any) -> None:
+        try:
+            label.setMinimumWidth(0)
+            hints = getattr(label, "_sizeHint", None)
+            if isinstance(hints, dict):
+                key = Qt.SizeHint.MinimumSize
+                if key in hints:
+                    hints[key] = (0, hints[key][1])
+            label.updateGeometry()
+        except Exception:
+            pass
 
     def map_background_lightness(self) -> int:
         return int(self.map_plot.backgroundBrush().color().lightness())
@@ -958,6 +998,7 @@ class SunPyPlotCanvas(QWidget):
         self.map_image.setRect(QRectF(x0, y0, width, height))
 
         self.map_plot.setTitle(title)
+        self._unclamp_title_min_width()
         self._set_map_axis_labels()
         self._update_colorbar_visibility(is_rgb=is_rgb)
 

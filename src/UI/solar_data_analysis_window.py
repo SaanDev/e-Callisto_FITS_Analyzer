@@ -1034,6 +1034,17 @@ class SolarDataAnalysisWindow(QMainWindow):
             collapsed = False
         if collapsed:
             self._set_sidebar_collapsed(True, animate=False)
+        # Quick-start guidance in the details drawer until the first result
+        # replaces it; mirrors the numbered sidebar workflow.
+        self.analysis_text.setPlainText(
+            "Welcome to Solar Image Analysis.\n"
+            "  1. Data Source — pick an observable and time range, then Fetch Records\n"
+            "     (or Upload FITS to load local files directly).\n"
+            "  2. Archive Results — check the rows you want and click Load Selected.\n"
+            "  3. Analysis — plot, difference, composite, measure and track CMEs;\n"
+            "     use the playback bar under the image to step through the sequence.\n"
+            "Tip: hover the image for solar coordinates (R☉, position angle, pixel)."
+        )
         self.statusBar().showMessage("Ready.")
 
     def _build_ui(self):
@@ -1058,27 +1069,31 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.controls_panel = controls_panel
         self.controls_scroll.setWidget(controls_panel)
         controls_layout = QVBoxLayout(controls_panel)
-        controls_layout.setContentsMargins(12, 10, 12, 12)
-        controls_layout.setSpacing(10)
+        controls_layout.setContentsMargins(14, 12, 14, 16)
+        controls_layout.setSpacing(12)
 
+        # The sidebar reads top-to-bottom as the workflow: get data, pick the
+        # records, analyse — then per-topic display/export/instrument cards.
         self._build_data_source_group(controls_layout)
         self._build_archive_results_group(controls_layout)
         self._build_mode_group(controls_layout)
-        self._build_timeline_group(controls_layout)
-        self._build_movie_group(controls_layout)
         self._build_plot_controls_group(controls_layout)
+        self._build_movie_group(controls_layout)
         self._build_coronagraph_group(controls_layout)
         self._build_hi_group(controls_layout)
         self._build_vector_field_group(controls_layout)
         self._build_region_group(controls_layout)
         controls_layout.addStretch(1)
 
-        plot_group = QGroupBox("Time-Lapse")
-        # Left edge of the plot pane: a full-height collapse handle for the
+        # Viewer pane: header bar, measurement toolbar, canvas (+ tracking
+        # panel), a video-player-style playback bar, and the details drawer.
+        viewer_panel = QWidget()
+        viewer_panel.setObjectName("SolarViewerPanel")
+        # Left edge of the viewer: a full-height collapse handle for the
         # sidebar (VS Code style) — impossible to miss, one click either way.
-        outer_layout = QHBoxLayout(plot_group)
-        outer_layout.setContentsMargins(4, 8, 8, 8)
-        outer_layout.setSpacing(4)
+        outer_layout = QHBoxLayout(viewer_panel)
+        outer_layout.setContentsMargins(3, 8, 10, 8)
+        outer_layout.setSpacing(5)
         self.sidebar_toggle_btn = QToolButton()
         self.sidebar_toggle_btn.setObjectName("SolarSidebarHandle")
         self.sidebar_toggle_btn.setArrowType(Qt.LeftArrow)
@@ -1092,24 +1107,37 @@ class SolarDataAnalysisWindow(QMainWindow):
         )
         outer_layout.addWidget(self.sidebar_toggle_btn)
         plot_layout = QVBoxLayout()
+        plot_layout.setSpacing(8)
         outer_layout.addLayout(plot_layout, 1)
 
-        top_row = QHBoxLayout()
+        header_bar = QWidget()
+        header_bar.setObjectName("SolarViewerHeader")
+        top_row = QHBoxLayout(header_bar)
+        top_row.setContentsMargins(12, 7, 10, 7)
+        top_row.setSpacing(10)
         self.plot_title_label = QLabel("No image data loaded.")
+        self.plot_title_label.setObjectName("SolarPlotTitle")
         self.plot_title_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         # Live cursor position: R☉ + position angle + pixel.
         self.coord_readout_label = QLabel("")
         self.coord_readout_label.setObjectName("SolarCoordReadout")
         self.coord_readout_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.quick_mp4_btn = QPushButton("MP4")
+        self.quick_mp4_btn = QPushButton("Export MP4")
         self.quick_mp4_btn.setEnabled(False)
+        self.quick_mp4_btn.setToolTip(
+            "One-click MP4 of the loaded sequence with the current display settings."
+        )
         top_row.addWidget(self.plot_title_label, 1)
         top_row.addWidget(self.coord_readout_label)
         top_row.addWidget(self.quick_mp4_btn)
-        plot_layout.addLayout(top_row)
+        plot_layout.addWidget(header_bar)
 
         # Measurement toolbar: click-driven tools on the displayed map.
-        measure_row = QHBoxLayout()
+        measure_bar = QWidget()
+        measure_bar.setObjectName("SolarMeasureBar")
+        measure_row = QHBoxLayout(measure_bar)
+        measure_row.setContentsMargins(2, 0, 2, 0)
+        measure_row.setSpacing(6)
         self.ruler_tool_btn = QPushButton("Ruler")
         self.ruler_tool_btn.setCheckable(True)
         self.ruler_tool_btn.setToolTip(
@@ -1145,14 +1173,16 @@ class SolarDataAnalysisWindow(QMainWindow):
             self.clear_measure_btn,
         ):
             btn.setEnabled(False)
-        measure_row.addWidget(QLabel("Measure:"))
+        measure_label = QLabel("Measure")
+        measure_label.setObjectName("SolarFieldLabel")
+        measure_row.addWidget(measure_label)
         measure_row.addWidget(self.ruler_tool_btn)
         measure_row.addWidget(self.profile_tool_btn)
         measure_row.addWidget(self.stats_tool_btn)
         measure_row.addWidget(self.height_time_btn)
         measure_row.addWidget(self.clear_measure_btn)
         measure_row.addStretch(1)
-        plot_layout.addLayout(measure_row)
+        plot_layout.addWidget(measure_bar)
 
         self.pyqt_canvas = SunPyPlotCanvas(theme=self.theme, enable_colorbar=True)
         self.pyqt_canvas.map_plot.showGrid(x=True, y=True, alpha=0.25)
@@ -1181,10 +1211,23 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.plot_splitter.setStretchFactor(1, 0)
         self.plot_splitter.setSizes([900, 330])
 
+        # Playback bar: transport controls live directly under the image like
+        # a video player, so stepping through a sequence never means hunting
+        # through the sidebar.
+        playback_bar = self._build_playback_bar()
+
+        canvas_area = QWidget()
+        canvas_layout = QVBoxLayout(canvas_area)
+        canvas_layout.setContentsMargins(0, 0, 0, 0)
+        canvas_layout.setSpacing(6)
+        canvas_layout.addWidget(self.plot_splitter, 1)
+        canvas_layout.addWidget(playback_bar)
+
         # Details drawer: an IDE-style output panel under the canvas. The header
         # is always visible; the body collapses with the arrow and its height is
         # drag-adjustable through the vertical splitter handle.
         details_container = QWidget()
+        details_container.setObjectName("SolarDetailsPanel")
         details_layout = QVBoxLayout(details_container)
         details_layout.setContentsMargins(0, 0, 0, 0)
         details_layout.setSpacing(2)
@@ -1210,7 +1253,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.details_container = details_container
 
         self.content_splitter = QSplitter(Qt.Vertical)
-        self.content_splitter.addWidget(self.plot_splitter)
+        self.content_splitter.addWidget(canvas_area)
         self.content_splitter.addWidget(details_container)
         self.content_splitter.setStretchFactor(0, 1)
         self.content_splitter.setStretchFactor(1, 0)
@@ -1226,7 +1269,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         plot_layout.addWidget(self.progress_panel)
 
         splitter.addWidget(self.controls_scroll)
-        splitter.addWidget(plot_group)
+        splitter.addWidget(viewer_panel)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([560, 1040])
@@ -1234,20 +1277,84 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._make_sidebar_groups_collapsible()
         self._apply_sidebar_style()
 
+    def _build_playback_bar(self) -> QWidget:
+        """Transport bar under the canvas: step buttons, frame scrubber, FPS."""
+        bar = QWidget()
+        bar.setObjectName("SolarPlaybackBar")
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(10, 5, 10, 5)
+        layout.setSpacing(4)
+
+        self.rewind_btn = QPushButton()
+        self.prev_btn = QPushButton()
+        self.play_btn = QPushButton()
+        self.pause_btn = QPushButton()
+        self.next_btn = QPushButton()
+        transport = (
+            (self.rewind_btn, QStyle.SP_MediaSkipBackward, "Rewind to the first frame"),
+            (self.prev_btn, QStyle.SP_MediaSeekBackward, "Previous frame"),
+            (self.play_btn, QStyle.SP_MediaPlay, "Play the sequence"),
+            (self.pause_btn, QStyle.SP_MediaPause, "Pause"),
+            (self.next_btn, QStyle.SP_MediaSeekForward, "Next frame"),
+        )
+        for btn, icon, tip in transport:
+            btn.setIcon(self.style().standardIcon(icon))
+            btn.setToolTip(tip)
+            btn.setFixedWidth(40)
+            btn.setCursor(Qt.PointingHandCursor)
+            layout.addWidget(btn)
+
+        layout.addSpacing(8)
+        self.frame_slider = QSlider(Qt.Horizontal)
+        self.frame_slider.setRange(0, 0)
+        self.frame_slider.setEnabled(False)
+        self.frame_slider.setToolTip("Scrub through the loaded frame sequence.")
+        layout.addWidget(self.frame_slider, 1)
+        self.frame_label = QLabel("Frame 0 / 0")
+        self.frame_label.setObjectName("SolarFrameLabel")
+        self.frame_label.setMinimumWidth(96)
+        self.frame_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        layout.addWidget(self.frame_label)
+
+        layout.addSpacing(8)
+        speed_label = QLabel("Speed")
+        speed_label.setObjectName("SolarFieldLabel")
+        layout.addWidget(speed_label)
+        self.fps_spin = QDoubleSpinBox()
+        self.fps_spin.setRange(1.0, 30.0)
+        self.fps_spin.setDecimals(1)
+        self.fps_spin.setSingleStep(1.0)
+        self.fps_spin.setValue(8.0)
+        self.fps_spin.setSuffix(" fps")
+        self.fps_spin.setToolTip(
+            "Frames per second — used for playback here and for exported movies."
+        )
+        layout.addWidget(self.fps_spin)
+        return bar
+
     def _make_sidebar_groups_collapsible(self) -> None:
         """Accordion behaviour: each sidebar group collapses to its title.
 
         Qt's checkable QGroupBox provides the click affordance; unchecking hides
-        the group's children so the box shrinks to a single row.
+        the group's children so the box shrinks to a single row. An arrow in the
+        title shows the state (the built-in indicator is hidden by the style).
         """
         for group in self.controls_panel.findChildren(QGroupBox, options=Qt.FindDirectChildrenOnly):
+            group.setProperty("baseTitle", group.title())
             group.setCheckable(True)
             group.setChecked(True)
+            self._set_group_title_arrow(group, True)
             group.toggled.connect(
                 lambda expanded, g=group: self._on_sidebar_group_toggled(g, expanded)
             )
 
+    @staticmethod
+    def _set_group_title_arrow(group: QGroupBox, expanded: bool) -> None:
+        base = str(group.property("baseTitle") or group.title())
+        group.setTitle(("▾  " if expanded else "▸  ") + base)
+
     def _on_sidebar_group_toggled(self, group: QGroupBox, expanded: bool) -> None:
+        self._set_group_title_arrow(group, bool(expanded))
         for child in group.findChildren(QWidget, options=Qt.FindDirectChildrenOnly):
             child.setVisible(bool(expanded))
         if expanded:
@@ -1260,6 +1367,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._set_loaded_state(bool(self._map_frames))
         self._apply_observable_download_gating()
         self._apply_instrument_visibility()
+        self._on_frame_size_changed()
         self._sync_nrgf_enabled()
 
     def _set_sidebar_collapsed(self, collapsed: bool, *, animate: bool = True) -> None:
@@ -1378,34 +1486,44 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._sync_menu_action_state(loaded=False)
 
     def _apply_sidebar_style(self) -> None:
-        if not hasattr(self, "controls_scroll"):
+        """Theme-aware stylesheet for the whole window (sidebar + viewer)."""
+        central = self.centralWidget()
+        if central is None:
             return
         dark = self._is_dark_ui()
         if dark:
-            panel_bg = "#111827"
-            surface_bg = "#182233"
-            field_bg = "#0f172a"
-            border = "#334155"
-            text = "#e5edf8"
-            muted = "#a8b5c7"
-            disabled_text = "#8fa1b7"
-            disabled_bg = "#1e293b"
-            accent = "#60a5fa"
-            accent_bg = "#16365f"
-            hover = "#22304a"
+            panel_bg = "#0f1522"
+            viewer_bg = "#0b101a"
+            card_bg = "#161f30"
+            border = "#2c3a52"
+            field_bg = "#0e1626"
+            field_border = "#34435d"
+            text = "#e7edf7"
+            muted = "#9aa9c0"
+            disabled_text = "#7c8ba1"
+            disabled_bg = "#1b2434"
+            accent = "#4f8ff7"
+            accent_hover = "#3c7ce4"
+            accent_soft = "#16365f"
+            accent_muted = "#7ea6dd"
+            hover = "#1e2940"
         else:
-            panel_bg = "#eef3f9"
-            surface_bg = "#ffffff"
-            field_bg = "#f8fbff"
-            border = "#c9d5e6"
-            text = "#1f2a3a"
-            muted = "#53667f"
-            disabled_text = "#63758d"
-            disabled_bg = "#edf3fa"
+            panel_bg = "#eef2f8"
+            viewer_bg = "#e7edf5"
+            card_bg = "#ffffff"
+            border = "#d3dce9"
+            field_bg = "#f9fbfe"
+            field_border = "#c3d0e2"
+            text = "#1c2637"
+            muted = "#5c6d85"
+            disabled_text = "#8a97ab"
+            disabled_bg = "#eef2f8"
             accent = "#0f62d8"
-            accent_bg = "#e8f1ff"
-            hover = "#f1f6fd"
-        self.controls_scroll.setStyleSheet(
+            accent_hover = "#0d55bb"
+            accent_soft = "#e3eeff"
+            accent_muted = "#7ba3dd"
+            hover = "#f0f5fc"
+        central.setStyleSheet(
             f"""
             QScrollArea#SolarControlsScroll {{
                 background: {panel_bg};
@@ -1415,24 +1533,70 @@ class SolarDataAnalysisWindow(QMainWindow):
             QWidget#SolarControlsPanel {{
                 background: {panel_bg};
             }}
-            QGroupBox {{
-                background: {surface_bg};
+            QWidget#SolarViewerPanel {{
+                background: {viewer_bg};
+            }}
+            QWidget#SolarViewerHeader,
+            QWidget#SolarPlaybackBar {{
+                background: {card_bg};
                 border: 1px solid {border};
                 border-radius: 8px;
-                margin-top: 16px;
-                padding: 12px 10px 10px 10px;
+            }}
+            QWidget#SolarMeasureBar,
+            QWidget#SolarDetailsPanel {{
+                background: transparent;
+            }}
+            QGroupBox {{
+                background: {card_bg};
+                border: 1px solid {border};
+                border-radius: 10px;
+                margin-top: 22px;
+                padding: 14px 12px 12px 12px;
                 font-weight: 600;
                 color: {text};
             }}
             QGroupBox::title {{
                 subcontrol-origin: margin;
                 subcontrol-position: top left;
-                left: 12px;
-                padding: 0px 4px;
-                color: {muted};
+                left: 8px;
+                top: 2px;
+                padding: 2px 6px;
+                color: {text};
+                background: transparent;
+            }}
+            QGroupBox::indicator {{
+                width: 0px;
+                height: 0px;
             }}
             QLabel {{
                 color: {text};
+                background: transparent;
+            }}
+            QLabel#SolarPlotTitle {{
+                font-weight: 600;
+            }}
+            QLabel#SolarCoordReadout {{
+                color: {muted};
+                font-family: "Consolas", "DejaVu Sans Mono", monospace;
+            }}
+            QLabel#SolarFrameLabel,
+            QLabel#SolarLoadSummary,
+            QLabel#SolarResultsStatus,
+            QLabel#SolarHintLabel,
+            QLabel#SizeEstimateLabel {{
+                color: {muted};
+            }}
+            QLabel#SolarFieldLabel {{
+                color: {muted};
+                font-size: 11px;
+                font-weight: 600;
+            }}
+            QLabel#SolarSubheading {{
+                color: {muted};
+                font-size: 11px;
+                font-weight: 700;
+                letter-spacing: 1px;
+                margin-top: 6px;
             }}
             QLineEdit,
             QComboBox,
@@ -1441,43 +1605,78 @@ class SolarDataAnalysisWindow(QMainWindow):
             QDoubleSpinBox {{
                 min-height: 30px;
                 padding: 4px 8px;
-                border: 1px solid {border};
+                border: 1px solid {field_border};
                 border-radius: 7px;
                 background: {field_bg};
                 color: {text};
+                selection-background-color: {accent};
+                selection-color: #ffffff;
+            }}
+            QLineEdit:focus,
+            QComboBox:focus,
+            QDateTimeEdit:focus,
+            QSpinBox:focus,
+            QDoubleSpinBox:focus {{
+                border-color: {accent};
+            }}
+            QLineEdit:disabled,
+            QComboBox:disabled,
+            QDateTimeEdit:disabled,
+            QSpinBox:disabled,
+            QDoubleSpinBox:disabled {{
+                color: {disabled_text};
+                background: {disabled_bg};
+            }}
+            QComboBox QAbstractItemView {{
+                background: {card_bg};
+                color: {text};
+                border: 1px solid {border};
+                selection-background-color: {accent_soft};
+                selection-color: {text};
             }}
             QTableWidget {{
                 border: 1px solid {border};
-                border-radius: 6px;
+                border-radius: 8px;
                 background: {field_bg};
                 color: {text};
                 gridline-color: {border};
-            }}
-            QTableWidget#SolarArchiveResultsTable {{
-                alternate-background-color: {surface_bg};
+                alternate-background-color: {card_bg};
+                selection-background-color: {accent_soft};
+                selection-color: {text};
             }}
             QHeaderView::section {{
                 background: {disabled_bg};
-                color: {text};
-                border: 0px;
-                border-right: 1px solid {border};
-                padding: 4px 6px;
-            }}
-            QLabel#SolarResultsStatus {{
                 color: {muted};
-                font-weight: 500;
+                border: 0px;
+                border-bottom: 1px solid {border};
+                border-right: 1px solid {border};
+                padding: 5px 6px;
+                font-weight: 600;
+            }}
+            QTableCornerButton::section {{
+                background: {disabled_bg};
+                border: 0px;
             }}
             QPushButton {{
-                min-height: 32px;
-                padding: 6px 10px;
-                border: 1px solid {border};
+                min-height: 30px;
+                padding: 5px 12px;
+                border: 1px solid {field_border};
                 border-radius: 7px;
-                background: {field_bg};
+                background: {card_bg};
                 color: {text};
                 font-weight: 500;
             }}
             QPushButton:hover {{
                 background: {hover};
+                border-color: {accent};
+            }}
+            QPushButton:pressed {{
+                background: {accent_soft};
+            }}
+            QPushButton:checked {{
+                background: {accent};
+                border-color: {accent};
+                color: #ffffff;
             }}
             QPushButton:disabled {{
                 background: {disabled_bg};
@@ -1485,20 +1684,159 @@ class SolarDataAnalysisWindow(QMainWindow):
                 border-color: {border};
             }}
             QPushButton#SolarPrimaryAction {{
-                min-height: 36px;
-                background: {accent_bg};
-                color: {accent};
+                min-height: 34px;
+                background: {accent};
                 border-color: {accent};
+                color: #ffffff;
                 font-weight: 700;
             }}
+            QPushButton#SolarPrimaryAction:hover {{
+                background: {accent_hover};
+            }}
             QPushButton#SolarPrimaryAction:disabled {{
-                background: {accent_bg};
-                color: {accent};
-                border-color: {accent};
+                background: {accent_soft};
+                color: {accent_muted};
+                border-color: transparent;
+            }}
+            QWidget#SolarMeasureBar QPushButton {{
+                min-height: 26px;
+                padding: 3px 14px;
+                border-radius: 13px;
+            }}
+            QWidget#SolarPlaybackBar QPushButton {{
+                min-height: 26px;
+                padding: 2px 6px;
+                border-radius: 6px;
+                background: transparent;
+                border: 1px solid transparent;
+            }}
+            QWidget#SolarPlaybackBar QPushButton:hover {{
+                background: {hover};
+                border-color: {border};
+            }}
+            QWidget#SolarPlaybackBar QPushButton:disabled {{
+                background: transparent;
+                color: {disabled_text};
             }}
             QCheckBox {{
                 color: {text};
-                spacing: 6px;
+                spacing: 7px;
+                background: transparent;
+            }}
+            QCheckBox:disabled {{
+                color: {disabled_text};
+            }}
+            QCheckBox::indicator {{
+                width: 15px;
+                height: 15px;
+                border-radius: 4px;
+                border: 1px solid {field_border};
+                background: {field_bg};
+            }}
+            QCheckBox::indicator:hover {{
+                border-color: {accent};
+            }}
+            QCheckBox::indicator:checked {{
+                background: {accent};
+                border-color: {accent};
+            }}
+            QCheckBox::indicator:checked:disabled {{
+                background: {border};
+                border-color: {border};
+            }}
+            QCheckBox::indicator:disabled {{
+                background: {disabled_bg};
+            }}
+            QSlider::groove:horizontal {{
+                height: 4px;
+                border-radius: 2px;
+                background: {field_border};
+            }}
+            QSlider::sub-page:horizontal {{
+                background: {accent};
+                border-radius: 2px;
+            }}
+            QSlider::handle:horizontal {{
+                width: 14px;
+                height: 14px;
+                margin: -5px 0;
+                border-radius: 7px;
+                background: {accent};
+            }}
+            QSlider::handle:horizontal:hover {{
+                background: {accent_hover};
+            }}
+            QSlider::handle:horizontal:disabled {{
+                background: {disabled_text};
+            }}
+            QSlider::sub-page:horizontal:disabled {{
+                background: {border};
+            }}
+            QToolButton {{
+                border: none;
+                background: transparent;
+                color: {text};
+                padding: 2px 6px;
+                border-radius: 6px;
+                font-weight: 600;
+            }}
+            QToolButton:hover {{
+                background: {hover};
+            }}
+            QToolButton#SolarSidebarHandle {{
+                background: {card_bg};
+                border: 1px solid {border};
+                border-radius: 6px;
+            }}
+            QToolButton#SolarSidebarHandle:hover {{
+                background: {hover};
+                border-color: {accent};
+            }}
+            QTextEdit {{
+                background: {field_bg};
+                color: {text};
+                border: 1px solid {border};
+                border-radius: 8px;
+                padding: 4px;
+            }}
+            QSplitter::handle {{
+                background: transparent;
+            }}
+            QSplitter::handle:hover {{
+                background: {accent_soft};
+            }}
+            QScrollBar:vertical {{
+                background: transparent;
+                width: 10px;
+                margin: 0px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {field_border};
+                border-radius: 5px;
+                min-height: 30px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {muted};
+            }}
+            QScrollBar:horizontal {{
+                background: transparent;
+                height: 10px;
+                margin: 0px;
+            }}
+            QScrollBar::handle:horizontal {{
+                background: {field_border};
+                border-radius: 5px;
+                min-width: 30px;
+            }}
+            QScrollBar::handle:horizontal:hover {{
+                background: {muted};
+            }}
+            QScrollBar::add-line, QScrollBar::sub-line {{
+                width: 0px;
+                height: 0px;
+            }}
+            QScrollBar::add-page, QScrollBar::sub-page {{
+                background: transparent;
             }}
             """
         )
@@ -1513,7 +1851,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         return self.palette().color(self.backgroundRole()).lightness() < 128
 
     def _build_data_source_group(self, parent_layout: QVBoxLayout) -> None:
-        group = QGroupBox("Data Source")
+        group = QGroupBox("1 · Data Source")
         self.data_source_group = group
         layout = QGridLayout(group)
         layout.setHorizontalSpacing(8)
@@ -1522,24 +1860,33 @@ class SolarDataAnalysisWindow(QMainWindow):
         layout.setColumnStretch(1, 1)
         parent_layout.addWidget(group)
 
-        self.search_btn = QPushButton("Fetch")
-        self.download_load_btn = QPushButton("Load Selected")
-        self.download_load_btn.setEnabled(False)
+        self.search_btn = QPushButton("Fetch Records")
+        self.search_btn.setObjectName("SolarPrimaryAction")
+        self.search_btn.setToolTip(
+            "Search the archive for the selected observable and time range.\n"
+            "Matching records appear below in Archive Results."
+        )
         self.find_latest_btn = QPushButton("Find Latest")
         self.find_latest_btn.setToolTip(
             "Jump to the newest data actually available in the archive for the selected observable.\n"
             "Especially useful for SOHO/LASCO, whose calibrated FITS archive can lag real time by many\n"
             "months. This scans the archive backwards and may take up to a minute or two."
         )
-        self.live_preview_btn = QPushButton("Live Preview")
+        self.live_preview_btn = QPushButton("Live Preview (Helioviewer)")
         self.live_preview_btn.setToolTip(
             "Show the newest SOHO/LASCO C2/C3 quicklook image from Helioviewer (updated within ~an hour).\n"
             "A near-real-time browse image for situational awareness — not analysis-grade FITS."
         )
-        self.load_local_btn = QPushButton("Upload")
-        self.use_analyzer_btn = QPushButton("Use Analyzer Window")
+        self.load_local_btn = QPushButton("Upload FITS…")
+        self.load_local_btn.setToolTip("Load solar FITS files straight from disk — no archive search needed.")
+        self.use_analyzer_btn = QPushButton("Use Analyzer Time Window")
+        self.use_analyzer_btn.setToolTip(
+            "Copy the start/end times from the main e-Callisto analyzer window, so the\n"
+            "solar images match the radio burst you are looking at."
+        )
         self.stop_btn = QPushButton("Stop")
         self.stop_btn.setEnabled(False)
+        self.stop_btn.setToolTip("Cancel the running search or download. Completed files stay in the cache.")
 
         # Observable selector: AIA EUV/UV channels, HMI line-of-sight products,
         # SOHO/LASCO coronagraph detectors, STEREO/SECCHI detectors and GOES/SUVI
@@ -1630,58 +1977,57 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.size_estimate_label.setObjectName("SizeEstimateLabel")
 
         row = 0
-        layout.addWidget(self.search_btn, row, 0)
-        layout.addWidget(self.download_load_btn, row, 1)
-        row += 1
-        layout.addWidget(self.find_latest_btn, row, 0)
-        layout.addWidget(self.live_preview_btn, row, 1)
-        row += 1
-        layout.addWidget(self.load_local_btn, row, 0)
-        layout.addWidget(self.stop_btn, row, 1)
-
-        row += 1
-        layout.addWidget(QLabel("Observable"), row, 0, 1, 2)
+        layout.addWidget(self._field_label("Observable"), row, 0, 1, 2)
         row += 1
         layout.addWidget(self.wavelength_combo, row, 0, 1, 2)
 
         row += 1
-        layout.addWidget(QLabel("Start UTC"), row, 0)
-        layout.addWidget(QLabel("End UTC"), row, 1)
+        layout.addWidget(self._field_label("Start (UTC)"), row, 0)
+        layout.addWidget(self._field_label("End (UTC)"), row, 1)
         row += 1
         layout.addWidget(self.start_dt_edit, row, 0)
         layout.addWidget(self.end_dt_edit, row, 1)
 
         row += 1
-        layout.addWidget(QLabel("Sample"), row, 0)
-        layout.addWidget(QLabel("Max Records"), row, 1)
+        layout.addWidget(self._field_label("Cadence (s)"), row, 0)
+        layout.addWidget(self._field_label("Max records"), row, 1)
         row += 1
         layout.addWidget(self.sample_seconds_spin, row, 0)
         layout.addWidget(self.max_records_spin, row, 1)
 
         row += 1
-        layout.addWidget(QLabel("Download Source"), row, 0)
-        layout.addWidget(QLabel("JSOC Notify E-mail"), row, 1)
+        layout.addWidget(self.use_analyzer_btn, row, 0, 1, 2)
+
+        row += 1
+        layout.addWidget(self._subheading("Download options"), row, 0, 1, 2)
+        row += 1
+        layout.addWidget(self._field_label("Source"), row, 0)
+        layout.addWidget(self._field_label("JSOC notify e-mail"), row, 1)
         row += 1
         layout.addWidget(self.source_combo, row, 0)
         layout.addWidget(self.jsoc_email_edit, row, 1)
 
         row += 1
-        layout.addWidget(QLabel("Frame Size"), row, 0, 1, 2)
-        row += 1
-        layout.addWidget(self.frame_size_combo, row, 0, 1, 2)
+        layout.addWidget(self._field_label("Frame size"), row, 0)
+        layout.addWidget(self.frame_size_combo, row, 1)
         row += 1
         layout.addWidget(self.cutout_widget, row, 0, 1, 2)
+        row += 1
+        layout.addWidget(self.high_resolution_check, row, 0, 1, 2)
         row += 1
         layout.addWidget(self.size_estimate_label, row, 0, 1, 2)
 
         row += 1
-        layout.addWidget(self.high_resolution_check, row, 0, 1, 2)
-
+        layout.addWidget(self.search_btn, row, 0)
+        layout.addWidget(self.stop_btn, row, 1)
         row += 1
-        layout.addWidget(self.use_analyzer_btn, row, 0, 1, 2)
+        layout.addWidget(self.find_latest_btn, row, 0)
+        layout.addWidget(self.load_local_btn, row, 1)
+        row += 1
+        layout.addWidget(self.live_preview_btn, row, 0, 1, 2)
 
     def _build_archive_results_group(self, parent_layout: QVBoxLayout) -> None:
-        self.archive_results_group = QGroupBox("Archive Results")
+        self.archive_results_group = QGroupBox("2 · Archive Results")
         self.archive_results_group.setMinimumHeight(300)
         self.archive_results_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         layout = QVBoxLayout(self.archive_results_group)
@@ -1698,7 +2044,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         table_controls.setContentsMargins(0, 0, 0, 0)
         self.select_all_results_btn = QPushButton("Select All")
         self.deselect_all_results_btn = QPushButton("Deselect All")
-        self.save_disk_btn = QPushButton("Save to Disk")
+        self.save_disk_btn = QPushButton("Save to Disk…")
         self.save_disk_btn.setToolTip(
             "Download the checked rows to a folder you choose (kept on disk).\n"
             "Use 'Load Selected' instead to download into the working cache."
@@ -1733,8 +2079,17 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.results_table.setColumnWidth(3, 72)
         layout.addWidget(self.results_table)
 
+        # The step-2 action sits right under the table it acts on.
+        self.download_load_btn = QPushButton("Load Selected")
+        self.download_load_btn.setObjectName("SolarPrimaryAction")
+        self.download_load_btn.setEnabled(False)
+        self.download_load_btn.setToolTip(
+            "Download the checked rows into the working cache and load them for analysis."
+        )
+        layout.addWidget(self.download_load_btn)
+
     def _build_mode_group(self, parent_layout: QVBoxLayout) -> None:
-        group = QGroupBox("Analysis Modes")
+        group = QGroupBox("3 · Analysis")
         self.mode_group = group
         layout = QGridLayout(group)
         layout.setHorizontalSpacing(8)
@@ -1746,7 +2101,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.load_summary_label.setObjectName("SolarLoadSummary")
         self.load_summary_label.setWordWrap(True)
 
-        self.plot_mode_btn = QPushButton("Plot")
+        self.plot_mode_btn = QPushButton("Plot Frames")
         self.plot_mode_btn.setObjectName("SolarPrimaryAction")
         self.plot_mode_btn.setToolTip("Render the loaded solar frame sequence in the embedded plot area.")
         self.difference_mode_btn = QPushButton("Running Diff")
@@ -1795,65 +2150,42 @@ class SolarDataAnalysisWindow(QMainWindow):
         layout.addWidget(self.compare_viewpoint_btn, 6, 0, 1, 2)
         layout.addWidget(self.reset_loaded_btn, 7, 0, 1, 2)
 
-    def _build_timeline_group(self, parent_layout: QVBoxLayout) -> None:
-        group = QGroupBox("Timeline")
-        layout = QVBoxLayout(group)
-        parent_layout.addWidget(group)
-
-        self.frame_label = QLabel("Frame 0 / 0")
-        self.frame_slider = QSlider(Qt.Horizontal)
-        self.frame_slider.setRange(0, 0)
-        self.frame_slider.setEnabled(False)
-        layout.addWidget(self.frame_label)
-        layout.addWidget(self.frame_slider)
-
-        buttons = QGridLayout()
-        buttons.setHorizontalSpacing(8)
-        buttons.setVerticalSpacing(8)
-        self.rewind_btn = QPushButton("Rewind")
-        self.prev_btn = QPushButton("Back")
-        self.play_btn = QPushButton("Play")
-        self.pause_btn = QPushButton("Pause")
-        self.next_btn = QPushButton("Forward")
-        self.rewind_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaSkipBackward))
-        self.prev_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaSeekBackward))
-        self.play_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
-        self.pause_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
-        self.next_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaSeekForward))
-        buttons.addWidget(self.rewind_btn, 0, 0)
-        buttons.addWidget(self.prev_btn, 0, 1)
-        buttons.addWidget(self.play_btn, 0, 2)
-        buttons.addWidget(self.pause_btn, 1, 0)
-        buttons.addWidget(self.next_btn, 1, 1, 1, 2)
-        layout.addLayout(buttons)
-
     def _build_movie_group(self, parent_layout: QVBoxLayout) -> None:
-        group = QGroupBox("Movie")
+        group = QGroupBox("Movie Export")
         layout = QGridLayout(group)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(8)
         parent_layout.addWidget(group)
 
         self.movie_content_combo = QComboBox()
         self.movie_content_combo.addItems(["Frames", "Running Difference", "Base Difference"])
+        self.movie_content_combo.setToolTip(
+            "What the movie (and the viewer) shows: plain frames, frame-to-frame\n"
+            "running differences, or differences against the first frame."
+        )
         self.movie_format_combo = QComboBox()
         self.movie_format_combo.addItems(["MP4", "GIF"])
-        self.fps_spin = QDoubleSpinBox()
-        self.fps_spin.setRange(1.0, 30.0)
-        self.fps_spin.setDecimals(1)
-        self.fps_spin.setSingleStep(1.0)
-        self.fps_spin.setValue(8.0)
-        self.export_movie_btn = QPushButton("Build Movie")
+        self.export_movie_btn = QPushButton("Build Movie…")
 
-        layout.addWidget(QLabel("Content"), 0, 0)
+        hint = QLabel(
+            "Movies use the playback speed (fps) under the viewer and the current "
+            "colormap, scale, clip and crop settings."
+        )
+        hint.setObjectName("SolarHintLabel")
+        hint.setWordWrap(True)
+
+        layout.addWidget(self._field_label("Content"), 0, 0)
         layout.addWidget(self.movie_content_combo, 0, 1)
-        layout.addWidget(QLabel("Format"), 1, 0)
+        layout.addWidget(self._field_label("Format"), 1, 0)
         layout.addWidget(self.movie_format_combo, 1, 1)
-        layout.addWidget(QLabel("Frames per second"), 2, 0)
-        layout.addWidget(self.fps_spin, 2, 1)
-        layout.addWidget(self.export_movie_btn, 3, 0, 1, 2)
+        layout.addWidget(self.export_movie_btn, 2, 0, 1, 2)
+        layout.addWidget(hint, 3, 0, 1, 2)
 
     def _build_plot_controls_group(self, parent_layout: QVBoxLayout) -> None:
-        group = QGroupBox("Plot Controls")
+        group = QGroupBox("Display & Crop")
         layout = QGridLayout(group)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(8)
         parent_layout.addWidget(group)
 
         self.colormap_combo = QComboBox()
@@ -1913,27 +2245,45 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.export_plot_btn = QPushButton("Export Plot")
         self.export_regions_btn = QPushButton("Export Regions CSV")
 
-        layout.addWidget(QLabel("Renderer"), 0, 0)
-        layout.addWidget(self.renderer_combo, 0, 1)
-        layout.addWidget(QLabel("Colormap"), 1, 0)
-        layout.addWidget(self.colormap_combo, 1, 1)
-        layout.addWidget(QLabel("Scale"), 2, 0)
-        layout.addWidget(self.scale_combo, 2, 1)
-        layout.addWidget(QLabel("Clip low %"), 3, 0)
-        layout.addWidget(self.clip_low_slider, 3, 1)
-        layout.addWidget(QLabel("Clip high %"), 4, 0)
-        layout.addWidget(self.clip_high_slider, 4, 1)
-        layout.addWidget(self.crop_check, 5, 0, 1, 2)
-        layout.addWidget(QLabel("X min / max"), 6, 0)
-        layout.addWidget(self._two_widgets(self.crop_x0_spin, self.crop_x1_spin), 6, 1)
-        layout.addWidget(QLabel("Y min / max"), 7, 0)
-        layout.addWidget(self._two_widgets(self.crop_y0_spin, self.crop_y1_spin), 7, 1)
-        layout.addWidget(self.apply_crop_btn, 8, 0)
-        layout.addWidget(self.export_crop_btn, 8, 1)
-        layout.addWidget(self.solar_limb_check, 9, 0)
-        layout.addWidget(self.grid_check, 9, 1)
-        layout.addWidget(self.colorbar_check, 10, 0)
-        layout.addWidget(self.region_overlay_check, 10, 1)
+        row = 0
+        layout.addWidget(self._field_label("Renderer"), row, 0)
+        layout.addWidget(self.renderer_combo, row, 1)
+        row += 1
+        layout.addWidget(self._field_label("Colormap"), row, 0)
+        layout.addWidget(self.colormap_combo, row, 1)
+        row += 1
+        layout.addWidget(self._field_label("Scale"), row, 0)
+        layout.addWidget(self.scale_combo, row, 1)
+        row += 1
+        layout.addWidget(self._field_label("Clip low"), row, 0)
+        layout.addWidget(self.clip_low_slider, row, 1)
+        row += 1
+        layout.addWidget(self._field_label("Clip high"), row, 0)
+        layout.addWidget(self.clip_high_slider, row, 1)
+        row += 1
+        layout.addWidget(self.solar_limb_check, row, 0)
+        layout.addWidget(self.grid_check, row, 1)
+        row += 1
+        layout.addWidget(self.colorbar_check, row, 0)
+        layout.addWidget(self.region_overlay_check, row, 1)
+        row += 1
+        layout.addWidget(self._subheading("Crop (arcsec)"), row, 0, 1, 2)
+        row += 1
+        layout.addWidget(self.crop_check, row, 0, 1, 2)
+        row += 1
+        layout.addWidget(self._field_label("X min / max"), row, 0)
+        layout.addWidget(self._two_widgets(self.crop_x0_spin, self.crop_x1_spin), row, 1)
+        row += 1
+        layout.addWidget(self._field_label("Y min / max"), row, 0)
+        layout.addWidget(self._two_widgets(self.crop_y0_spin, self.crop_y1_spin), row, 1)
+        row += 1
+        layout.addWidget(self.apply_crop_btn, row, 0)
+        layout.addWidget(self.export_crop_btn, row, 1)
+        row += 1
+        layout.addWidget(self._subheading("Export stills"), row, 0, 1, 2)
+        row += 1
+        layout.addWidget(self.export_plot_btn, row, 0)
+        layout.addWidget(self.export_regions_btn, row, 1)
 
     def _build_coronagraph_group(self, parent_layout: QVBoxLayout) -> None:
         """White-light coronagraph tools (STEREO COR1/COR2, SOHO/LASCO).
@@ -1990,9 +2340,9 @@ class SolarDataAnalysisWindow(QMainWindow):
             "Stack per-frame slit profiles into a time–elongation map; an outward-\n"
             "moving CME appears as a slanted bright track."
         )
-        layout.addWidget(QLabel("Background"), 0, 0)
+        layout.addWidget(self._field_label("Background"), 0, 0)
         layout.addWidget(self.hi_background_combo, 0, 1)
-        layout.addWidget(QLabel("Position angle"), 1, 0)
+        layout.addWidget(self._field_label("Position angle"), 1, 0)
         layout.addWidget(self.hi_pa_spin, 1, 1)
         layout.addWidget(self.hi_jmap_btn, 2, 0, 1, 2)
         group.setVisible(False)
@@ -2064,7 +2414,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         style_widget = QWidget()
         style_widget.setLayout(style_row)
         layout.addWidget(style_widget, 2, 0, 1, 2)
-        layout.addWidget(QLabel("Spacing / Min B⊥"), 3, 0)
+        layout.addWidget(self._field_label("Spacing / Min B⊥"), 3, 0)
         layout.addWidget(self._two_widgets(self.vector_spacing_spin, self.vector_threshold_spin), 3, 1)
         layout.addWidget(self.vector_status_label, 4, 0, 1, 2)
 
@@ -2082,9 +2432,9 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.min_area_spin.setRange(1, 100000)
         self.min_area_spin.setValue(12)
         self.metadata_status_label = QLabel("Metadata: not loaded")
-        settings.addWidget(QLabel("Threshold"))
+        settings.addWidget(self._field_label("Threshold"))
         settings.addWidget(self.threshold_spin)
-        settings.addWidget(QLabel("Min px"))
+        settings.addWidget(self._field_label("Min px"))
         settings.addWidget(self.min_area_spin)
         layout.addLayout(settings)
         layout.addWidget(self.metadata_status_label)
@@ -2104,6 +2454,18 @@ class SolarDataAnalysisWindow(QMainWindow):
         spin.setSuffix('"')
         spin.setValue(float(value))
         return spin
+
+    def _field_label(self, text: str) -> QLabel:
+        """Small muted caption above/beside an input field."""
+        label = QLabel(text)
+        label.setObjectName("SolarFieldLabel")
+        return label
+
+    def _subheading(self, text: str) -> QLabel:
+        """Uppercase section divider inside a sidebar card."""
+        label = QLabel(str(text).upper())
+        label.setObjectName("SolarSubheading")
+        return label
 
     def _two_widgets(self, left: QWidget, right: QWidget) -> QWidget:
         widget = QWidget()
@@ -2764,7 +3126,11 @@ class SolarDataAnalysisWindow(QMainWindow):
 
     def _on_frame_size_changed(self) -> None:
         is_cutout = self._frame_size_mode() == SIZE_CUTOUT
-        self.cutout_widget.setVisible(is_cutout)
+        # Never re-show the cutout fields inside a collapsed accordion card.
+        source_expanded = (
+            not self.data_source_group.isCheckable() or self.data_source_group.isChecked()
+        )
+        self.cutout_widget.setVisible(is_cutout and source_expanded)
         self._update_size_estimate()
 
     def _estimated_frame_count(self) -> int:
