@@ -19,6 +19,7 @@ from src.UI.dialogs.multi_station_comparison_dialog import MultiStationCompariso
 from src.UI.dialogs.rfi_control_dialog import RFIControlDialog
 from src.UI.dialogs.type_ii_band_splitting_dialog import TypeIIBandSplittingDialog
 from src.UI.dialogs.type_ii_graph_settings_dialog import TypeIIGraphSettingsDialog
+from src.UI.dialogs.user_guide_dialog import UserGuideDialog
 
 __all__ = [
     "AnalyzeDialog",
@@ -34,4 +35,5 @@ __all__ = [
     "RFIControlDialog",
     "TypeIIBandSplittingDialog",
     "TypeIIGraphSettingsDialog",
+    "UserGuideDialog",
 ]

@@ -154,6 +154,7 @@ from src.UI.dialogs.annotation_text_dialog import TextAnnotationDialog
 from src.UI.dialogs.batch_processing_dialog import BatchProcessingDialog
 from src.UI.dialogs.bug_report_dialog import BugReportDialog
 from src.UI.dialogs.citation_dialog import CitationDialog
+from src.UI.dialogs.user_guide_dialog import UserGuideDialog
 from src.UI.dialogs.combine_dialogs import CombineFrequencyDialog, CombineTimeDialog, FrequencyCombineOptionsDialog
 from src.UI.dialogs.display_range_dialog import DisplayRangeDialog
 from src.UI.dialogs.light_curve_frequency_dialog import LightCurveFrequencyDialog
@@ -370,6 +371,7 @@ class MainWindow(QMainWindow):
         self._multi_station_comparison_dialog = None
         self._bug_report_dialog = None
         self._citation_dialog = None
+        self._user_guide_dialog = None
 
         # Processing audit + derived state
         self._processing_log = []
@@ -1196,6 +1198,13 @@ class MainWindow(QMainWindow):
         self.check_updates_action.triggered.connect(self.check_for_app_updates)
         self.report_bug_action.triggered.connect(self.open_bug_report_dialog)
         about_action.triggered.connect(self.show_about_dialog)
+
+        help_menu = menubar.addMenu("Help")
+        self.user_guide_action = QAction("User Guide", self)
+        self.user_guide_action.setMenuRole(QAction.NoRole)
+        self.user_guide_action.setShortcut("F1")
+        help_menu.addAction(self.user_guide_action)
+        self.user_guide_action.triggered.connect(self.open_user_guide)
 
         # (OPTIONAL) Connect them later like:
         # open_action.triggered.connect(self.open_file)
@@ -7426,6 +7435,9 @@ class MainWindow(QMainWindow):
     def _on_citation_dialog_destroyed(self, *_):
         self._citation_dialog = None
 
+    def _on_user_guide_dialog_destroyed(self, *_):
+        self._user_guide_dialog = None
+
     def open_bug_report_dialog(self):
         try:
             alive = self._bug_report_dialog is not None
@@ -7465,6 +7477,23 @@ class MainWindow(QMainWindow):
         self._citation_dialog.show()
         self._citation_dialog.raise_()
         self._citation_dialog.activateWindow()
+
+    def open_user_guide(self):
+        try:
+            alive = self._user_guide_dialog is not None
+            if alive:
+                _ = self._user_guide_dialog.windowTitle()
+        except Exception:
+            alive = False
+
+        if not alive:
+            self._user_guide_dialog = UserGuideDialog(parent=self)
+            self._user_guide_dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+            self._user_guide_dialog.destroyed.connect(self._on_user_guide_dialog_destroyed)
+
+        self._user_guide_dialog.show()
+        self._user_guide_dialog.raise_()
+        self._user_guide_dialog.activateWindow()
 
     def reset_selection(self):
         had_drift_points = self._clear_drift_overlays(keep_view=True)
