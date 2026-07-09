@@ -14,6 +14,7 @@ pytest.importorskip("PySide6")
 pytest.importorskip("matplotlib")
 pytest.importorskip("astropy")
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QGroupBox, QScrollArea, QToolBar
 
 from src.Backend.presets import build_preset
@@ -85,16 +86,19 @@ def test_sidebar_toggle_and_controls_still_work():
     section_titles = {group.title() for group in win.side_scroll.findChildren(QGroupBox) if group.title()}
     assert {"Noise Clipping Thresholds", "Units", "Graph Properties", "Analysis Summary"}.issubset(section_titles)
 
-    assert win.side_scroll.isVisible() is True
+    # The sidebar collapses by animating its width to 0 inside a splitter
+    # (same method as the Solar Image Analysis window); the scroll area stays
+    # "visible" and the arrow handle flips direction to signal the state.
+    assert win._sidebar_collapsed is False
     win.toggle_left_sidebar()
     QApplication.processEvents()
-    assert win.side_scroll.isVisible() is False
-    assert win.sidebar_toggle_btn.text() == "▶"
+    assert win._sidebar_collapsed is True
+    assert win.sidebar_toggle_btn.arrowType() == Qt.RightArrow
 
     win.toggle_left_sidebar()
     QApplication.processEvents()
-    assert win.side_scroll.isVisible() is True
-    assert win.sidebar_toggle_btn.text() == "◀"
+    assert win._sidebar_collapsed is False
+    assert win.sidebar_toggle_btn.arrowType() == Qt.LeftArrow
 
     win.units_db_radio.setChecked(True)
     QApplication.processEvents()

@@ -27,7 +27,7 @@ from matplotlib.path import Path
 from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter, ScalarFormatter
 from matplotlib.widgets import LassoSelector, RectangleSelector
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QSettings, QSize, QStandardPaths, Qt, QThread, QTimer, QUrl, Slot
+from PySide6.QtCore import QByteArray, QBuffer, QEasingCurve, QIODevice, QPropertyAnimation, QSettings, QSize, QStandardPaths, Qt, QThread, QTimer, QUrl, Slot
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -67,9 +67,11 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSlider,
     QSpinBox,
+    QSplitter,
     QStackedLayout,
     QStatusBar,
     QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -784,33 +786,33 @@ class MainWindow(QMainWindow):
         self.analysis_summary_group.setMaximumWidth(SIDEBAR_W)
         self.measurement_readout.setMaximumWidth(SIDEBAR_W)
 
+        # Sidebar collapse/expand uses the same method as the Solar Image
+        # Analysis window: a draggable splitter plus a full-height arrow handle
+        # on the viewer's left edge, with an animated maximumWidth slide.
+        self._sidebar_min_width = SIDEBAR_W + 16
+        self._sidebar_max_width = self._sidebar_min_width + 40
+        self._sidebar_animation = None
+        self._sidebar_collapsed = False
+
         self.side_scroll = QScrollArea()
         self.side_scroll.setWidgetResizable(True)
         self.side_scroll.setFrameShape(QFrame.NoFrame)
         self.side_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.side_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.side_scroll.setMinimumWidth(SIDEBAR_W + 16)
-        self.side_scroll.setMaximumWidth(SIDEBAR_W + 28)
+        self.side_scroll.setMinimumWidth(self._sidebar_min_width)
+        self.side_scroll.setMaximumWidth(self._sidebar_max_width)
         self.side_scroll.setWidget(side_panel_widget)
 
-        self.sidebar_toggle_btn = QPushButton("◀")
+        self.sidebar_toggle_btn = QToolButton()
         self.sidebar_toggle_btn.setObjectName("SidebarToggleButton")
-        self.sidebar_toggle_btn.setToolTip("Collapse sidebar")
-        self.sidebar_toggle_btn.setFixedSize(12, 22)
-        self.sidebar_toggle_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.sidebar_toggle_btn.setArrowType(Qt.LeftArrow)
+        self.sidebar_toggle_btn.setAutoRaise(True)
+        self.sidebar_toggle_btn.setFixedWidth(18)
+        self.sidebar_toggle_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self.sidebar_toggle_btn.setCursor(Qt.PointingHandCursor)
         self.sidebar_toggle_btn.setFocusPolicy(Qt.NoFocus)
+        self.sidebar_toggle_btn.setToolTip("Hide the controls sidebar")
         self.sidebar_toggle_btn.clicked.connect(self.toggle_left_sidebar)
-
-        self.sidebar_toggle_strip = QWidget()
-        self.sidebar_toggle_strip.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-        self.sidebar_toggle_strip.setFixedWidth(12)
-        sidebar_toggle_layout = QVBoxLayout(self.sidebar_toggle_strip)
-        sidebar_toggle_layout.setContentsMargins(0, 0, 0, 0)
-        sidebar_toggle_layout.setSpacing(0)
-        sidebar_toggle_layout.addStretch(1)
-        sidebar_toggle_layout.addWidget(self.sidebar_toggle_btn, 0, Qt.AlignHCenter)
-        sidebar_toggle_layout.addStretch(1)
-        self._sidebar_collapsed = False
 
         # -------------------------
         # Style (safe sizes, no tiny max-heights)
@@ -823,12 +825,9 @@ class MainWindow(QMainWindow):
             self.analysis_summary_group.setStyleSheet(sidebar_style)
 
         # -------------------------
-        # Main layout with scrollable sidebar + canvas
+        # Main layout: draggable splitter (sidebar | viewer) with the
+        # full-height collapse handle on the viewer's left edge.
         # -------------------------
-        main_layout = QHBoxLayout()
-        main_layout.setContentsMargins(8, 8, 8, 8)
-        main_layout.setSpacing(0)
-
         self.plot_stack_host = QWidget()
         self.plot_stack = QStackedLayout(self.plot_stack_host)
         self.plot_stack.setContentsMargins(0, 0, 0, 0)
@@ -837,15 +836,29 @@ class MainWindow(QMainWindow):
         self.plot_stack.addWidget(self.accel_canvas)
         self.plot_stack.setCurrentWidget(self.accel_canvas if self.use_hw_live_preview else self.canvas)
 
-        main_layout.addWidget(self.side_scroll, 0)
-        main_layout.addWidget(self.sidebar_toggle_strip, 0)
-        main_layout.addWidget(self.plot_stack_host, 1)
-        self._main_layout = main_layout
+        viewer_panel = QWidget()
+        viewer_layout = QHBoxLayout(viewer_panel)
+        viewer_layout.setContentsMargins(3, 0, 0, 0)
+        viewer_layout.setSpacing(5)
+        viewer_layout.addWidget(self.sidebar_toggle_btn)
+        viewer_layout.addWidget(self.plot_stack_host, 1)
+
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.addWidget(self.side_scroll)
+        splitter.addWidget(viewer_panel)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([self._sidebar_min_width, 1000])
+        self.main_splitter = splitter
 
         container = QWidget()
-        container.setLayout(main_layout)
+        container_layout = QHBoxLayout(container)
+        container_layout.setContentsMargins(8, 8, 8, 8)
+        container_layout.setSpacing(0)
+        container_layout.addWidget(splitter)
         self.setCentralWidget(container)
-        self._set_sidebar_collapsed(False)
+        self._set_sidebar_collapsed(False, animate=False)
 
         # ----- Menu Bar -----
         menubar = self.menuBar()
@@ -1392,11 +1405,13 @@ class MainWindow(QMainWindow):
             font-weight: bold;
             font-size: 14px;
         }
-        QPushButton#SidebarToggleButton {
-            font-size: 10px;
-            padding: 0px;
-            min-width: 12px;
-            max-width: 12px;
+        QToolButton#SidebarToggleButton {
+            border: 1px solid #b0b0b0;
+            border-radius: 6px;
+            background-color: #f0f0f0;
+        }
+        QToolButton#SidebarToggleButton:hover {
+            background-color: #e0e0e0;
         }
         """
 
@@ -1600,21 +1615,24 @@ class MainWindow(QMainWindow):
             background-color: {accent};
             border-radius: 5px;
         }}
-        QPushButton#SidebarToggleButton {{
-            font-size: 10px;
-            padding: 0px;
-            min-width: 12px;
-            max-width: 12px;
+        QToolButton#SidebarToggleButton {{
             border: 1px solid {border};
             border-radius: 6px;
             color: {text};
             background-color: {surface_bg};
         }}
-        QPushButton#SidebarToggleButton:hover {{
+        QToolButton#SidebarToggleButton:hover {{
             background-color: {hover};
+            border-color: {accent};
         }}
-        QPushButton#SidebarToggleButton:pressed {{
+        QToolButton#SidebarToggleButton:pressed {{
             background-color: {pressed};
+        }}
+        QSplitter::handle {{
+            background: transparent;
+        }}
+        QSplitter::handle:hover {{
+            background-color: {hover};
         }}
         """
 
@@ -2254,22 +2272,59 @@ class MainWindow(QMainWindow):
     def toggle_left_sidebar(self):
         self._set_sidebar_collapsed(not bool(getattr(self, "_sidebar_collapsed", False)))
 
-    def _set_sidebar_collapsed(self, collapsed: bool):
-        self._sidebar_collapsed = bool(collapsed)
+    def _set_sidebar_collapsed(self, collapsed: bool, animate: bool = True):
+        """Slide the controls sidebar away (or back) to maximise the plot area.
+
+        Same method as the Solar Image Analysis window: animate the scroll
+        area's maximumWidth, then pin the splitter panes so the collapse holds.
+        """
+        collapsed = bool(collapsed)
+        self._sidebar_collapsed = collapsed
         if getattr(self, "side_scroll", None) is None or getattr(self, "sidebar_toggle_btn", None) is None:
             return
 
-        self.side_scroll.setVisible(not self._sidebar_collapsed)
-        if self._sidebar_collapsed:
-            self.sidebar_toggle_btn.setText("▶")
-            self.sidebar_toggle_btn.setToolTip("Expand sidebar")
-        else:
-            self.sidebar_toggle_btn.setText("◀")
-            self.sidebar_toggle_btn.setToolTip("Collapse sidebar")
+        self.sidebar_toggle_btn.setArrowType(Qt.RightArrow if collapsed else Qt.LeftArrow)
+        self.sidebar_toggle_btn.setToolTip(
+            "Show the controls sidebar" if collapsed else "Hide the controls sidebar"
+        )
+        if collapsed:
+            self.side_scroll.setMinimumWidth(0)
+        end_width = 0 if collapsed else self._sidebar_max_width
 
-        layout = getattr(self, "_main_layout", None)
-        if layout is not None:
-            layout.setSpacing(0)
+        splitter = getattr(self, "main_splitter", None)
+
+        def _finish() -> None:
+            # Belt-and-braces: pin the splitter panes so the collapse holds even
+            # where max-width alone would not move the splitter.
+            if splitter is None:
+                return
+            total = max(1, sum(splitter.sizes()))
+            if collapsed:
+                splitter.setSizes([0, total])
+            else:
+                self.side_scroll.setMinimumWidth(self._sidebar_min_width)
+                self.side_scroll.setMaximumWidth(self._sidebar_max_width)
+                open_width = self._sidebar_min_width
+                splitter.setSizes([open_width, max(total - open_width, 1)])
+
+        # Stop any in-flight animation so rapid toggles pick up cleanly.
+        animation = getattr(self, "_sidebar_animation", None)
+        if animation is not None:
+            animation.stop()
+            self._sidebar_animation = None
+
+        if animate:
+            animation = QPropertyAnimation(self.side_scroll, b"maximumWidth", self)
+            animation.setDuration(220)
+            animation.setStartValue(self.side_scroll.width())
+            animation.setEndValue(end_width)
+            animation.setEasingCurve(QEasingCurve.InOutCubic)
+            animation.finished.connect(_finish)
+            self._sidebar_animation = animation  # keep alive for the duration
+            animation.start()
+        else:
+            self.side_scroll.setMaximumWidth(end_width)
+            _finish()
 
     def _normalize_plot_type(self, title: str | None) -> str:
         txt = str(title or "").strip()
