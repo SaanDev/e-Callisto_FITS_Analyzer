@@ -667,21 +667,34 @@ Use **About → Check for Updates...** to query the latest release from GitHub.
   - `src/Installation/FITS_Analyzer_InnoSetup.iss`
 
 ### Linux (.deb + PyInstaller)
-- Debian/Ubuntu build prerequisites:
+- Build the `.deb` on Linux. Do not run this step on macOS or Windows: PyInstaller bundles binaries for the host OS, and `build_deb_linux.sh` uses Linux tools such as `dpkg`, `apt-get`, and `fpm`.
+- Ubuntu 24.04 on `amd64` is recommended for the release package. Other Debian/Ubuntu versions can work if they provide Python `3.11+`.
+- Native Debian/Ubuntu prerequisites:
   - `sudo apt-get update`
-  - `sudo apt-get install -y python3-venv python3-pip`
-- Use Python `3.11+` for packaging. If you already have a working project venv, the script will prefer it automatically.
-- If your machine uses a stale pip mirror, point the build at official PyPI:
-  - `PIP_INDEX_URL=https://pypi.org/simple bash src/Installation/build_deb_linux.sh`
-- If you need a specific interpreter:
-  - `PYTHON_BIN=/usr/bin/python3.13 bash src/Installation/build_deb_linux.sh`
-  - `PYTHON_BIN="$(pwd)/.venv/bin/python" PIP_INDEX_URL=https://pypi.org/simple bash src/Installation/build_deb_linux.sh`
-- Recommended `.deb` packaging workflow:
-  - `bash src/Installation/build_deb_linux.sh`
+  - `sudo apt-get install -y python3 python3-venv python3-pip ruby ruby-dev build-essential desktop-file-utils binutils patchelf libgl1 libegl1 libxkbcommon-x11-0 libxcb-cursor0`
+  - `sudo gem install --no-document fpm`
+- Build the package:
+  - `PYTHON_BIN=/usr/bin/python3 PIP_INDEX_URL=https://pypi.org/simple bash src/Installation/build_deb_linux.sh`
+- If the target Linux machine has a different Python `3.11+` interpreter, point at it explicitly:
+  - `PYTHON_BIN=/usr/bin/python3.13 PIP_INDEX_URL=https://pypi.org/simple bash src/Installation/build_deb_linux.sh`
+- If the repository was copied from macOS/Windows or contains an existing non-Linux `.venv`, always set `PYTHON_BIN` explicitly. The Linux build script creates its own `.venv-build`, but it otherwise tries to reuse `./.venv` when present.
+- If you see `.venv-build/bin/python: bad interpreter: No such file or directory`, remove the stale build virtual environment and rerun the build:
+  - `rm -rf .venv-build`
+  - `PYTHON_BIN=/usr/bin/python3 PIP_INDEX_URL=https://pypi.org/simple bash src/Installation/build_deb_linux.sh`
+  - Current versions of `build_deb_linux.sh` remove `.venv-build` automatically before recreating it.
+- Build from macOS with Docker:
+  - `docker run --rm -it --platform linux/amd64 -v "$PWD":/work -w /work ubuntu:24.04 bash`
+  - Inside the container, run:
+    - `apt-get update`
+    - `apt-get install -y python3 python3-venv python3-pip ruby ruby-dev build-essential desktop-file-utils binutils patchelf libgl1 libegl1 libxkbcommon-x11-0 libxcb-cursor0`
+    - `gem install --no-document fpm`
+    - `PYTHON_BIN=/usr/bin/python3 PIP_INDEX_URL=https://pypi.org/simple bash src/Installation/build_deb_linux.sh`
+- Expected output on `amd64`:
+  - `dist/e-callisto-fits-analyzer_2.7.0_amd64.deb`
 - Install the generated local package using a path, not a bare filename:
   - `sudo apt install -y ./dist/e-callisto-fits-analyzer_2.7.0_amd64.deb`
   - If you are already inside `dist`, use `sudo apt install -y ./e-callisto-fits-analyzer_2.7.0_amd64.deb`
-- Manual PyInstaller build:
+- Manual PyInstaller build only creates the Linux app folder, not the `.deb`:
   - `pyinstaller src/Installation/FITS_Analyzer_linux.spec`
 
 ### macOS (py2app)

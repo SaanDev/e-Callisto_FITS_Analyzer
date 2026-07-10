@@ -18,6 +18,7 @@ ARCH="$(dpkg --print-architecture)"
 OUT_DEB="$ROOT/dist/${APP_ID}_${VERSION}_${ARCH}.deb"
 RUNTIME_REQUIREMENTS="$ROOT/src/Installation/requirements-runtime.txt"
 BUILD_REQUIREMENTS="$ROOT/src/Installation/requirements-build.txt"
+BUILD_VENV="$ROOT/.venv-build"
 
 cd "$ROOT"
 
@@ -85,11 +86,16 @@ fi
 echo "==> Using Python: $PYTHON_BIN ($PYTHON_VERSION)"
 echo "==> Using package index: $PIP_INDEX_URL"
 
-if ! "$PYTHON_BIN" -m venv "$ROOT/.venv-build"; then
+if [ -d "$BUILD_VENV" ]; then
+  echo "==> Removing stale build virtual environment: $BUILD_VENV"
+  rm -rf "$BUILD_VENV"
+fi
+
+if ! "$PYTHON_BIN" -m venv "$BUILD_VENV"; then
   print_python_prereq_help
   exit 1
 fi
-source "$ROOT/.venv-build/bin/activate"
+source "$BUILD_VENV/bin/activate"
 if ! python -m pip --version >/dev/null 2>&1; then
   echo "==> pip is missing in .venv-build; attempting ensurepip bootstrap"
   if ! python -m ensurepip --upgrade >/dev/null 2>&1; then
