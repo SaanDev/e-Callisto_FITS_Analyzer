@@ -12,7 +12,6 @@ import re
 import sys
 
 import numpy as np
-from openpyxl import Workbook, load_workbook
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -29,8 +28,6 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from scipy.optimize import curve_fit
-from sklearn.metrics import mean_squared_error, r2_score
 
 from src.UI.gui_shared import MplCanvas, fit_window_to_screen, pick_export_path
 from src.UI.mpl_style import style_axes
@@ -317,6 +314,8 @@ class AnalyzeDialog(QDialog):
         self._fit_mask = fit_mask
 
         if params is None:
+            from scipy.optimize import curve_fit
+
             params, cov = curve_fit(
                 model_func,
                 fit_time,
@@ -354,6 +353,8 @@ class AnalyzeDialog(QDialog):
         self.canvas.ax.grid(True)
         self.canvas.draw()
         self.current_plot_title = f"{self.filename}_Best_Fit"
+
+        from sklearn.metrics import mean_squared_error, r2_score
 
         predicted = model_func(fit_time, a, b)
         r2 = r2_score(fit_freq, predicted)
@@ -695,6 +696,8 @@ class AnalyzeDialog(QDialog):
             date = "UNKNOWN"
 
         # ✅ Excel File Handling
+        from openpyxl import Workbook, load_workbook
+
         if self.existing_excel_checkbox.isChecked():
             path, _ = QFileDialog.getOpenFileName(self, "Select Existing Excel File", "", "Excel Files (*.xlsx)")
             if not path:

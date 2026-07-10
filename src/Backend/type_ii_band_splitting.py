@@ -11,7 +11,6 @@ import math
 from typing import Any
 
 import numpy as np
-from scipy.optimize import curve_fit
 
 
 MU_0 = 4.0 * math.pi * 1e-7
@@ -64,6 +63,8 @@ def fit_power_law(time_values: Any, freq_values: Any) -> dict[str, Any]:
 
     fit_time = x[mask]
     fit_freq = y[mask]
+    from scipy.optimize import curve_fit
+
     params, cov = curve_fit(
         power_law,
         fit_time,
