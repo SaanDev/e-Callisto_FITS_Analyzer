@@ -1369,10 +1369,52 @@ class SunPyPlotWindow(QMainWindow):
         self.canvas.theme = self.theme
         self.canvas.apply_theme()
 
+    @staticmethod
+    def _prepare_difference_sequence(frames: list[Any]) -> tuple[list[Any], str]:
+        """Time-order frames and keep one difference-compatible configuration.
+
+        Returns ``(frames, note)``. The dominant science group is kept only when
+        it has at least two frames and something was actually excluded; otherwise
+        the (time-ordered) input is returned unchanged so nothing is silently lost
+        from a sequence too small to auto-filter.
+        """
+        try:
+            from src.Backend.solar_data_analysis import (
+                frame_observation_time,
+                partition_frames_by_config,
+            )
+        except Exception:
+            return list(frames), ""
+
+        def _obs_time(frame: Any):
+            when = frame_observation_time(frame)
+            return (when is None, when or datetime.max)
+
+        ordered = sorted(frames, key=_obs_time)
+        try:
+            partition = partition_frames_by_config(ordered)
+        except Exception:
+            return ordered, ""
+        if partition.dropped and len(partition.kept) >= 2:
+            return partition.kept, partition.note
+        return ordered, ""
+
     def set_map_frames(self, frames: list[Any], metadata: dict[str, Any]) -> None:
         values = list(frames or [])
         if not values:
             raise ValueError("No map frames were provided to SunPyPlotWindow.")
+
+        # Order chronologically and keep a single physically-consistent observing
+        # configuration before anything is differenced. SOHO/LASCO C2 & C3 archive
+        # windows interleave colour filters (Orange/Clear/Blue), polarizer states
+        # (Clear / ±60°) and image sizes (1024² synoptic vs 512² polarizer/browse)
+        # in one query. Running/base difference subtracts adjacent frames, so a
+        # size mismatch previously left a raw, undifferenced frame in the movie —
+        # the "running difference mixed with real frames" defect. Partitioning to
+        # the dominant science group (as the Solar Image Analysis window does)
+        # keeps the difference sequence to one passband and size.
+        values, drop_note = self._prepare_difference_sequence(values)
+        self._sequence_note = drop_note
 
         self._mode = "map"
         self._map_frames = values
@@ -1430,6 +1472,11 @@ class SunPyPlotWindow(QMainWindow):
         self.show_map_mode()
         self._render_current_map_frame(emit_signal=True)
         self._refresh_playback_buttons()
+        if drop_note:
+            try:
+                self.statusBar().showMessage(f"Sequence: {drop_note}", 12000)
+            except Exception:
+                pass
 
     def set_timeseries(
         self,

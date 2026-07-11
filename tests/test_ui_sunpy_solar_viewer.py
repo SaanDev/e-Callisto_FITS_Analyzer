@@ -342,6 +342,54 @@ def test_safe_meta_text_handles_quantity_and_non_scalars():
     win.close()
 
 
+class _FakeLascoMap:
+    observatory = "SOHO"
+    instrument = "LASCO"
+
+    def __init__(self, value, *, detector="C2", filt="Orange", polar="Clear",
+                 shape=(16, 16), date="2024-06-01T00:00:00"):
+        self.data = np.full(shape, float(value), dtype=float)
+        self.detector = detector
+        self.wavelength = ""
+        self.date = date
+        self.meta = {"instrume": "LASCO", "detector": detector,
+                     "filter": filt, "polar": polar}
+
+
+def test_plot_window_partitions_mixed_lasco_for_clean_running_difference():
+    # A real SOHO/LASCO window interleaves the 1024² Orange synoptic frames with
+    # 512² Blue and polarizer frames. Before partitioning, running difference fell
+    # back to raw on every size boundary — raw frames mixed into the movie. The
+    # plot window must keep only the dominant science group so differences are
+    # clean end-to-end.
+    _app()
+    plot = SunPyPlotWindow()
+    frames = [
+        _FakeLascoMap(1.0, date="2024-06-01T00:00:00"),                                    # 16² Orange
+        _FakeLascoMap(9.0, filt="Blue", shape=(8, 8), date="2024-06-01T00:10:00"),         # 8²  Blue
+        _FakeLascoMap(2.0, date="2024-06-01T00:20:00"),                                    # 16² Orange
+        _FakeLascoMap(8.0, polar="+60 Deg", shape=(8, 8), date="2024-06-01T00:30:00"),     # 8²  polarizer
+        _FakeLascoMap(3.0, date="2024-06-01T00:40:00"),                                    # 16² Orange
+        _FakeLascoMap(4.0, date="2024-06-01T01:00:00"),                                    # 16² Orange
+    ]
+    plot.set_map_frames(frames, metadata={})
+    QApplication.processEvents()
+
+    # Only the four 16² Orange frames survive, in time order (values 1,2,3,4).
+    assert len(plot._map_frames) == 4
+    assert {f.data.shape for f in plot._map_frames} == {(16, 16)}
+    np.testing.assert_allclose([f.data.flat[0] for f in plot._map_frames], [1.0, 2.0, 3.0, 4.0])
+    assert "excluded" in getattr(plot, "_sequence_note", "")
+
+    # Every running-difference frame is a true difference (+1), never a raw frame.
+    plot.running_diff_check.setChecked(True)
+    for i in range(len(plot._map_frames)):
+        plot.frame_slider.setValue(i)
+        QApplication.processEvents()
+        np.testing.assert_allclose(plot.current_map_data(), np.full((16, 16), 1.0))
+    plot.close()
+
+
 def test_plot_window_playback_slider_and_running_difference():
     _app()
     plot = SunPyPlotWindow()
