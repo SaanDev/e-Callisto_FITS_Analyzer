@@ -183,6 +183,10 @@ class SunPyPlotCanvas(QWidget):
         # how many follow-up passes a single resize may spawn; the budget resets
         # on the next real resize so genuine size changes always re-square.
         self._square_reflow_passes = 0
+        # Interactive pan/zoom is opt-in (see set_pan_zoom_enabled). While off the
+        # view is pinned to the full frame; while on the user can zoom/pan and the
+        # zoom survives frame changes so a movie plays zoomed-in.
+        self._pan_zoom_enabled = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -724,6 +728,12 @@ class SunPyPlotCanvas(QWidget):
     def has_plot_content(self) -> bool:
         return self.map_image.image is not None
 
+    def set_map_title(self, title: str) -> None:
+        """Set the map graph title (used for the empty 'No image data loaded.'
+        state; frame renders set their own title through plot_map_data)."""
+        self.map_plot.setTitle(str(title))
+        self._unclamp_title_min_width()
+
     def set_grid_visible(self, visible: bool) -> None:
         # The "Coordinate Grid" control now draws a curvilinear solar-coordinate
         # graticule (see set_solar_graticule); the plain rectilinear arcsec grid
@@ -1097,20 +1107,9 @@ class SunPyPlotCanvas(QWidget):
         x1 = x0 + width
         y1 = y0 + height
         bounds = (min(x0, x1), max(x0, x1), min(y0, y1), max(y0, y1))
-        x_span = max(1e-12, bounds[1] - bounds[0])
-        y_span = max(1e-12, bounds[3] - bounds[2])
         vb = self.map_plot.getViewBox()
         vb.setAspectLocked(True, ratio=1.0)
-        vb.setLimits(
-            xMin=bounds[0],
-            xMax=bounds[1],
-            yMin=bounds[2],
-            yMax=bounds[3],
-            minXRange=x_span,
-            maxXRange=x_span,
-            minYRange=y_span,
-            maxYRange=y_span,
-        )
+        self._apply_view_limits(bounds)
         if self._last_map_bounds is None or any(abs(bounds[i] - self._last_map_bounds[i]) > 1e-9 for i in range(4)):
             vb.setRange(
                 xRange=(bounds[0], bounds[1]),
@@ -1120,6 +1119,53 @@ class SunPyPlotCanvas(QWidget):
             )
             self._last_map_bounds = bounds
         self._enforce_square_map_plot()
+
+    def _apply_view_limits(self, bounds: tuple[float, float, float, float]) -> None:
+        """Constrain the map view box for the current pan/zoom mode.
+
+        Off (default): the range is pinned to the full frame (min == max span),
+        so no frame render can drift the view. On: the user may zoom in to ~2%
+        of the frame and pan, but never zoom out past the full frame or pan off
+        the image. Relaxing the min-range is also what lets a zoomed-in view
+        survive the per-frame ``setLimits`` call during movie playback.
+        """
+        x_span = max(1e-12, bounds[1] - bounds[0])
+        y_span = max(1e-12, bounds[3] - bounds[2])
+        vb = self.map_plot.getViewBox()
+        min_x_range = x_span / 50.0 if self._pan_zoom_enabled else x_span
+        min_y_range = y_span / 50.0 if self._pan_zoom_enabled else y_span
+        vb.setLimits(
+            xMin=bounds[0],
+            xMax=bounds[1],
+            yMin=bounds[2],
+            yMax=bounds[3],
+            minXRange=min_x_range,
+            maxXRange=x_span,
+            minYRange=min_y_range,
+            maxYRange=y_span,
+        )
+
+    def set_pan_zoom_enabled(self, enabled: bool) -> None:
+        """Toggle interactive pan (mouse drag) and zoom (wheel) on the map.
+
+        Turning it off snaps the view back to the full frame. The zoom persists
+        across frame changes because :meth:`plot_map_data` only re-ranges when the
+        frame bounds actually change — so a movie plays inside the zoomed view.
+        """
+        enabled = bool(enabled)
+        self._pan_zoom_enabled = enabled
+        vb = self.map_plot.getViewBox()
+        vb.setMouseEnabled(x=enabled, y=enabled)
+        if self._last_map_bounds is not None:
+            self._apply_view_limits(self._last_map_bounds)
+            if not enabled:
+                b = self._last_map_bounds
+                vb.setRange(
+                    xRange=(b[0], b[1]),
+                    yRange=(b[2], b[3]),
+                    padding=0.0,
+                    disableAutoRange=True,
+                )
 
     def _map_rect_from_transform(self, shape: tuple[int, ...]) -> tuple[float, float, float, float]:
         ny = int(shape[0]) if len(shape) >= 1 else 1

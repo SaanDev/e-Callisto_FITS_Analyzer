@@ -588,6 +588,15 @@ class SolarMatplotlibCanvas(QWidget):
     def has_plot_content(self) -> bool:
         return self._image_artist is not None
 
+    def set_map_title(self, title: str) -> None:
+        """Set the graph title without a full re-render (used for the empty
+        'No image data loaded.' state)."""
+        if getattr(self, "ax", None) is None:
+            return
+        fg = "#e1e8f0" if self._is_dark_ui() else "#1e2a38"
+        self.ax.set_title(str(title), color=fg)
+        self.canvas.draw_idle()
+
     def plot_map_data(
         self,
         image_data: np.ndarray,
@@ -1202,9 +1211,14 @@ class SolarDataAnalysisWindow(QMainWindow):
         top_row = QHBoxLayout(header_bar)
         top_row.setContentsMargins(12, 7, 10, 7)
         top_row.setSpacing(10)
-        self.plot_title_label = QLabel("No image data loaded.")
+        # The frame title (instrument/wavelength/time) is shown at the top of the
+        # graph itself, so the header bar carries ONLY the live coordinate readout
+        # — on small screens there isn't room for both, and the readout must stay
+        # legible while the cursor moves. This label is kept (hidden) as the
+        # canonical current-title store used elsewhere.
+        self.plot_title_label = QLabel("No image data loaded.", header_bar)
         self.plot_title_label.setObjectName("SolarPlotTitle")
-        self.plot_title_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.plot_title_label.hide()
         # Live cursor position: R☉ + position angle + pixel.
         self.coord_readout_label = QLabel("")
         self.coord_readout_label.setObjectName("SolarCoordReadout")
@@ -1214,8 +1228,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.quick_mp4_btn.setToolTip(
             "One-click MP4 of the loaded sequence with the current display settings."
         )
-        top_row.addWidget(self.plot_title_label, 1)
-        top_row.addWidget(self.coord_readout_label)
+        top_row.addWidget(self.coord_readout_label, 1)
         top_row.addWidget(self.quick_mp4_btn)
         plot_layout.addWidget(header_bar)
 
@@ -1260,15 +1273,31 @@ class SolarDataAnalysisWindow(QMainWindow):
             self.clear_measure_btn,
         ):
             btn.setEnabled(False)
-        measure_label = QLabel("Measure")
-        measure_label.setObjectName("SolarFieldLabel")
-        measure_row.addWidget(measure_label)
+        # Master switch: the measurement tools and the CME tracking panel stay
+        # unavailable until this is ticked (the panel is greyed out, not hidden).
+        self.measurements_check = QCheckBox("Measurements")
+        self.measurements_check.setToolTip(
+            "Enable the measurement tools (ruler, profile, region stats, CME\n"
+            "tracking) and make the CME tracking panel on the right available."
+        )
+        self.measurements_check.toggled.connect(self._on_measurements_toggled)
+        measure_row.addWidget(self.measurements_check)
         measure_row.addWidget(self.ruler_tool_btn)
         measure_row.addWidget(self.profile_tool_btn)
         measure_row.addWidget(self.stats_tool_btn)
         measure_row.addWidget(self.height_time_btn)
         measure_row.addWidget(self.clear_measure_btn)
         measure_row.addStretch(1)
+        # Interactive pan/zoom of the loaded image; the zoom is kept while the
+        # movie plays so a sequence can be reviewed zoomed-in.
+        self.pan_zoom_check = QCheckBox("Pan / Zoom")
+        self.pan_zoom_check.setToolTip(
+            "Drag to pan and scroll to zoom the loaded image. The zoom is kept as\n"
+            "the movie plays; untick to snap back to the full frame."
+        )
+        self.pan_zoom_check.setEnabled(False)
+        self.pan_zoom_check.toggled.connect(self._on_pan_zoom_toggled)
+        measure_row.addWidget(self.pan_zoom_check)
         plot_layout.addWidget(measure_bar)
 
         self.pyqt_canvas = SunPyPlotCanvas(theme=self.theme, enable_colorbar=True)
@@ -1282,11 +1311,12 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.plot_canvas_stack.addWidget(self.matplotlib_canvas)
 
         # Canvas | CME-tracking panel (table + live height-time plot). The panel
-        # only appears while tracking, in a splitter so it can be resized.
+        # is always part of the layout so the viewer stays fully filled; it is
+        # merely disabled (greyed out) until the Measurements switch is ticked.
         from src.UI.solar_measure_tools import TrackingPanel
 
         self.tracking_panel = TrackingPanel(self)
-        self.tracking_panel.setVisible(False)
+        self.tracking_panel.setEnabled(False)
         # Back-compat aliases: the fit/clear controls used to live in the
         # Coronagraph Tools group and are referenced by name elsewhere.
         self.ht_fit_btn = self.tracking_panel.fit_btn
@@ -1294,9 +1324,12 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.plot_splitter = QSplitter(Qt.Horizontal)
         self.plot_splitter.addWidget(self.plot_canvas_stack)
         self.plot_splitter.addWidget(self.tracking_panel)
-        self.plot_splitter.setStretchFactor(0, 1)
-        self.plot_splitter.setStretchFactor(1, 0)
-        self.plot_splitter.setSizes([900, 330])
+        # Both panes stretch with the window so no dead gutter is left on the
+        # right; the map keeps the larger share.
+        self.plot_splitter.setStretchFactor(0, 3)
+        self.plot_splitter.setStretchFactor(1, 1)
+        self.plot_splitter.setCollapsible(1, False)
+        self.plot_splitter.setSizes([1000, 380])
 
         # Playback bar: transport controls live directly under the image like
         # a video player, so stepping through a sequence never means hunting
@@ -2823,18 +2856,24 @@ class SolarDataAnalysisWindow(QMainWindow):
             self._set_crop_mode_checked(False)
         # A light curve is a time profile: it needs at least two frames.
         self.lightcurve_btn.setEnabled(bool(loaded) and len(self._map_frames) >= 2)
-        # Measurement tools follow the loaded state; height-time additionally
-        # needs a time sequence, and NRGF a raw-mode coronagraph view.
-        many = bool(loaded) and len(self._map_frames) >= 2
+        # Measurement tools follow the loaded state AND the Measurements switch;
+        # height-time additionally needs a time sequence, NRGF a raw-mode
+        # coronagraph view.
+        many_frames = bool(loaded) and len(self._map_frames) >= 2
+        measure_on = bool(loaded) and self.measurements_check.isChecked()
         for widget in (
             self.ruler_tool_btn,
             self.profile_tool_btn,
             self.stats_tool_btn,
             self.clear_measure_btn,
         ):
-            widget.setEnabled(bool(loaded))
-        self.height_time_btn.setEnabled(many)
-        self.hi_jmap_btn.setEnabled(many)
+            widget.setEnabled(measure_on)
+        self.height_time_btn.setEnabled(measure_on and len(self._map_frames) >= 2)
+        self.hi_jmap_btn.setEnabled(many_frames)
+        # Pan/zoom is a view control, available whenever an image is loaded.
+        self.pan_zoom_check.setEnabled(bool(loaded))
+        if not loaded and self.pan_zoom_check.isChecked():
+            self.pan_zoom_check.setChecked(False)
         self._sync_nrgf_enabled()
         if not loaded and hasattr(self, "_measure"):
             for btn in (self.ruler_tool_btn, self.profile_tool_btn, self.height_time_btn):
@@ -4041,6 +4080,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         if not self._map_frames:
             for canvas in self._all_plot_canvases():
                 canvas.clear_plot()
+                canvas.set_map_title("No image data loaded.")
             self.frame_label.setText("Frame 0 / 0")
             self.plot_title_label.setText("No image data loaded.")
             return
@@ -4326,11 +4366,34 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.statusBar().showMessage(hints[mode], 8000)
 
     def _sync_tracking_panel_visibility(self) -> None:
-        """The tracking table/plot shows while tracking is active or picks exist."""
-        show = bool(
-            self._measure.mode == "height_time" or getattr(self._measure, "picks", None)
-        )
-        self.tracking_panel.setVisible(show)
+        """The tracking panel is a permanent part of the layout now; its
+        availability is gated by the Measurements switch, not by whether a
+        tracking mode is active or picks exist."""
+        self.tracking_panel.setVisible(True)
+
+    def _on_measurements_toggled(self, checked: bool) -> None:
+        """Gate the measurement tools and the CME tracking panel behind one
+        switch. The panel stays in the layout but is unavailable until this is
+        ticked."""
+        checked = bool(checked)
+        self.tracking_panel.setEnabled(checked)
+        if not checked:
+            # Leaving measurement mode: drop any active tool so stray canvas
+            # clicks stop landing as picks/overlays.
+            for btn in (self.ruler_tool_btn, self.profile_tool_btn, self.height_time_btn):
+                if btn.isChecked():
+                    btn.blockSignals(True)
+                    btn.setChecked(False)
+                    btn.blockSignals(False)
+            if hasattr(self, "_measure"):
+                self._measure.set_mode(None)
+        # Re-apply the enabled state of every tool button for the new switch.
+        self._set_loaded_state(bool(self._map_frames))
+
+    def _on_pan_zoom_toggled(self, checked: bool) -> None:
+        """Enable interactive pan/zoom on the loaded image. The zoom persists
+        across frames so a movie can play zoomed-in."""
+        self.pyqt_canvas.set_pan_zoom_enabled(bool(checked))
 
     def _on_details_toggled(self, expanded: bool) -> None:
         expanded = bool(expanded)
@@ -4851,6 +4914,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         for canvas in self._all_plot_canvases():
             try:
                 canvas.clear_plot()
+                canvas.set_map_title("No image data loaded.")
             except Exception:
                 pass
         self.plot_title_label.setText("No image data loaded.")
@@ -5482,6 +5546,9 @@ class SolarDataAnalysisWindow(QMainWindow):
         # Restore height-time picks, dropping any that fall outside the range.
         picks = deserialize_picks((meta.get("measurements") or {}).get("height_time_picks"))
         picks = {idx: entry for idx, entry in picks.items() if 0 <= idx < n}
+        if picks and not self.measurements_check.isChecked():
+            # Restored picks need the tracking panel available to be seen.
+            self.measurements_check.setChecked(True)
         if hasattr(self, "_measure"):
             self._measure.restore_picks(picks)
         self._sync_tracking_panel_visibility()

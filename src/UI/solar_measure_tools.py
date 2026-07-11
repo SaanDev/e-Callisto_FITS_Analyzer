@@ -112,13 +112,8 @@ class TrackingPanel(QWidget):
         layout.setContentsMargins(6, 0, 0, 0)
         layout.setSpacing(6)
 
-        header = QHBoxLayout()
-        title = QLabel("CME Tracking")
-        title.setStyleSheet("font-weight: 600;")
-        header.addWidget(title)
-        header.addStretch(1)
-        layout.addLayout(header)
-
+        # No section title here: the panel already reads as the CME tracking area
+        # from the graph's own labels, and the map header carries the frame title.
         self.auto_advance_check = QCheckBox("Auto-advance frame after each pick")
         self.auto_advance_check.setChecked(True)
         self.auto_advance_check.setToolTip(

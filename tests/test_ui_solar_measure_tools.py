@@ -66,6 +66,9 @@ class CorWcsMap(WcsMap):
 def _load(win, frames, n=None):
     paths = [f"f{i}.fits" for i in range(len(frames))]
     win._apply_loaded_frames(frames, paths=paths, metadata={})
+    # The measurement tools and CME tracking panel are gated behind the
+    # Measurements switch; every test here exercises them, so turn it on.
+    win.measurements_check.setChecked(True)
     QApplication.processEvents()
 
 
@@ -236,7 +239,8 @@ def test_clear_all_measurements_resets_everything():
     assert len(win._measure.picks) == 0
     assert win._measure.mode is None
     assert not win.height_time_btn.isChecked()
-    assert win.tracking_panel.isHidden()
+    # The panel is never hidden now — clearing just empties it.
+    assert not win.tracking_panel.isHidden()
     assert win.tracking_panel.table.rowCount() == 0
     win.close()
 

@@ -92,6 +92,7 @@ def _load(win, frames, paths):
 
 def _add_two_picks(win):
     """Two height-time picks on frames 0 and 1 (leading edge marching out)."""
+    win.measurements_check.setChecked(True)  # unlock the measurement tools
     win.height_time_btn.setChecked(True)
     win.tracking_panel.auto_advance_check.setChecked(False)
     win.frame_slider.setValue(0)
