@@ -71,6 +71,8 @@ def test_build_scripts_install_from_pinned_requirements():
     assert "python3-venv python3-pip" in linux_script
     assert "PYTHON_BIN" in linux_script
     assert "https://pypi.org/simple" in linux_script
+    assert "BUILD_VENV" in linux_script
+    assert 'rm -rf "$BUILD_VENV"' in linux_script
     assert "sudo apt install -y ./$(basename" in linux_script
 
 
