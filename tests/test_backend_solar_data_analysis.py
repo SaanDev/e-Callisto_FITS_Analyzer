@@ -57,7 +57,7 @@ class ConfigMap(FakeMap):
     """FakeMap with a controllable observing configuration."""
 
     def __init__(self, data, *, instrument="SECCHI", detector="COR2", polar=None,
-                 wavelnth=None, exptime=None):
+                 wavelnth=None, exptime=None, filter=None):
         super().__init__(data)
         self.instrument = instrument
         self.detector = detector
@@ -68,6 +68,8 @@ class ConfigMap(FakeMap):
             self.meta["wavelnth"] = wavelnth
         if exptime is not None:
             self.meta["exptime"] = exptime
+        if filter is not None:
+            self.meta["filter"] = filter
 
 
 def test_partition_prefers_total_brightness_over_polarizer_triplet():
@@ -118,6 +120,37 @@ def test_partition_groups_by_wavelength():
     assert len(part.kept) == 3
     assert part.kept_key[2] == 171
     assert len(part.dropped) == 1
+
+
+def test_partition_groups_lasco_by_colour_filter():
+    from src.Backend.solar_data_analysis import partition_frames_by_config
+
+    # A LASCO C2 window: mostly Orange science frames, with Blue and Clear frames
+    # interspersed at the SAME size and total brightness. Differencing across
+    # filters leaves raw-looking frames in the movie, so only the dominant filter
+    # group must survive.
+    frames = [
+        ConfigMap(np.zeros((8, 8)), instrument="LASCO", detector="C2", polar="Clear", filter="Orange"),
+        ConfigMap(np.zeros((8, 8)), instrument="LASCO", detector="C2", polar="Clear", filter="Blue"),
+        ConfigMap(np.zeros((8, 8)), instrument="LASCO", detector="C2", polar="Clear", filter="Orange"),
+        ConfigMap(np.zeros((8, 8)), instrument="LASCO", detector="C2", polar="Clear", filter="Orange"),
+        ConfigMap(np.zeros((8, 8)), instrument="LASCO", detector="C2", polar="Clear", filter="Clear"),
+    ]
+    part = partition_frames_by_config(frames)
+    assert len(part.kept) == 3  # the three Orange frames
+    assert part.kept_key[4] == "orange"
+    assert len(part.dropped) == 2
+    assert "filter" in part.note
+
+
+def test_partition_filterless_frames_unaffected():
+    from src.Backend.solar_data_analysis import partition_frames_by_config
+
+    # Frames with no FILTER keyword (EUV imagers) collapse to one group.
+    frames = [ConfigMap(np.zeros((8, 8)), instrument="AIA", detector="", wavelnth=193) for _ in range(3)]
+    part = partition_frames_by_config(frames)
+    assert part.kept == frames and part.dropped == [] and part.note == ""
+    assert part.kept_key[4] == "none"  # filter slot
 
 
 def test_partition_single_config_keeps_all_with_empty_note():

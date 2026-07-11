@@ -314,12 +314,29 @@ def _polar_state(frame: Any) -> str:
     return f"pol{int(round(number))}"
 
 
+def _filter_state(frame: Any) -> str:
+    """Normalise a frame's optical FILTER into a comparable token.
+
+    SOHO/LASCO C2 & C3 sequences interleave frames taken through different colour
+    filters (Orange/Clear/Blue/Deep Red/IR) at the same image size and the same
+    total-brightness polarizer state, so POLAR and shape alone do not tell them
+    apart. Differencing across filters does NOT cancel the static corona — the two
+    passbands have very different overall response — so a cross-filter running
+    difference looks like a raw, undifferenced frame dropped into the movie.
+    Including the filter in the config key keeps a difference sequence to a single
+    passband. Frames with no FILTER keyword (EUV imagers, HMI) collapse to "none"
+    so their grouping is unchanged.
+    """
+    text = _safe_text(_frame_meta_get(frame, "filter")).lower()
+    return text or "none"
+
+
 def frame_config_key(frame: Any) -> tuple:
     """Observation-configuration identity for sequence compatibility.
 
-    ``(instrument, detector, wavelength, polar_state, shape)`` — two frames are
-    difference/movie-compatible only when all five match. Exposure time is
-    deliberately NOT part of the key: AIA's automatic exposure control varies
+    ``(instrument, detector, wavelength, polar_state, filter_state, shape)`` — two
+    frames are difference/movie-compatible only when all six match. Exposure time
+    is deliberately NOT part of the key: AIA's automatic exposure control varies
     EXPTIME by design inside a perfectly valid sequence, so exposure mismatch is
     corrected by normalisation (see ``exposures_differ``), not by exclusion.
     """
@@ -332,7 +349,7 @@ def frame_config_key(frame: Any) -> tuple:
     wavelength = _as_float(_frame_meta_get(frame, "wavelnth"))
     wavelength_key = int(round(wavelength)) if wavelength is not None else None
     shape = tuple(np.asarray(getattr(frame, "data")).shape)
-    return (instrument, detector, wavelength_key, _polar_state(frame), shape)
+    return (instrument, detector, wavelength_key, _polar_state(frame), _filter_state(frame), shape)
 
 
 def partition_frames_by_config(frames: Sequence[Any]) -> FramePartition:
@@ -369,7 +386,7 @@ def partition_frames_by_config(frames: Sequence[Any]) -> FramePartition:
         )
 
     def _area(key: tuple) -> int:
-        shape = key[4]
+        shape = key[-1]
         area = 1
         for dim in shape:
             area *= int(dim)
@@ -391,10 +408,12 @@ def partition_frames_by_config(frames: Sequence[Any]) -> FramePartition:
     reasons = []
     for key, n in dropped_keys.items():
         parts = []
-        if key[4] != chosen[4]:
-            parts.append(f"{key[4][1]}x{key[4][0]} px" if len(key[4]) == 2 else "different size")
+        if key[-1] != chosen[-1]:
+            parts.append(f"{key[-1][1]}x{key[-1][0]} px" if len(key[-1]) == 2 else "different size")
         if key[3] != chosen[3]:
             parts.append("polarizer " + key[3][3:] + "°" if key[3].startswith("pol") else key[3])
+        if key[4] != chosen[4] and key[4] != "none":
+            parts.append(f"{key[4]} filter")
         if key[2] != chosen[2] and key[2] is not None:
             parts.append(f"{key[2]} Å")
         if key[0] != chosen[0] or key[1] != chosen[1]:
