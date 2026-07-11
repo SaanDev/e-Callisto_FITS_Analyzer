@@ -3634,7 +3634,10 @@ class SolarDataAnalysisWindow(QMainWindow):
                 f"No {target} records found for the selected time range.{hint}."
             )
             return
-        if latest_mode:
+        notice = getattr(result, "notice", None)
+        if latest_mode or notice:
+            # Both the Find-Latest path and the empty-window fallback return data
+            # for a different window than requested — reflect the real one.
             self._sync_time_fields_from_spec(result.spec)
         quality_text = " high-resolution" if result.spec.resolution is not None else ""
         self.archive_results_status_label.setText(
@@ -3642,9 +3645,16 @@ class SolarDataAnalysisWindow(QMainWindow):
         )
         if latest_mode:
             self._announce_latest(result, target)
+        elif notice:
+            self.analysis_text.setPlainText(
+                f"{notice}\n\nChecked rows will be downloaded with Load Selected."
+            )
         else:
             self.analysis_text.setPlainText(f"Found {len(result.rows)} {target}{quality_text} archive records.")
-        self.statusBar().showMessage(f"Found {len(result.rows)} {target} records.", 5000)
+        self.statusBar().showMessage(
+            notice if notice else f"Found {len(result.rows)} {target} records.",
+            8000 if notice else 5000,
+        )
 
     @Slot(object, object)
     def _on_load_finished(self, fetch_obj: object, load_obj: object):

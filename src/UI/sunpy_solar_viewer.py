@@ -134,7 +134,17 @@ class SunPyWorker(QObject):
                 if self.query_spec is None:
                     raise ValueError("Search mode requires a query spec.")
                 self.progress.emit(None, "Searching SunPy archives...")
-                result = search(self.query_spec)
+                # For lagging archives (SOHO/LASCO) an empty selected window
+                # falls back to the nearest available data instead of nothing.
+                result = search(
+                    self.query_spec,
+                    allow_time_fallback=True,
+                    progress_cb=self.progress.emit,
+                    cancel_cb=self._cancel_event.is_set,
+                )
+                if self._cancel_event.is_set():
+                    self.cancelled.emit()
+                    return
                 self.progress.emit(100, f"Found {len(result.rows)} candidate files.")
                 self.search_finished.emit(result)
                 return
@@ -747,8 +757,16 @@ class SunPySolarViewer(QMainWindow):
             self.statusBar().showMessage("No archive matches found.", 5000)
             return
 
-        self.statusBar().showMessage(f"Found {len(result.rows)} records.", 5000)
-        self.analysis_text.setPlainText("Search complete. Select rows and click 'Download & Load Selected'.")
+        notice = getattr(result, "notice", None)
+        if notice:
+            # The selected date was empty; nearest available data was substituted.
+            self.statusBar().showMessage(notice, 8000)
+            self.analysis_text.setPlainText(
+                f"{notice}\n\nSelect rows and click 'Download & Load Selected'."
+            )
+        else:
+            self.statusBar().showMessage(f"Found {len(result.rows)} records.", 5000)
+            self.analysis_text.setPlainText("Search complete. Select rows and click 'Download & Load Selected'.")
 
     @Slot(object, object)
     def _on_load_finished(self, fetch_obj: object, load_obj: object):

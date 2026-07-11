@@ -8,6 +8,7 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 import threading
@@ -185,6 +186,103 @@ def test_build_attrs_omits_sample_for_dataretriever_targets():
         units_module=_FakeUnits,
     )
     assert any(isinstance(x, tuple) and x[0] == "Sample" for x in aia)
+
+
+class _EmptyFido:
+    """Fido stub that always returns no records (empty selected window)."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def search(self, *attrs):
+        self.calls += 1
+        return []
+
+
+def _nearest_result(spec, when=datetime(2025, 3, 1, 12, 0)):
+    """A stand-in SunPySearchResult as if find_latest located older data."""
+    row = sa.SunPySearchRow(
+        start=when, end=when, source=spec.spacecraft, instrument=spec.instrument,
+        provider="SDAC", fileid=f"{when:%Y%m%d_%H%M}.fts", size="2 MB",
+    )
+    return sa.SunPySearchResult(
+        spec=replace(spec, start_dt=when - timedelta(hours=6), end_dt=when),
+        data_kind=sa.DATA_KIND_MAP, rows=[row],
+        raw_response=[[row]], row_index_map=[(0, 0)],
+    )
+
+
+def test_search_lasco_empty_falls_back_to_nearest_available(monkeypatch):
+    spec = _mk_query(
+        spacecraft="SOHO", instrument="LASCO", detector="C2",
+        start_dt=datetime(2026, 7, 10, 0, 0), end_dt=datetime(2026, 7, 10, 6, 0),
+    )
+    called = {"n": 0}
+
+    def fake_find_latest(s, **kwargs):
+        called["n"] += 1
+        return _nearest_result(s)
+
+    monkeypatch.setattr(sa, "find_latest_search", fake_find_latest)
+    fido = _EmptyFido()
+    result = sa.search(
+        spec, fido_client=fido, attrs_module=_FakeAttrs, units_module=_FakeUnits,
+        allow_time_fallback=True,
+    )
+
+    assert called["n"] == 1
+    assert result.rows and len(result.rows) == 1
+    assert result.notice and "nearest available" in result.notice.lower()
+    assert "SOHO/LASCO C2" in result.notice
+
+
+def test_search_lasco_empty_no_fallback_when_disabled(monkeypatch):
+    spec = _mk_query(spacecraft="SOHO", instrument="LASCO", detector="C2")
+    called = {"n": 0}
+    monkeypatch.setattr(sa, "find_latest_search", lambda *a, **k: called.__setitem__("n", called["n"] + 1))
+
+    result = sa.search(
+        spec, fido_client=_EmptyFido(), attrs_module=_FakeAttrs, units_module=_FakeUnits,
+        allow_time_fallback=False,
+    )
+    assert called["n"] == 0  # fallback never attempted
+    assert result.rows == []
+    assert result.notice is None
+
+
+def test_search_non_lasco_empty_does_not_fall_back(monkeypatch):
+    spec = _mk_query(spacecraft="SDO", instrument="AIA", wavelength_angstrom=193.0)
+    called = {"n": 0}
+    monkeypatch.setattr(sa, "find_latest_search", lambda *a, **k: called.__setitem__("n", called["n"] + 1))
+
+    result = sa.search(
+        spec, fido_client=_EmptyFido(), attrs_module=_FakeAttrs, units_module=_FakeUnits,
+        allow_time_fallback=True,  # enabled, but AIA is not a lagging archive
+    )
+    assert called["n"] == 0
+    assert result.rows == []
+    assert result.notice is None
+
+
+def test_search_lasco_with_data_skips_fallback(monkeypatch):
+    class DataFido:
+        def search(self, *attrs):
+            return [[{
+                "Start Time": "2026-02-10 01:00:00", "End Time": "2026-02-10 01:02:00",
+                "Source": "SOHO", "Instrument": "LASCO", "Provider": "SDAC",
+                "fileid": "lasco_1.fts", "Size": "2.0 MB",
+            }]]
+
+    called = {"n": 0}
+    monkeypatch.setattr(sa, "find_latest_search", lambda *a, **k: called.__setitem__("n", called["n"] + 1))
+    spec = _mk_query(spacecraft="SOHO", instrument="LASCO", detector="C2")
+    result = sa.search(
+        spec, fido_client=DataFido(), attrs_module=_FakeAttrs, units_module=_FakeUnits,
+        allow_time_fallback=True,
+    )
+    assert called["n"] == 0  # data present, no fallback
+    assert len(result.rows) == 1
+    assert result.notice is None
 
 
 def test_search_wraps_no_match_error_with_actionable_message():

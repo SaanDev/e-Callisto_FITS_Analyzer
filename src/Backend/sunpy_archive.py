@@ -162,6 +162,11 @@ class SunPySearchResult:
     rows: list[SunPySearchRow]
     raw_response: Any
     row_index_map: list[tuple[int, int]]
+    # Set when the returned rows are NOT for the originally requested window —
+    # e.g. the selected date had no data so the nearest available frames were
+    # substituted (see the LASCO empty-window fallback in search()). The UI shows
+    # it so the user knows the data is from a different date.
+    notice: str | None = None
 
 
 @dataclass(frozen=True)
@@ -199,6 +204,12 @@ class InstrumentRegistryEntry:
     # sunpy dataretriever clients (GOES XRS/SUVI) reject the whole query if a
     # Sample attr is present, yielding "not understood by any clients".
     supports_sample: bool = True
+    # Whether an empty search for the selected window should automatically fall
+    # back to the nearest available data. SOHO/LASCO's definitive archive lags
+    # real time by months, so a recent date returns nothing even though the
+    # instrument is observing — the newest available frames are what the user
+    # actually needs (see the fallback in search()).
+    nearest_when_empty: bool = False
 
 
 @dataclass(frozen=True)
@@ -314,6 +325,7 @@ INSTRUMENT_REGISTRY: tuple[InstrumentRegistryEntry, ...] = (
         default_detector="C2",
         default_satellite=None,
         wavelengths=(),
+        nearest_when_empty=True,
     ),
     InstrumentRegistryEntry(
         key="soho_lasco_c3",
@@ -329,6 +341,7 @@ INSTRUMENT_REGISTRY: tuple[InstrumentRegistryEntry, ...] = (
         default_detector="C3",
         default_satellite=None,
         wavelengths=(),
+        nearest_when_empty=True,
     ),
     *_stereo_secchi_entries(),
     InstrumentRegistryEntry(
@@ -524,6 +537,9 @@ def search(
     fido_client: Any | None = None,
     attrs_module: Any | None = None,
     units_module: Any | None = None,
+    allow_time_fallback: bool = False,
+    progress_cb: Callable[[Any, str], None] | None = None,
+    cancel_cb: Callable[[], bool] | None = None,
 ) -> SunPySearchResult:
     spec = normalize_query_spec(spec)
     entry = resolve_registry_entry(spec)
@@ -548,6 +564,30 @@ def search(
         raise
     rows, row_index_map = _normalize_search_rows(raw_response, spec, max_records=int(spec.max_records or 0))
 
+    if rows:
+        return SunPySearchResult(
+            spec=spec,
+            data_kind=entry.data_kind,
+            rows=rows,
+            raw_response=raw_response,
+            row_index_map=row_index_map,
+        )
+
+    # Empty window. For lagging archives (SOHO/LASCO) the selected date is often
+    # simply ahead of the archive frontier, so fall back to the nearest available
+    # data instead of returning nothing — the newest frames are what matters.
+    if allow_time_fallback and entry.nearest_when_empty:
+        fallback = _search_nearest_available(
+            spec,
+            fido_client=fido_client,
+            attrs_module=attrs_module,
+            units_module=units_module,
+            progress_cb=progress_cb,
+            cancel_cb=cancel_cb,
+        )
+        if fallback is not None and fallback.rows:
+            return fallback
+
     return SunPySearchResult(
         spec=spec,
         data_kind=entry.data_kind,
@@ -555,6 +595,45 @@ def search(
         raw_response=raw_response,
         row_index_map=row_index_map,
     )
+
+
+def _search_nearest_available(
+    spec: SunPyQuerySpec,
+    *,
+    fido_client: Any | None = None,
+    attrs_module: Any | None = None,
+    units_module: Any | None = None,
+    progress_cb: Callable[[Any, str], None] | None = None,
+    cancel_cb: Callable[[], bool] | None = None,
+) -> SunPySearchResult | None:
+    """Locate the nearest available data when the selected window is empty.
+
+    Reuses :func:`find_latest_search` to walk back to the archive's data frontier
+    (the newest window that actually has records) and returns a normal search over
+    it, tagged with a ``notice`` so the caller can tell the user the data is from a
+    different date than requested. Returns ``None`` when nothing is found.
+    """
+    result = find_latest_search(
+        spec,
+        fido_client=fido_client,
+        attrs_module=attrs_module,
+        units_module=units_module,
+        progress_cb=progress_cb,
+        cancel_cb=cancel_cb,
+    )
+    if result is None or not result.rows:
+        return None
+
+    detector = (spec.detector or "").strip()
+    target = f"{spec.spacecraft}/{spec.instrument}" + (f" {detector}" if detector else "")
+    latest = max((row.start for row in result.rows), default=None)
+    when = f" (newest available: {latest:%Y-%m-%d %H:%M} UTC)" if latest is not None else ""
+    notice = (
+        f"No {target} data was available for the selected date "
+        f"({spec.start_dt:%Y-%m-%d}). Showing the nearest available data instead"
+        f"{when}."
+    )
+    return replace(result, notice=notice)
 
 
 def find_latest_search(
@@ -1032,12 +1111,22 @@ def load_downloaded(
     if data_kind == DATA_KIND_MAP:
         per_file = False
         if map_loader is None:
-            # GOES/SUVI L1b FITS need a header repair that must happen one file at
-            # a time (see suvi_ingest); other instruments use the plain loader.
-            if str(instrument or "").strip().upper() == "SUVI":
+            # A few instruments need their header repaired one file at a time
+            # before sunpy will build a Map; others use the plain loader.
+            instrument_name = str(instrument or "").strip().upper()
+            if instrument_name == "SUVI":
+                # GOES/SUVI L1b FITS carry a malformed CONTINUE card (see
+                # suvi_ingest).
                 from src.Backend.suvi_ingest import load_suvi_map
 
                 map_loader = load_suvi_map
+                per_file = True
+            elif instrument_name == "LASCO":
+                # SOHO/LASCO C2/C3 FITS often omit CUNIT1/2, which crashes
+                # LASCOMap.spatial_units (see lasco_ingest).
+                from src.Backend.lasco_ingest import load_lasco_map
+
+                map_loader = load_lasco_map
                 per_file = True
             else:
                 map_loader = _import_map_loader()
