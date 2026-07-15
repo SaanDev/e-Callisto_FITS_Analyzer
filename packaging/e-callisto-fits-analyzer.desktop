@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=e-CALLISTO FITS Analyzer
+Exec=e-callisto-fits-analyzer
+Icon=e-callisto-fits-analyzer
+Terminal=false
+Categories=Science;Education;
+StartupNotify=true
