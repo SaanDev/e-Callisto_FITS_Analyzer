@@ -20,6 +20,7 @@ The HTML uses only the rich-text subset that ``QTextBrowser`` supports
 
 from __future__ import annotations
 
+from src.UI.font_utils import preferred_monospace_font_family
 from src.version import APP_NAME, APP_VERSION
 
 
@@ -59,6 +60,7 @@ def build_default_stylesheet(dark: bool) -> str:
     """
 
     c = _DARK_COLORS if dark else _LIGHT_COLORS
+    monospace = preferred_monospace_font_family().replace("\\", "\\\\").replace("'", "\\'")
     return f"""
     body {{ color: {c['text']}; font-size: 10.5pt; line-height: 140%; }}
     h1 {{ color: {c['heading']}; font-size: 20pt; }}
@@ -69,7 +71,7 @@ def build_default_stylesheet(dark: bool) -> str:
     a {{ color: {c['accent']}; text-decoration: none; }}
     .muted {{ color: {c['muted']}; }}
     .lead {{ color: {c['muted']}; font-size: 11pt; }}
-    code, .kbd {{ color: {c['code']}; font-family: 'Consolas','Courier New',monospace; }}
+    code, .kbd {{ color: {c['code']}; font-family: '{monospace}',monospace; }}
     .toc a {{ color: {c['accent']}; }}
     table {{ border-collapse: collapse; }}
     th {{ color: {c['heading']}; text-align: left; border-bottom: 1px solid {c['border']}; padding: 4px 12px 4px 0; }}
@@ -220,6 +222,20 @@ seconds from file start, with shared, per-station, or manual color scaling, then
 <ul>
 <li><b>Solar Image Analysis</b>: open the multi-mission imaging workspace
 (see <a href="#solar-image-analysis">section 14</a>).</li>
+<li><b>Detect &amp; Isolate Type II (Experimental)</b>: scan the full spectrum or visible zoom range for
+slow downward-drifting Type II candidates. Review the ranked mask, choose <b>Fundamental</b>,
+<b>Harmonic</b>, or <b>Both detected bands</b> when a validated pair is shown, then accept it to reuse
+the normal isolated-burst workflow. Choose <b>Automatic</b> to use a validated local model with a
+deterministic fallback, or choose the deterministic detector explicitly. The spectrum is not changed
+until acceptance.</li>
+<li><b>Run Automatic Type II Detection</b>: immediately scan the current spectrum with the saved scope
+and sensitivity settings. The same one-click action is available in the Type II Learning Manager.</li>
+<li><b>Teach Type II by Lasso</b>: draw and label one emission band as a positive example. For paired
+fundamental/harmonic emission, draw one lasso per band and choose which single band remains isolated.</li>
+<li><b>Type II Learning Manager</b>: choose automatic or deterministic detection, run automatic detection
+on the current spectrum, inspect per-class source coverage and validation metrics, train or roll back a
+local model, and export/import <code>.ecallisto-typeii</code> backups. Learned data lives in the per-user
+application-data folder and is retained when the application is reinstalled.</li>
 <li><b>Maximum Intensities &#8594; Open Maximum Intensities</b>: trace the peak frequency for each time channel
 after noise reduction or burst isolation. Inside that window you can lasso-select outliers and remove them.</li>
 <li><b>Type II Band-splitting &#8594; Open Type II Band-splitting</b>: pick points along the upper and lower
@@ -267,7 +283,7 @@ GitHub issue draft.</li>
 <h2>11. Toolbar</h2>
 <p>Icon buttons, left to right, cover the common actions: Open ({_kbd('Ctrl+O')}), Download, Export
 ({_kbd('Ctrl+E')}), Export as FITS ({_kbd('Ctrl+F')}), Save Project, Undo, Redo, Estimate Drift Rate,
-Isolate Burst, Plot Maximum Intensities, Rectangular Zooming, Lock/Unlock navigation, Reset Selection,
+Isolate Burst, Detect Type II (Experimental), Plot Maximum Intensities, Rectangular Zooming, Lock/Unlock navigation, Reset Selection,
 Reset to Raw, and Reset All. On the right is the <b>Cite this Software</b> button. Actions that need processed
 data or a loaded file stay disabled until they are usable.</p>
 

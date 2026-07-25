@@ -16,6 +16,12 @@ from src.UI.dialogs.combine_dialogs import CombineFrequencyDialog, CombineTimeDi
 from src.UI.dialogs.max_intensity_dialog import MaxIntensityPlotDialog
 from src.UI.dialogs.rfi_control_dialog import RFIControlDialog
 from src.UI.dialogs.type_ii_band_splitting_dialog import TypeIIBandSplittingDialog
+from src.UI.dialogs.type_ii_detection_dialog import (
+    TypeIIDetectionOptionsDialog,
+    TypeIIDetectionPreviewDialog,
+    TypeIILearningManagerDialog,
+    TypeIITeachLabelDialog,
+)
 from src.UI.gui_shared import (
     IS_LINUX,
     MplCanvas,
@@ -25,7 +31,13 @@ from src.UI.gui_shared import (
     resource_path,
     start_combine,
 )
-from src.UI.gui_workers import DownloaderImportWorker, UpdateCheckWorker, UpdateDownloadWorker
+from src.UI.gui_workers import (
+    DownloaderImportWorker,
+    TypeIIDetectionWorker,
+    TypeIITrainingWorker,
+    UpdateCheckWorker,
+    UpdateDownloadWorker,
+)
 from src.UI.main_window import MainWindow
 
 __all__ = [
@@ -41,6 +53,12 @@ __all__ = [
     "MplCanvas",
     "RFIControlDialog",
     "TypeIIBandSplittingDialog",
+    "TypeIIDetectionOptionsDialog",
+    "TypeIIDetectionPreviewDialog",
+    "TypeIILearningManagerDialog",
+    "TypeIITeachLabelDialog",
+    "TypeIIDetectionWorker",
+    "TypeIITrainingWorker",
     "UpdateCheckWorker",
     "UpdateDownloadWorker",
     "_ext_from_filter",

@@ -1,5 +1,17 @@
-# e-CALLISTO FITS Analyzer (v2.7.0)
+# e-CALLISTO FITS Analyzer (v2.8.0)
 A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data.
+
+---
+
+## What's New in v2.8.0
+
+### Assisted Type II burst detection
+- **Experimental Type II candidate scan:** detect slow downward-drifting Type II ridges in the full spectrum or current zoom range, review ranked masks, and isolate the fundamental lane, harmonic lane, or both lanes when a validated pair is detected through the existing undoable isolation workflow.
+- **Persistent local learning:** use **Teach Type II by Lasso** to save reviewed fundamental/harmonic masks, and use accepted or rejected assisted candidates as explicit feedback for a local explainable model.
+- **Validation-gated model promotion:** candidate and mask models train in the background but affect detection only after grouped holdout precision, recall, false-alarm, and mask-quality gates pass.
+- **Learning Manager:** inspect examples and model history, roll back promoted versions, and export/import checksum-validated `.ecallisto-typeii` libraries for backup or transfer between computers.
+- **One-click automatic detection:** run the current spectrum directly from the Analysis menu or Learning Manager. Automatic mode uses the active validated local model when available and safely falls back to deterministic Type II detection otherwise.
+- **Reinstall-safe storage:** examples and numeric model files live in the per-user application-data directory, outside program files, and are not removed by normal application upgrades or reinstalls.
 
 ---
 
@@ -690,10 +702,10 @@ Use **About → Check for Updates...** to query the latest release from GitHub.
     - `gem install --no-document fpm`
     - `PYTHON_BIN=/usr/bin/python3 PIP_INDEX_URL=https://pypi.org/simple bash src/Installation/build_deb_linux.sh`
 - Expected output on `amd64`:
-  - `dist/e-callisto-fits-analyzer_2.7.0_amd64.deb`
+  - `dist/e-callisto-fits-analyzer_2.8.0_amd64.deb`
 - Install the generated local package using a path, not a bare filename:
-  - `sudo apt install -y ./dist/e-callisto-fits-analyzer_2.7.0_amd64.deb`
-  - If you are already inside `dist`, use `sudo apt install -y ./e-callisto-fits-analyzer_2.7.0_amd64.deb`
+  - `sudo apt install -y ./dist/e-callisto-fits-analyzer_2.8.0_amd64.deb`
+  - If you are already inside `dist`, use `sudo apt install -y ./e-callisto-fits-analyzer_2.8.0_amd64.deb`
 - Manual PyInstaller build only creates the Linux app folder, not the `.deb`:
   - `pyinstaller src/Installation/FITS_Analyzer_linux.spec`
 

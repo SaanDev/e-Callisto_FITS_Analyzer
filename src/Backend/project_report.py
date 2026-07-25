@@ -70,6 +70,7 @@ class ProjectReportInput:
     rfi: Mapping[str, Any] = field(default_factory=dict)
     annotations: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
     light_curve: Mapping[str, Any] = field(default_factory=dict)
+    type_ii_detection: Mapping[str, Any] = field(default_factory=dict)
     analysis_session: Mapping[str, Any] | None = None
     analysis_row: Mapping[str, Any] = field(default_factory=dict)
     project_path: str = ""
@@ -348,6 +349,24 @@ def _type_ii_pairs(session: Mapping[str, Any] | None) -> list[tuple[str, Any]]:
     ]
 
 
+def _type_ii_detection_pairs(value: Mapping[str, Any] | None) -> list[tuple[str, Any]]:
+    detection = _as_mapping(value)
+    candidate = _as_mapping(detection.get("candidate"))
+    return [
+        ("Experimental", detection.get("experimental")),
+        ("Algorithm version", detection.get("algorithm_version")),
+        ("Model ID", detection.get("model_id")),
+        ("Selected band", detection.get("band")),
+        ("Confidence", candidate.get("confidence")),
+        ("Deterministic score", candidate.get("deterministic_score")),
+        ("Learned probability", candidate.get("learned_probability")),
+        ("Drift (MHz/s)", candidate.get("drift_mhz_s")),
+        ("Duration (s)", candidate.get("duration_s")),
+        ("Frequency span (MHz)", candidate.get("frequency_span_mhz")),
+        ("Training example ID", detection.get("training_example_id")),
+    ]
+
+
 def _fit_image(rl, image_bytes: bytes, max_width: float, max_height: float):
     Image = rl["Image"]
     img = Image(io.BytesIO(image_bytes))
@@ -515,6 +534,9 @@ def generate_project_report_pdf(
     _emit(progress_cb, 34, "Adding analysis sections...")
     _section(story, rl, styles, "Analysis Summary")
     story.append(_pair_table(rl, styles, _analysis_pairs(report), doc.width))
+    story.append(Spacer(1, 0.12 * inch))
+    _section(story, rl, styles, "Assisted Type II Detection")
+    story.append(_pair_table(rl, styles, _type_ii_detection_pairs(report.type_ii_detection), doc.width))
     story.append(Spacer(1, 0.12 * inch))
     _section(story, rl, styles, "Type II Results")
     story.append(_pair_table(rl, styles, _type_ii_pairs(report.analysis_session), doc.width))
