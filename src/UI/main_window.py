@@ -15,7 +15,6 @@ import tempfile
 import math
 import json
 import io
-import uuid
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import unquote, urlparse
 
@@ -133,18 +132,6 @@ from src.Backend.recovery_manager import (
 )
 from src.Backend.noise_reduction import rowwise_baseline, subtract_background_rows
 from src.Backend.rfi_filters import clean_rfi, config_dict as rfi_config_dict
-from src.Backend.type_ii_detection import (
-    TypeIIDetectionSettings,
-    build_type_ii_isolation_mask,
-    type_ii_candidate_from_mask,
-)
-from src.Backend.type_ii_learning import (
-    TypeIILearningLibrary,
-    load_active_type_ii_model,
-    record_type_ii_example,
-    source_observation_hash,
-    training_example_from_candidate,
-)
 from src.Backend.update_checker import GITHUB_REPO
 from src.Backend.view_config import (
     build_display_range_preset,
@@ -176,12 +163,6 @@ from src.UI.dialogs.max_intensity_dialog import MaxIntensityPlotDialog
 from src.UI.dialogs.multi_station_comparison_dialog import MultiStationComparisonDialog
 from src.UI.dialogs.rfi_control_dialog import RFIControlDialog
 from src.UI.dialogs.type_ii_band_splitting_dialog import TypeIIBandSplittingDialog
-from src.UI.dialogs.type_ii_detection_dialog import (
-    TypeIIDetectionOptionsDialog,
-    TypeIIDetectionPreviewDialog,
-    TypeIILearningManagerDialog,
-    TypeIITeachLabelDialog,
-)
 from src.UI.dst_index_gui import MainWindow as DstIndexWindow
 from src.UI.fits_header_viewer import FitsHeaderViewerDialog
 from src.UI.font_utils import normalize_font_family
@@ -203,8 +184,6 @@ from src.UI.gui_workers import (
     DownloaderImportWorker,
     GoesOverlayLoadWorker,
     ProjectReportWorker,
-    TypeIIDetectionWorker,
-    TypeIITrainingWorker,
     UpdateCheckWorker,
     UpdateDownloadWorker,
 )
@@ -386,18 +365,6 @@ class MainWindow(QMainWindow):
         self._project_report_thread = None
         self._project_report_worker = None
         self._project_report_progress_dialog = None
-        self._type_ii_detection_thread = None
-        self._type_ii_detection_worker = None
-        self._type_ii_detection_progress_dialog = None
-        self._type_ii_detection_engine = None
-        self._type_ii_training_thread = None
-        self._type_ii_training_worker = None
-        self._type_ii_training_pending = False
-        self._type_ii_learning_manager_dialog = None
-        self._type_ii_learning_library = TypeIILearningLibrary()
-        self._type_ii_detection_state = None
-        self._type_ii_last_result = None
-        self._type_ii_teach_context = None
         self._update_check_interactive = True
         self._import_progress_dialog = None
         self._batch_processing_dialog = None
@@ -1104,21 +1071,6 @@ class MainWindow(QMainWindow):
         self.open_solar_data_analysis_action.triggered.connect(self.open_solar_data_analysis_window)
         analysis_menu.addAction(self.open_solar_data_analysis_action)
         analysis_menu.addSeparator()
-        self.detect_type_ii_action = QAction("Detect && Isolate Type II… (Experimental)", self)
-        self.detect_type_ii_action.setEnabled(False)
-        self.auto_detect_type_ii_action = QAction(
-            "Run Automatic Type II Detection… (Experimental)",
-            self,
-        )
-        self.auto_detect_type_ii_action.setEnabled(False)
-        self.teach_type_ii_action = QAction("Teach Type II by Lasso…", self)
-        self.teach_type_ii_action.setEnabled(False)
-        self.type_ii_learning_manager_action = QAction("Type II Learning Manager…", self)
-        analysis_menu.addAction(self.detect_type_ii_action)
-        analysis_menu.addAction(self.auto_detect_type_ii_action)
-        analysis_menu.addAction(self.teach_type_ii_action)
-        analysis_menu.addAction(self.type_ii_learning_manager_action)
-        analysis_menu.addSeparator()
         self.maximum_intensities_menu = analysis_menu.addMenu("Maximum Intensities")
         self.open_maximum_intensities_action = QAction("Open Maximum Intensities", self)
         self.open_maximum_intensities_action.setEnabled(False)
@@ -1313,12 +1265,6 @@ class MainWindow(QMainWindow):
         self.preset_clear_default_action.triggered.connect(self.clear_default_preset)
         self.preset_delete_action.triggered.connect(self.delete_saved_preset)
         self.max_auto_clean_isolated_action.toggled.connect(self.set_max_auto_clean_isolated_enabled)
-        self.detect_type_ii_action.triggered.connect(self.start_type_ii_detection)
-        self.auto_detect_type_ii_action.triggered.connect(
-            self.start_automatic_type_ii_detection
-        )
-        self.teach_type_ii_action.triggered.connect(self.start_type_ii_teaching)
-        self.type_ii_learning_manager_action.triggered.connect(self.open_type_ii_learning_manager)
         self.open_maximum_intensities_action.triggered.connect(self.plot_max_intensities)
         self.open_type_ii_band_splitting_action.triggered.connect(self._open_or_focus_type_ii_dialog)
         self.enter_light_curve_frequency_action.triggered.connect(self.open_light_curve_frequency_dialog)
@@ -1967,10 +1913,6 @@ class MainWindow(QMainWindow):
         self.tb_isolate.triggered.connect(self.activate_lasso)
         tb.addAction(self.tb_isolate)
 
-        self.tb_type_ii = QAction(self._icon("isolate.svg"), "Detect Type II Burst (Experimental)", self)
-        self.tb_type_ii.triggered.connect(self.start_type_ii_detection)
-        tb.addAction(self.tb_type_ii)
-
         self.tb_max = QAction(self._icon("max.svg"), "Plot Maximum Intensities", self)
         self.tb_max.triggered.connect(self.plot_max_intensities)
         tb.addAction(self.tb_max)
@@ -2060,13 +2002,6 @@ class MainWindow(QMainWindow):
         # Tools that require processed data
         self.tb_drift.setEnabled(has_noise)
         self.tb_isolate.setEnabled(has_noise)
-        self.tb_type_ii.setEnabled(
-            bool(
-                has_file
-                and str(getattr(self, "current_plot_type", "")) != "Isolated Burst"
-                and getattr(self, "_type_ii_detection_worker", None) is None
-            )
-        )
         self.tb_max.setEnabled(has_noise)
         self.tb_reset_sel.setEnabled(has_noise or can_reset_view)
         self.tb_reset_to_raw.setEnabled(has_file)
@@ -2876,19 +2811,16 @@ class MainWindow(QMainWindow):
                 time_seconds = time_seconds[valid_idx]
             auto_outlier_cleaned = bool(auto_removed > 0)
 
-        selected_type_ii_band = str(
-            (getattr(self, "_type_ii_detection_state", None) or {}).get("band") or "fundamental"
-        ).strip().lower()
         payload = {
             "source": self._analysis_source_context(),
             "max_intensity": {
                 "time_channels": time_channels,
                 "time_seconds": time_seconds,
                 "freqs": max_freqs,
-                "fundamental": selected_type_ii_band != "harmonic",
-                "harmonic": selected_type_ii_band == "harmonic",
+                "fundamental": True,
+                "harmonic": False,
             },
-            "analyzer": {"fold": 2 if selected_type_ii_band == "harmonic" else 1},
+            "analyzer": {"fold": 1},
             "ui": {
                 "restore_max_window": True,
                 "restore_analyzer_window": False,
@@ -3238,9 +3170,6 @@ class MainWindow(QMainWindow):
 
     def _reset_feature_state_for_new_data(self):
         self._clear_analysis_session_state(close_windows=True)
-        self._type_ii_detection_state = None
-        self._type_ii_last_result = None
-        self._type_ii_teach_context = None
         self._reset_annotation_mode()
         self.clear_ruler_measurement(reset_readout=True)
         self._clear_light_curve_overlay(clear_frequency=True)
@@ -6052,611 +5981,6 @@ class MainWindow(QMainWindow):
 
         self.lasso = LassoSelector(self.canvas.ax, onselect=self.on_lasso_select)
 
-    def _type_ii_source_hash(self) -> str:
-        sources = list(getattr(self, "_combined_sources", []) or [])
-        if sources:
-            source = "|".join(str(item) for item in sources)
-        else:
-            source = str(getattr(self, "_fits_source_path", "") or getattr(self, "filename", "") or "")
-        shape = None
-        if getattr(self, "raw_data", None) is not None:
-            shape = tuple(int(value) for value in np.asarray(self.raw_data).shape[:2])
-        return source_observation_hash(
-            source,
-            station=self._analysis_station_name(),
-            observation_time=self._analysis_date_obs(),
-            shape=shape,
-        )
-
-    def _type_ii_visible_roi(self) -> dict | None:
-        view = self._capture_view()
-        if not view:
-            return None
-        try:
-            x0, x1 = view["xlim"]
-            y0, y1 = view["ylim"]
-            return {
-                "time_start_s": float(min(x0, x1)),
-                "time_end_s": float(max(x0, x1)),
-                "frequency_min_mhz": float(min(y0, y1)),
-                "frequency_max_mhz": float(max(y0, y1)),
-            }
-        except Exception:
-            return None
-
-    def _type_ii_invalid_row_mask(self) -> np.ndarray | None:
-        row_count = int(np.asarray(self.raw_data).shape[0]) if self.raw_data is not None else 0
-        if row_count <= 0:
-            return None
-        mask = np.zeros(row_count, dtype=bool)
-        gap_mask = self._current_gap_row_mask()
-        if gap_mask is not None:
-            gap_arr = np.asarray(gap_mask, dtype=bool).ravel()
-            if gap_arr.size == row_count:
-                mask |= gap_arr
-        rfi = dict(getattr(self, "_rfi_config", {}) or {})
-        if bool(rfi.get("applied", False)):
-            for index in list(rfi.get("masked_channel_indices") or []):
-                try:
-                    row = int(index)
-                except Exception:
-                    continue
-                if 0 <= row < row_count:
-                    mask[row] = True
-        return mask if np.any(mask) else None
-
-    def start_type_ii_detection(self):
-        self._start_type_ii_detection(show_options=True)
-
-    def start_automatic_type_ii_detection(self):
-        self._ui_settings.setValue("type_ii_detection/engine", "automatic")
-        self._start_type_ii_detection(
-            show_options=False,
-            forced_engine="automatic",
-        )
-
-    def _start_type_ii_detection(
-        self,
-        *,
-        show_options: bool,
-        forced_engine: str | None = None,
-    ):
-        if self.raw_data is None or self.freqs is None or self.time is None:
-            QMessageBox.information(self, "Assisted Type II Detection", "Load a FITS spectrum first.")
-            return
-        if self.current_plot_type == "Isolated Burst":
-            QMessageBox.information(
-                self,
-                "Assisted Type II Detection",
-                "Undo or restore the pre-isolation spectrum before starting another scan.",
-            )
-            return
-        if self._type_ii_detection_worker is not None:
-            QMessageBox.information(self, "Assisted Type II Detection", "A Type II scan is already running.")
-            return
-
-        active_model = load_active_type_ii_model(self._type_ii_learning_library)
-        scope = str(self._ui_settings.value("type_ii_detection/scope", "full"))
-        sensitivity = str(
-            self._ui_settings.value("type_ii_detection/sensitivity", "conservative")
-        )
-        engine = str(
-            forced_engine
-            or self._ui_settings.value("type_ii_detection/engine", "automatic")
-        ).strip().lower()
-        if engine not in ("automatic", "deterministic"):
-            engine = "automatic"
-        if show_options:
-            options = TypeIIDetectionOptionsDialog(
-                self,
-                default_scope=scope,
-                default_sensitivity=sensitivity,
-                default_engine=engine,
-                active_model_id=(
-                    None if active_model is None else str(active_model.model_id)
-                ),
-            )
-            if options.exec() != QDialog.Accepted:
-                return
-            scope = options.scope
-            sensitivity = options.sensitivity
-            engine = options.engine
-            self._ui_settings.setValue("type_ii_detection/scope", scope)
-            self._ui_settings.setValue("type_ii_detection/sensitivity", sensitivity)
-            self._ui_settings.setValue("type_ii_detection/engine", engine)
-        settings = TypeIIDetectionSettings.for_sensitivity(sensitivity)
-        roi = self._type_ii_visible_roi() if scope == "visible" else None
-
-        if self.noise_reduced_data is not None:
-            source_data = np.asarray(self.noise_reduced_data, dtype=np.float32).copy()
-            source_kind = "noise_reduced"
-        else:
-            source_data = np.asarray(self.raw_data, dtype=np.float32).copy()
-            source_kind = "raw_snr"
-        self._type_ii_detection_display_data = source_data
-        self._type_ii_detection_engine = engine
-        self._type_ii_detection_model = active_model if engine == "automatic" else None
-
-        engine_label = (
-            f"validated local model {active_model.model_id}"
-            if self._type_ii_detection_model is not None
-            else "deterministic detector"
-        )
-        progress = QProgressDialog(
-            f"Preparing automatic Type II detection with {engine_label}…",
-            "Cancel",
-            0,
-            100,
-            self,
-        )
-        progress.setWindowTitle("Type II Detection — Experimental")
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.setAutoClose(False)
-        progress.setValue(0)
-        self._type_ii_detection_progress_dialog = progress
-
-        self._type_ii_detection_thread = QThread(self)
-        self._type_ii_detection_worker = TypeIIDetectionWorker(
-            source_data,
-            np.asarray(self.freqs, dtype=float).copy(),
-            np.asarray(self.time, dtype=float).copy(),
-            station=self._analysis_station_name(),
-            gap_row_mask=self._type_ii_invalid_row_mask(),
-            roi=roi,
-            settings=settings,
-            model=self._type_ii_detection_model,
-            source_kind=source_kind,
-        )
-        worker = self._type_ii_detection_worker
-        thread = self._type_ii_detection_thread
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.progress.connect(
-            self._on_type_ii_detection_progress,
-            Qt.ConnectionType.QueuedConnection,
-        )
-        worker.finished.connect(
-            self._on_type_ii_detection_finished,
-            Qt.ConnectionType.QueuedConnection,
-        )
-        worker.failed.connect(
-            self._on_type_ii_detection_failed,
-            Qt.ConnectionType.QueuedConnection,
-        )
-        worker.cancelled.connect(
-            self._on_type_ii_detection_cancelled,
-            Qt.ConnectionType.QueuedConnection,
-        )
-        for signal in (worker.finished, worker.failed, worker.cancelled):
-            signal.connect(thread.quit)
-        progress.canceled.connect(lambda: worker.request_cancel())
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(self._cleanup_type_ii_detection_worker)
-        thread.finished.connect(thread.deleteLater)
-        self._sync_toolbar_enabled_states()
-        thread.start()
-
-    @Slot(int, str)
-    def _on_type_ii_detection_progress(self, value: int, text: str):
-        progress = getattr(self, "_type_ii_detection_progress_dialog", None)
-        if progress is not None:
-            progress.setValue(max(0, min(100, int(value))))
-            progress.setLabelText(str(text or "Scanning…"))
-
-    def _close_type_ii_detection_progress(self):
-        progress = getattr(self, "_type_ii_detection_progress_dialog", None)
-        self._type_ii_detection_progress_dialog = None
-        if progress is not None:
-            try:
-                progress.close()
-                progress.deleteLater()
-            except Exception:
-                pass
-
-    def _record_type_ii_candidate_feedback(
-        self,
-        candidate,
-        *,
-        label: int,
-        review_kind: str,
-        band=None,
-        event_id: str | None = None,
-        reviewed_duration_s: float | None = None,
-    ):
-        example = training_example_from_candidate(
-            candidate,
-            source_hash=self._type_ii_source_hash(),
-            label=int(label),
-            review_kind=review_kind,
-            station=self._analysis_station_name(),
-            event_id=str(event_id or uuid.uuid4()),
-            band=band,
-            reviewed_duration_s=float(
-                candidate.duration_s if reviewed_duration_s is None else reviewed_duration_s
-            ),
-        )
-        record_type_ii_example(example, self._type_ii_learning_library)
-        return example.example_id
-
-    @Slot(object)
-    def _on_type_ii_detection_finished(self, result):
-        self._close_type_ii_detection_progress()
-        self._type_ii_last_result = result
-        if not result.candidates:
-            QMessageBox.information(
-                self,
-                "No Conservative Type II Candidate",
-                "No candidate passed the current Type II confidence threshold.\n\n"
-                "The spectrum was not changed. Try the visible range, a less conservative "
-                "sensitivity, or Teach Type II by Lasso.",
-            )
-            return
-
-        preview = TypeIIDetectionPreviewDialog(
-            result,
-            self._type_ii_detection_display_data,
-            self.freqs,
-            self.time,
-            self,
-            cmap=self.get_current_cmap(),
-        )
-        accepted = preview.exec() == QDialog.Accepted
-        generated_by_id = {item.candidate_id: item for item in result.generated_candidates}
-        negative_ids = set(preview.rejected_candidate_ids)
-        if preview.clean_range_requested:
-            negative_ids.update(generated_by_id)
-        review_event_id = str(uuid.uuid4())
-        reviewed_duration_s = max(
-            1.0,
-            float(result.roi.get("time_end_s", 0.0))
-            - float(result.roi.get("time_start_s", 0.0)),
-        )
-        for candidate_id in sorted(negative_ids):
-            candidate = generated_by_id.get(candidate_id)
-            if candidate is not None:
-                try:
-                    self._record_type_ii_candidate_feedback(
-                        candidate,
-                        label=0,
-                        review_kind="clean_range" if preview.clean_range_requested else "rejected",
-                        event_id=review_event_id,
-                        reviewed_duration_s=reviewed_duration_s,
-                    )
-                except Exception as exc:
-                    self._log_operation(f"Could not save Type II negative feedback: {exc}")
-
-        if not accepted or preview.selected_candidate is None or preview.selected_band is None:
-            if negative_ids:
-                self.queue_type_ii_training()
-            return
-
-        candidate = preview.selected_candidate
-        band = preview.selected_band
-        selected_candidates = tuple(
-            getattr(preview, "selected_candidates", ()) or (candidate,)
-        )
-        if band != "both":
-            selected_candidates = (candidate,)
-        pre_isolation_state = None
-        if self.noise_reduced_data is None:
-            pre_isolation_state = self._capture_state()
-            self.noise_reduced_data = subtract_background_rows(
-                np.asarray(self.raw_data, dtype=np.float32),
-                method="robust",
-                gap_row_mask=self._type_ii_invalid_row_mask(),
-            )
-            self.current_plot_type = "Background Subtracted"
-        model = load_active_type_ii_model(self._type_ii_learning_library)
-        selected_masks = [
-            build_type_ii_isolation_mask(
-                item,
-                model=model,
-                shape=np.asarray(self.noise_reduced_data).shape,
-            )
-            for item in selected_candidates
-        ]
-        mask = np.logical_or.reduce(selected_masks)
-        acceptance_event_id = str(uuid.uuid4())
-        example_ids = []
-        for item in selected_candidates:
-            item_band = item.suggested_band if band == "both" else band
-            if item_band not in ("fundamental", "harmonic"):
-                item_band = "fundamental"
-            example_ids.append(
-                self._record_type_ii_candidate_feedback(
-                    item,
-                    label=1,
-                    review_kind="accepted",
-                    band=item_band,
-                    event_id=acceptance_event_id,
-                )
-            )
-        example_id = example_ids[0]
-        detection_state = {
-            "algorithm_version": result.algorithm_version,
-            "model_id": result.model_id,
-            "source_kind": result.source_kind,
-            "detection_engine": str(
-                getattr(self, "_type_ii_detection_engine", None) or "automatic"
-            ),
-            "scope": dict(result.roi),
-            "settings": result.settings.to_dict(),
-            "candidate": candidate.summary(),
-            "candidates": [item.summary() for item in selected_candidates],
-            "band": band,
-            "training_example_id": example_id,
-            "paired_training_example_ids": example_ids,
-            "experimental": True,
-        }
-        if pre_isolation_state is None:
-            self._plot_isolated_burst(mask)
-        else:
-            self._plot_isolated_burst(mask, undo_state=pre_isolation_state)
-        self.lasso_mask = np.asarray(mask, dtype=bool).copy()
-        self._type_ii_detection_state = detection_state
-        self.statusBar().showMessage(
-            f"Experimental Type II {band} selection isolated (confidence {candidate.confidence:.3f}).",
-            6000,
-        )
-        self._log_operation(
-            f"Accepted assisted Type II {band} selection "
-            f"({', '.join(item.candidate_id for item in selected_candidates)}) "
-            f"(confidence={candidate.confidence:.3f})."
-        )
-        self.queue_type_ii_training()
-        self._sync_toolbar_enabled_states()
-
-    @Slot(str)
-    def _on_type_ii_detection_failed(self, message: str):
-        self._close_type_ii_detection_progress()
-        QMessageBox.critical(self, "Type II Detection Failed", str(message or "Unknown error."))
-
-    @Slot()
-    def _on_type_ii_detection_cancelled(self):
-        self._close_type_ii_detection_progress()
-        self.statusBar().showMessage("Type II detection cancelled; spectrum unchanged.", 4000)
-
-    @Slot()
-    def _cleanup_type_ii_detection_worker(self):
-        self._type_ii_detection_worker = None
-        self._type_ii_detection_thread = None
-        self._type_ii_detection_display_data = None
-        self._type_ii_detection_model = None
-        self._type_ii_detection_engine = None
-        self._sync_toolbar_enabled_states()
-
-    def queue_type_ii_training(self, *, force: bool = False):
-        if self._type_ii_training_worker is not None:
-            self._type_ii_training_pending = True
-            return
-        if not force:
-            examples = [
-                item for item in self._type_ii_learning_library.examples()
-                if item.feature_vector is not None
-            ]
-            if sum(item.label == 1 for item in examples) < 20:
-                return
-            if sum(item.label == 0 for item in examples) < 20:
-                return
-        self._type_ii_training_pending = False
-        self._type_ii_training_thread = QThread(self)
-        self._type_ii_training_worker = TypeIITrainingWorker(
-            str(self._type_ii_learning_library.root)
-        )
-        worker = self._type_ii_training_worker
-        thread = self._type_ii_training_thread
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.progress.connect(
-            self._on_type_ii_training_progress,
-            Qt.ConnectionType.QueuedConnection,
-        )
-        worker.finished.connect(
-            self._on_type_ii_training_finished,
-            Qt.ConnectionType.QueuedConnection,
-        )
-        worker.failed.connect(
-            self._on_type_ii_training_failed,
-            Qt.ConnectionType.QueuedConnection,
-        )
-        worker.cancelled.connect(
-            self._on_type_ii_training_cancelled,
-            Qt.ConnectionType.QueuedConnection,
-        )
-        for signal in (worker.finished, worker.failed, worker.cancelled):
-            signal.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(self._cleanup_type_ii_training_worker)
-        thread.finished.connect(thread.deleteLater)
-        thread.start()
-
-    @Slot(int, str)
-    def _on_type_ii_training_progress(self, _value: int, text: str):
-        self.statusBar().showMessage(str(text), 2500)
-
-    @Slot(object)
-    def _on_type_ii_training_finished(self, outcome):
-        manifest = outcome.manifest
-        if outcome.active_model_changed:
-            self.statusBar().showMessage(
-                f"Type II model {manifest.model_id} passed validation and is now active.",
-                6000,
-            )
-        else:
-            self.statusBar().showMessage(
-                f"Type II training staged: {manifest.status_reason}",
-                5000,
-            )
-        manager = getattr(self, "_type_ii_learning_manager_dialog", None)
-        if manager is not None:
-            manager.refresh()
-
-    @Slot(str)
-    def _on_type_ii_training_failed(self, message: str):
-        self.statusBar().showMessage(f"Type II model training failed: {message}", 6000)
-
-    @Slot()
-    def _on_type_ii_training_cancelled(self):
-        self.statusBar().showMessage("Type II model training cancelled.", 3000)
-
-    @Slot()
-    def _cleanup_type_ii_training_worker(self):
-        self._type_ii_training_worker = None
-        self._type_ii_training_thread = None
-        if self._type_ii_training_pending:
-            QTimer.singleShot(750, self.queue_type_ii_training)
-
-    def open_type_ii_learning_manager(self):
-        dialog = getattr(self, "_type_ii_learning_manager_dialog", None)
-        if dialog is None:
-            dialog = TypeIILearningManagerDialog(
-                self._type_ii_learning_library,
-                self,
-                train_callback=lambda: self.queue_type_ii_training(force=True),
-                detect_callback=self.start_automatic_type_ii_detection,
-                detection_mode=str(
-                    self._ui_settings.value(
-                        "type_ii_detection/engine",
-                        "automatic",
-                    )
-                ),
-                mode_changed_callback=lambda mode: self._ui_settings.setValue(
-                    "type_ii_detection/engine",
-                    mode,
-                ),
-            )
-            self._type_ii_learning_manager_dialog = dialog
-            dialog.finished.connect(lambda _result: setattr(self, "_type_ii_learning_manager_dialog", None))
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
-
-    def start_type_ii_teaching(self):
-        if self.noise_reduced_data is None:
-            QMessageBox.information(
-                self,
-                "Teach Type II",
-                "Apply background subtraction before teaching a Type II isolation.",
-            )
-            return
-        if self.current_plot_type == "Isolated Burst":
-            QMessageBox.information(
-                self,
-                "Teach Type II",
-                "Undo or restore the pre-isolation spectrum before teaching another event.",
-            )
-            return
-        self._type_ii_teach_context = {
-            "event_id": str(uuid.uuid4()),
-            "items": [],
-        }
-        self.activate_lasso()
-        self.statusBar().showMessage(
-            "Teach Type II: draw around one fundamental or harmonic band.",
-            6000,
-        )
-
-    def _handle_type_ii_teaching_mask(self, mask: np.ndarray):
-        context = self._type_ii_teach_context
-        if not isinstance(context, dict):
-            return
-        items = list(context.get("items") or [])
-        try:
-            candidate = type_ii_candidate_from_mask(
-                self.noise_reduced_data,
-                self.freqs,
-                self.time,
-                mask,
-                gap_row_mask=self._type_ii_invalid_row_mask(),
-            )
-        except Exception as exc:
-            self._type_ii_teach_context = None
-            QMessageBox.warning(self, "Invalid Teaching Mask", str(exc))
-            return
-        required_band = None
-        if items:
-            required_band = "harmonic" if items[0]["band"] == "fundamental" else "fundamental"
-        label_dialog = TypeIITeachLabelDialog(
-            self,
-            allow_pair=not items,
-            required_band=required_band,
-        )
-        if label_dialog.exec() != QDialog.Accepted or label_dialog.band is None:
-            self._type_ii_teach_context = None
-            self.statusBar().showMessage("Type II teaching cancelled; spectrum unchanged.", 4000)
-            return
-        items.append({"candidate": candidate, "band": label_dialog.band, "mask": np.asarray(mask, dtype=bool)})
-        context["items"] = items
-        if len(items) == 1 and label_dialog.add_pair.isChecked():
-            self._type_ii_teach_context = context
-            self.activate_lasso()
-            self.statusBar().showMessage(
-                f"Draw around the paired {required_band or ('harmonic' if label_dialog.band == 'fundamental' else 'fundamental')} band.",
-                6000,
-            )
-            return
-
-        selected_index = 0
-        if len(items) == 2:
-            labels = [str(item["band"]).capitalize() for item in items]
-            selected, ok = QInputDialog.getItem(
-                self,
-                "Choose Isolated Teaching Result",
-                "Which single band should remain isolated?",
-                labels,
-                0,
-                False,
-            )
-            if not ok:
-                self._type_ii_teach_context = None
-                self.statusBar().showMessage("Type II teaching cancelled; spectrum unchanged.", 4000)
-                return
-            selected_index = labels.index(str(selected))
-
-        source_hash = self._type_ii_source_hash()
-        example_ids = []
-        for item in items:
-            example = training_example_from_candidate(
-                item["candidate"],
-                source_hash=source_hash,
-                label=1,
-                review_kind="teach",
-                station=self._analysis_station_name(),
-                event_id=str(context["event_id"]),
-                band=item["band"],
-                mask=item["mask"],
-            )
-            record_type_ii_example(example, self._type_ii_learning_library)
-            example_ids.append(example.example_id)
-
-        selected_item = items[selected_index]
-        self._type_ii_teach_context = None
-        self._plot_isolated_burst(selected_item["mask"])
-        self.lasso_mask = np.asarray(selected_item["mask"], dtype=bool).copy()
-        self._type_ii_detection_state = {
-            "algorithm_version": "manual-teach-1",
-            "model_id": None,
-            "source_kind": "noise_reduced",
-            "scope": {},
-            "settings": {},
-            "candidate": selected_item["candidate"].summary(),
-            "band": selected_item["band"],
-            "training_example_id": example_ids[selected_index],
-            "paired_training_example_ids": example_ids,
-            "experimental": True,
-        }
-        self.statusBar().showMessage(
-            f"Saved Type II teaching example and isolated the {selected_item['band']} band.",
-            6000,
-        )
-        self._log_operation(
-            f"Taught Type II detector with {len(items)} manually isolated band(s); "
-            f"displayed {selected_item['band']}."
-        )
-        self.queue_type_ii_training()
-        self._sync_toolbar_enabled_states()
-
     @staticmethod
     def _rendered_axis_centers(start, stop, count: int) -> np.ndarray:
         count = int(count)
@@ -6700,21 +6024,6 @@ class MainWindow(QMainWindow):
         coords = np.column_stack((X.flatten(), Y.flatten()))
         mask = path.contains_points(coords).reshape(ny, nx)
 
-        if self._type_ii_teach_context is not None:
-            if self.lasso:
-                try:
-                    self.lasso.disconnect_events()
-                except Exception:
-                    pass
-                self.lasso = None
-            if not self._hardware_mode_enabled():
-                self._cid_press = self.canvas.mpl_connect("button_press_event", self.on_mouse_press)
-                self._cid_motion = self.canvas.mpl_connect("motion_notify_event", self.on_mouse_move)
-                self._cid_release = self.canvas.mpl_connect("button_release_event", self.on_mouse_release)
-            self.lasso_active = False
-            QTimer.singleShot(0, lambda selected=mask.copy(): self._handle_type_ii_teaching_mask(selected))
-            return
-
         self.lasso_mask = mask  # store for use later
 
         # Safely disconnect the lasso tool
@@ -6733,14 +6042,8 @@ class MainWindow(QMainWindow):
         # Defer drawing to avoid crash during event handling
         QTimer.singleShot(0, lambda: self._plot_isolated_burst(mask))
 
-    def _plot_isolated_burst(self, mask, *, undo_state=None):
-        if undo_state is None:
-            self._push_undo_state()
-        else:
-            self._undo_stack.append({"kind": "state", "state": undo_state})
-            self._redo_stack.clear()
-            self._trim_history()
-            self._mark_project_dirty()
+    def _plot_isolated_burst(self, mask):
+        self._push_undo_state()
         self.noise_reduced_original = np.asarray(self.noise_reduced_data, dtype=np.float32).copy()
         self.noise_reduced_original_plot_type = self._normalize_plot_type(
             getattr(self, "current_plot_type", "Background Subtracted")
@@ -7495,9 +6798,6 @@ class MainWindow(QMainWindow):
         self.noise_reduced_original = None
         self.noise_reduced_original_plot_type = "Background Subtracted"
         self.lasso_mask = None
-        self._type_ii_detection_state = None
-        self._type_ii_last_result = None
-        self._type_ii_teach_context = None
         self.current_plot_type = "Raw"
         self.current_display_data = None
         self._current_plot_source_data = None
@@ -7610,9 +6910,6 @@ class MainWindow(QMainWindow):
         self.noise_reduced_original = None
         self.noise_reduced_original_plot_type = "Background Subtracted"
         self.lasso_mask = None
-        self._type_ii_detection_state = None
-        self._type_ii_last_result = None
-        self._type_ii_teach_context = None
         self.noise_vmin = None
         self.noise_vmax = None
         self._rfi_preview_data = None
@@ -9037,11 +8334,6 @@ class MainWindow(QMainWindow):
                 getattr(self, "noise_reduced_original_plot_type", "Background Subtracted")
             ),
             "lasso_mask": None if self.lasso_mask is None else self.lasso_mask.copy(),
-            "type_ii_detection_state": (
-                None
-                if getattr(self, "_type_ii_detection_state", None) is None
-                else dict(self._type_ii_detection_state)
-            ),
             "gap_row_mask": None if self._gap_row_mask is None else np.asarray(self._gap_row_mask, dtype=bool).copy(),
             "freqs": None if self.freqs is None else self.freqs.copy(),
             "time": None if self.time is None else self.time.copy(),
@@ -9163,11 +8455,6 @@ class MainWindow(QMainWindow):
             state.get("noise_reduced_original_plot_type", "Background Subtracted")
         )
         self.lasso_mask = state["lasso_mask"]
-        self._type_ii_detection_state = (
-            None
-            if state.get("type_ii_detection_state") is None
-            else dict(state.get("type_ii_detection_state") or {})
-        )
         self._gap_row_mask = state.get("gap_row_mask", None)
         self.freqs = state["freqs"]
         self.time = state["time"]
@@ -10926,11 +10213,6 @@ class MainWindow(QMainWindow):
             "rfi": dict(self._rfi_config or {}),
             "annotations": normalize_annotations(self._annotations),
             "max_intensity": self._max_intensity_state,
-            "type_ii_detection": (
-                None
-                if getattr(self, "_type_ii_detection_state", None) is None
-                else dict(self._type_ii_detection_state)
-            ),
             "time_sync": dict(self._last_time_sync_context or {}),
             "operation_log": list(self._processing_log or []),
         }
@@ -12038,7 +11320,6 @@ class MainWindow(QMainWindow):
                 "records": self._light_curve_records_payload(),
                 "settings": self._light_curve_settings_payload(),
             },
-            type_ii_detection=dict(getattr(self, "_type_ii_detection_state", {}) or {}),
             analysis_session=session,
             analysis_row=analysis_row,
             project_path=str(getattr(self, "_project_path", "") or ""),
@@ -12200,17 +11481,6 @@ class MainWindow(QMainWindow):
     def _sync_analysis_menu_actions(self):
         has_data = getattr(self, "raw_data", None) is not None
         has_noise = getattr(self, "noise_reduced_data", None) is not None
-        is_isolated = str(getattr(self, "current_plot_type", "")) == "Isolated Burst"
-        detecting = getattr(self, "_type_ii_detection_worker", None) is not None
-        act = getattr(self, "detect_type_ii_action", None)
-        if act is not None:
-            act.setEnabled(bool(has_data and not is_isolated and not detecting))
-        act = getattr(self, "auto_detect_type_ii_action", None)
-        if act is not None:
-            act.setEnabled(bool(has_data and not is_isolated and not detecting))
-        act = getattr(self, "teach_type_ii_action", None)
-        if act is not None:
-            act.setEnabled(bool(has_noise and not is_isolated and not detecting))
         has_light_curve_data = self._has_light_curve_dataset()
         has_light_curve = bool(self._light_curve_records_payload())
         for name in ("open_maximum_intensities_action", "open_type_ii_band_splitting_action"):
@@ -12336,11 +11606,6 @@ class MainWindow(QMainWindow):
             "active_preset": dict(getattr(self, "_active_preset_snapshot", {}) or {}),
             "processing_log": list(getattr(self, "_processing_log", []) or []),
             "time_sync": dict(getattr(self, "_last_time_sync_context", {}) or {}),
-            "type_ii_detection": (
-                None
-                if getattr(self, "_type_ii_detection_state", None) is None
-                else dict(self._type_ii_detection_state)
-            ),
         }
 
         # Canonical analysis session (v2.6.0)
@@ -12463,11 +11728,6 @@ class MainWindow(QMainWindow):
             self._active_preset_snapshot = dict(meta.get("active_preset") or {})
             self._processing_log = list(meta.get("processing_log") or [])
             self._last_time_sync_context = dict(meta.get("time_sync") or {})
-            self._type_ii_detection_state = (
-                None
-                if meta.get("type_ii_detection") is None
-                else dict(meta.get("type_ii_detection") or {})
-            )
 
             header_txt = meta.get("fits_header", None)
             self._fits_header0 = None
@@ -12879,8 +12139,6 @@ class MainWindow(QMainWindow):
             "_update_download_worker",
             "_project_report_worker",
             "_goes_overlay_worker",
-            "_type_ii_detection_worker",
-            "_type_ii_training_worker",
         ):
             worker = getattr(self, worker_name, None)
             if worker is None or not hasattr(worker, "request_cancel"):
@@ -12898,8 +12156,6 @@ class MainWindow(QMainWindow):
             ("FITS import", "_import_thread"),
             ("comparison preparation", "_comparison_thread"),
             ("GOES overlay", "_goes_overlay_thread"),
-            ("Type II detection", "_type_ii_detection_thread"),
-            ("Type II training", "_type_ii_training_thread"),
         ):
             thread = getattr(self, thread_name, None)
             if thread is None:

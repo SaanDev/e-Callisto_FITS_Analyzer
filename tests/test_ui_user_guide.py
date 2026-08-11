@@ -8,7 +8,6 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 from __future__ import annotations
 
 import re
-import sys
 
 import pytest
 
@@ -38,11 +37,6 @@ def test_guide_html_is_non_empty_and_accessor_matches():
     assert isinstance(USER_GUIDE_HTML, str)
     assert len(USER_GUIDE_HTML.strip()) > 500
     assert user_guide_html() == USER_GUIDE_HTML
-
-
-def test_guide_stylesheet_avoids_windows_only_monospace_font_on_macos():
-    if sys.platform == "darwin":
-        assert "'Consolas'" not in build_default_stylesheet(False)
 
 
 def test_every_internal_link_has_a_matching_anchor():

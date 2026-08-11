@@ -36,15 +36,6 @@ from src.Backend.batch_processing import (
 from src.Backend.fits_io import extract_ut_start_sec, load_callisto_fits
 from src.Backend.goes_overlay import goes_overlay_payload_from_dict
 from src.Backend.project_report import ReportGenerationCancelled, generate_project_report_pdf
-from src.Backend.type_ii_detection import (
-    TypeIIDetectionCancelled,
-    detect_type_ii_bursts,
-)
-from src.Backend.type_ii_learning import (
-    TypeIILearningCancelled,
-    TypeIILearningLibrary,
-    train_type_ii_model,
-)
 from src.Backend.update_checker import check_for_updates
 from src.Backend.view_config import normalize_view_config
 
@@ -56,108 +47,6 @@ def _default_sunpy_cache_dir() -> Path:
     out = Path(app_data) / "sunpy_cache"
     out.mkdir(parents=True, exist_ok=True)
     return out
-
-
-class TypeIIDetectionWorker(QObject):
-    progress = Signal(int, str)
-    finished = Signal(object)
-    failed = Signal(str)
-    cancelled = Signal()
-
-    def __init__(
-        self,
-        data,
-        freqs_mhz,
-        times_s,
-        *,
-        station="",
-        gap_row_mask=None,
-        roi=None,
-        settings=None,
-        model=None,
-        source_kind="noise_reduced",
-    ):
-        super().__init__()
-        self.data = np.asarray(data, dtype=np.float32)
-        self.freqs_mhz = np.asarray(freqs_mhz, dtype=float)
-        self.times_s = np.asarray(times_s, dtype=float)
-        self.station = str(station or "")
-        self.gap_row_mask = None if gap_row_mask is None else np.asarray(gap_row_mask, dtype=bool)
-        self.roi = roi
-        self.settings = settings
-        self.model = model
-        self.source_kind = str(source_kind or "noise_reduced")
-        self._cancel_requested = False
-
-    @Slot()
-    def request_cancel(self):
-        self._cancel_requested = True
-
-    @Slot()
-    def run(self):
-        self.progress.emit(5, "Preparing robust SNR spectrum…")
-        try:
-            result = detect_type_ii_bursts(
-                self.data,
-                self.freqs_mhz,
-                self.times_s,
-                station=self.station,
-                gap_row_mask=self.gap_row_mask,
-                roi=self.roi,
-                settings=self.settings,
-                model=self.model,
-                cancel_cb=lambda: self._cancel_requested,
-                source_kind=self.source_kind,
-            )
-        except TypeIIDetectionCancelled:
-            self.cancelled.emit()
-            return
-        except Exception as exc:
-            self.failed.emit(str(exc))
-            return
-        if self._cancel_requested:
-            self.cancelled.emit()
-            return
-        self.progress.emit(100, "Type II candidate scan complete.")
-        self.finished.emit(result)
-
-
-class TypeIITrainingWorker(QObject):
-    progress = Signal(int, str)
-    finished = Signal(object)
-    failed = Signal(str)
-    cancelled = Signal()
-
-    def __init__(self, learning_root=None, *, policy=None):
-        super().__init__()
-        self.learning_root = learning_root
-        self.policy = policy
-        self._cancel_requested = False
-
-    @Slot()
-    def request_cancel(self):
-        self._cancel_requested = True
-
-    @Slot()
-    def run(self):
-        self.progress.emit(5, "Loading reviewed Type II examples…")
-        try:
-            outcome = train_type_ii_model(
-                TypeIILearningLibrary(self.learning_root),
-                policy=self.policy,
-                cancel_cb=lambda: self._cancel_requested,
-            )
-        except TypeIILearningCancelled:
-            self.cancelled.emit()
-            return
-        except Exception as exc:
-            self.failed.emit(str(exc))
-            return
-        if self._cancel_requested:
-            self.cancelled.emit()
-            return
-        self.progress.emit(100, "Type II model training complete.")
-        self.finished.emit(outcome)
 
 
 class DownloaderImportWorker(QObject):
