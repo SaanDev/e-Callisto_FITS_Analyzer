@@ -694,7 +694,7 @@ def make_magnetogram_composite(
     if mag.shape != base.shape:
         mag = _resample_nearest(mag, base.shape)
 
-    rgb = _array_to_rgb_uint8(
+    rgb = array_to_rgb_uint8(
         apply_display_scale(base, base_scale),
         percentile_low=base_percentile_low,
         percentile_high=base_percentile_high,
@@ -918,7 +918,7 @@ def iter_rendered_movie_frames(
         return arr
 
     def _render(arr: np.ndarray) -> np.ndarray:
-        return _array_to_rgb_uint8(
+        return array_to_rgb_uint8(
             apply_display_scale(arr, scale),
             percentile_low=p_low,
             percentile_high=p_high,
@@ -1261,13 +1261,27 @@ def _normalize_to_unit(data: Any, p_low: float, p_high: float) -> np.ndarray:
     return np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
 
 
-def _array_to_rgb_uint8(
+def array_to_rgb_uint8(
     arr: Any,
     *,
     percentile_low: float,
     percentile_high: float,
     colormap_name: str = "inferno",
+    gamma: float = 1.0,
 ) -> np.ndarray:
+    """Percentile-clip ``arr`` and colour-map it to an ``(H, W, 3)`` uint8 image.
+
+    Arrays that are already RGB(A) are passed straight through, which is what
+    lets pre-rendered composites travel the ordinary preview and movie-export
+    paths untouched.
+
+    ``gamma`` below 1 raises the midtones after normalisation. Solar EUV and
+    white-light data are strongly bottom-heavy — for a real EUVI frame the
+    median sits at 13% of the percentile range, i.e. deep in the dark end of the
+    colormap, so a straight mapping renders the disk almost black. ``gamma=0.5``
+    puts that median at 36%, which is the conventional display stretch for this
+    kind of image.
+    """
     data = np.asarray(arr)
     if data.ndim == 3 and data.shape[-1] in (3, 4):
         rgb = np.asarray(data[..., :3], dtype=float)
@@ -1276,6 +1290,10 @@ def _array_to_rgb_uint8(
         return np.clip(rgb, 0, 255).astype(np.uint8)
 
     norm = _normalize_to_unit(data, percentile_low, percentile_high)
+    exponent = float(gamma)
+    if exponent > 0 and abs(exponent - 1.0) > 1e-9:
+        with np.errstate(invalid="ignore"):
+            norm = np.power(np.clip(norm, 0.0, 1.0), exponent)
     try:
         try:
             import sunpy.visualization.colormaps  # noqa: F401

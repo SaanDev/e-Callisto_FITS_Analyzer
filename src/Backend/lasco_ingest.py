@@ -29,6 +29,10 @@ without network access — the same shape as ``suvi_ingest``.
 
 from __future__ import annotations
 
+import logging
+import warnings
+from contextlib import contextmanager
+
 from pathlib import Path
 from typing import Any, Callable
 
@@ -90,6 +94,48 @@ def _pick_image_hdu(hdul: Any) -> tuple[Any, Any]:
     return None, None
 
 
+@contextmanager
+def quiet_lasco_metadata_noise():
+    """Silence the diagnostics every LASCO file in the archive produces.
+
+    Neither is actionable and both fire once per frame, so a modest series
+    buries the console in thousands of identical lines:
+
+    * ``VerifyWarning`` for unprintable characters in the instrument's own
+      HISTORY cards (e.g. ``offset_bias.pro\\t1.39``). astropy reads the file
+      regardless; the cards are cosmetic provenance records.
+    * ``SunpyMetadataWarning`` for the missing observer keywords. LASCO
+      level-0.5 headers carry no ``DSUN_OBS``/``HGLN_OBS``/``HGLT_OBS``, so
+      sunpy assumes an Earth-based observer. SOHO orbits L1 at about 0.99 AU,
+      making that assumption accurate to roughly 1% in plate scale — fine for
+      overlay registration, and nothing the user can supply.
+
+    sunpy also logs "Missing metadata for solar radius" at INFO on every
+    ``rsun_obs`` access, for the same reason and just as often.
+
+    Scoped to callers that know they are handling LASCO, so the same diagnostics
+    still surface for other missions, where missing observer metadata may well be
+    a real problem.
+    """
+    from astropy.io.fits.verify import VerifyWarning
+
+    logger = logging.getLogger("sunpy")
+    previous = logger.level
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=VerifyWarning)
+        try:
+            from sunpy.util.exceptions import SunpyMetadataWarning
+
+            warnings.filterwarnings("ignore", category=SunpyMetadataWarning)
+        except Exception:
+            pass
+        logger.setLevel(max(previous, logging.WARNING))
+        try:
+            yield
+        finally:
+            logger.setLevel(previous)
+
+
 def load_lasco_map(path: str | Path, *, base_loader: Callable[..., Any] | None = None) -> Any:
     """Load one SOHO/LASCO FITS file into a sunpy Map, repairing missing units.
 
@@ -104,22 +150,23 @@ def load_lasco_map(path: str | Path, *, base_loader: Callable[..., Any] | None =
 
         base_loader = _Map
 
-    try:
-        return base_loader(file_path)
-    except Exception:
-        # Fall through to the salvage path (missing CUNIT on LASCO level-0.5/1).
-        pass
-
-    from astropy.io import fits
-
-    with fits.open(file_path) as hdul:
-        data, header = _pick_image_hdu(hdul)
-        if data is None:
-            # Nothing salvageable — re-raise the original loader error for context.
+    with quiet_lasco_metadata_noise():
+        try:
             return base_loader(file_path)
-        clean = patch_lasco_header(header)
-        array = np.asarray(data, dtype=np.float32)
-    return base_loader((array, clean))
+        except Exception:
+            # Fall through to the salvage path (missing CUNIT on LASCO level-0.5/1).
+            pass
+
+        from astropy.io import fits
+
+        with fits.open(file_path) as hdul:
+            data, header = _pick_image_hdu(hdul)
+            if data is None:
+                # Nothing salvageable — re-raise the original loader error for context.
+                return base_loader(file_path)
+            clean = patch_lasco_header(header)
+            array = np.asarray(data, dtype=np.float32)
+        return base_loader((array, clean))
 
 
 # Each LASCO header is repaired individually, so callers (e.g.

@@ -40,8 +40,11 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -59,11 +62,13 @@ from PySide6.QtWidgets import (
 )
 
 from src.Backend.solar_data_analysis import (
+    AiaArrayMap,
     AiaCompositeSpec,
     AiaMovieExportSpec,
     AiaRegion,
     CropBounds,
     apply_display_scale,
+    crop_array,
     crop_maps,
     detect_active_regions,
     export_movie,
@@ -136,7 +141,7 @@ from src.Backend.sunpy_archive import (
 from src.UI.download_queue_panel import DownloadProgressPanel
 from src.UI.font_utils import preferred_monospace_font_family
 from src.UI.gui_shared import fit_window_to_screen, pick_export_path, screen_available_geometry
-from src.UI.sunpy_plot_window import SunPyPlotCanvas
+from src.UI.sunpy_plot_window import SunPyPlotCanvas, _rgb_to_uint8
 from src.UI.sunpy_solar_viewer import SunPyWorker, _default_cache_dir, _get_theme
 
 
@@ -244,6 +249,31 @@ def populate_observable_combo(combo: Any) -> None:
         combo.addItem(f"GOES/SUVI {wl} A", userData=("SUVI", float(wl)))
 
 
+def default_colormap_for_observable(instrument: str, value: Any) -> str:
+    """The colormap an observable reads best in, for the same userData tuples
+    :func:`populate_observable_combo` produces. Used to seed a new overlay layer
+    so a stack looks right before the user touches anything."""
+    key = str(instrument or "").strip().upper()
+    if key == "AIA":
+        try:
+            rounded = int(round(float(value)))
+        except (TypeError, ValueError):
+            rounded = 193
+        return f"sdoaia{rounded}" if rounded in AIA_WAVELENGTHS else "sdoaia193"
+    if key == "HMI":
+        return HMI_COLORMAPS.get(str(value), "gray")
+    if key == "LASCO":
+        return LASCO_COLORMAPS.get(str(value).upper(), "soholasco2")
+    if key == "SECCHI":
+        detector, wavelength = None, None
+        if isinstance(value, (tuple, list)) and len(value) >= 3:
+            detector, wavelength = value[1], value[2]
+        return _secchi_colormap_name(detector, wavelength)
+    if key == "SUVI":
+        return _suvi_colormap_name(value)
+    return "inferno"
+
+
 class SolarMetadataWorker(QObject):
     progress = Signal(object, object)
     finished = Signal(object)
@@ -305,6 +335,506 @@ class MovieExportWorker(QObject):
                 self.cancelled.emit()
             else:
                 self.finished.emit(str(self._spec.path))
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
+class CompositeBuildWorker(QObject):
+    """Downloads, reprojects and blends overlay layers off the UI thread.
+
+    The whole pipeline lives in one worker — search, fetch, load, reproject,
+    composite — because the stages are strictly sequential per layer and a single
+    worker keeps cancellation and progress reporting in one place. Reprojection
+    alone runs seconds per frame, so this must never touch the render path.
+
+    Emits ``finished(composites, warnings)`` where ``composites`` is one RGB
+    uint8 array per base frame. Layers that fail (no archive data, unusable WCS)
+    are dropped with a warning rather than aborting the build: a partial
+    composite is still worth looking at.
+    """
+
+    progress = Signal(object, object)      # percent-or-None, status text
+    build_progress = Signal(int, int)      # done, total
+    finished = Signal(object, object)      # list[np.ndarray], list[str]
+    failed = Signal(str)
+    cancelled = Signal()
+
+    # Ceiling on how many files one layer may download and reproject. A full-disk
+    # AIA frame is 4096x4096 (~67 MB as float32), so an uncapped series is
+    # gigabytes; a composite only needs enough frames to follow the event, and
+    # the selection is thinned evenly across the loaded time range.
+    MAX_LAYER_FILES = 48
+
+    def __init__(
+        self,
+        base_frames: list[Any],
+        base_spec: Any,
+        layer_specs: list[Any],
+        *,
+        window_minutes: int = 30,
+        cache_dir: Any = None,
+        difference_mode: str = "raw",
+    ):
+        super().__init__()
+        self._base_frames = list(base_frames)
+        self._base_spec = base_spec
+        self._layer_specs = list(layer_specs)
+        self._window_minutes = max(1, int(window_minutes))
+        self._cache_dir = cache_dir
+        self._difference_mode = str(difference_mode or "raw").strip().lower()
+        self._cancel = threading.Event()
+
+    def cancel(self):
+        self._cancel.set()
+
+    # ------------------------------------------------------------------ helpers
+    @staticmethod
+    def _rows_for_times(rows: list[Any], targets: list[Any], *, limit: int = 48) -> list[int]:
+        """Row indexes nearest each base time, de-duplicated and capped.
+
+        Bounds the download to at most one file per base frame instead of the
+        whole search result, which for a fast cadence would be hundreds. The
+        ``limit`` then caps it again and thins the selection evenly across the
+        time range: a full-disk AIA frame is ~67 MB, so an uncapped series is
+        gigabytes of downloads and memory for a composite that only needs enough
+        frames to follow the event.
+        """
+        picked: list[int] = []
+        seen: set[int] = set()
+        for when in targets:
+            if not isinstance(when, datetime):
+                continue
+            best, best_gap = None, float("inf")
+            for i, row in enumerate(rows):
+                start = getattr(row, "start", None)
+                if not isinstance(start, datetime):
+                    continue
+                gap = abs((start - when).total_seconds())
+                if gap < best_gap:
+                    best, best_gap = i, gap
+            if best is not None and best not in seen:
+                seen.add(best)
+                picked.append(best)
+        picked = picked or list(range(min(len(rows), 8)))
+        if limit and len(picked) > int(limit):
+            # Thin evenly so the kept frames still span the whole time range.
+            step = len(picked) / float(limit)
+            picked = [picked[int(i * step)] for i in range(int(limit))]
+        return picked
+
+    # Instrument operating ranges, so an overlay that could never have data is
+    # explained rather than reported as a bare "no records found".
+    _MISSION_SPAN = {
+        "AIA": (datetime(2010, 5, 1), None, "SDO launched February 2010"),
+        "HMI": (datetime(2010, 5, 1), None, "SDO launched February 2010"),
+        "SUVI": (datetime(2017, 6, 1), None, "GOES-16 SUVI became operational in 2017"),
+        "SECCHI": (datetime(2006, 12, 1), None, "STEREO launched October 2006"),
+        "LASCO": (datetime(1996, 1, 1), None, "SOHO launched December 1995"),
+    }
+
+    def _no_records_message(self, spec: Any, dated: list[datetime]) -> str:
+        """Explain an empty layer search in terms the user can act on."""
+        first, last = min(dated), max(dated)
+        span = self._MISSION_SPAN.get(str(spec.instrument or "").upper())
+        if span is not None:
+            start, end, note = span
+            if start is not None and last < start:
+                return (
+                    f"{spec.label} has no data for {first:%Y-%m-%d}: {note}, so it was "
+                    f"not observing then.\nThe loaded frames are from "
+                    f"{first:%Y-%m-%d %H:%M} to {last:%H:%M} UT — pick an instrument that "
+                    "was operating at that time."
+                )
+            if end is not None and first > end:
+                return f"{spec.label} stopped observing before {first:%Y-%m-%d} ({note})."
+        detail = "STEREO-B has returned no data since 2014." if (
+            isinstance(spec.value, (tuple, list)) and "STEREO_B" in str(spec.value)
+        ) else ""
+        return (
+            f"No {spec.label} records within ±{self._window_minutes} min of the loaded frames "
+            f"({first:%Y-%m-%d %H:%M} to {last:%H:%M} UT).\n"
+            f"Widen the time-match window, or pick an instrument that was observing then. {detail}"
+        ).strip()
+
+    @staticmethod
+    def _header_time(path: str) -> datetime | None:
+        """Observation time straight from a FITS header, without loading pixels.
+
+        Time-matching needs every candidate frame's timestamp, but building a
+        sunpy Map for each one just to read its date would pull the whole series
+        into memory — the pixels are only needed for the handful of frames that
+        actually get matched.
+        """
+        from astropy.io import fits
+
+        try:
+            header = fits.getheader(path)
+        except Exception:
+            return None
+        for key in ("date-obs", "date_obs", "t_obs", "date"):
+            value = header.get(key)
+            if not value:
+                continue
+            text = str(value).strip().replace("/", "-")
+            # LASCO splits the timestamp across DATE-OBS and TIME-OBS.
+            if len(text) <= 10 and header.get("time-obs"):
+                text = f"{text}T{str(header.get('time-obs')).strip()}"
+            try:
+                return datetime.fromisoformat(text.replace("Z", ""))
+            except ValueError:
+                continue
+        return None
+
+    def _layer_sources(self, spec: Any, base_times: list[Any]) -> tuple[list[str], list[Any]]:
+        """Search and download one layer, returning cached paths and their times.
+
+        Deliberately does not load pixels. A full-disk AIA frame is 4096x4096
+        (~67 MB as float32); materialising one per base frame exhausted memory
+        and the OS killed the process. Only matched frames are loaded, one at a
+        time, in :meth:`_run`.
+        """
+        from src.Backend.sunpy_archive import build_spec_for_observable, fetch, search
+
+        dated = [t for t in base_times if isinstance(t, datetime)]
+        if not dated:
+            raise RuntimeError("The loaded frames carry no observation times to match against.")
+        margin = timedelta(minutes=self._window_minutes)
+        query = build_spec_for_observable(
+            spec.instrument, spec.value, min(dated) - margin, max(dated) + margin,
+            max_records=max(24, min(self.MAX_LAYER_FILES * 3, len(dated) * 2)),
+        )
+
+        self.progress.emit(None, f"Searching {spec.label}…")
+        # allow_time_fallback is deliberately off. It exists so a LASCO search in
+        # an empty window can jump to the nearest available data, which is right
+        # for picking a series to look at but wrong for an overlay: a layer from
+        # another date silently mis-registers against the base. Better to report
+        # the gap than to composite unrelated images.
+        result = search(query, allow_time_fallback=False, cancel_cb=self._cancel.is_set)
+        rows = list(getattr(result, "rows", []) or [])
+        if not rows:
+            raise RuntimeError(self._no_records_message(spec, dated))
+
+        selected = self._rows_for_times(rows, dated, limit=self.MAX_LAYER_FILES)
+        self.progress.emit(
+            None, f"Downloading {spec.label} ({len(selected)} of {len(rows)} record(s))…"
+        )
+        fetched = fetch(
+            result, self._cache_dir, selected_rows=selected, cancel_cb=self._cancel.is_set
+        )
+        paths = list(getattr(fetched, "paths", None) or [])
+        if not paths:
+            raise RuntimeError(f"No {spec.label} files could be downloaded.")
+        return paths, [self._header_time(p) for p in paths]
+
+    def _load_one_layer_frame(self, path: str, spec: Any) -> Any:
+        """Build a single sunpy Map for one layer file."""
+        from src.Backend.solar_data_analysis import extract_map_frames
+        from src.Backend.sunpy_archive import DATA_KIND_MAP, load_downloaded
+
+        loaded = load_downloaded(
+            [path], DATA_KIND_MAP, instrument=str(spec.instrument or "")
+        )
+        frames = extract_map_frames(getattr(loaded, "maps_or_timeseries", None))
+        if not frames:
+            raise RuntimeError(f"{Path(path).name} produced no loadable frame.")
+        return frames[0]
+
+    @staticmethod
+    def _frame_geometry(frame: Any) -> tuple:
+        """``(sun_centre_px, pixels_per_solar_radius)`` for one base frame.
+
+        Per frame, not per series: a summed LASCO frame has half the plate scale
+        of a full-resolution one, so a shared value would put every layer
+        boundary at the wrong radius.
+        """
+        import numpy as _np
+
+        from src.Backend.coronagraph import solar_center_from_meta
+        from src.Backend.coronagraph_composite import rsun_pixels
+
+        shape = _np.asarray(getattr(frame, "data")).shape
+        return (
+            solar_center_from_meta(getattr(frame, "meta", None), data_shape=shape),
+            rsun_pixels(frame, shape),
+        )
+
+    @staticmethod
+    def _geometry_key(frame: Any) -> tuple:
+        """Identity of a frame's pixel grid and pointing.
+
+        LASCO series routinely interleave full-resolution frames with on-board
+        summed ones — 1024x1024 at 11.9"/px next to 512x512 at 23.8"/px on the
+        same day. Those cannot share a reprojection target or a radial mask, so
+        base frames are grouped by this key and each group is handled on its own
+        grid.
+        """
+        import numpy as _np
+
+        meta = getattr(frame, "meta", None) or {}
+
+        def _get(*keys):
+            for key in keys:
+                try:
+                    if key in meta:
+                        return round(float(meta[key]), 4)
+                except Exception:
+                    continue
+            return None
+
+        shape = tuple(_np.asarray(getattr(frame, "data")).shape[:2])
+        return (shape, _get("cdelt1", "CDELT1"), _get("crpix1", "CRPIX1"), _get("crpix2", "CRPIX2"))
+
+    @staticmethod
+    def _difference(arrays: dict[int, Any], order: list[int], mode: str) -> dict[int, Any]:
+        """Difference a layer within its own series, keyed by source-frame index.
+
+        Differencing against the layer's own previous frame (not the previous
+        *base* frame) matters when cadences differ: consecutive base frames often
+        match the same slower layer frame, which would otherwise give a blank
+        difference.
+        """
+        if mode not in ("running", "base") or len(order) < 2:
+            return arrays
+        out: dict[int, Any] = {}
+        first = arrays[order[0]]
+        for position, index in enumerate(order):
+            current = arrays[index]
+            if mode == "base":
+                reference = first
+            else:
+                reference = arrays[order[position - 1]] if position > 0 else arrays[order[1]]
+            try:
+                out[index] = (
+                    current - reference if mode == "base" or position > 0 else reference - current
+                )
+            except Exception:
+                out[index] = current
+        return out
+
+    @Slot()
+    def run(self):
+        from src.Backend.lasco_ingest import quiet_lasco_metadata_noise
+
+        # LASCO headers carry no observer or solar-radius keywords, so sunpy
+        # re-announces both on every reprojection. Reported once in the notes
+        # below instead of once per frame per layer.
+        with quiet_lasco_metadata_noise():
+            self._run()
+
+    def _run(self):
+        try:
+            import numpy as _np
+
+            from src.Backend.coronagraph import solar_center_from_meta
+            from src.Backend.coronagraph_composite import (
+                composite_frame,
+                layer_alpha,
+                match_layer_frames,
+                rsun_pixels,
+            )
+            from src.Backend.multiview import observer_separation_deg, reproject_map_to
+            from src.Backend.solar_data_analysis import frame_observation_time
+
+            base_frames = self._base_frames
+            if not base_frames:
+                raise RuntimeError("Load a coronagraph series before building a composite.")
+            base_times = [frame_observation_time(f) for f in base_frames]
+            warnings: list[str] = []
+
+            # SOHO/LASCO level-0.5 headers carry no observer keywords, so every
+            # reprojection makes sunpy re-announce that it is assuming an
+            # Earth-based observer. Say it once, here, instead of once per frame
+            # per layer: SOHO sits at L1 (~0.99 AU), so the assumption costs
+            # about 1% in plate scale, which overlay registration tolerates.
+            base_meta = getattr(base_frames[0], "meta", None) or {}
+            if not any(k in base_meta for k in ("dsun_obs", "DSUN_OBS")):
+                warnings.append(
+                    "The base frames carry no observer position (normal for SOHO/LASCO); "
+                    "an Earth-based observer was assumed, which is accurate to about 1%."
+                )
+
+            # Group base frames by pixel grid. A mixed series (full-resolution
+            # and on-board summed LASCO frames together) needs one reprojection
+            # target and one radial mask per grid, not one for the whole series.
+            geometry: dict[tuple, list[int]] = {}
+            for index, frame in enumerate(base_frames):
+                geometry.setdefault(self._geometry_key(frame), []).append(index)
+            geometry_of = {i: key for key, idxs in geometry.items() for i in idxs}
+            representative = {key: idxs[0] for key, idxs in geometry.items()}
+            if len(geometry) > 1:
+                sizes = ", ".join(
+                    f"{key[0][1]}x{key[0][0]}" for key in sorted(geometry, key=lambda k: -len(geometry[k]))
+                )
+                warnings.append(
+                    f"The loaded series mixes {len(geometry)} image geometries ({sizes}); "
+                    "each is composited on its own grid."
+                )
+
+            # --- per layer: download, time-match, reproject -------------------
+            # Reprojection is keyed by (base geometry, layer frame) so a slower
+            # layer cadence and a uniform base series both stay at one
+            # reprojection per distinct pairing.
+            resolved: list[tuple[Any, dict[tuple, Any], list[int | None]]] = []
+            for spec in self._layer_specs:
+                if not spec.enabled:
+                    continue
+                if self._cancel.is_set():
+                    self.cancelled.emit()
+                    return
+                try:
+                    paths, layer_times = self._layer_sources(spec, base_times)
+                except Exception as exc:
+                    warnings.append(f"{spec.label}: {exc}")
+                    continue
+
+                matches = match_layer_frames(
+                    base_times, layer_times, max_gap_seconds=self._window_minutes * 60.0
+                )
+                if all(index is None for index in matches):
+                    warnings.append(
+                        f"{spec.label}: downloaded {len(paths)} frame(s), but none fell within "
+                        f"±{self._window_minutes} min of any loaded frame — widen the time-match window."
+                    )
+                    continue
+
+                screen = spec.resolved_screen()
+                # Group the work by source frame so each file is read from disk
+                # once, reprojected onto every base geometry that needs it, and
+                # released before the next one is opened. Holding the whole layer
+                # series in memory is what previously exhausted RAM.
+                needed: dict[int, list[tuple]] = {}
+                for i, index in enumerate(matches):
+                    if index is not None:
+                        needed.setdefault(index, [])
+                        if geometry_of[i] not in needed[index]:
+                            needed[index].append(geometry_of[i])
+                arrays: dict[tuple, Any] = {}
+                for done, index in enumerate(sorted(needed), start=1):
+                    if self._cancel.is_set():
+                        self.cancelled.emit()
+                        return
+                    self.progress.emit(
+                        None, f"Reprojecting {spec.label} ({done}/{len(needed)})…"
+                    )
+                    source = None
+                    try:
+                        source = self._load_one_layer_frame(paths[index], spec)
+                        for geom in needed[index]:
+                            target = base_frames[representative[geom]]
+                            reprojected = reproject_map_to(source, target, screen=screen)
+                            data = _np.asarray(getattr(reprojected, "data"), dtype=_np.float32)
+                            if not _np.isfinite(data).any():
+                                warnings.append(
+                                    f"{spec.label} frame {index}: no overlap with the base field of view."
+                                )
+                                continue
+                            arrays[(geom, index)] = data
+                    except Exception as exc:
+                        warnings.append(f"{spec.label} frame {index}: reprojection failed ({exc}).")
+                    finally:
+                        # Drop the full-resolution source before opening the next.
+                        del source
+                if not arrays:
+                    warnings.append(f"{spec.label}: no frame could be placed onto the base view.")
+                    continue
+
+                # How much of this layer's own field of view actually carries
+                # data once reprojected. A large observer separation means only
+                # the part of the Sun both spacecraft can see survives, so the
+                # layer shows up as a crescent rather than a full disk — correct,
+                # but baffling unless it is stated.
+                sample_geom, sample_index = next(iter(sorted(arrays)))
+                sample = arrays[(sample_geom, sample_index)]
+                centre_s, rsun_s = self._frame_geometry(base_frames[representative[sample_geom]])
+                band = layer_alpha(
+                    _np.ones_like(sample), spec, center=centre_s, rsun_px=rsun_s
+                ) > 0
+                if band.any():
+                    coverage = float(_np.isfinite(sample[band]).mean())
+                    if coverage < 0.6:
+                        try:
+                            separation = observer_separation_deg(
+                                self._load_one_layer_frame(paths[sample_index], spec),
+                                base_frames[0],
+                            )
+                            why = f" The observers are {separation:.0f}° apart"
+                        except Exception:
+                            why = " The observers are far apart"
+                        warnings.append(
+                            f"{spec.label}: only {coverage:.0%} of its field of view overlaps the "
+                            f"base view, so it appears as a partial disk.{why}, and only the region "
+                            "both spacecraft can see survives the reprojection."
+                        )
+                for geom in geometry:
+                    order = sorted(index for (g, index) in arrays if g == geom)
+                    if len(order) < 2:
+                        continue
+                    subset = {index: arrays[(geom, index)] for index in order}
+                    for index, value in self._difference(subset, order, self._difference_mode).items():
+                        arrays[(geom, index)] = value
+                resolved.append((spec, arrays, matches))
+
+            # --- blend one composite per base frame --------------------------
+            # Centre and solar radius are per frame: a summed frame has half the
+            # pixel scale of a full-resolution one, so sharing a mask would put
+            # every layer boundary at the wrong radius.
+            geometry_cache = {
+                key: self._frame_geometry(base_frames[idxs[0]])
+                for key, idxs in geometry.items()
+            }
+
+            # Only difference modes need every base frame in hand at once; in raw
+            # mode each is read as it is composited. At float64 a 112-frame
+            # 1024x1024 series is ~940 MB held for no reason, which on top of the
+            # layer data was enough to get the process killed.
+            if self._difference_mode in ("running", "base"):
+                base_arrays = {
+                    i: _np.asarray(getattr(f, "data"), dtype=_np.float32)
+                    for i, f in enumerate(base_frames)
+                }
+                base_arrays = self._difference(
+                    base_arrays, sorted(base_arrays), self._difference_mode
+                )
+
+                def _base_array(index: int) -> Any:
+                    return base_arrays[index]
+            else:
+
+                def _base_array(index: int) -> Any:
+                    return _np.asarray(getattr(base_frames[index], "data"), dtype=_np.float32)
+
+            composites: list[Any] = []
+            skipped = 0
+            total = len(base_frames)
+            for i in range(total):
+                if self._cancel.is_set():
+                    self.cancelled.emit()
+                    return
+                geom = geometry_of[i]
+                centre, rsun_px = geometry_cache[geom]
+                layers = []
+                for spec, arrays, matches in resolved:
+                    index = matches[i] if i < len(matches) else None
+                    data = arrays.get((geom, index)) if index is not None else None
+                    if data is None:
+                        skipped += 1
+                    else:
+                        layers.append((spec, data))
+                composites.append(
+                    composite_frame(
+                        _base_array(i), self._base_spec, layers,
+                        center=centre, rsun_px=rsun_px,
+                    )
+                )
+                self.build_progress.emit(i + 1, total)
+
+            if skipped:
+                warnings.append(
+                    f"{skipped} frame-layer pairing(s) had no matching overlay image; "
+                    "those frames show the base view alone."
+                )
+            self.finished.emit(composites, warnings)
         except Exception:
             self.failed.emit(traceback.format_exc())
 
@@ -629,6 +1159,11 @@ class SolarMatplotlibCanvas(QWidget):
         self.ax.set_box_aspect(1)
 
         if is_rgb:
+            # Producers disagree on RGB convention (float 0-1 from
+            # make_composite, uint8 0-255 from the overlay compositor), and
+            # matplotlib silently clips a float array carrying 0-255 to solid
+            # white. Normalise through the same helper the pyqtgraph canvas uses.
+            arr = _rgb_to_uint8(arr)
             self._image_artist = self.ax.imshow(arr, origin="lower", extent=extent, interpolation="nearest")
             self._colorbar_artist = None
         else:
@@ -700,8 +1235,8 @@ class SolarMatplotlibCanvas(QWidget):
             "sdoaia335": ((0, 0, 0), (16, 64, 128), (64, 128, 181), (145, 192, 221), (255, 255, 255)),
             "sdoaia1600": ((0, 0, 0), (91, 91, 16), (142, 142, 64), (196, 196, 145), (255, 255, 255)),
             "sdoaia1700": ((0, 0, 0), (128, 64, 64), (181, 128, 128), (221, 192, 192), (255, 255, 255)),
-            "soholasco2": ((0, 0, 0), (20, 20, 90), (30, 90, 165), (120, 185, 220), (255, 255, 255)),
-            "soholasco3": ((0, 0, 0), (60, 20, 12), (150, 62, 22), (222, 150, 60), (255, 252, 220)),
+            "soholasco2": ((0, 0, 0), (96, 0, 0), (192, 1, 0), (255, 129, 3), (255, 255, 255)),
+            "soholasco3": ((0, 0, 0), (56, 56, 78), (112, 123, 144), (169, 200, 200), (255, 255, 255)),
         }
         colors = np.asarray(palettes.get(str(name or "").lower(), palettes["sdoaia193"]), dtype=float) / 255.0
         stops = np.linspace(0.0, 1.0, colors.shape[0])
@@ -1071,6 +1606,17 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._vector_frames: list[Any] = []
         self._vector_geometry_cache: dict[Any, Any] = {}
         self._pending_vector_download = False
+        # Overlay layers. Composites are kept parallel to _map_frames rather than
+        # replacing them, so _current_map_data stays the 2-D base array that the
+        # measure/stats tools require (region_stats rejects 3-D input).
+        self._overlay_specs: list[Any] = []
+        self._composite_frames: list[Any] = []
+        self._composite_token: str = ""
+        # Labels of the layers the current composite was actually built from.
+        # The title reads from this, not from _overlay_specs, so editing or
+        # clearing the stack afterwards can never make the title disagree with
+        # the pixels on screen.
+        self._composite_labels: list[str] = []
         self._busy = False
         self._progress_target = 0
         self._progress_value = 0
@@ -1176,6 +1722,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._build_plot_controls_group(controls_layout)
         self._build_movie_group(controls_layout)
         self._build_coronagraph_group(controls_layout)
+        self._build_overlay_group(controls_layout)
         self._build_hi_group(controls_layout)
         self._build_vector_field_group(controls_layout)
         self._build_region_group(controls_layout)
@@ -2493,6 +3040,131 @@ class SolarDataAnalysisWindow(QMainWindow):
         layout.addWidget(self.nrgf_check, 0, 0, 1, 2)
         group.setVisible(False)
 
+    def _build_overlay_group(self, parent_layout: QVBoxLayout) -> None:
+        """Multi-instrument overlay stack for coronagraph views.
+
+        A CME crosses several instruments' fields of view, each blind to the
+        others because of its occulter. Layers added here are time-matched to the
+        loaded series, reprojected onto its WCS and blended into it, giving one
+        continuous image from the disk out to the outer corona.
+        """
+        group = QGroupBox("Overlay Layers")
+        self.overlay_group = group
+        layout = QGridLayout(group)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(8)
+        parent_layout.addWidget(group)
+
+        self.overlay_add_combo = QComboBox()
+        populate_observable_combo(self.overlay_add_combo)
+        self.overlay_add_combo.setToolTip(
+            "Instrument to overlay on the loaded coronagraph series.\n"
+            "Disk imagers (AIA, EUVI) fill the occulted centre; another\n"
+            "coronagraph extends the field of view outward."
+        )
+        self.overlay_add_btn = QPushButton("Add")
+        self.overlay_add_btn.setToolTip("Add this observable to the layer stack.")
+        layout.addWidget(self.overlay_add_combo, 0, 0, 1, 2)
+        layout.addWidget(self.overlay_add_btn, 0, 2)
+
+        self.overlay_list = QListWidget()
+        self.overlay_list.setToolTip(
+            "Layers blended over the loaded series, painted widest field of view\n"
+            "first. Un-tick a layer to leave it out without losing its settings."
+        )
+        self.overlay_list.setMaximumHeight(110)
+        layout.addWidget(self.overlay_list, 1, 0, 1, 3)
+
+        self.overlay_remove_btn = QPushButton("Remove")
+        self.overlay_remove_btn.setToolTip("Remove the selected layer from the stack.")
+        layout.addWidget(self.overlay_remove_btn, 2, 2)
+        self.overlay_note_label = QLabel("")
+        self.overlay_note_label.setWordWrap(True)
+        layout.addWidget(self.overlay_note_label, 2, 0, 1, 2)
+
+        # --- per-layer appearance, bound to the selected row -----------------
+        self.overlay_colormap_combo = QComboBox()
+        self.overlay_colormap_combo.setEditable(True)
+        self.overlay_colormap_combo.addItems(
+            sorted({*AIA_COLORMAPS, *LASCO_COLORMAPS.values(), "stereocor1", "stereocor2",
+                    "euvi171", "euvi195", "euvi284", "euvi304", "gray", "inferno"})
+        )
+        self.overlay_scale_combo = QComboBox()
+        self.overlay_scale_combo.addItems(["log", "linear"])
+        self.overlay_opacity_slider = QSlider(Qt.Horizontal)
+        self.overlay_opacity_slider.setRange(0, 100)
+        self.overlay_opacity_slider.setValue(100)
+        self.overlay_opacity_slider.setToolTip("Blend strength of this layer over the ones beneath it.")
+        self.overlay_gamma_slider = QSlider(Qt.Horizontal)
+        self.overlay_gamma_slider.setRange(20, 200)   # gamma x100
+        self.overlay_gamma_slider.setValue(50)
+        self.overlay_gamma_slider.setToolTip(
+            "Midtone stretch (gamma x100). Solar EUV and white-light data are\n"
+            "bottom-heavy — the median pixel sits near 13% of its own range, so a\n"
+            "straight mapping paints the disk almost black. Values below 100\n"
+            "brighten the midtones; 50 is the usual choice for solar imagery."
+        )
+        self.overlay_inner_spin = QDoubleSpinBox()
+        self.overlay_inner_spin.setRange(0.0, 400.0)
+        self.overlay_inner_spin.setDecimals(2)
+        self.overlay_inner_spin.setSingleStep(0.1)
+        self.overlay_inner_spin.setSuffix(" R☉")
+        self.overlay_inner_spin.setToolTip(
+            "Inner edge of this layer, in solar radii — normally the instrument's\n"
+            "occulter. Pixels inside it stay transparent so the layer below shows."
+        )
+        self.overlay_outer_spin = QDoubleSpinBox()
+        self.overlay_outer_spin.setRange(0.1, 400.0)
+        self.overlay_outer_spin.setDecimals(2)
+        self.overlay_outer_spin.setSingleStep(0.1)
+        self.overlay_outer_spin.setSuffix(" R☉")
+        self.overlay_outer_spin.setToolTip("Outer edge of this layer's usable field of view, in solar radii.")
+
+        layout.addWidget(self._field_label("Colormap"), 3, 0)
+        layout.addWidget(self.overlay_colormap_combo, 3, 1, 1, 2)
+        layout.addWidget(self._field_label("Scale"), 4, 0)
+        layout.addWidget(self.overlay_scale_combo, 4, 1, 1, 2)
+        layout.addWidget(self._field_label("Opacity"), 5, 0)
+        layout.addWidget(self.overlay_opacity_slider, 5, 1, 1, 2)
+        layout.addWidget(self._field_label("Midtones"), 6, 0)
+        layout.addWidget(self.overlay_gamma_slider, 6, 1, 1, 2)
+        layout.addWidget(self._field_label("Inner / outer"), 7, 0)
+        layout.addWidget(self.overlay_inner_spin, 7, 1)
+        layout.addWidget(self.overlay_outer_spin, 7, 2)
+
+        self.overlay_window_spin = QSpinBox()
+        self.overlay_window_spin.setRange(1, 720)
+        self.overlay_window_spin.setValue(30)
+        self.overlay_window_spin.setSuffix(" min")
+        self.overlay_window_spin.setToolTip(
+            "How far from each loaded frame's time an overlay frame may be taken.\n"
+            "Widen it for instruments with a slow cadence or a patchy archive."
+        )
+        layout.addWidget(self._field_label("Time match"), 8, 0)
+        layout.addWidget(self.overlay_window_spin, 8, 1, 1, 2)
+
+        self.overlay_build_btn = QPushButton("Build Composite")
+        self.overlay_build_btn.setEnabled(False)
+        self.overlay_build_btn.setToolTip(
+            "Download each layer's matching frames, reproject them onto the loaded\n"
+            "series and blend. Runs in the background; the result replaces the view\n"
+            "and works with the measure tools, PNG save and movie export."
+        )
+        self.overlay_clear_btn = QPushButton("Clear")
+        self.overlay_clear_btn.setEnabled(False)
+        self.overlay_clear_btn.setToolTip("Drop the composite and restore the originally loaded frames.")
+        layout.addWidget(self.overlay_build_btn, 9, 0, 1, 2)
+        layout.addWidget(self.overlay_clear_btn, 9, 2)
+
+        self.overlay_progress = QProgressBar()
+        self.overlay_progress.setRange(0, 100)
+        self.overlay_progress.setValue(0)
+        self.overlay_progress.setVisible(False)
+        layout.addWidget(self.overlay_progress, 10, 0, 1, 3)
+
+        self._overlay_set_editor_enabled(False)
+        group.setVisible(False)
+
     def _build_hi_group(self, parent_layout: QVBoxLayout) -> None:
         """Heliospheric Imager tools (STEREO HI1/HI2): starfield/F-corona
         background subtraction and time-elongation J-maps. Shown only for HI."""
@@ -2685,6 +3357,17 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.detect_regions_btn.clicked.connect(self.detect_active_regions)
         self.fetch_labels_btn.clicked.connect(self.fetch_active_region_labels)
         self.compare_viewpoint_btn.clicked.connect(self.open_multiview_dialog)
+        self.overlay_add_btn.clicked.connect(self.add_overlay_layer)
+        self.overlay_remove_btn.clicked.connect(self.remove_overlay_layer)
+        self.overlay_build_btn.clicked.connect(self.build_composite)
+        self.overlay_clear_btn.clicked.connect(self.clear_composite)
+        self.overlay_list.currentRowChanged.connect(lambda _row: self._sync_overlay_editor())
+        self.overlay_list.itemChanged.connect(self._on_overlay_item_changed)
+        for _combo in (self.overlay_colormap_combo, self.overlay_scale_combo):
+            _combo.currentTextChanged.connect(lambda _t: self._on_overlay_style_changed())
+        for _widget in (self.overlay_opacity_slider, self.overlay_gamma_slider,
+                        self.overlay_inner_spin, self.overlay_outer_spin):
+            _widget.valueChanged.connect(lambda _v: self._on_overlay_style_changed())
         self.reset_loaded_btn.clicked.connect(self.reset_loaded_frames)
         self.frame_slider.valueChanged.connect(self._on_frame_slider_changed)
         self.rewind_btn.clicked.connect(self.rewind_frames)
@@ -2870,6 +3553,11 @@ class SolarDataAnalysisWindow(QMainWindow):
             widget.setEnabled(measure_on)
         self.height_time_btn.setEnabled(measure_on and len(self._map_frames) >= 2)
         self.hi_jmap_btn.setEnabled(many_frames)
+        # Overlay layers can be assembled any time, but building needs frames and
+        # a base that still carries the world coordinates reprojection targets.
+        self.overlay_add_btn.setEnabled(bool(loaded))
+        self.overlay_list.setEnabled(bool(loaded))
+        self._refresh_overlay_note()
         # Pan/zoom is a view control, available whenever an image is loaded.
         self.pan_zoom_check.setEnabled(bool(loaded))
         if not loaded and self.pan_zoom_check.isChecked():
@@ -3421,6 +4109,14 @@ class SolarDataAnalysisWindow(QMainWindow):
             worker.finished.connect(thread.quit)
             worker.failed.connect(thread.quit)
             worker.cancelled.connect(thread.quit)
+        elif isinstance(worker, CompositeBuildWorker):
+            worker.build_progress.connect(self._on_composite_progress)
+            worker.finished.connect(self._on_composite_finished)
+            worker.failed.connect(self._on_worker_failed)
+            worker.cancelled.connect(self._on_worker_cancelled)
+            worker.finished.connect(thread.quit)
+            worker.failed.connect(thread.quit)
+            worker.cancelled.connect(thread.quit)
         elif isinstance(worker, MapLoadWorker):
             worker.load_progress.connect(self._on_load_maps_progress)
             worker.finished.connect(self._on_local_maps_loaded)
@@ -3454,6 +4150,10 @@ class SolarDataAnalysisWindow(QMainWindow):
         # Clear the find-latest flag so a failed/cancelled scan never taints the
         # next ordinary search (it is consumed on success in _on_search_finished).
         self._pending_latest = False
+        # The composite progress bar belongs to a build that is now over, however
+        # it ended (finished, failed or cancelled).
+        if hasattr(self, "overlay_progress"):
+            self.overlay_progress.setVisible(False)
         self._set_busy(False)
         # A close requested mid-download was deferred until the worker stopped;
         # complete it now that nothing is running.
@@ -3827,6 +4527,14 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._loaded_paths = list(paths or [])
         self._original_frames = list(frames)
         self._map_frames = list(frames)
+        # A composite belongs to the series it was built from; a new load makes
+        # both the pixels and the layers' time matching meaningless.
+        self._composite_frames = []
+        self._composite_token = ""
+        self._composite_labels = []
+        self._overlay_specs = []
+        if hasattr(self, "overlay_list"):
+            self._refresh_overlay_list()
         self._map_metadata = dict(metadata or {})
         self._regions = []
         self._metadata_regions = []
@@ -4151,27 +4859,43 @@ class SolarDataAnalysisWindow(QMainWindow):
             current = self._nrgf_filter_frame(frame, current)
             title += " (NRGF)"
 
-        # Shared with the movie exporter so the preview and the exported video
-        # use identical scaling.
-        display_data = apply_display_scale(current, self.scale_combo.currentText())
+        # A built composite is already display-ready RGB: it carries each layer's
+        # own colormap and stretch, so the global scale/clip and the colorbar do
+        # not apply to it. It replaces only what is painted — `current` stays the
+        # 2-D base array that the measure and statistics tools work on.
+        composite = None
+        if self._composite_frames and idx < len(self._composite_frames):
+            composite = self._composite_frames[idx]
+            if self._composite_labels:
+                title += " + " + " + ".join(self._composite_labels)
+            else:
+                title += " + overlay composite"
 
-        finite = display_data[np.isfinite(display_data)]
-        vmin = None
-        vmax = None
-        if finite.size > 0:
-            lo = min(float(self.clip_low_slider.value()), float(self.clip_high_slider.value()) - 0.1)
-            hi = max(float(self.clip_high_slider.value()), lo + 0.1)
-            vmin = float(np.nanpercentile(finite, lo))
-            vmax = float(np.nanpercentile(finite, hi))
-            if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
-                vmin = None
-                vmax = None
+        if composite is not None:
+            display_data = composite
+            vmin = vmax = None
+        else:
+            # Shared with the movie exporter so the preview and the exported video
+            # use identical scaling.
+            display_data = apply_display_scale(current, self.scale_combo.currentText())
+
+            finite = display_data[np.isfinite(display_data)]
+            vmin = None
+            vmax = None
+            if finite.size > 0:
+                lo = min(float(self.clip_low_slider.value()), float(self.clip_high_slider.value()) - 0.1)
+                hi = max(float(self.clip_high_slider.value()), lo + 0.1)
+                vmin = float(np.nanpercentile(finite, lo))
+                vmax = float(np.nanpercentile(finite, hi))
+                if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
+                    vmin = None
+                    vmax = None
 
         self._current_map_data = current
         self._current_frame_index = idx
         self._current_axis_transform = self._axis_transform_for_arcsec(frame=frame, data_shape=current.shape)
         canvas = self._active_canvas()
-        canvas.set_colorbar_visible(self.colorbar_check.isChecked())
+        canvas.set_colorbar_visible(self.colorbar_check.isChecked() and composite is None)
         canvas.set_colormap_name(self._resolved_colormap_name())
         canvas.plot_map_data(display_data, title=title, vmin=vmin, vmax=vmax, axis_transform=self._current_axis_transform)
         self.frame_label.setText(f"Frame {idx + 1} / {len(self._map_frames)}")
@@ -4259,6 +4983,9 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.vector_group.setVisible(cls == MAGNETOGRAPH)
         self.region_group.setVisible(cls in (DISK_EUV, MAGNETOGRAPH, UNKNOWN))
         self.coronagraph_group.setVisible(cls == CORONAGRAPH)
+        # Overlay layers nest other instruments into a coronagraph's occulted
+        # field of view, so they only make sense for a coronagraph base.
+        self.overlay_group.setVisible(cls == CORONAGRAPH)
         self.hi_group.setVisible(cls == HELIOSPHERIC)
         # Disk-only mode buttons vanish for coronagraph/heliospheric work
         # (they are also disabled — see _set_loaded_state — so tests that only
@@ -4471,6 +5198,342 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._jmap_dialog = dialog
         dialog.show()
         self.statusBar().showMessage("J-map built from the loaded HI sequence.", 6000)
+
+    # ----------------------------------------------------------- overlay layers
+    def _overlay_set_editor_enabled(self, enabled: bool) -> None:
+        """Enable the per-layer editors only while a layer row is selected."""
+        for widget in (
+            self.overlay_colormap_combo,
+            self.overlay_scale_combo,
+            self.overlay_opacity_slider,
+            self.overlay_gamma_slider,
+            self.overlay_inner_spin,
+            self.overlay_outer_spin,
+            self.overlay_remove_btn,
+        ):
+            widget.setEnabled(bool(enabled))
+
+    def _selected_overlay_index(self) -> int:
+        return int(self.overlay_list.currentRow())
+
+    def _overlay_layer_label(self, spec: Any) -> str:
+        """List text for a layer, flagging an approximate screen assumption."""
+        suffix = "" if not spec.is_approximate() else "  ~"
+        return f"{spec.label}{suffix}"
+
+    def _refresh_overlay_list(self) -> None:
+        """Rebuild the list widget from ``self._overlay_specs``."""
+        blocked = self.overlay_list.blockSignals(True)
+        current = self._selected_overlay_index()
+        self.overlay_list.clear()
+        for spec in self._overlay_specs:
+            item = QListWidgetItem(self._overlay_layer_label(spec))
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if spec.enabled else Qt.Unchecked)
+            if spec.is_approximate():
+                item.setToolTip(
+                    "Reprojected with a spherical-screen assumption because this is\n"
+                    "optically-thin coronal emission with no single line-of-sight depth.\n"
+                    "Good for morphology and event identification, not for photometry."
+                )
+            self.overlay_list.addItem(item)
+        if 0 <= current < self.overlay_list.count():
+            self.overlay_list.setCurrentRow(current)
+        elif self.overlay_list.count():
+            self.overlay_list.setCurrentRow(0)
+        self.overlay_list.blockSignals(blocked)
+        self._sync_overlay_editor()
+        self._refresh_overlay_note()
+
+    def _refresh_overlay_note(self) -> None:
+        """One-line summary under the list: layer count and the approximate flag."""
+        specs = [s for s in self._overlay_specs if s.enabled]
+        if not self._overlay_specs:
+            self.overlay_note_label.setText("No layers yet — pick an observable and Add.")
+        elif any(s.is_approximate() for s in specs):
+            self.overlay_note_label.setText(
+                f"{len(specs)} active. '~' marks an approximate cross-observer reprojection."
+            )
+        else:
+            self.overlay_note_label.setText(f"{len(specs)} active layer(s).")
+        has_layers = bool(specs) and bool(self._map_frames)
+        self.overlay_build_btn.setEnabled(has_layers and not self._busy)
+        self.overlay_clear_btn.setEnabled(bool(self._composite_frames))
+
+    def _sync_overlay_editor(self) -> None:
+        """Load the selected layer's style into the editor widgets."""
+        index = self._selected_overlay_index()
+        if not (0 <= index < len(self._overlay_specs)):
+            self._overlay_set_editor_enabled(False)
+            return
+        spec = self._overlay_specs[index]
+        inner, outer = spec.resolved_fov()
+        for widget, setter, value in (
+            (self.overlay_colormap_combo, "setCurrentText", spec.colormap),
+            (self.overlay_scale_combo, "setCurrentText", spec.scale),
+            (self.overlay_opacity_slider, "setValue", int(round(spec.opacity * 100))),
+            (self.overlay_gamma_slider, "setValue", int(round(spec.gamma * 100))),
+            (self.overlay_inner_spin, "setValue", float(inner)),
+            (self.overlay_outer_spin, "setValue", float(outer)),
+        ):
+            blocked = widget.blockSignals(True)
+            getattr(widget, setter)(value)
+            widget.blockSignals(blocked)
+        self._overlay_set_editor_enabled(True)
+
+    def _on_overlay_style_changed(self) -> None:
+        """Write the editor values back into the selected layer's spec."""
+        from dataclasses import replace as _replace
+
+        index = self._selected_overlay_index()
+        if not (0 <= index < len(self._overlay_specs)):
+            return
+        self._overlay_specs[index] = _replace(
+            self._overlay_specs[index],
+            colormap=self.overlay_colormap_combo.currentText().strip() or "inferno",
+            scale=self.overlay_scale_combo.currentText().strip() or "log",
+            opacity=float(self.overlay_opacity_slider.value()) / 100.0,
+            gamma=max(0.05, float(self.overlay_gamma_slider.value()) / 100.0),
+            inner_rsun=float(self.overlay_inner_spin.value()),
+            outer_rsun=float(self.overlay_outer_spin.value()),
+        )
+        self._invalidate_composite("layer settings changed")
+
+    def _on_overlay_item_changed(self, item: Any) -> None:
+        """Mirror a row's tick box into its spec's ``enabled`` flag."""
+        from dataclasses import replace as _replace
+
+        row = self.overlay_list.row(item)
+        if not (0 <= row < len(self._overlay_specs)):
+            return
+        enabled = item.checkState() == Qt.Checked
+        if enabled != self._overlay_specs[row].enabled:
+            self._overlay_specs[row] = _replace(self._overlay_specs[row], enabled=enabled)
+            self._invalidate_composite("layer toggled")
+        self._refresh_overlay_note()
+
+    def add_overlay_layer(self) -> None:
+        """Add the selected observable to the layer stack."""
+        from src.Backend.coronagraph_composite import (
+            LayerSpec,
+            default_fov_rsun,
+            default_gamma_for,
+        )
+
+        data = self.overlay_add_combo.currentData()
+        if not (isinstance(data, (tuple, list)) and len(data) == 2):
+            return
+        # PySide6 hands back tuple userData as a list, while a session restore
+        # yields a tuple. Normalise so the same layer hashes and compares equal
+        # whichever way it arrived.
+        instrument = str(data[0]).upper()
+        value = tuple(data[1]) if isinstance(data[1], list) else data[1]
+        label = self.overlay_add_combo.currentText()
+        if any(s.instrument == instrument and s.value == value for s in self._overlay_specs):
+            QMessageBox.information(self, "Overlay Layers", f"{label} is already in the stack.")
+            return
+        inner, outer = default_fov_rsun(instrument, value)
+        self._overlay_specs.append(
+            LayerSpec(
+                instrument=instrument,
+                value=value,
+                label=label,
+                colormap=default_colormap_for_observable(instrument, value),
+                scale="log" if instrument in ("AIA", "SUVI", "SECCHI") else "linear",
+                gamma=default_gamma_for(instrument, value),
+                inner_rsun=inner,
+                outer_rsun=outer,
+            )
+        )
+        self._invalidate_composite("layer added")
+        self._refresh_overlay_list()
+        self.overlay_list.setCurrentRow(len(self._overlay_specs) - 1)
+
+    def remove_overlay_layer(self) -> None:
+        index = self._selected_overlay_index()
+        if not (0 <= index < len(self._overlay_specs)):
+            return
+        self._overlay_specs.pop(index)
+        self._invalidate_composite("layer removed")
+        self._refresh_overlay_list()
+
+    def _invalidate_composite(self, reason: str = "") -> None:
+        """Drop composited pixels whose inputs no longer apply."""
+        if not self._composite_frames:
+            self._refresh_overlay_note()
+            return
+        self._composite_frames = []
+        self._composite_token = ""
+        self._composite_labels = []
+        self._refresh_overlay_note()
+        if reason:
+            self.plot_title_label.setText(f"Composite cleared — {reason}. Rebuild to apply.")
+        self._render_current_frame()
+
+    def clear_composite(self) -> None:
+        """Return to the plain loaded frames, keeping the layer stack intact."""
+        self._composite_frames = []
+        self._composite_token = ""
+        self._composite_labels = []
+        self._refresh_overlay_note()
+        self._render_current_frame()
+
+    def build_composite(self) -> None:
+        """Download, reproject and blend every enabled layer over the series."""
+        from src.Backend.coronagraph_composite import LayerSpec, layer_config_hash
+
+        if self.is_operation_running():
+            QMessageBox.information(self, "Overlay Layers", "Another operation is still running.")
+            return
+        base_frames = self._original_frames or self._map_frames
+        if not base_frames:
+            QMessageBox.information(self, "Overlay Layers", "Load a coronagraph series first.")
+            return
+        if not hasattr(base_frames[0], "reproject_to"):
+            QMessageBox.warning(
+                self,
+                "Overlay Layers",
+                "The loaded frames are derived arrays without full world coordinates,\n"
+                "so other instruments cannot be reprojected onto them. Reload the\n"
+                "series from the archive and build the composite before cropping.",
+            )
+            return
+        specs = [s for s in self._overlay_specs if s.enabled]
+        if not specs:
+            QMessageBox.information(self, "Overlay Layers", "Add at least one layer first.")
+            return
+
+        detector = self._frame_lasco_detector(base_frames[0]) or ""
+        base_spec = LayerSpec(
+            instrument=str(getattr(base_frames[0], "instrument", "") or "LASCO").upper(),
+            value=detector,
+            label=self._loaded_instrument_label(),
+            colormap=self._resolved_colormap_name(),
+            scale=self.scale_combo.currentText(),
+            clip_low=float(self.clip_low_slider.value()),
+            clip_high=float(self.clip_high_slider.value()),
+        )
+        mode = self._movie_mode()
+        self._composite_token = layer_config_hash(specs, extra=f"{base_spec}|{mode}")
+
+        # Composited pixels are held for the whole series, so check the cost up
+        # front rather than discovering it when the OS kills the process.
+        shape = np.asarray(getattr(base_frames[0], "data")).shape[:2]
+        megabytes = len(base_frames) * shape[0] * shape[1] * 3 / (1024.0 * 1024.0)
+        if megabytes > 2048:
+            QMessageBox.warning(
+                self,
+                "Overlay Layers",
+                f"This series would need about {megabytes / 1024.0:.1f} GB of composited "
+                f"images ({len(base_frames)} frames at {shape[1]}x{shape[0]}).\n\n"
+                "Load a shorter time range, a coarser cadence, or crop before building.",
+            )
+            return
+
+        estimate = len(base_frames) * len(specs)
+        reprojections = min(estimate, CompositeBuildWorker.MAX_LAYER_FILES * len(specs))
+        if estimate > 60 or megabytes > 512:
+            answer = QMessageBox.question(
+                self,
+                "Overlay Layers",
+                f"{len(base_frames)} frames x {len(specs)} layer(s).\n\n"
+                f"Up to {reprojections} reprojections, roughly "
+                f"{reprojections * 0.5 / 60:.0f}-{reprojections * 1.5 / 60:.0f} minutes plus "
+                f"downloads, and about {megabytes:.0f} MB of composited images.\n\n"
+                "Continue?",
+            )
+            if answer != QMessageBox.Yes:
+                return
+
+        self._composite_pending_labels = [str(s.label) for s in specs]
+        self.overlay_progress.setValue(0)
+        self.overlay_progress.setVisible(True)
+        self._set_busy(True, "Building the overlay composite…")
+        self._start_worker(
+            CompositeBuildWorker(
+                base_frames,
+                base_spec,
+                specs,
+                window_minutes=int(self.overlay_window_spin.value()),
+                cache_dir=self.cache_dir,
+                difference_mode=mode,
+            )
+        )
+
+    def _on_composite_progress(self, done: int, total: int) -> None:
+        if total > 0:
+            self.overlay_progress.setValue(int(round(100.0 * done / total)))
+
+    def _on_composite_finished(self, composites: Any, warnings: Any) -> None:
+        self.overlay_progress.setVisible(False)
+        frames = list(composites or [])
+        notes = list(warnings or [])
+        if not frames:
+            self._composite_token = ""
+            QMessageBox.warning(
+                self,
+                "Overlay Layers",
+                "No composite could be built.\n\n" + ("\n".join(notes) or "No layers produced data."),
+            )
+            return
+        self._composite_frames = frames
+        self._composite_labels = list(getattr(self, "_composite_pending_labels", []) or [])
+        self._refresh_overlay_note()
+        self._render_current_frame()
+        if notes:
+            self.analysis_text.setPlainText(
+                "Overlay composite built with warnings:\n  " + "\n  ".join(notes)
+            )
+            QMessageBox.information(
+                self,
+                "Overlay Layers",
+                "The composite was built, but some layers were skipped:\n\n" + "\n".join(notes[:8]),
+            )
+
+    def _restore_overlay_layers(self, saved: Any) -> None:
+        """Rebuild the layer stack from a saved session recipe.
+
+        Only the recipe is restored; the composited pixels are not stored in the
+        session, so the user re-runs Build. Unknown or malformed entries are
+        skipped rather than failing the whole restore.
+        """
+        from src.Backend.coronagraph_composite import LayerSpec
+
+        if not isinstance(saved, dict):
+            return
+        window_minutes = saved.get("window_minutes")
+        if window_minutes:
+            was = self.overlay_window_spin.blockSignals(True)
+            self.overlay_window_spin.setValue(int(window_minutes))
+            self.overlay_window_spin.blockSignals(was)
+
+        fields = {f for f in LayerSpec.__dataclass_fields__}
+        specs: list[Any] = []
+        for entry in saved.get("layers") or []:
+            if not isinstance(entry, dict):
+                continue
+            payload = {k: v for k, v in entry.items() if k in fields}
+            if not payload.get("instrument"):
+                continue
+            # JSON turns the SECCHI (spacecraft, detector, wavelength) tuple into
+            # a list; restore the tuple so it matches the combo's userData.
+            if isinstance(payload.get("value"), list):
+                payload["value"] = tuple(payload["value"])
+            try:
+                specs.append(LayerSpec(**payload))
+            except Exception:
+                continue
+
+        self._overlay_specs = specs
+        self._composite_frames = []
+        self._composite_token = ""
+        self._composite_labels = []
+        self._refresh_overlay_list()
+        if specs:
+            self.statusBar().showMessage(
+                f"Restored {len(specs)} overlay layer(s) — click Build Composite to render them.",
+                8000,
+            )
 
     def open_multiview_dialog(self) -> None:
         """Compare the loaded view against a second observable's viewpoint."""
@@ -4778,6 +5841,12 @@ class SolarDataAnalysisWindow(QMainWindow):
         try:
             bounds = self._crop_bounds_from_axis_fields(self._current_map_data.shape)
             self._map_frames = crop_maps(self._map_frames, bounds)
+            # Composited pixels are on the uncropped grid; crop them alongside the
+            # frames so the two stay the same shape.
+            if self._composite_frames:
+                self._composite_frames = [
+                    crop_array(rgb, bounds) for rgb in self._composite_frames
+                ]
             self._regions = []
             self.region_table.setRowCount(0)
             self._current_frame_index = 0
@@ -4819,6 +5888,11 @@ class SolarDataAnalysisWindow(QMainWindow):
         if not self._original_frames:
             return
         self._map_frames = list(self._original_frames)
+        # Composites were cropped in step with the frames, so they cannot be
+        # un-cropped; drop them and let the user rebuild on the restored series.
+        self._composite_frames = []
+        self._composite_token = ""
+        self._composite_labels = []
         self._crop_applied = False
         self._applied_crop_arcsec = None
         self._regions = []
@@ -5440,9 +6514,18 @@ class SolarDataAnalysisWindow(QMainWindow):
             "frame_count": len(self._map_frames),
             "frame_times": frame_times,
         }
+        # The layer stack is saved as a recipe, not as pixels: re-embedding every
+        # overlay instrument's FITS would balloon the session file, and the layer
+        # frames stay in the shared archive cache anyway. On restore the stack
+        # reappears and the user re-runs Build.
+        overlay = {
+            "window_minutes": int(self.overlay_window_spin.value()),
+            "layers": [asdict(spec) for spec in self._overlay_specs],
+        }
         return {
             "source": source,
             "view": view,
+            "overlay_layers": overlay,
             "measurements": {"height_time_picks": serialize_picks(picks)},
         }
 
@@ -5540,6 +6623,7 @@ class SolarDataAnalysisWindow(QMainWindow):
 
         self._restore_source_widgets(source)
         self._restore_view_widgets(view)
+        self._restore_overlay_layers(meta.get("overlay_layers"))
 
         # Frames always reload uncropped, so re-apply the saved crop.
         if view.get("crop_applied"):
@@ -5764,21 +6848,35 @@ class SolarDataAnalysisWindow(QMainWindow):
         if self.crop_check.isChecked() and self._current_map_data is not None:
             crop_bounds = self._crop_bounds_from_axis_fields(self._current_map_data.shape)
 
+        # A built composite is already rendered RGB carrying each layer's own
+        # colormap and stretch, and the difference mode was applied per layer at
+        # build time. Exporting it as "raw" frames therefore reproduces exactly
+        # what is on screen: apply_display_scale and array_to_rgb_uint8 both pass
+        # RGB through untouched, and crop_array handles it.
+        movie_frames = self._map_frames
+        movie_mode = self._movie_mode()
+        if self._composite_frames and len(self._composite_frames) == len(self._map_frames):
+            movie_frames = [
+                AiaArrayMap(rgb, base, nickname="Overlay composite")
+                for rgb, base in zip(self._composite_frames, self._map_frames)
+            ]
+            movie_mode = "raw"
+
         spec = AiaMovieExportSpec(
             path=path,
             fps=float(self.fps_spin.value()),
-            mode=self._movie_mode(),
+            mode=movie_mode,
             crop_bounds=crop_bounds,
             percentile_low=float(self.clip_low_slider.value()),
             percentile_high=float(self.clip_high_slider.value()),
             colormap_name=self._resolved_colormap_name(),
             scale=self.scale_combo.currentText(),
             # Match the preview: difference movies normalise unequal exposures.
-            normalize_exposure=bool(self._exposure_varies) and self._movie_mode() != "raw",
+            normalize_exposure=bool(self._exposure_varies) and movie_mode != "raw",
         )
-        self._set_busy(True, f"Exporting movie ({len(self._map_frames)} frame(s))…")
+        self._set_busy(True, f"Exporting movie ({len(movie_frames)} frame(s))…")
         self.progress_panel.set_status_text("Preparing export…")
-        self._start_worker(MovieExportWorker(self._map_frames, spec))
+        self._start_worker(MovieExportWorker(movie_frames, spec))
 
     @Slot(int, int)
     def _on_export_progress(self, done: int, total: int):
@@ -5867,7 +6965,10 @@ class SolarDataAnalysisWindow(QMainWindow):
         if arr.ndim == 2:
             return np.asarray(arr, dtype=float)
         if arr.ndim == 3 and arr.shape[-1] in (3, 4):
-            return np.asarray(arr, dtype=float)
+            # Keep RGB dtype intact: matplotlib reads float images as 0..1 and
+            # integer images as 0..255, so casting a uint8 composite to float
+            # would clip every channel above 1 to white.
+            return arr
         if arr.ndim > 2:
             arr2 = np.asarray(arr[0]).squeeze()
             if arr2.ndim == 2:

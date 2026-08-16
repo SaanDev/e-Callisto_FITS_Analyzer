@@ -20,7 +20,7 @@ from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication
 
 from src.Backend.jsoc_client import SIZE_BIN2, SIZE_CUTOUT, SIZE_FULL
-from src.Backend.solar_data_analysis import AiaFrameSet, AiaMetadataRegion
+from src.Backend.solar_data_analysis import AiaFrameSet, AiaMetadataRegion, frame_observation_time
 from src.Backend.sunpy_archive import DATA_KIND_MAP, SunPyQuerySpec, SunPySearchResult, SunPySearchRow
 from src.UI import solar_data_analysis_window as solar_mod
 from src.UI.solar_data_analysis_window import SolarDataAnalysisWindow
@@ -2058,3 +2058,954 @@ def test_solar_data_window_vector_no_records_without_latest(monkeypatch):
     assert calls["download"] == 0
     assert "earlier time window" in seen.get("text", "").lower()
     win.close()
+
+
+# --------------------------------------------------------------------------- #
+# Overlay Layers: multi-instrument coronagraph composites
+# --------------------------------------------------------------------------- #
+class FakeCoronagraphMap(FakeMap):
+    """A LASCO-like frame with enough WCS metadata to composite onto."""
+
+    observatory = "SOHO"
+    instrument = "LASCO"
+    detector = "C2"
+    wavelength = ""
+    date = "2012-07-12T16:00:00"
+
+    def __init__(self, data, detector="C2"):
+        super().__init__(data)
+        self.detector = detector
+        self.meta = {
+            "instrume": "LASCO",
+            "detector": detector,
+            "cdelt1": 11.9,
+            "cdelt2": 11.9,
+            "crpix1": 32.5,
+            "crpix2": 32.5,
+            "crval1": 0.0,
+            "crval2": 0.0,
+            "rsun_obs": 945.0,
+        }
+
+
+def _coronagraph_frames(count=3, detector="C2", size=64):
+    yy, xx = np.mgrid[0:size, 0:size]
+    radius = np.hypot(xx - size / 2, yy - size / 2) + 1.0
+    return [FakeCoronagraphMap(1000.0 / radius, detector) for _ in range(count)]
+
+
+def _rgb_composites(count=3, size=64):
+    frames = []
+    for _ in range(count):
+        rgb = np.zeros((size, size, 3), np.uint8)
+        rgb[..., 0] = 200
+        rgb[..., 1] = 100
+        frames.append(rgb)
+    return frames
+
+
+def test_overlay_group_visible_only_for_coronagraph_data():
+    _app()
+    win = SolarDataAnalysisWindow()
+
+    win._apply_loaded_frames([FakeWcsMap(np.ones((64, 64)))], paths=[], metadata={})
+    assert win.overlay_group.isHidden()
+
+    win._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
+    assert not win.overlay_group.isHidden()
+    assert not win.coronagraph_group.isHidden()
+    win.close()
+
+
+def test_overlay_layer_add_edit_and_remove():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
+
+    idx = win.overlay_add_combo.findText("AIA 193 A")
+    win.overlay_add_combo.setCurrentIndex(idx)
+    win.add_overlay_layer()
+
+    assert len(win._overlay_specs) == 1
+    assert win.overlay_list.count() == 1
+    spec = win._overlay_specs[0]
+    assert spec.instrument == "AIA"
+    assert spec.colormap == "sdoaia193"
+    # A disk imager fills the occulted centre, so it is masked to the disk.
+    assert spec.resolved_fov() == (0.0, 1.28)
+    assert spec.resolved_screen() == "surface"
+    # Editors follow the selection.
+    assert win.overlay_colormap_combo.isEnabled()
+    assert win.overlay_colormap_combo.currentText() == "sdoaia193"
+
+    win.overlay_opacity_slider.setValue(40)
+    assert win._overlay_specs[0].opacity == pytest.approx(0.4)
+
+    win.overlay_list.setCurrentRow(0)
+    win.remove_overlay_layer()
+    assert win._overlay_specs == []
+    assert win.overlay_list.count() == 0
+    win.close()
+
+
+def test_overlay_coronagraph_layer_is_flagged_approximate():
+    """Cross-observer white-light overlays use a screen assumption; say so."""
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
+
+    idx = win.overlay_add_combo.findText("STEREO-A/COR2")
+    win.overlay_add_combo.setCurrentIndex(idx)
+    win.add_overlay_layer()
+
+    spec = win._overlay_specs[0]
+    assert spec.resolved_screen() == "spherical"
+    assert spec.is_approximate()
+    assert "~" in win.overlay_list.item(0).text()
+    assert "approximate" in win.overlay_note_label.text().lower()
+    win.close()
+
+
+def test_overlay_layer_checkbox_toggles_enabled():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
+    win.overlay_add_combo.setCurrentIndex(win.overlay_add_combo.findText("AIA 193 A"))
+    win.add_overlay_layer()
+
+    win.overlay_list.item(0).setCheckState(Qt.Unchecked)
+    assert win._overlay_specs[0].enabled is False
+    win.overlay_list.item(0).setCheckState(Qt.Checked)
+    assert win._overlay_specs[0].enabled is True
+    win.close()
+
+
+def test_composite_renders_as_rgb_without_a_colorbar():
+    """A built composite is painted as-is and leaves the measure data 2-D."""
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
+    win.overlay_add_combo.setCurrentIndex(win.overlay_add_combo.findText("AIA 193 A"))
+    win.add_overlay_layer()
+
+    win._composite_frames = _rgb_composites()
+    win._render_current_frame()
+
+    canvas = win._active_canvas()
+    painted = np.asarray(canvas.map_image.image)
+    assert painted.dtype == np.uint8
+    assert painted.ndim == 3 and painted.shape[-1] == 3
+    # Explicit identity levels: stale greyscale levels would render the
+    # composite almost black, and None crashes once autoDownsample floats it.
+    assert list(canvas.map_image.levels) == [0, 255]
+    assert not canvas.has_visible_colorbar()
+    # region_stats and the measure tools need a 2-D array.
+    assert win._current_map_data.ndim == 2
+    # No build ran here (the cache was seeded directly), so the title falls back
+    # to the generic wording rather than naming layers it cannot vouch for.
+    assert "overlay composite" in win.plot_title_label.text()
+    win.close()
+
+
+def test_composite_survives_region_stats():
+    _app()
+    from src.Backend.image_measure import region_stats
+
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
+    win._composite_frames = _rgb_composites()
+    win._render_current_frame()
+
+    stats = region_stats(win._current_map_data, (10, 30, 10, 30))
+    assert np.isfinite(stats.mean)
+    win.close()
+
+
+def test_editing_a_layer_invalidates_the_composite():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
+    win.overlay_add_combo.setCurrentIndex(win.overlay_add_combo.findText("AIA 193 A"))
+    win.add_overlay_layer()
+    win._composite_frames = _rgb_composites()
+
+    win.overlay_opacity_slider.setValue(50)
+    assert win._composite_frames == []
+    win.close()
+
+
+def test_clear_composite_keeps_the_layer_stack():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
+    win.overlay_add_combo.setCurrentIndex(win.overlay_add_combo.findText("AIA 193 A"))
+    win.add_overlay_layer()
+    win._composite_frames = _rgb_composites()
+
+    win.clear_composite()
+    assert win._composite_frames == []
+    assert len(win._overlay_specs) == 1
+    canvas = win._active_canvas()
+    assert np.asarray(canvas.map_image.image).ndim == 2
+    win.close()
+
+
+def test_loading_a_new_series_drops_layers_and_composite():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
+    win.overlay_add_combo.setCurrentIndex(win.overlay_add_combo.findText("AIA 193 A"))
+    win.add_overlay_layer()
+    win._composite_frames = _rgb_composites()
+
+    win._apply_loaded_frames(_coronagraph_frames(detector="C3"), paths=[], metadata={})
+    assert win._overlay_specs == []
+    assert win._composite_frames == []
+    assert win.overlay_list.count() == 0
+    win.close()
+
+
+def test_build_composite_refuses_frames_without_world_coordinates(monkeypatch):
+    """Derived arrays cannot be reprojected onto; say why instead of crashing."""
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
+    win.overlay_add_combo.setCurrentIndex(win.overlay_add_combo.findText("AIA 193 A"))
+    win.add_overlay_layer()
+
+    seen = {}
+    monkeypatch.setattr(
+        solar_mod.QMessageBox, "warning",
+        lambda *a, **k: seen.update(text=a[2] if len(a) > 2 else ""),
+    )
+    started = []
+    monkeypatch.setattr(win, "_start_worker", lambda w: started.append(w))
+
+    win.build_composite()
+    assert started == []
+    assert "world coordinates" in seen.get("text", "").lower()
+    win.close()
+
+
+def test_build_composite_starts_a_worker(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    frames = _coronagraph_frames()
+    for frame in frames:  # a real Map exposes reproject_to
+        frame.reproject_to = lambda *a, **k: frame
+    win._apply_loaded_frames(frames, paths=[], metadata={})
+    win.overlay_add_combo.setCurrentIndex(win.overlay_add_combo.findText("AIA 193 A"))
+    win.add_overlay_layer()
+
+    started = []
+    monkeypatch.setattr(win, "_start_worker", lambda w: started.append(w))
+    win.build_composite()
+
+    assert len(started) == 1
+    assert isinstance(started[0], solar_mod.CompositeBuildWorker)
+    assert win.overlay_progress.isVisibleTo(win.overlay_group)
+    win.close()
+
+
+def test_composite_export_uses_raw_rgb_frames(monkeypatch, tmp_path):
+    """The exported movie must be the composite, not the plain base."""
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
+    win._composite_frames = _rgb_composites()
+    win._render_current_frame()
+
+    out = tmp_path / "movie.gif"
+    monkeypatch.setattr(solar_mod, "pick_export_path", lambda *a, **k: (str(out), ""))
+    monkeypatch.setattr(win, "_set_difference_mode", lambda mode: None)
+    win.movie_content_combo.setCurrentText("Running Difference")
+    started = []
+    monkeypatch.setattr(win, "_start_worker", lambda w: started.append(w))
+
+    win.export_movie()
+    assert len(started) == 1
+    worker = started[0]
+    # Composites already carry the per-layer stretch and difference, so they are
+    # exported as raw RGB rather than differenced again.
+    assert worker._spec.mode == "raw"
+    assert np.asarray(worker._frames[0].data).shape[-1] == 3
+    win.close()
+
+
+def test_overlay_layers_round_trip_through_a_session():
+    _app()
+    import json
+
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
+    win.overlay_add_combo.setCurrentIndex(win.overlay_add_combo.findText("STEREO-A/COR2"))
+    win.add_overlay_layer()
+    win.overlay_opacity_slider.setValue(60)
+    win.overlay_window_spin.setValue(45)
+
+    meta = json.loads(json.dumps(win._collect_session_meta()))
+    assert meta["overlay_layers"]["window_minutes"] == 45
+
+    other = SolarDataAnalysisWindow()
+    other._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
+    other._restore_overlay_layers(meta["overlay_layers"])
+
+    assert len(other._overlay_specs) == 1
+    restored = other._overlay_specs[0]
+    # JSON turns the SECCHI tuple into a list; it must come back as a tuple so
+    # the layer hashes and compares equal to a freshly added one.
+    assert restored == win._overlay_specs[0]
+    assert isinstance(restored.value, tuple)
+    assert restored.opacity == pytest.approx(0.6)
+    assert other.overlay_window_spin.value() == 45
+    win.close()
+    other.close()
+
+
+def test_restore_overlay_layers_ignores_malformed_entries():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._restore_overlay_layers({"layers": [{"bogus": 1}, {"instrument": ""}, "not-a-dict", 7]})
+    assert win._overlay_specs == []
+    win._restore_overlay_layers(None)
+    win._restore_overlay_layers("nonsense")
+    assert win._overlay_specs == []
+    win.close()
+
+
+# --------------------------------------------------------------------------- #
+# CompositeBuildWorker: the download -> reproject -> blend orchestration.
+# The archive and reprojection are stubbed so this runs offline.
+# --------------------------------------------------------------------------- #
+def test_composite_worker_row_selection_is_bounded_by_base_frames():
+    """One file per base frame, not the whole search result."""
+    rows = [type("Row", (), {"start": datetime(2012, 7, 12, 16, 0) + timedelta(minutes=i)})()
+            for i in range(120)]
+    targets = [datetime(2012, 7, 12, 16, 0) + timedelta(minutes=30 * i) for i in range(3)]
+    picked = solar_mod.CompositeBuildWorker._rows_for_times(rows, targets)
+    assert picked == [0, 30, 60]
+
+
+def test_composite_worker_row_selection_deduplicates():
+    rows = [type("Row", (), {"start": datetime(2012, 7, 12, 16, 0)})()]
+    targets = [datetime(2012, 7, 12, 16, 0) + timedelta(minutes=i) for i in range(4)]
+    assert solar_mod.CompositeBuildWorker._rows_for_times(rows, targets) == [0]
+
+
+def test_composite_worker_difference_uses_the_layers_own_cadence():
+    arrays = {0: np.full((2, 2), 1.0), 2: np.full((2, 2), 5.0), 5: np.full((2, 2), 9.0)}
+    running = solar_mod.CompositeBuildWorker._difference(arrays, [0, 2, 5], "running")
+    # Index 2 differences against index 0 (its own predecessor), not a base frame.
+    assert running[2].mean() == pytest.approx(4.0)
+    assert running[5].mean() == pytest.approx(4.0)
+
+    base = solar_mod.CompositeBuildWorker._difference(arrays, [0, 2, 5], "base")
+    assert base[0].mean() == pytest.approx(0.0)
+    assert base[5].mean() == pytest.approx(8.0)
+
+    # Raw mode and single-frame series are passed straight through.
+    assert solar_mod.CompositeBuildWorker._difference(arrays, [0, 2, 5], "raw") is arrays
+    single = {0: arrays[0]}
+    assert solar_mod.CompositeBuildWorker._difference(single, [0], "running") is single
+
+
+def test_composite_worker_builds_frames_end_to_end(monkeypatch):
+    """Full orchestration with the archive and reprojection stubbed out."""
+    from src.Backend.coronagraph_composite import LayerSpec
+
+    base_frames = _coronagraph_frames(count=3)
+    for i, frame in enumerate(base_frames):
+        frame.date = f"2012-07-12T16:{i * 20:02d}:00"
+
+    layer_frames = _coronagraph_frames(count=2)
+    for i, frame in enumerate(layer_frames):
+        frame.date = f"2012-07-12T16:{i * 30:02d}:00"
+        frame.instrument = "AIA"
+
+    monkeypatch.setattr(
+        solar_mod.CompositeBuildWorker, "_layer_sources",
+        lambda self, spec, base_times: (
+            [f"layer{i}.fits" for i in range(len(layer_frames))],
+            [frame_observation_time(f) for f in layer_frames],
+        ),
+    )
+    monkeypatch.setattr(
+        solar_mod.CompositeBuildWorker, "_load_one_layer_frame",
+        lambda self, path, spec: layer_frames[int(path[5:-5])],
+    )
+    # Reprojection is the identity here: the stub layer is already on the grid.
+    monkeypatch.setattr(
+        "src.Backend.multiview.reproject_map_to",
+        lambda source, target, **kw: source,
+    )
+
+    worker = solar_mod.CompositeBuildWorker(
+        base_frames,
+        LayerSpec("LASCO", "C2", "C2", colormap="soholasco2", scale="linear"),
+        [LayerSpec("AIA", 193.0, "AIA 193", colormap="sdoaia193", scale="linear")],
+    )
+    captured = {}
+    worker.finished.connect(lambda frames, notes: captured.update(frames=frames, notes=notes))
+    worker.run()
+
+    assert "frames" in captured, captured
+    assert len(captured["frames"]) == 3
+    for rgb in captured["frames"]:
+        assert rgb.dtype == np.uint8
+        assert rgb.shape == (64, 64, 3)
+    # Nothing was skipped or dropped. The observer note is expected: these fakes
+    # carry no DSUN_OBS, exactly like real LASCO level-0.5 headers.
+    assert not [n for n in captured["notes"] if "failed" in n or "no matching" in n]
+    assert all("observer position" in n for n in captured["notes"])
+
+
+def test_composite_worker_drops_a_failing_layer_with_a_warning(monkeypatch):
+    """A layer with no archive data must not abort the whole build."""
+    from src.Backend.coronagraph_composite import LayerSpec
+
+    base_frames = _coronagraph_frames(count=2)
+
+    def explode(self, spec, base_times):
+        raise RuntimeError("No AIA 193 records in the window.")
+
+    monkeypatch.setattr(solar_mod.CompositeBuildWorker, "_layer_sources", explode)
+
+    worker = solar_mod.CompositeBuildWorker(
+        base_frames,
+        LayerSpec("LASCO", "C2", "C2", colormap="soholasco2", scale="linear"),
+        [LayerSpec("AIA", 193.0, "AIA 193")],
+    )
+    captured = {}
+    worker.finished.connect(lambda frames, notes: captured.update(frames=frames, notes=notes))
+    worker.run()
+
+    # The base still composites; the failure is reported, not raised.
+    assert len(captured["frames"]) == 2
+    assert any("No AIA 193 records" in note for note in captured["notes"])
+
+
+def test_composite_worker_reports_reprojection_failure(monkeypatch):
+    from src.Backend.coronagraph_composite import LayerSpec
+
+    stub = _coronagraph_frames(count=1)
+    monkeypatch.setattr(
+        solar_mod.CompositeBuildWorker, "_layer_sources",
+        lambda self, spec, base_times: (["layer0.fits"], [frame_observation_time(stub[0])]),
+    )
+    monkeypatch.setattr(
+        solar_mod.CompositeBuildWorker, "_load_one_layer_frame",
+        lambda self, path, spec: stub[0],
+    )
+
+    def bad_reproject(source, target, **kw):
+        raise ValueError("no overlap")
+
+    monkeypatch.setattr("src.Backend.multiview.reproject_map_to", bad_reproject)
+
+    worker = solar_mod.CompositeBuildWorker(
+        _coronagraph_frames(count=2),
+        LayerSpec("LASCO", "C2", "C2", colormap="soholasco2", scale="linear"),
+        [LayerSpec("AIA", 193.0, "AIA 193")],
+    )
+    captured = {}
+    worker.finished.connect(lambda frames, notes: captured.update(frames=frames, notes=notes))
+    worker.run()
+
+    assert len(captured["frames"]) == 2
+    assert any("reprojection failed" in note for note in captured["notes"])
+
+
+def test_composite_worker_emits_cancelled(monkeypatch):
+    from src.Backend.coronagraph_composite import LayerSpec
+
+    worker = solar_mod.CompositeBuildWorker(
+        _coronagraph_frames(count=2),
+        LayerSpec("LASCO", "C2", "C2"),
+        [LayerSpec("AIA", 193.0, "AIA 193")],
+    )
+    worker.cancel()
+    seen = {}
+    worker.cancelled.connect(lambda: seen.update(cancelled=True))
+    worker.finished.connect(lambda *a: seen.update(finished=True))
+    worker.run()
+    assert seen == {"cancelled": True}
+
+
+def test_composite_worker_requires_base_frames():
+    from src.Backend.coronagraph_composite import LayerSpec
+
+    worker = solar_mod.CompositeBuildWorker([], LayerSpec("LASCO", "C2", "C2"), [])
+    seen = {}
+    worker.failed.connect(lambda tb: seen.update(tb=tb))
+    worker.run()
+    assert "coronagraph series" in seen.get("tb", "")
+
+
+def test_composite_worker_handles_mixed_image_geometries(monkeypatch):
+    """LASCO days interleave full-resolution and on-board summed frames.
+
+    1024x1024 at 11.9"/px next to 512x512 at 23.8"/px cannot share a
+    reprojection target or a radial mask, so each grid is composited on its own.
+    """
+    from src.Backend.coronagraph_composite import LayerSpec
+
+    big = _coronagraph_frames(count=2, size=64)
+    small = _coronagraph_frames(count=2, size=32)
+    for frame in small:
+        frame.meta = dict(frame.meta, cdelt1=23.8, cdelt2=23.8, crpix1=16.5, crpix2=16.5)
+    base_frames = [big[0], small[0], big[1], small[1]]
+    for i, frame in enumerate(base_frames):
+        frame.date = f"2020-08-16T09:{i * 10:02d}:00"
+
+    layer_frames = _coronagraph_frames(count=1, size=64)
+    layer_frames[0].date = "2020-08-16T09:05:00"
+
+    monkeypatch.setattr(
+        solar_mod.CompositeBuildWorker, "_layer_sources",
+        lambda self, spec, base_times: (
+            [f"layer{i}.fits" for i in range(len(layer_frames))],
+            [frame_observation_time(f) for f in layer_frames],
+        ),
+    )
+    monkeypatch.setattr(
+        solar_mod.CompositeBuildWorker, "_load_one_layer_frame",
+        lambda self, path, spec: layer_frames[int(path[5:-5])],
+    )
+    # Identity reprojection returns a frame sized for whichever base it targets.
+    monkeypatch.setattr(
+        "src.Backend.multiview.reproject_map_to",
+        lambda source, target, **kw: _coronagraph_frames(
+            count=1, size=np.asarray(target.data).shape[0])[0],
+    )
+
+    worker = solar_mod.CompositeBuildWorker(
+        base_frames,
+        LayerSpec("LASCO", "C3", "C3", colormap="soholasco3", scale="linear"),
+        [LayerSpec("LASCO", "C2", "C2", colormap="soholasco2", scale="linear")],
+        window_minutes=120,
+    )
+    captured = {}
+    worker.finished.connect(lambda frames, notes: captured.update(frames=frames, notes=notes))
+    worker.run()
+
+    frames, notes = captured["frames"], captured["notes"]
+    assert len(frames) == 4
+    # Each composite matches the shape of the base frame it came from.
+    assert [f.shape[:2] for f in frames] == [(64, 64), (32, 32), (64, 64), (32, 32)]
+    assert all(f.dtype == np.uint8 for f in frames)
+    assert any("mixes 2 image geometries" in note for note in notes)
+
+
+def test_composite_worker_geometry_key_separates_binned_frames():
+    big = _coronagraph_frames(count=1, size=64)[0]
+    small = _coronagraph_frames(count=1, size=32)[0]
+    small.meta = dict(small.meta, cdelt1=23.8, crpix1=16.5, crpix2=16.5)
+    key = solar_mod.CompositeBuildWorker._geometry_key
+    assert key(big) != key(small)
+    assert key(big) == key(_coronagraph_frames(count=1, size=64)[0])
+
+
+def test_composite_worker_reports_an_empty_time_window(monkeypatch):
+    """Downloaded frames that all fall outside the window must be explained."""
+    from src.Backend.coronagraph_composite import LayerSpec
+
+    base_frames = _coronagraph_frames(count=2)
+    for i, frame in enumerate(base_frames):
+        frame.date = f"2020-08-16T09:{i * 10:02d}:00"
+    layer_frames = _coronagraph_frames(count=2)
+    for i, frame in enumerate(layer_frames):
+        frame.date = f"2020-08-16T23:{i * 10:02d}:00"   # ~14 hours later
+
+    monkeypatch.setattr(
+        solar_mod.CompositeBuildWorker, "_layer_sources",
+        lambda self, spec, base_times: (
+            [f"layer{i}.fits" for i in range(len(layer_frames))],
+            [frame_observation_time(f) for f in layer_frames],
+        ),
+    )
+    monkeypatch.setattr(
+        solar_mod.CompositeBuildWorker, "_load_one_layer_frame",
+        lambda self, path, spec: layer_frames[int(path[5:-5])],
+    )
+    worker = solar_mod.CompositeBuildWorker(
+        base_frames, LayerSpec("LASCO", "C3", "C3"),
+        [LayerSpec("LASCO", "C2", "C2")], window_minutes=30,
+    )
+    captured = {}
+    worker.finished.connect(lambda frames, notes: captured.update(frames=frames, notes=notes))
+    worker.run()
+
+    assert len(captured["frames"]) == 2
+    assert any("none fell within" in note and "widen" in note.lower()
+               for note in captured["notes"])
+
+
+def test_row_selection_is_capped_and_spans_the_range():
+    """Regression: an uncapped selection downloaded a file per base frame.
+
+    A full-disk AIA frame is ~67 MB, so 100 base frames meant gigabytes and the
+    process was killed by the OS.
+    """
+    start = datetime(2020, 8, 16, 0, 0)
+    rows = [type("Row", (), {"start": start + timedelta(minutes=i)})() for i in range(600)]
+    targets = [start + timedelta(minutes=2 * i) for i in range(300)]
+
+    picked = solar_mod.CompositeBuildWorker._rows_for_times(rows, targets, limit=48)
+    assert len(picked) == 48
+    assert len(set(picked)) == 48
+    # Thinned evenly, so the kept frames still cover the whole time range.
+    assert min(picked) < 20 and max(picked) > 550
+
+
+def test_row_selection_below_the_cap_is_untouched():
+    start = datetime(2020, 8, 16, 0, 0)
+    rows = [type("Row", (), {"start": start + timedelta(minutes=10 * i)})() for i in range(5)]
+    targets = [start + timedelta(minutes=10 * i) for i in range(5)]
+    assert solar_mod.CompositeBuildWorker._rows_for_times(rows, targets, limit=48) == [0, 1, 2, 3, 4]
+
+
+def test_header_time_reads_lasco_split_timestamps(tmp_path):
+    """LASCO puts the date in DATE-OBS and the time in TIME-OBS."""
+    from astropy.io import fits
+
+    path = tmp_path / "lasco.fts"
+    hdu = fits.PrimaryHDU(np.zeros((4, 4), np.float32))
+    hdu.header["DATE-OBS"] = "2020/08/16"
+    hdu.header["TIME-OBS"] = "09:24:05.528"
+    hdu.writeto(path)
+    assert solar_mod.CompositeBuildWorker._header_time(str(path)) == datetime(
+        2020, 8, 16, 9, 24, 5, 528000
+    )
+
+
+def test_header_time_reads_a_full_iso_timestamp(tmp_path):
+    from astropy.io import fits
+
+    path = tmp_path / "aia.fits"
+    hdu = fits.PrimaryHDU(np.zeros((4, 4), np.float32))
+    hdu.header["DATE-OBS"] = "2020-08-16T09:24:05"
+    hdu.writeto(path)
+    assert solar_mod.CompositeBuildWorker._header_time(str(path)) == datetime(2020, 8, 16, 9, 24, 5)
+
+
+def test_header_time_returns_none_for_unreadable_files(tmp_path):
+    bad = tmp_path / "not-fits.txt"
+    bad.write_text("nope")
+    assert solar_mod.CompositeBuildWorker._header_time(str(bad)) is None
+
+
+def test_no_records_message_explains_a_pre_launch_date():
+    """Asking for AIA over 1997 LASCO must say why, not just 'no records'."""
+    from src.Backend.coronagraph_composite import LayerSpec
+
+    worker = solar_mod.CompositeBuildWorker([], LayerSpec("LASCO", "C2", "C2"), [])
+    message = worker._no_records_message(
+        LayerSpec("AIA", 193.0, "AIA 193"),
+        [datetime(1997, 11, 14, 3, 0), datetime(1997, 11, 14, 5, 0)],
+    )
+    assert "1997-11-14" in message
+    assert "2010" in message
+    assert "was operating" in message
+
+
+def test_no_records_message_for_a_date_the_instrument_covers():
+    from src.Backend.coronagraph_composite import LayerSpec
+
+    worker = solar_mod.CompositeBuildWorker(
+        [], LayerSpec("LASCO", "C2", "C2"), [], window_minutes=30
+    )
+    message = worker._no_records_message(
+        LayerSpec("AIA", 193.0, "AIA 193"),
+        [datetime(2020, 8, 16, 9, 0), datetime(2020, 8, 16, 11, 0)],
+    )
+    assert "30 min" in message
+    assert "Widen" in message
+
+
+def test_raw_mode_does_not_materialise_every_base_frame(monkeypatch):
+    """Raw builds must read base pixels per frame, not hold the whole series."""
+    from src.Backend.coronagraph_composite import LayerSpec
+
+    reads = {"n": 0}
+
+    class CountingFrame(FakeCoronagraphMap):
+        @property
+        def data(self):
+            reads["n"] += 1
+            return self._data
+
+        @data.setter
+        def data(self, value):
+            self._data = np.asarray(value, dtype=float)
+
+    frames = []
+    for i in range(4):
+        frame = CountingFrame(np.ones((32, 32)))
+        frame.date = f"2020-08-16T09:{i * 10:02d}:00"
+        frames.append(frame)
+
+    worker = solar_mod.CompositeBuildWorker(
+        frames, LayerSpec("LASCO", "C3", "C3", scale="linear"), [], difference_mode="raw"
+    )
+    captured = {}
+    worker.finished.connect(lambda f, n: captured.update(frames=f))
+    worker.run()
+    assert len(captured["frames"]) == 4
+    # Composited lazily: no dict of every frame's pixels is built up front.
+    assert reads["n"] > 0
+
+
+# --------------------------------------------------------------------------- #
+# RGB convention handling on both canvases.
+#
+# Three producers, three conventions: make_composite yields float 0-1,
+# make_magnetogram_composite and the overlay compositor yield uint8 0-255, and a
+# float array carrying 0-255 turns up when a composite is passed through
+# float-casting helpers. pyqtgraph raises on float without levels; matplotlib
+# silently clips float 0-255 to white. Both must render identically.
+# --------------------------------------------------------------------------- #
+def _rgb_case(dtype, high, mid):
+    arr = np.zeros((8, 8, 3), dtype)
+    arr[..., 0] = high
+    arr[..., 1] = mid
+    return arr
+
+
+RGB_CASES = [
+    ("uint8_0_255", _rgb_case(np.uint8, 255, 128)),
+    ("float_0_1", _rgb_case(float, 1.0, 128 / 255.0)),
+    ("float_0_255", _rgb_case(float, 255.0, 128.0)),
+]
+
+
+@pytest.mark.parametrize("label, image", RGB_CASES)
+def test_pyqtgraph_canvas_renders_every_rgb_convention(label, image):
+    _app()
+    from src.UI.sunpy_plot_window import SunPyPlotCanvas
+
+    canvas = SunPyPlotCanvas()
+    # A greyscale frame first, so stale contrast levels are in play.
+    canvas.plot_map_data(np.random.rand(8, 8) * 3000, "grey", vmin=0, vmax=3000)
+    canvas.plot_map_data(image, label)
+    canvas.map_image.render()   # regression: this raised for float input
+
+    colour = canvas.map_image.qimage.pixelColor(4, 4)
+    assert (colour.red(), colour.green(), colour.blue()) == (255, 128, 0)
+    assert list(canvas.map_image.levels) == [0, 255]
+
+
+@pytest.mark.parametrize("label, image", RGB_CASES)
+def test_matplotlib_canvas_renders_every_rgb_convention(label, image):
+    _app()
+    canvas = solar_mod.SolarMatplotlibCanvas()
+    canvas.plot_map_data(image, label)
+    canvas.figure.canvas.draw()
+
+    rendered = canvas._image_artist.make_image(canvas.figure.canvas.get_renderer())[0]
+    assert tuple(int(v) for v in rendered[4, 4][:3]) == (255, 128, 0)
+
+
+def test_rgb_to_uint8_leaves_uint8_untouched():
+    from src.UI.sunpy_plot_window import _rgb_to_uint8
+
+    arr = _rgb_case(np.uint8, 255, 128)
+    assert _rgb_to_uint8(arr) is arr
+
+
+def test_rgb_to_uint8_handles_nan():
+    from src.UI.sunpy_plot_window import _rgb_to_uint8
+
+    arr = _rgb_case(float, 1.0, 0.5)
+    arr[2, 2, :] = np.nan
+    out = _rgb_to_uint8(arr)
+    assert out.dtype == np.uint8
+    assert tuple(out[2, 2]) == (0, 0, 0)
+
+
+def test_float_composite_from_make_composite_reaches_the_canvas():
+    """The Composite button produces float 0-1 RGB; it must still render."""
+    _app()
+    from src.Backend.solar_data_analysis import AiaCompositeSpec, make_composite
+    from src.UI.sunpy_plot_window import SunPyPlotCanvas
+
+    yy, xx = np.mgrid[0:32, 0:32]
+    frames = [FakeMap(np.sin(xx / 3.0 + k) + 2.0) for k in range(3)]
+    composite = make_composite(frames, AiaCompositeSpec(frame_indexes=(0, 1, 2)))
+    assert composite.data.dtype.kind == "f"   # documents the convention
+
+    canvas = SunPyPlotCanvas()
+    canvas.plot_map_data(np.random.rand(32, 32) * 100, "grey", vmin=0, vmax=100)
+    canvas.plot_map_data(composite.data, "composite")
+    canvas.map_image.render()
+    assert canvas.map_image.image.dtype == np.uint8
+
+
+# --------------------------------------------------------------------------- #
+# autoDownsample + RGB.
+#
+# These MUST use a shown canvas smaller than the image. ImageItem.render()
+# returns early when _computeDownsampleFactors() finds no real viewport, so a
+# canvas that was never sized silently skips the downsample path — which is
+# exactly where the bug lived, and why earlier direct render() tests passed.
+# --------------------------------------------------------------------------- #
+def _downsampling_canvas(size=240):
+    from src.UI.sunpy_plot_window import SunPyPlotCanvas
+
+    canvas = SunPyPlotCanvas()
+    canvas.resize(size, size)
+    canvas.show()
+    QApplication.processEvents()
+    return canvas
+
+
+@pytest.mark.parametrize("label, image", [
+    ("uint8", (lambda: np.dstack([np.full((1024, 1024), v, np.uint8) for v in (200, 100, 0)]))()),
+    ("float_0_1", (lambda: np.dstack([np.full((1024, 1024), v, float) for v in (0.8, 0.4, 0.0)]))()),
+])
+def test_rgb_survives_autodownsample(label, image):
+    """Regression: downsampling averages, so uint8 RGB becomes float64.
+
+    With levels=None that reached makeARGB(), which raises
+    "levels argument is required for float input types" from inside paint().
+    """
+    _app()
+    canvas = _downsampling_canvas()
+    # A greyscale frame first, so stale levels would also be in play.
+    canvas.plot_map_data(np.random.rand(1024, 1024).astype(np.float32) * 3000,
+                         "grey", vmin=0, vmax=3000)
+    QApplication.processEvents()
+    canvas.plot_map_data(image, label)
+    QApplication.processEvents()
+
+    item = canvas.map_image
+    assert item.autoDownsample is True
+    xds, yds = item._computeDownsampleFactors()
+    assert xds and xds > 1, "viewport must be smaller than the image to exercise this"
+
+    item._renderRequired = True
+    item.render()   # raised before the fix
+
+    # Identity mapping for uint8 RGB, and correct after downsampling too.
+    assert list(item.levels) == [0, 255]
+    canvas.close()
+
+
+def test_greyscale_still_gets_its_own_levels_after_an_rgb_frame():
+    _app()
+    canvas = _downsampling_canvas()
+    rgb = np.dstack([np.full((1024, 1024), v, np.uint8) for v in (200, 100, 0)])
+    canvas.plot_map_data(rgb, "rgb")
+    QApplication.processEvents()
+    canvas.plot_map_data(np.random.rand(1024, 1024).astype(np.float32) * 3000,
+                         "grey", vmin=0.0, vmax=3000.0)
+    QApplication.processEvents()
+
+    item = canvas.map_image
+    item._renderRequired = True
+    item.render()
+    assert list(item.levels) == [0.0, 3000.0]
+    canvas.close()
+
+
+def test_new_layer_is_seeded_with_a_readable_stretch():
+    """A layer added from the UI must be visible without the user tuning it."""
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
+    idx = win.overlay_add_combo.findText("STEREO-A/EUVI 195 A")
+    win.overlay_add_combo.setCurrentIndex(idx)
+    win.add_overlay_layer()
+
+    spec = win._overlay_specs[0]
+    assert spec.scale == "log"
+    assert spec.gamma == pytest.approx(0.5)
+    assert win.overlay_gamma_slider.value() == 50
+    win.close()
+
+
+def test_gamma_slider_writes_back_to_the_selected_layer():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
+    win.overlay_add_combo.setCurrentIndex(win.overlay_add_combo.findText("AIA 193 A"))
+    win.add_overlay_layer()
+
+    win.overlay_gamma_slider.setValue(80)
+    assert win._overlay_specs[0].gamma == pytest.approx(0.8)
+    win.close()
+
+
+def test_title_names_the_layers_actually_composited():
+    """Regression: the title read the live spec list, so editing or clearing
+    the stack after a build made it claim "+ 0 overlay layer(s)" over a
+    composite that plainly showed one."""
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
+    win.overlay_add_combo.setCurrentIndex(win.overlay_add_combo.findText("AIA 193 A"))
+    win.add_overlay_layer()
+
+    win._composite_pending_labels = ["AIA 193 A"]
+    win._on_composite_finished(_rgb_composites(), [])
+    assert "AIA 193 A" in win.plot_title_label.text()
+
+    # Emptying the stack must not rewrite the title of the composite on screen.
+    win._overlay_specs = []
+    win._render_current_frame()
+    assert "AIA 193 A" in win.plot_title_label.text()
+    assert "0 overlay" not in win.plot_title_label.text()
+    win.close()
+
+
+def test_clearing_the_composite_drops_its_labels():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
+    win._composite_pending_labels = ["AIA 193 A"]
+    win._on_composite_finished(_rgb_composites(), [])
+    win.clear_composite()
+    assert win._composite_labels == []
+    assert "AIA 193 A" not in win.plot_title_label.text()
+    win.close()
+
+
+def test_partial_overlap_is_reported(monkeypatch):
+    """A large observer separation yields a crescent, not a disk. Say so."""
+    from src.Backend.coronagraph_composite import LayerSpec
+
+    base_frames = _coronagraph_frames(count=2, size=64)
+    layer_frames = _coronagraph_frames(count=1, size=64)
+
+    monkeypatch.setattr(
+        solar_mod.CompositeBuildWorker, "_layer_sources",
+        lambda self, spec, base_times: (["l0.fits"], [frame_observation_time(layer_frames[0])]),
+    )
+    monkeypatch.setattr(
+        solar_mod.CompositeBuildWorker, "_load_one_layer_frame",
+        lambda self, path, spec: layer_frames[0],
+    )
+
+    # Reprojection that only covers a sliver, as a big baseline would give.
+    def sliver(source, target, **kw):
+        out = _coronagraph_frames(count=1, size=64)[0]
+        data = np.full((64, 64), np.nan)
+        data[:, :8] = 100.0
+        out.data = data
+        return out
+
+    monkeypatch.setattr("src.Backend.multiview.reproject_map_to", sliver)
+    monkeypatch.setattr("src.Backend.multiview.observer_separation_deg", lambda a, b: 64.0)
+
+    worker = solar_mod.CompositeBuildWorker(
+        base_frames,
+        LayerSpec("LASCO", "C2", "C2", colormap="soholasco2", scale="linear"),
+        [LayerSpec("SECCHI", ("STEREO_A", "EUVI", 195.0), "EUVI 195",
+                   inner_rsun=0.0, outer_rsun=1.7)],
+        window_minutes=240,
+    )
+    captured = {}
+    worker.finished.connect(lambda f, n: captured.update(frames=f, notes=n))
+    worker.run()
+
+    notes = captured["notes"]
+    assert any("overlaps the base view" in n and "partial disk" in n for n in notes)

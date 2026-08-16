@@ -112,3 +112,47 @@ def test_main_window_does_not_eagerly_import_pyplot():
         "assert 'matplotlib.pyplot' not in sys.modules"
     )
     subprocess.check_call([sys.executable, "-c", code])
+
+
+# ----------------------------------------------------------------------- #
+# Warning configuration
+# ----------------------------------------------------------------------- #
+def test_observer_warning_is_suppressed_regardless_of_key_order():
+    """sunpy builds this message from a set, so the key order varies.
+
+    Python's "once" registry is keyed on message text, so each reordering
+    counted as a new warning and printed again. The filter must match the
+    stable prefix instead.
+    """
+    import warnings
+
+    from sunpy.util.exceptions import SunpyMetadataWarning
+
+    from src.UI.main import _configure_science_warnings
+
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.resetwarnings()
+        _configure_science_warnings()
+        for order in ("hgln_obs,hglt_obs,dsun_obs", "dsun_obs,hgln_obs,hglt_obs",
+                      "hglt_obs,dsun_obs,hgln_obs"):
+            warnings.warn(
+                "Missing metadata for observer: assuming Earth-based observer.\n"
+                f"For frame 'heliographic_stonyhurst' the following metadata is missing: {order}",
+                SunpyMetadataWarning,
+            )
+    assert [w for w in seen if "Missing metadata for observer" in str(w.message)] == []
+
+
+def test_other_sunpy_metadata_warnings_still_surface():
+    """Only the observer message is silenced; real problems must show."""
+    import warnings
+
+    from sunpy.util.exceptions import SunpyMetadataWarning
+
+    from src.UI.main import _configure_science_warnings
+
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.resetwarnings()
+        _configure_science_warnings()
+        warnings.warn("Something else is wrong with this header", SunpyMetadataWarning)
+    assert len(seen) == 1

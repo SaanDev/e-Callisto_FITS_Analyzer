@@ -457,6 +457,54 @@ def registry_lookup(
     return None
 
 
+def build_spec_for_observable(
+    instrument: str,
+    value: Any,
+    start_dt: datetime,
+    end_dt: datetime,
+    *,
+    max_records: int = 24,
+) -> SunPyQuerySpec:
+    """Query spec for an observable-combo selection.
+
+    ``instrument``/``value`` follow the userData convention shared by every
+    observable selector in the Solar Image Analysis window:
+    ``("AIA", wavelength)``, ``("HMI", product)``, ``("LASCO", detector)``,
+    ``("SECCHI", (spacecraft, detector, wavelength_or_None))``,
+    ``("SUVI", wavelength)``. Unrecognised instruments fall back to AIA.
+    """
+    key = str(instrument or "").strip().upper()
+    if key == "HMI":
+        return SunPyQuerySpec(
+            start_dt=start_dt, end_dt=end_dt, spacecraft="SDO", instrument="HMI",
+            product=str(value), max_records=max_records,
+        )
+    if key == "LASCO":
+        return SunPyQuerySpec(
+            start_dt=start_dt, end_dt=end_dt, spacecraft="SOHO", instrument="LASCO",
+            detector=str(value), max_records=max_records,
+        )
+    if key == "SECCHI":
+        spacecraft, detector, wavelength = value
+        return SunPyQuerySpec(
+            start_dt=start_dt, end_dt=end_dt, spacecraft=str(spacecraft), instrument="SECCHI",
+            detector=str(detector),
+            wavelength_angstrom=float(wavelength) if wavelength else None,
+            max_records=max_records,
+        )
+    if key == "SUVI":
+        # GOES-18 serves the operational SUVI for current dates (see registry).
+        return SunPyQuerySpec(
+            start_dt=start_dt, end_dt=end_dt, spacecraft="GOES", instrument="SUVI",
+            wavelength_angstrom=float(value), satellite_number=18, level="1b",
+            max_records=max_records,
+        )
+    return SunPyQuerySpec(
+        start_dt=start_dt, end_dt=end_dt, spacecraft="SDO", instrument="AIA",
+        wavelength_angstrom=float(value or 193.0), max_records=max_records,
+    )
+
+
 def build_attrs(
     spec: SunPyQuerySpec,
     attrs_module: Any | None = None,

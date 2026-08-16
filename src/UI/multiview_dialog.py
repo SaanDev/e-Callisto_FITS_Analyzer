@@ -41,50 +41,13 @@ from PySide6.QtWidgets import (
 
 from src.Backend.multiview import observer_separation_deg, reproject_map_to
 from src.Backend.solar_data_analysis import extract_map_frames, frame_observation_time
-from src.Backend.sunpy_archive import SunPyQuerySpec, SunPySearchRow
+from src.Backend.sunpy_archive import SunPySearchRow, build_spec_for_observable
 from src.UI.gui_shared import fit_window_to_screen
 from src.UI.sunpy_plot_window import SunPyPlotCanvas
 
-
-def build_spec_for_observable(
-    instrument: str,
-    value: Any,
-    start_dt: datetime,
-    end_dt: datetime,
-    *,
-    max_records: int = 24,
-) -> SunPyQuerySpec:
-    """Query spec for an observable-combo selection (same userData convention
-    as the main window's selector)."""
-    if instrument == "HMI":
-        return SunPyQuerySpec(
-            start_dt=start_dt, end_dt=end_dt, spacecraft="SDO", instrument="HMI",
-            product=str(value), max_records=max_records,
-        )
-    if instrument == "LASCO":
-        return SunPyQuerySpec(
-            start_dt=start_dt, end_dt=end_dt, spacecraft="SOHO", instrument="LASCO",
-            detector=str(value), max_records=max_records,
-        )
-    if instrument == "SECCHI":
-        spacecraft, detector, wavelength = value
-        return SunPyQuerySpec(
-            start_dt=start_dt, end_dt=end_dt, spacecraft=str(spacecraft), instrument="SECCHI",
-            detector=str(detector),
-            wavelength_angstrom=float(wavelength) if wavelength else None,
-            max_records=max_records,
-        )
-    if instrument == "SUVI":
-        # GOES-18 serves the operational SUVI for current dates (see registry).
-        return SunPyQuerySpec(
-            start_dt=start_dt, end_dt=end_dt, spacecraft="GOES", instrument="SUVI",
-            wavelength_angstrom=float(value), satellite_number=18, level="1b",
-            max_records=max_records,
-        )
-    return SunPyQuerySpec(
-        start_dt=start_dt, end_dt=end_dt, spacecraft="SDO", instrument="AIA",
-        wavelength_angstrom=float(value or 193.0), max_records=max_records,
-    )
+# Re-exported: the overlay-layer downloader in the main window builds the same
+# specs, so the mapping lives in sunpy_archive next to SunPyQuerySpec.
+__all__ = ["MultiViewpointDialog", "ReprojectWorker", "build_spec_for_observable"]
 
 
 class ReprojectWorker(QObject):

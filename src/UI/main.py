@@ -419,12 +419,59 @@ def _run_goes_overlay_helper_mode(request_file: str, response_file: str) -> int:
     return run_goes_overlay_helper_cli(request_file, response_file)
 
 
+def _configure_science_warnings() -> None:
+    """Show each repeated FITS-metadata complaint once instead of per frame.
+
+    SOHO/LASCO archive products carry no observer keywords
+    (``DSUN_OBS``/``HGLN_OBS``/``HGLT_OBS``), so sunpy warns that it is assuming
+    an Earth-based observer. SOHO orbits L1 at about 0.99 AU, so that assumption
+    is accurate to roughly 1% — fine for display and overlay registration, and
+    nothing the user can supply. The same files also carry unprintable characters
+    in their own HISTORY cards, which astropy flags on every read.
+
+    Both fire on every frame and on every property access that rebuilds a WCS, so
+    a normal session emits thousands of identical lines and buries anything that
+    actually matters.
+
+    The observer warning needs an exact-message filter rather than "once".
+    sunpy builds the message from ``set(keys) - self.meta.keys()``
+    (``mapbase.py``), so the missing-keyword list comes out in a different order
+    on each call — and Python's once-registry is keyed on message *text*, so
+    every reordering counts as a brand new warning and prints again. Matching the
+    stable prefix suppresses only this one non-actionable message; any other
+    SunpyMetadataWarning still surfaces normally, and the Overlay Layers build
+    reports the Earth-observer assumption once in its own notes.
+    """
+    import warnings
+
+    try:
+        from astropy.io.fits.verify import VerifyWarning
+
+        warnings.filterwarnings("once", category=VerifyWarning)
+    except Exception:
+        pass
+    try:
+        from sunpy.util.exceptions import SunpyMetadataWarning
+
+        # Order matters: filterwarnings inserts at the FRONT of the list and the
+        # first match wins, so the broad rule is registered first and the
+        # specific one second, leaving the specific one ahead of it.
+        warnings.filterwarnings("once", category=SunpyMetadataWarning)
+        warnings.filterwarnings(
+            "ignore", message="Missing metadata for observer", category=SunpyMetadataWarning
+        )
+    except Exception:
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(argv or sys.argv)
     args, qt_args = _parse_cli_args(argv)
 
     if platform.system() != "Windows":
         faulthandler.enable()
+
+    _configure_science_warnings()
 
     if args.mode == "goes-overlay-helper":
         return _run_goes_overlay_helper_mode(

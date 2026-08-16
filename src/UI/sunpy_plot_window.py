@@ -129,6 +129,26 @@ def _fallback_colormap_lut(name: str) -> np.ndarray | None:
     return cmap.getLookupTable(nPts=256)
 
 
+def _rgb_to_uint8(arr: np.ndarray) -> np.ndarray:
+    """Coerce an RGB(A) image to uint8 0-255.
+
+    Producers disagree on convention — ``make_composite`` returns float 0-1,
+    ``make_magnetogram_composite`` and the overlay compositor return uint8
+    0-255 — and pyqtgraph raises "levels argument is required for float input
+    types" if it is handed float pixels without explicit levels. Normalising
+    here means the canvas accepts either.
+    """
+    data = np.asarray(arr)
+    if data.dtype == np.uint8:
+        return data
+    values = np.asarray(data, dtype=float)
+    finite = values[np.isfinite(values)]
+    # Float RGB is conventionally 0-1, but a float array carrying 0-255 (an
+    # un-cast composite) must not be scaled up again.
+    scale = 255.0 if finite.size and float(np.nanmax(finite)) <= 1.0 else 1.0
+    return np.clip(np.nan_to_num(values) * scale, 0.0, 255.0).astype(np.uint8)
+
+
 def _fallback_colormap(name: str) -> pg.ColorMap | None:
     palettes = {
         "sdoaia94": ((0, 0, 0), (16, 91, 64), (64, 142, 128), (145, 196, 192), (255, 255, 255)),
@@ -140,8 +160,8 @@ def _fallback_colormap(name: str) -> pg.ColorMap | None:
         "sdoaia335": ((0, 0, 0), (16, 64, 128), (64, 128, 181), (145, 192, 221), (255, 255, 255)),
         "sdoaia1600": ((0, 0, 0), (91, 91, 16), (142, 142, 64), (196, 196, 145), (255, 255, 255)),
         "sdoaia1700": ((0, 0, 0), (128, 64, 64), (181, 128, 128), (221, 192, 192), (255, 255, 255)),
-        "soholasco2": ((0, 0, 0), (20, 20, 90), (30, 90, 165), (120, 185, 220), (255, 255, 255)),
-        "soholasco3": ((0, 0, 0), (60, 20, 12), (150, 62, 22), (222, 150, 60), (255, 252, 220)),
+        "soholasco2": ((0, 0, 0), (96, 0, 0), (192, 1, 0), (255, 129, 3), (255, 255, 255)),
+        "soholasco3": ((0, 0, 0), (56, 56, 78), (112, 123, 144), (169, 200, 200), (255, 255, 255)),
         # STEREO/SECCHI white-light detectors. sunpy ships proper stereocor*/
         # stereohi* colormaps (used via the matplotlib path); these approximate
         # them as an offline fallback so coronagraph frames never render as EUV.
@@ -1067,7 +1087,28 @@ class SunPyPlotCanvas(QWidget):
 
         if is_rgb:
             self.map_image.setLookupTable(None)
-            self.map_image.setImage(arr, autoLevels=False)
+            # pyqtgraph refuses float RGB without explicit levels, and different
+            # producers hand us different conventions (make_composite yields
+            # float 0-1, the overlay compositor uint8 0-255). Normalise to uint8
+            # so one code path serves both.
+            arr = _rgb_to_uint8(arr)
+            # Levels must be set explicitly, and must NOT be None.
+            #
+            # Explicit, because pyqtgraph otherwise keeps the previous frame's
+            # contrast levels and applies them per RGB channel — a composite
+            # shown after a greyscale frame would render almost black.
+            #
+            # Not None, because autoDownsample is on: when the view is smaller
+            # than the image, ImageItem.render() calls fn.downsample(), which
+            # averages and therefore returns float64 even for a uint8 source.
+            # makeARGB() then raises "levels argument is required for float
+            # input types" from inside paint(), which Qt reports as an
+            # unrecoverable cascade of boundingRect/painter errors.
+            #
+            # [0, 255] is the identity mapping for the uint8 RGB produced above,
+            # so it is correct before and after downsampling.
+            levels = [0, 255]
+            self.map_image.setImage(arr, autoLevels=False, levels=levels)
             self._last_map_levels = None
         else:
             data = np.asarray(arr, dtype=np.float32)
