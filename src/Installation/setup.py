@@ -96,6 +96,7 @@ OPTIONS = {
     "packages": [
         "src",
         "netCDF4",
+        "cdflib",
         "cftime",
         "reportlab",
         "PIL",
@@ -162,6 +163,9 @@ OPTIONS = {
 
         # Project modules
         "src.UI.callisto_downloader",
+        # Imported lazily from the Solar Events menu handler.
+        "src.UI.swaves_downloader",
+        "src.Backend.swaves",
         "src.UI.theme_manager",
         "src.UI.mpl_style",
         "src.UI.dst_index_gui",

@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from src.Backend.frequency_axis import finite_data_limits, invalid_row_mask
 from src.Backend.goes_overlay import GOES_OVERLAY_CHANNEL_ORDER, goes_class_ticks_for_limits, goes_flux_axis_limits
+from src.Backend.swaves import format_log_frequency, log_frequency_ticks
 from src.UI.font_utils import normalize_font_family
 
 try:
@@ -127,6 +128,20 @@ if pg is not None:
             return ["" for _ in values]
 
 
+    class _LogFreqAxisItem(pg.AxisItem):
+        """Renders a log10(kHz) axis coordinate as a human frequency."""
+
+        def tickStrings(self, values, scale, spacing):
+            return [format_log_frequency(value) for value in values]
+
+        def tickValues(self, minVal, maxVal, size):
+            ticks = log_frequency_ticks(float(minVal), float(maxVal))
+            if not ticks:
+                return super().tickValues(minVal, maxVal, size)
+            spacing = abs(ticks[1] - ticks[0]) if len(ticks) > 1 else 1.0
+            return [(spacing, ticks)]
+
+
     class _PassiveViewBox(pg.ViewBox):
         def mouseDragEvent(self, ev, axis=None):
             ev.ignore()
@@ -145,6 +160,10 @@ else:
         pass
 
 
+    class _LogFreqAxisItem:
+        pass
+
+
     class _PassiveViewBox:
         pass
 
@@ -154,6 +173,8 @@ GOES_OVERLAY_CHANNEL_COLORS = {
     "xrsb": "#ffffff",
 }
 GOES_OVERLAY_LINE_WIDTH = 3.0
+# Shared left-axis width for the CALLISTO/SWAVES split view.
+_SPLIT_LEFT_AXIS_WIDTH = 78
 
 
 class _SceneEventFilter(QObject):
@@ -202,6 +223,15 @@ class AcceleratedPlotWidget(QWidget):
         self._goes_visible_channels = ()
         self._goes_overlay_rect_zoom_hidden = False
         self._goes_axis_label = "GOES X-Ray Class"
+        self._swaves_plot = None
+        self._swaves_viewbox = None
+        self._swaves_image = None
+        self._swaves_color_bar = None
+        self._swaves_axis = None
+        self._swaves_bottom_axis = None
+        self._swaves_region = None
+        self._swaves_title = ""
+        self._swaves_colorbar_label = ""
         self._title = ""
         self._x_label = "Time [s]"
         self._y_label = "Frequency [MHz]"
@@ -565,7 +595,13 @@ class AcceleratedPlotWidget(QWidget):
             except Exception:
                 pass
             try:
-                text = self._y_label if axis_name == "left" else self._x_label
+                if axis_name == "left":
+                    text = self._y_label
+                elif self._swaves_plot is not None:
+                    # Split view: the lower panel carries the time label.
+                    text = ""
+                else:
+                    text = self._x_label
                 axis.setLabel(text, **label_style)
             except Exception:
                 pass
@@ -588,6 +624,43 @@ class AcceleratedPlotWidget(QWidget):
                 self._goes_axis.setLabel(self._goes_axis_label, **label_style)
             except Exception:
                 pass
+
+        if self._swaves_plot is not None:
+            for axis_name in ("left", "bottom"):
+                try:
+                    axis = self._swaves_plot.getAxis(axis_name)
+                    axis.setTextPen(self._fg)
+                    axis.setPen(self._fg)
+                    axis.setStyle(tickFont=tick_font)
+                    text = "Frequency" if axis_name == "left" else self._x_label
+                    axis.setLabel(text, **label_style)
+                except Exception:
+                    pass
+            if self._swaves_color_bar is not None:
+                try:
+                    swaves_cbar_axis = self._swaves_color_bar.axis
+                    swaves_cbar_axis.setTextPen(self._fg)
+                    swaves_cbar_axis.setPen(self._fg)
+                    swaves_cbar_axis.setStyle(tickFont=tick_font)
+                    swaves_cbar_axis.setLabel(self._swaves_colorbar_label, **label_style)
+                except Exception:
+                    pass
+            try:
+                self._swaves_plot.setTitle(self._swaves_title, **self._title_style())
+                swaves_title_font = self._build_font(
+                    max(9, self._title_font_px - 3), self._title_bold, self._title_italic
+                )
+                self._swaves_plot.titleLabel.item.setFont(swaves_title_font)
+                self._swaves_plot.titleLabel.item.setDefaultTextColor(QColor(self._fg))
+            except Exception:
+                pass
+            if self._swaves_region is not None:
+                try:
+                    self._swaves_region.setPen(
+                        pg.mkPen(color=self._fg, width=1.2, style=Qt.DashLine)
+                    )
+                except Exception:
+                    pass
 
         self._plot.setTitle(self._title, **self._title_style())
         try:
@@ -1071,11 +1144,240 @@ class AcceleratedPlotWidget(QWidget):
         self._clear_annotation_capture_overlay()
         self._clear_annotation_overlay()
         self.clear_goes_overlay()
+        self.clear_swaves_panel()
 
     def export_plot_item(self):
         if not self.is_available:
             return None
         return self._plot
+
+    def export_scene(self):
+        """Whole-scene export target, so a split view exports both panels."""
+        if not self.is_available or self._graphics is None:
+            return None
+        try:
+            return self._graphics.scene()
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
+    # STEREO/SWAVES companion panel
+    # ------------------------------------------------------------------
+
+    @property
+    def has_swaves_panel(self) -> bool:
+        return bool(self.is_available and self._swaves_plot is not None)
+
+    def _ensure_swaves_panel(self) -> bool:
+        """Create the linked second row on first use."""
+        if not self.is_available:
+            return False
+        if self._swaves_plot is not None:
+            return True
+
+        try:
+            self._swaves_bottom_axis = _TimeAxisItem(orientation="bottom")
+            self._swaves_axis = _LogFreqAxisItem(orientation="left")
+            self._swaves_plot = self._graphics.addPlot(
+                row=1,
+                col=0,
+                axisItems={"bottom": self._swaves_bottom_axis, "left": self._swaves_axis},
+            )
+            self._swaves_plot.hideButtons()
+            self._swaves_plot.setMenuEnabled(False)
+            self._swaves_plot.invertY(False)
+            self._swaves_plot.setLabel("left", "Frequency")
+
+            self._swaves_viewbox = self._swaves_plot.getViewBox()
+            # One X link is the entire time sync between the two panels.
+            self._swaves_viewbox.setXLink(self._viewbox)
+            self._swaves_viewbox.setMouseEnabled(x=True, y=False)
+
+            self._swaves_image = pg.ImageItem(axisOrder="row-major")
+            self._swaves_plot.addItem(self._swaves_image)
+
+            try:
+                cmap = pg.colormap.get("viridis")
+                self._swaves_color_bar = pg.ColorBarItem(values=(0.0, 1.0), colorMap=cmap, interactive=False)
+                self._swaves_color_bar.setImageItem(self._swaves_image, insert_in=self._swaves_plot)
+            except Exception:
+                self._swaves_color_bar = None
+
+            try:
+                self._graphics.ci.layout.setRowStretchFactor(0, 1)
+                self._graphics.ci.layout.setRowStretchFactor(1, 1)
+            except Exception:
+                pass
+
+            # pyqtgraph maps a linked X range through each view's geometry, so
+            # the two plot areas must be the same width or the shared time axis
+            # drifts between panels. Pin both left axes to one width.
+            try:
+                self._plot.getAxis("left").setWidth(_SPLIT_LEFT_AXIS_WIDTH)
+                self._swaves_axis.setWidth(_SPLIT_LEFT_AXIS_WIDTH)
+            except Exception:
+                pass
+            return True
+        except Exception:
+            self.clear_swaves_panel()
+            return False
+
+    def clear_swaves_panel(self) -> None:
+        if not self.is_available:
+            return
+        plot = self._swaves_plot
+        self._swaves_plot = None
+        self._swaves_viewbox = None
+        self._swaves_image = None
+        self._swaves_color_bar = None
+        self._swaves_axis = None
+        self._swaves_bottom_axis = None
+        self._swaves_region = None
+        self._swaves_title = ""
+        self._swaves_colorbar_label = ""
+        if plot is not None:
+            try:
+                self._graphics.removeItem(plot)
+            except Exception:
+                pass
+        # The main panel takes its time axis and automatic left-axis width back.
+        try:
+            self._plot.getAxis("bottom").setStyle(showValues=True)
+            self._plot.setLabel("bottom", self._x_label)
+            self._plot.getAxis("left").setWidth(None)
+        except Exception:
+            pass
+        self._apply_text_style()
+
+    def set_swaves_panel(
+        self,
+        payload,
+        cmap,
+        *,
+        levels=None,
+        span=None,
+        title: str = "",
+        x_label: str = "Time [s]",
+        colorbar_label: str = "",
+        use_utc: bool = False,
+        ut_start_sec=None,
+    ) -> bool:
+        """Mirror the Matplotlib SWAVES panel onto the hardware canvas."""
+        if not self.is_available:
+            return False
+        if payload is None:
+            if self.has_swaves_panel:
+                self.clear_swaves_panel()
+            return False
+        if not self._ensure_swaves_panel():
+            return False
+
+        arr = np.asarray(payload.intensity_db, dtype=np.float32)
+        if arr.ndim != 2 or arr.size == 0:
+            return False
+        # Rows arrive highest-frequency-first for Matplotlib's origin="upper";
+        # this canvas uses a Cartesian Y axis, so flip them back.
+        arr = np.ascontiguousarray(arr[::-1, :])
+
+        try:
+            x0, x1, y0, y1 = (float(v) for v in payload.pyqtgraph_extent())
+        except Exception:
+            return False
+
+        vmin, vmax = finite_data_limits(arr)
+        if levels is not None:
+            try:
+                low, high = float(levels[0]), float(levels[1])
+                if np.isfinite(low) and np.isfinite(high) and high > low:
+                    vmin, vmax = low, high
+            except Exception:
+                pass
+        if vmin is None or vmax is None:
+            return False
+
+        color_map, lut = _mpl_cmap_to_lookup(cmap)
+        has_invalid = bool(np.any(~np.isfinite(arr)))
+
+        try:
+            if has_invalid:
+                rgba = _rgba_image_from_cmap(arr, cmap, vmin=vmin, vmax=vmax)
+                self._swaves_image.setLookupTable(None, update=False)
+                self._swaves_image.setImage(rgba, autoLevels=False)
+            else:
+                if lut is not None:
+                    self._swaves_image.setLookupTable(lut, update=False)
+                self._swaves_image.setImage(arr, autoLevels=False, levels=(vmin, vmax))
+                self._swaves_image.setLevels((vmin, vmax))
+            self._swaves_image.setRect(QRectF(x0, y0, x1 - x0, y1 - y0))
+        except Exception:
+            return False
+
+        if self._swaves_color_bar is not None:
+            try:
+                self._swaves_color_bar.setLevels((vmin, vmax))
+                if color_map is not None:
+                    self._swaves_color_bar.setColorMap(color_map)
+            except Exception:
+                pass
+
+        try:
+            self._swaves_viewbox.setYRange(min(y0, y1), max(y0, y1), padding=0.0)
+        except Exception:
+            pass
+
+        self._set_swaves_span(span)
+
+        if self._swaves_bottom_axis is not None:
+            try:
+                self._swaves_bottom_axis.set_time_mode(bool(use_utc), ut_start_sec)
+            except Exception:
+                pass
+
+        self._swaves_title = str(title or "")
+        self._swaves_colorbar_label = str(colorbar_label or "")
+        self._x_label = str(x_label or "")
+
+        # In split view only the lower panel shows the time ticks and label.
+        try:
+            self._plot.getAxis("bottom").setStyle(showValues=False)
+            self._plot.setLabel("bottom", "")
+        except Exception:
+            pass
+
+        self._apply_text_style()
+        return True
+
+    def _set_swaves_span(self, span) -> None:
+        """Mark the CALLISTO interval inside the wider SWAVES context window."""
+        if self._swaves_plot is None:
+            return
+        if self._swaves_region is not None:
+            try:
+                self._swaves_plot.removeItem(self._swaves_region)
+            except Exception:
+                pass
+            self._swaves_region = None
+        if not span:
+            return
+        try:
+            low, high = float(span[0]), float(span[1])
+            if not (np.isfinite(low) and np.isfinite(high)) or high <= low:
+                return
+            region = pg.LinearRegionItem(
+                values=(low, high),
+                movable=False,
+                brush=pg.mkBrush(255, 255, 255, 26),
+                pen=pg.mkPen(color=self._fg, width=1.2, style=Qt.DashLine),
+            )
+            region.setZValue(20)
+            try:
+                region.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            except Exception:
+                pass
+            self._swaves_plot.addItem(region)
+            self._swaves_region = region
+        except Exception:
+            self._swaves_region = None
 
     def update_image(
         self,

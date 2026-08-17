@@ -195,10 +195,12 @@ on the right, the live cursor readout (time, frequency, intensity) and the updat
 <li><b>Geomagnetic</b>: Kyoto Dst Index and GFZ Kp Index viewers.</li>
 <li><b>Archives &#8594; SunPy Multi-Mission Explorer</b>: search and plot external imagery and time series
 (see <a href="#sunpy-explorer">section 17</a>).</li>
-<li><b>Radio Bursts</b>: the e-CALLISTO and Learmonth downloaders.</li>
+<li><b>Radio Bursts</b>: the e-CALLISTO, Learmonth, and STEREO/SWAVES loaders.</li>
 <li><b>Sync Current Time Window</b>: push the analyzer time window to supported context viewers.</li>
 <li><b>GOES Overlay</b>: draw the GOES long channel (XRS-B) and/or short channel (XRS-A) directly on the
 spectrum, with a flare-class guide (A/B/C/M/X). The overlay does not alter the data.</li>
+<li><b>SWAVES Panel</b>: show or hide the loaded STEREO/SWAVES spectrum without discarding it
+(see <a href="#swaves">section 15a</a>).</li>
 </ul>
 
 <a name="menu-view"></a>
@@ -333,6 +335,32 @@ median_dB baseline, with per-focus-code preview tabs, and export it.</li>
 </ul>
 <p>The separate <b>Learmonth</b> downloader loads or downloads the Learmonth daily archive, converts selected
 chunks to FIT, and imports them for the same workflow used with e-CALLISTO data.</p>
+
+<a name="swaves"></a>
+<h2>15a. STEREO/SWAVES dynamic spectrum</h2>
+<p>Open from <code>Solar Events &#8594; Radio Bursts &#8594; SWAVES</code>. SWAVES covers 2.6 kHz to 16 MHz from
+space, directly below the CALLISTO band, so a burst that drifts out of the ground-based range can be followed
+into the interplanetary medium on the same figure.</p>
+<ul>
+<li><b>Window</b>: choose a UTC start date and time plus a duration. Data are one-minute averages served as one
+file per UTC day; a window that crosses midnight fetches and stitches both days automatically. The archive
+starts on 2006-10-27.</li>
+<li><b>Spacecraft</b>: STEREO-A (Ahead) or STEREO-B (Behind). Behind is disabled for dates after 2014-10-01,
+when contact with that spacecraft was lost.</li>
+<li><b>Use CALLISTO Window</b>: copy the loaded spectrum's time range, widened on both sides by the
+<b>Sync padding</b> value (30 minutes by default). The padding matters because a type II or III burst takes
+tens of minutes to hours to drift from the corona down into the SWAVES band, so an exact match would cut off
+the part you want to see. <code>Solar Events &#8594; Sync Current Time Window</code> updates an open SWAVES
+dialog the same way.</li>
+</ul>
+<p>Once loaded, the plotting area splits: CALLISTO above, SWAVES below, on a shared time axis, so panning or
+zooming either panel moves both. The CALLISTO interval is outlined on the SWAVES panel. The SWAVES frequency
+axis is logarithmic and its intensity is decibels above the instrument background, so it keeps its own colorbar
+and color scaling while following the colormap chosen in the sidebar. Loading SWAVES with no CALLISTO file open
+plots it across the full area instead; it folds into the split view as soon as a FITS file is loaded.</p>
+<p>The split view is included in <b>Save Plot</b> exports, saved in and restored from project files without
+re-downloading, and added to generated PDF reports. The drawing, lasso, drift, and measurement tools still act
+on the CALLISTO panel only. Data-reduction controls do not yet apply to the SWAVES panel.</p>
 
 <a name="context-viewers"></a>
 <h2>16. Solar event context viewers</h2>

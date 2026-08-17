@@ -38,11 +38,15 @@ def test_learmonth_menu_action_is_present_in_radio_bursts_menu():
     _app()
     window = MainWindow(theme=None)
 
-    solar_menu = _find_menu_action(window.menuBar(), "Solar Events").menu()
-    radio_menu = _find_menu_action(solar_menu, "Radio Bursts").menu()
+    # Keep the QActions alive: dropping the last Python reference takes the
+    # submenu's C++ object with it before it can be inspected.
+    solar_action = _find_menu_action(window.menuBar(), "Solar Events")
+    solar_menu = solar_action.menu()
+    radio_action = _find_menu_action(solar_menu, "Radio Bursts")
+    radio_menu = radio_action.menu()
     radio_actions = [action.text() for action in radio_menu.actions() if not action.isSeparator()]
 
-    assert radio_actions == ["e-CALLISTO", "Learmonth"]
+    assert radio_actions == ["e-CALLISTO", "Learmonth", "SWAVES"]
     window.close()
 
 

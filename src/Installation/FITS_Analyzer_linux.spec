@@ -79,6 +79,7 @@ a = Analysis(
         "scipy",
         "cftime",
         "netCDF4",
+        "cdflib",
         "lxml",
         "drms",
         "zeep",
@@ -107,6 +108,10 @@ a = Analysis(
         "src.UI",
         "src.Backend",
         "src.UI.callisto_downloader",
+        # Imported lazily from the Solar Events menu handler, so the
+        # static analysis cannot see it.
+        "src.UI.swaves_downloader",
+        "src.Backend.swaves",
         "src.Backend.burst_processor",
         "src.Backend.spectral_overview",
         "src.Backend.multi_station_comparison",

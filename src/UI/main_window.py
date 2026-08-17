@@ -24,7 +24,7 @@ from astropy.io import fits
 from matplotlib import colormaps
 from matplotlib.figure import Figure
 from matplotlib.path import Path
-from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter, ScalarFormatter
+from matplotlib.ticker import FixedLocator, FuncFormatter, LogLocator, NullFormatter, ScalarFormatter
 from matplotlib.widgets import LassoSelector, RectangleSelector
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from PySide6.QtCore import QByteArray, QBuffer, QEasingCurve, QIODevice, QPropertyAnimation, QSettings, QSize, QStandardPaths, Qt, QThread, QTimer, QUrl, Slot
@@ -124,6 +124,12 @@ from src.Backend.project_report import (
     ProjectReportInput,
 )
 from src.Backend.provenance import build_provenance_payload, write_provenance_files
+from src.Backend.swaves import (
+    DEFAULT_PAD_SECONDS as SWAVES_DEFAULT_PAD_SECONDS,
+    SwavesPayload,
+    format_log_frequency,
+    log_frequency_ticks,
+)
 from src.Backend.recovery_manager import (
     DEFAULT_MAX_SNAPSHOTS,
     latest_snapshot_path,
@@ -464,6 +470,16 @@ class MainWindow(QMainWindow):
         # Colorbar
         self.current_colorbar = None
         self.current_cax = None
+
+        # --- STEREO/SWAVES companion panel ---
+        self._swaves_payload = None
+        self._swaves_visible = True
+        self._swaves_pad_seconds = int(SWAVES_DEFAULT_PAD_SECONDS)
+        self._swaves_dialog = None
+        self._swaves_ax = None
+        self._swaves_cax = None
+        self._swaves_colorbar = None
+        self._swaves_colorbar_label_text = ""
 
         # Statusbar
         self.setStatusBar(QStatusBar())
@@ -998,6 +1014,9 @@ class MainWindow(QMainWindow):
         learmonth_action = QAction("Learmonth", self)
         learmonth_action.triggered.connect(self.launch_learmonth_downloader)
         radio_submenu.addAction(learmonth_action)
+        swaves_action = QAction("SWAVES", self)
+        swaves_action.triggered.connect(self.launch_swaves_downloader)
+        radio_submenu.addAction(swaves_action)
 
         solar_events_menu.addSeparator()
         self.sync_time_window_action = QAction("Sync Current Time Window", self)
@@ -1008,6 +1027,11 @@ class MainWindow(QMainWindow):
         self.goes_overlay_short_action = QAction(GOES_OVERLAY_CHANNEL_LABELS["xrsb"], self, checkable=True)
         self.goes_overlay_menu.addAction(self.goes_overlay_long_action)
         self.goes_overlay_menu.addAction(self.goes_overlay_short_action)
+        self.swaves_panel_action = QAction("SWAVES Panel", self, checkable=True)
+        self.swaves_panel_action.setChecked(True)
+        self.swaves_panel_action.setEnabled(False)
+        self.swaves_panel_action.toggled.connect(self._on_swaves_panel_toggled)
+        solar_events_menu.addAction(self.swaves_panel_action)
 
         # View Menu
         view_menu = menubar.addMenu("View")
@@ -2175,6 +2199,7 @@ class MainWindow(QMainWindow):
             view=view,
         )
         self.accel_canvas.set_time_mode(self.use_utc, self.ut_start_sec)
+        self._refresh_accel_swaves_panel()
         try:
             self.accel_canvas.set_goes_overlay(
                 self._goes_overlay_payload if self._goes_overlay_enabled else None,
@@ -2184,6 +2209,44 @@ class MainWindow(QMainWindow):
             pass
         self._render_light_curve_accel_overlay()
         return True
+
+    def _refresh_accel_swaves_panel(self) -> None:
+        """Mirror the SWAVES companion panel onto the hardware canvas."""
+        accel = getattr(self, "accel_canvas", None)
+        if accel is None or not accel.is_available:
+            return
+
+        payload = getattr(self, "_swaves_payload", None)
+        if payload is None or not self._swaves_visible:
+            if accel.has_swaves_panel:
+                accel.clear_swaves_panel()
+            return
+
+        span = None
+        if self.time is not None and len(self.time):
+            try:
+                span = (float(np.min(self.time)), float(np.max(self.time)))
+            except Exception:
+                span = None
+
+        x_label = "Time [UT]" if (self.use_utc and self.ut_start_sec is not None) else "Time [s]"
+        title = "" if self.remove_titles else f"STEREO/SWAVES — {payload.spacecraft_label}"
+        cbar_label = "" if self.remove_titles else payload.units_label
+
+        try:
+            accel.set_swaves_panel(
+                payload,
+                self.get_current_cmap(),
+                levels=self._swaves_clim(payload),
+                span=span,
+                title=title,
+                x_label=x_label,
+                colorbar_label=cbar_label,
+                use_utc=self.use_utc,
+                ut_start_sec=self.ut_start_sec,
+            )
+        except Exception:
+            pass
 
     def _apply_mpl_theme(self):
         """
@@ -2242,6 +2305,7 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
+        self._style_swaves_axis()
         self.canvas.draw_idle()
 
     def _refresh_toolbar_icons(self):
@@ -2408,6 +2472,10 @@ class MainWindow(QMainWindow):
         if ax is None:
             return
 
+        # The standalone SWAVES view owns its own titles and tick formatting.
+        if getattr(self, "_swaves_standalone", False):
+            return
+
         # Must have an image already
         if not ax.images or len(ax.images) == 0:
             return
@@ -2555,6 +2623,8 @@ class MainWindow(QMainWindow):
         self.axis_bold_chk.setEnabled(not disable)
         self.axis_italic_chk.setEnabled(not disable)
 
+        self._style_swaves_axis()
+        self._move_time_label_to_bottom_panel()
         self.canvas.draw_idle()
         self._refresh_accel_plot(preserve_view=True)
         self._render_goes_overlay()
@@ -5150,6 +5220,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Import View Config", "View config applied.")
 
     def _clear_current_colorbar_artists(self) -> None:
+        self._clear_swaves_panel_artists()
+
         cbar = getattr(self, "current_colorbar", None)
         cax = getattr(self, "current_cax", None)
         self.current_colorbar = None
@@ -5170,6 +5242,300 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+    # ------------------------------------------------------------------
+    # STEREO/SWAVES companion panel
+    # ------------------------------------------------------------------
+
+    def _swaves_active(self) -> bool:
+        return bool(getattr(self, "_swaves_payload", None) is not None and self._swaves_visible)
+
+    def _clear_swaves_panel_artists(self) -> None:
+        cbar = getattr(self, "_swaves_colorbar", None)
+        cax = getattr(self, "_swaves_cax", None)
+        self._swaves_colorbar = None
+        self._swaves_cax = None
+        self._swaves_ax = None
+
+        figure_axes = list(getattr(self.canvas.figure, "axes", []))
+        for artist in (cbar, cax):
+            if artist is None:
+                continue
+            try:
+                axis = getattr(artist, "ax", None)
+                if axis is not None:
+                    if axis in figure_axes:
+                        artist.remove()
+                    continue
+                if artist in figure_axes:
+                    artist.remove()
+            except Exception:
+                pass
+
+    def _build_main_axes(self):
+        """Create the plotting axes, splitting the figure when SWAVES is loaded.
+
+        The figure is cleared on every redraw, so the companion panel has to be
+        rebuilt here each time rather than created once at start-up.
+        """
+        figure = self.canvas.figure
+        self._swaves_colorbar = None
+
+        if self._swaves_active():
+            grid = figure.add_gridspec(2, 1, height_ratios=[1, 1], hspace=0.14)
+            main_ax = figure.add_subplot(grid[0, 0])
+            swaves_ax = figure.add_subplot(grid[1, 0], sharex=main_ax)
+            swaves_ax.set_navigate(False)
+            self._swaves_ax = swaves_ax
+            self._swaves_cax = make_axes_locatable(swaves_ax).append_axes("right", size="5%", pad=0.1)
+        else:
+            main_ax = figure.add_subplot(111)
+            self._swaves_ax = None
+            self._swaves_cax = None
+
+        self.canvas.ax = main_ax
+        self.current_cax = make_axes_locatable(main_ax).append_axes("right", size="5%", pad=0.1)
+        return main_ax, self._swaves_ax
+
+    def _swaves_clim(self, payload) -> tuple[float, float] | tuple[None, None]:
+        vmin, vmax = percentile_data_limits(payload.intensity_db, 5.0, 98.0)
+        if vmin is None or vmax is None:
+            return finite_data_limits(payload.intensity_db)
+        return vmin, vmax
+
+    def _draw_swaves_span_marker(self, ax) -> None:
+        """Outline the CALLISTO interval inside the wider SWAVES context window."""
+        if self.time is None or len(self.time) == 0:
+            return
+        try:
+            t0 = float(np.min(self.time))
+            t1 = float(np.max(self.time))
+        except Exception:
+            return
+        if not np.isfinite(t0) or not np.isfinite(t1) or t1 <= t0:
+            return
+
+        edge = "#ffffff"
+        try:
+            if self.theme is not None and not bool(getattr(self.theme, "is_dark", True)):
+                edge = "#202020"
+        except Exception:
+            pass
+        try:
+            ax.axvspan(
+                t0,
+                t1,
+                facecolor="none",
+                edgecolor=edge,
+                linewidth=1.2,
+                linestyle="--",
+                zorder=5,
+            )
+        except Exception:
+            pass
+
+    def _render_swaves_panel(self) -> None:
+        ax = getattr(self, "_swaves_ax", None)
+        payload = getattr(self, "_swaves_payload", None)
+        if ax is None or payload is None or not self._swaves_visible:
+            return
+
+        try:
+            image = ax.imshow(
+                masked_display_data(payload.intensity_db),
+                aspect="auto",
+                extent=payload.matplotlib_extent(),
+                cmap=self._plot_cmap(),
+            )
+            vmin, vmax = self._swaves_clim(payload)
+            if vmin is not None and vmax is not None:
+                image.set_clim(vmin, vmax)
+
+            if self._swaves_cax is not None:
+                self._swaves_colorbar = self.canvas.figure.colorbar(image, cax=self._swaves_cax)
+                self._swaves_colorbar_label_text = payload.units_label
+                self._swaves_colorbar.set_label(payload.units_label)
+
+            ticks = log_frequency_ticks(float(payload.log_freq_rows[-1]), float(payload.log_freq_rows[0]))
+            if ticks:
+                ax.yaxis.set_major_locator(FixedLocator(ticks))
+            ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _pos: format_log_frequency(value)))
+            ax.set_ylabel("Frequency")
+            if ax is not self.canvas.ax:
+                # Split view only: standalone sets its own centred title.
+                ax.set_title(f"STEREO/SWAVES — {payload.spacecraft_label}", loc="left", fontsize=10)
+                self._draw_swaves_span_marker(ax)
+            ax.set_navigate(False)
+        except Exception:
+            self._swaves_colorbar = None
+
+    def _apply_shared_time_limits(self) -> None:
+        """Widen the shared x axis to cover both instruments' time ranges."""
+        ax = getattr(self, "_swaves_ax", None)
+        payload = getattr(self, "_swaves_payload", None)
+        if ax is None or payload is None or ax is self.canvas.ax:
+            return
+        try:
+            x0, x1 = payload.time_bounds()
+        except Exception:
+            return
+        if self.time is not None and len(self.time):
+            try:
+                x0 = min(x0, float(np.min(self.time)))
+                x1 = max(x1, float(np.max(self.time)))
+            except Exception:
+                pass
+        if np.isfinite(x0) and np.isfinite(x1) and x1 > x0:
+            self.canvas.ax.set_xlim(x0, x1)
+
+    def _move_time_label_to_bottom_panel(self) -> None:
+        """In split view only the lower panel carries the time ticks and label."""
+        ax = getattr(self, "_swaves_ax", None)
+        if ax is None or ax is self.canvas.ax:
+            return
+        try:
+            label = self.canvas.ax.get_xlabel()
+            self.canvas.ax.set_xlabel("")
+            self.canvas.ax.tick_params(axis="x", labelbottom=False)
+            ax.set_xlabel(label)
+            ax.tick_params(axis="x", labelbottom=True)
+        except Exception:
+            pass
+
+    def _style_swaves_axis(self) -> None:
+        """Match the companion panel to the active theme and font settings."""
+        ax = getattr(self, "_swaves_ax", None)
+        if ax is None or ax is self.canvas.ax:
+            return
+
+        app = QApplication.instance()
+        if app:
+            pal = app.palette()
+            base_bg = pal.color(QPalette.Base).name()
+            fg = pal.color(QPalette.WindowText).name()
+            mid = pal.color(QPalette.Mid).name()
+
+            ax.set_facecolor(base_bg)
+            for spine in ax.spines.values():
+                spine.set_color(fg)
+            ax.tick_params(axis="both", colors=fg, which="both")
+            ax.xaxis.label.set_color(fg)
+            ax.yaxis.label.set_color(fg)
+            ax.title.set_color(fg)
+            ax.grid(False)
+
+            cbar = getattr(self, "_swaves_colorbar", None)
+            if cbar is not None:
+                try:
+                    cax = cbar.ax
+                    cax.set_facecolor(base_bg)
+                    cax.tick_params(colors=fg)
+                    cax.yaxis.label.set_color(fg)
+                    for spine in cax.spines.values():
+                        spine.set_color(fg)
+                    cbar.outline.set_edgecolor(mid)
+                except Exception:
+                    pass
+
+        fontfam = normalize_font_family(self.graph_font_family) or None
+        weight = "bold" if self.ticks_bold else "normal"
+        style = "italic" if self.ticks_italic else "normal"
+        for label in list(ax.get_xticklabels()) + list(ax.get_yticklabels()):
+            label.set_fontsize(self.tick_font_px)
+            label.set_fontweight(weight)
+            label.set_fontstyle(style)
+            if fontfam:
+                label.set_fontfamily(fontfam)
+
+        axis_weight = "bold" if self.axis_bold else "normal"
+        axis_style = "italic" if self.axis_italic else "normal"
+        if self.remove_titles:
+            ax.set_title("", loc="left")
+            ax.set_ylabel("")
+        else:
+            for label_obj in (ax.xaxis.label, ax.yaxis.label):
+                label_obj.set_fontsize(self.axis_label_font_px)
+                label_obj.set_fontweight(axis_weight)
+                label_obj.set_fontstyle(axis_style)
+                if fontfam:
+                    label_obj.set_fontfamily(fontfam)
+
+        cbar = getattr(self, "_swaves_colorbar", None)
+        if cbar is not None:
+            try:
+                cax = cbar.ax
+                cax.tick_params(labelsize=self.tick_font_px)
+                for label in cax.get_yticklabels():
+                    label.set_fontsize(self.tick_font_px)
+                    if fontfam:
+                        label.set_fontfamily(fontfam)
+                if self.remove_titles:
+                    cbar.set_label("")
+                else:
+                    cbar.set_label(
+                        getattr(self, "_swaves_colorbar_label_text", "") or cax.get_ylabel(),
+                        fontsize=self.axis_label_font_px,
+                        fontfamily=fontfam,
+                        fontweight=axis_weight,
+                        fontstyle=axis_style,
+                    )
+            except Exception:
+                pass
+
+    def _plot_swaves_only(self) -> None:
+        """Draw SWAVES full-area when no CALLISTO spectrum is loaded."""
+        payload = getattr(self, "_swaves_payload", None)
+        if payload is None or not self._swaves_visible:
+            return
+        if not hasattr(self.canvas, "ax") or self.canvas.ax is None:
+            return
+
+        self._stop_rect_zoom()
+        self._clear_current_colorbar_artists()
+        self._clear_swaves_panel_artists()
+        self.canvas.figure.clf()
+
+        ax = self.canvas.figure.add_subplot(111)
+        self.canvas.ax = ax
+        self._swaves_ax = ax
+        self._swaves_standalone = True
+        self._swaves_cax = make_axes_locatable(ax).append_axes("right", size="5%", pad=0.1)
+        self.current_cax = None
+
+        self._render_swaves_panel()
+
+        base = payload.base_utc
+
+        def format_utc(value, _pos):
+            try:
+                moment = base + timedelta(seconds=float(value))
+            except (OverflowError, ValueError):
+                return ""
+            span = abs(float(np.subtract(*ax.get_xlim())))
+            if span <= 5 * 60:
+                return f"{moment:%H:%M:%S}"
+            return f"{moment:%H:%M}"
+
+        ax.xaxis.set_major_formatter(FuncFormatter(format_utc))
+        ax.set_xlabel("Time [UT]")
+        ax.set_title(
+            f"STEREO/SWAVES — {payload.spacecraft_label}  {payload.start_utc:%Y-%m-%d}",
+            fontsize=14,
+        )
+
+        try:
+            x0, x1 = payload.time_bounds()
+            ax.set_xlim(x0, x1)
+        except Exception:
+            pass
+        self._home_view = {"xlim": ax.get_xlim(), "ylim": ax.get_ylim()}
+
+        self._apply_mpl_theme()
+        style_axes(ax)
+        self._style_swaves_axis()
+        self.canvas.draw_idle()
+        self._show_plot_canvas()
+        self.statusBar().showMessage(f"Loaded SWAVES: {payload.spacecraft_label}", 5000)
+
     def _plot_data_internal(self, data, title="Raw", view=None):
 
         self._stop_rect_zoom()
@@ -5185,14 +5551,11 @@ class MainWindow(QMainWindow):
         self._clear_current_colorbar_artists()
         self.canvas.ax.clear()
         self.canvas.figure.clf()
-        self.canvas.ax = self.canvas.figure.add_subplot(111)
+        self._swaves_standalone = False
+        self._build_main_axes()
 
         cmap = self._plot_cmap()
-
-        # Prepare colorbar axis
-        divider = make_axes_locatable(self.canvas.ax)
-        cax = divider.append_axes("right", size="5%", pad=0.1)
-        self.current_cax = cax
+        cax = self.current_cax
 
         # Show image (convert units for display if needed)
         display_data = self._intensity_for_display(data)
@@ -5221,6 +5584,11 @@ class MainWindow(QMainWindow):
         plot_type = self._normalize_plot_type(title)
         self.canvas.ax.set_ylabel("Frequency [MHz]")
         self.canvas.ax.set_title(self._default_graph_title(plot_type), fontsize=14)
+
+        # Draw the companion panel before capturing the home view: the shared
+        # x axis spans the union of both instruments' time ranges.
+        self._render_swaves_panel()
+        self._apply_shared_time_limits()
 
         # Save full-extent limits as the "home" view (used for Reset Selection after zoom/pan)
         self._home_view = {
@@ -5258,10 +5626,49 @@ class MainWindow(QMainWindow):
         self._sync_toolbar_enabled_states()
         self.statusBar().showMessage(f"Loaded: {self.filename}", 5000)
 
+    def _update_cursor_label_from_swaves(self, x: float, y: float) -> bool:
+        """Status-bar readout for the SWAVES panel (log10(kHz) y coordinate)."""
+        payload = getattr(self, "_swaves_payload", None)
+        if payload is None:
+            return False
+        try:
+            x_arr = np.asarray(payload.x_seconds, dtype=float)
+            rows = np.asarray(payload.log_freq_rows, dtype=float)
+            if x_arr.size == 0 or rows.size == 0:
+                return False
+
+            idx_x = int(np.argmin(np.abs(x_arr - float(x))))
+            idx_y = int(np.argmin(np.abs(rows - float(y))))
+            intensity = float(payload.intensity_db[idx_y, idx_x])
+
+            moment = payload.base_utc + timedelta(seconds=float(x_arr[idx_x]))
+            freq_text = format_log_frequency(float(rows[idx_y]))
+            value_text = "n/a" if not np.isfinite(intensity) else f"{intensity:.2f} dB>bgnd"
+            self.cursor_label.setText(
+                f"SWAVES   t = {moment:%H:%M:%S} UT   |   f = {freq_text}   |   I = {value_text}"
+            )
+            return True
+        except Exception:
+            return False
+
     def on_mouse_motion_status(self, event):
         """Show time, frequency and intensity under cursor in status bar."""
+        swaves_ax = getattr(self, "_swaves_ax", None)
+        if (
+            swaves_ax is not None
+            and swaves_ax is not self.canvas.ax
+            and event.inaxes is swaves_ax
+            and event.xdata is not None
+            and event.ydata is not None
+        ):
+            if self._update_cursor_label_from_swaves(float(event.xdata), float(event.ydata)):
+                return
+
         in_axes = event.inaxes == self.canvas.ax and event.xdata is not None and event.ydata is not None
         if in_axes:
+            if getattr(self, "_swaves_standalone", False):
+                self._update_cursor_label_from_swaves(float(event.xdata), float(event.ydata))
+                return
             self._update_cursor_label_from_xy(float(event.xdata), float(event.ydata), True)
             return
 
@@ -6225,7 +6632,13 @@ class MainWindow(QMainWindow):
 
     def _export_hardware_visible_plot(self, file_path: str, ext_final: str) -> None:
         ext = str(ext_final or "").lower()
-        plot_item = self.accel_canvas.export_plot_item()
+        # With the SWAVES panel up, export the whole scene so both panels land
+        # in the file; a single PlotItem would capture only the CALLISTO one.
+        plot_item = None
+        if getattr(self.accel_canvas, "has_swaves_panel", False):
+            plot_item = self.accel_canvas.export_scene()
+        if plot_item is None:
+            plot_item = self.accel_canvas.export_plot_item()
         if plot_item is None:
             raise RuntimeError("Hardware plot is not available for export.")
 
@@ -6244,7 +6657,18 @@ class MainWindow(QMainWindow):
                     params["width"] = max(width, 1400)
                     exporter.export(file_path)
                     if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-                        return
+                        # A non-empty file is not proof of a real render: an
+                        # unrealised scene exports as a blank canvas. The
+                        # detector only decodes PNG, so limit the check to it.
+                        blank = False
+                        if ext == "png":
+                            try:
+                                with open(file_path, "rb") as handle:
+                                    blank = self._png_is_blank_or_black(handle.read())
+                            except Exception:
+                                blank = False
+                        if not blank:
+                            return
                 except Exception:
                     pass
                 self._save_captured_hardware_plot(file_path, ext)
@@ -7713,10 +8137,15 @@ class MainWindow(QMainWindow):
 
             self.canvas.ax.xaxis.set_major_formatter(FuncFormatter(format_func))
             self.canvas.ax.set_xlabel("Time [UT]")
+            if self._swaves_ax is not None and self._swaves_ax is not self.canvas.ax:
+                self._swaves_ax.xaxis.set_major_formatter(FuncFormatter(format_func))
         else:
             self.canvas.ax.xaxis.set_major_formatter(ScalarFormatter())
             self.canvas.ax.set_xlabel("Time [s]")
+            if self._swaves_ax is not None and self._swaves_ax is not self.canvas.ax:
+                self._swaves_ax.xaxis.set_major_formatter(ScalarFormatter())
 
+        self._move_time_label_to_bottom_panel()
         self.canvas.ax.figure.canvas.draw()
         if getattr(self, "accel_canvas", None) is not None and self.accel_canvas.is_available:
             self.accel_canvas.set_time_mode(self.use_utc, self.ut_start_sec)
@@ -8172,6 +8601,121 @@ class MainWindow(QMainWindow):
         self.downloader_dialog.import_success.connect(self.import_success_signal)
 
         self.downloader_dialog.exec()
+
+    def _swaves_base_utc(self) -> datetime | None:
+        """UTC instant of x=0 on the CALLISTO time axis."""
+        if self.ut_start_sec is None:
+            return None
+        obs_date = self._extract_observation_date()
+        if obs_date is None:
+            return None
+        return datetime(
+            obs_date.year,
+            obs_date.month,
+            obs_date.day,
+            tzinfo=timezone.utc,
+        ) + timedelta(seconds=float(self.ut_start_sec))
+
+    def launch_swaves_downloader(self):
+        from src.UI.swaves_downloader import SwavesDownloaderApp
+
+        base_utc = self._swaves_base_utc()
+        window = self._current_time_window_utc()
+
+        dialog = getattr(self, "_swaves_dialog", None)
+        alive = False
+        if dialog is not None:
+            try:
+                dialog.windowTitle()
+                alive = True
+            except RuntimeError:
+                alive = False
+
+        if not alive:
+            dialog = SwavesDownloaderApp(
+                self,
+                callisto_window=window,
+                callisto_base_utc=base_utc,
+            )
+            dialog.swaves_ready.connect(self._on_swaves_payload_ready)
+            self._swaves_dialog = dialog
+        else:
+            dialog.set_callisto_context(window, base_utc)
+
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    @Slot(object)
+    def _on_swaves_payload_ready(self, payload):
+        if payload is None:
+            return
+
+        base_utc = self._swaves_base_utc()
+        if base_utc is not None:
+            try:
+                payload = payload.rebase(base_utc)
+            except Exception:
+                pass
+
+        self._swaves_payload = payload
+        self._swaves_visible = True
+        self._swaves_standalone = False
+
+        action = getattr(self, "swaves_panel_action", None)
+        if action is not None:
+            action.setEnabled(True)
+            action.blockSignals(True)
+            action.setChecked(True)
+            action.blockSignals(False)
+
+        self._log_operation(
+            f"Loaded STEREO/SWAVES {payload.spacecraft_label}: "
+            f"{payload.start_utc:%Y-%m-%d %H:%M} to {payload.end_utc:%H:%M} UTC."
+        )
+        self._mark_project_dirty()
+        self._redraw_with_swaves()
+
+    def _redraw_with_swaves(self) -> None:
+        if self.raw_data is None:
+            self._plot_swaves_only()
+            return
+        data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
+        self.plot_data(data, title=self.current_plot_type)
+
+    def _on_swaves_panel_toggled(self, checked: bool):
+        self._swaves_visible = bool(checked)
+        if getattr(self, "_swaves_payload", None) is None:
+            return
+        if self.raw_data is None:
+            if self._swaves_visible:
+                self._plot_swaves_only()
+            else:
+                self._clear_current_colorbar_artists()
+                self.canvas.figure.clf()
+                self.canvas.ax = self.canvas.figure.add_subplot(111)
+                self._swaves_standalone = False
+                style_axes(self.canvas.ax)
+                self._apply_mpl_theme()
+                self.canvas.draw_idle()
+            return
+        self._redraw_with_swaves()
+
+    def clear_swaves_panel(self) -> None:
+        """Drop the loaded SWAVES data and return to the single-panel view."""
+        if getattr(self, "_swaves_payload", None) is None:
+            return
+        self._swaves_payload = None
+        self._swaves_standalone = False
+        action = getattr(self, "swaves_panel_action", None)
+        if action is not None:
+            action.setEnabled(False)
+            action.blockSignals(True)
+            action.setChecked(True)
+            action.blockSignals(False)
+        self._swaves_visible = True
+        if self.raw_data is not None:
+            self._redraw_with_swaves()
 
     def launch_learmonth_downloader(self):
         self.learmonth_downloader_dialog = LearmonthDownloaderApp()
@@ -10136,6 +10680,25 @@ class MainWindow(QMainWindow):
         except Exception:
             return False
 
+    def _sync_window_to_swaves(self, start_dt: datetime, end_dt: datetime) -> bool:
+        """Push the current CALLISTO window (plus padding) into the SWAVES dialog."""
+        dialog = getattr(self, "_swaves_dialog", None)
+        if dialog is None:
+            return False
+        try:
+            dialog.windowTitle()
+        except RuntimeError:
+            self._swaves_dialog = None
+            return False
+        if not hasattr(dialog, "set_callisto_context"):
+            return False
+        try:
+            dialog.set_callisto_context((start_dt, end_dt), self._swaves_base_utc())
+            dialog.use_callisto_window()
+            return True
+        except Exception:
+            return False
+
     def sync_current_time_window_to_solar_events(self):
         window = self._current_time_window_utc()
         if not window:
@@ -10150,6 +10713,7 @@ class MainWindow(QMainWindow):
         sep_ok = self._sync_window_to_sep(start_dt, end_dt, auto_plot=True)
         dst_ok = self._sync_window_to_dst(start_dt, end_dt, auto_plot=True)
         kp_ok = self._sync_window_to_kp(start_dt, end_dt, auto_plot=True)
+        swaves_ok = self._sync_window_to_swaves(start_dt, end_dt)
 
         self._last_time_sync_context = {
             "start_utc": start_dt.isoformat(timespec="seconds"),
@@ -10161,9 +10725,10 @@ class MainWindow(QMainWindow):
             "sep_synced": bool(sep_ok),
             "dst_synced": bool(dst_ok),
             "kp_synced": bool(kp_ok),
+            "swaves_synced": bool(swaves_ok),
         }
         self._log_operation("Synced current time window to Solar Events panels.")
-        if not goes_ok and not cme_ok and not sunpy_ok and not sep_ok and not dst_ok and not kp_ok:
+        if not any((goes_ok, cme_ok, sunpy_ok, sep_ok, dst_ok, kp_ok, swaves_ok)):
             self.statusBar().showMessage("No open Solar Events windows to sync.", 4000)
         else:
             self.statusBar().showMessage("Synced current time window to Solar Events.", 4000)
@@ -11191,6 +11756,107 @@ class MainWindow(QMainWindow):
             unavailable=f"{title} window was loaded, but its plot could not be captured.",
         )
 
+    def _capture_swaves_report_figure(self, *, view=None) -> ProjectReportFigure:
+        """Render the CALLISTO/SWAVES split view into the PDF report."""
+        payload = getattr(self, "_swaves_payload", None)
+        title = "CALLISTO and STEREO/SWAVES Dynamic Spectra"
+        if payload is None:
+            return self._project_report_figure(
+                title,
+                None,
+                unavailable="STEREO/SWAVES data are not loaded.",
+            )
+
+        png = b""
+        try:
+            callisto = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
+            has_callisto = callisto is not None and self.time is not None and self.freqs is not None
+
+            fig = Figure(figsize=(7.6, 6.4 if has_callisto else 3.8), dpi=150)
+            if has_callisto:
+                grid = fig.add_gridspec(2, 1, height_ratios=[1, 1], hspace=0.16)
+                top_ax = fig.add_subplot(grid[0, 0])
+                bottom_ax = fig.add_subplot(grid[1, 0], sharex=top_ax)
+            else:
+                top_ax = None
+                bottom_ax = fig.add_subplot(111)
+
+            x_lo = None
+            x_hi = None
+            if top_ax is not None:
+                style_axes(top_ax)
+                display = self._intensity_for_display(callisto)
+                image = top_ax.imshow(
+                    masked_display_data(display),
+                    aspect="auto",
+                    extent=matplotlib_extent(self.freqs, self.time, default_step=self._frequency_step_mhz),
+                    cmap=self._plot_cmap(),
+                )
+                vmin, vmax = finite_data_limits(display)
+                if vmin is not None and vmax is not None:
+                    image.set_clim(vmin, vmax)
+                top_ax.set_ylabel("Frequency [MHz]")
+                top_ax.set_title(f"CALLISTO — {self.filename or 'loaded spectrum'}", loc="left", fontsize=10)
+                top_ax.tick_params(axis="x", labelbottom=False)
+                fig.colorbar(
+                    image,
+                    ax=top_ax,
+                    pad=0.01,
+                ).set_label("Intensity [dB]" if self.use_db else "Intensity [Digits]", fontsize=8)
+                x_lo = float(np.min(self.time))
+                x_hi = float(np.max(self.time))
+
+            style_axes(bottom_ax)
+            swaves_image = bottom_ax.imshow(
+                masked_display_data(payload.intensity_db),
+                aspect="auto",
+                extent=payload.matplotlib_extent(),
+                cmap=self._plot_cmap(),
+            )
+            vmin, vmax = self._swaves_clim(payload)
+            if vmin is not None and vmax is not None:
+                swaves_image.set_clim(vmin, vmax)
+
+            ticks = log_frequency_ticks(float(payload.log_freq_rows[-1]), float(payload.log_freq_rows[0]))
+            if ticks:
+                bottom_ax.yaxis.set_major_locator(FixedLocator(ticks))
+            bottom_ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _pos: format_log_frequency(value)))
+            bottom_ax.set_ylabel("Frequency")
+            bottom_ax.set_title(f"STEREO/SWAVES — {payload.spacecraft_label}", loc="left", fontsize=10)
+            fig.colorbar(swaves_image, ax=bottom_ax, pad=0.01).set_label(payload.units_label, fontsize=8)
+
+            base = payload.base_utc
+            bottom_ax.xaxis.set_major_formatter(
+                FuncFormatter(lambda value, _pos: f"{base + timedelta(seconds=float(value)):%H:%M}")
+            )
+            bottom_ax.set_xlabel(f"Time [UT]  {payload.start_utc:%Y-%m-%d}")
+
+            sx0, sx1 = payload.time_bounds()
+            if x_lo is None:
+                lo, hi = sx0, sx1
+            else:
+                lo, hi = min(x_lo, sx0), max(x_hi, sx1)
+                bottom_ax.axvspan(
+                    x_lo,
+                    x_hi,
+                    facecolor="none",
+                    edgecolor="#202020",
+                    linewidth=1.1,
+                    linestyle="--",
+                    zorder=5,
+                )
+            bottom_ax.set_xlim(lo, hi)
+
+            png = self._matplotlib_figure_to_png(fig)
+        except Exception:
+            png = b""
+
+        return self._project_report_figure(
+            title,
+            png,
+            unavailable="STEREO/SWAVES figure could not be rendered.",
+        )
+
     def _build_project_report_figures(self, session: dict | None) -> list[ProjectReportFigure]:
         figures: list[ProjectReportFigure] = []
         report_view = self._capture_view()
@@ -11241,6 +11907,9 @@ class MainWindow(QMainWindow):
 
         figures.append(self._capture_max_intensity_fit_report_figure(session))
         figures.append(self._capture_type_ii_report_figure(session))
+
+        if getattr(self, "_swaves_payload", None) is not None:
+            figures.append(self._capture_swaves_report_figure(view=report_view))
 
         goes_window_fig = self._capture_solar_window_report_figure(
             "_goes_window",
@@ -11549,6 +12218,17 @@ class MainWindow(QMainWindow):
             "time": state["time"],
         }
 
+        swaves_meta = None
+        swaves_payload = getattr(self, "_swaves_payload", None)
+        if swaves_payload is not None:
+            try:
+                swaves_meta = swaves_payload.to_meta()
+                swaves_meta["visible"] = bool(self._swaves_visible)
+                swaves_meta["pad_seconds"] = int(getattr(self, "_swaves_pad_seconds", SWAVES_DEFAULT_PAD_SECONDS))
+                arrays.update(swaves_payload.to_arrays())
+            except Exception:
+                swaves_meta = None
+
         header_txt = None
         try:
             if getattr(self, "_fits_header0", None) is not None:
@@ -11606,6 +12286,7 @@ class MainWindow(QMainWindow):
             "active_preset": dict(getattr(self, "_active_preset_snapshot", {}) or {}),
             "processing_log": list(getattr(self, "_processing_log", []) or []),
             "time_sync": dict(getattr(self, "_last_time_sync_context", {}) or {}),
+            "swaves": swaves_meta,
         }
 
         # Canonical analysis session (v2.6.0)
@@ -11649,6 +12330,38 @@ class MainWindow(QMainWindow):
 
         return meta, arrays
 
+    def _restore_swaves_from_project(self, meta: dict, arrays: dict) -> None:
+        """Rebuild the SWAVES panel from the project file without re-downloading."""
+        swaves_meta = meta.get("swaves") or None
+        action = getattr(self, "swaves_panel_action", None)
+
+        payload = None
+        if isinstance(swaves_meta, dict):
+            payload = SwavesPayload.from_project(swaves_meta, arrays)
+
+        self._swaves_payload = payload
+        self._swaves_standalone = False
+        if payload is None:
+            self._swaves_visible = True
+            if action is not None:
+                action.setEnabled(False)
+                action.blockSignals(True)
+                action.setChecked(True)
+                action.blockSignals(False)
+            return
+
+        self._swaves_visible = bool(swaves_meta.get("visible", True))
+        try:
+            self._swaves_pad_seconds = int(swaves_meta.get("pad_seconds", SWAVES_DEFAULT_PAD_SECONDS))
+        except (TypeError, ValueError):
+            self._swaves_pad_seconds = int(SWAVES_DEFAULT_PAD_SECONDS)
+
+        if action is not None:
+            action.setEnabled(True)
+            action.blockSignals(True)
+            action.setChecked(self._swaves_visible)
+            action.blockSignals(False)
+
     def _apply_project_payload(self, meta: dict, arrays: dict):
         self._loading_project = True
         try:
@@ -11682,6 +12395,8 @@ class MainWindow(QMainWindow):
                     self._gap_row_mask = self._gap_row_mask.copy()
                 except Exception:
                     pass
+
+            self._restore_swaves_from_project(meta, arrays)
 
             self.filename = meta.get("filename", "") or ""
             self.current_plot_type = self._normalize_plot_type(meta.get("current_plot_type", "Raw"))

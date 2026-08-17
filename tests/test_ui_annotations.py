@@ -200,9 +200,12 @@ def test_goes_overlay_submenu_is_present_in_solar_events_menu():
 
     assert solar_menu is not None
     actions = [action for action in solar_menu.actions() if not action.isSeparator()]
-    assert actions[-2].text() == "Sync Current Time Window"
-    assert actions[-1].text() == "GOES Overlay"
-    goes_menu = actions[-1].menu()
+    labels = [action.text() for action in actions]
+    # Look items up by name: positional indices break whenever an entry is added.
+    assert "Sync Current Time Window" in labels
+    assert labels.index("Sync Current Time Window") < labels.index("GOES Overlay")
+    goes_action = actions[labels.index("GOES Overlay")]
+    goes_menu = goes_action.menu()
     assert goes_menu is not None
     goes_actions = [action for action in goes_menu.actions() if not action.isSeparator()]
     assert [action.text() for action in goes_actions] == ["Short(XRS-A)", "Long(XRS-B)"]

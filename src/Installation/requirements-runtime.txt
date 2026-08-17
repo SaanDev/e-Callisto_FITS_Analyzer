@@ -17,6 +17,9 @@ certifi==2026.5.20
 beautifulsoup4==4.14.3
 netCDF4==1.7.3
 cftime==1.6.5
+# STEREO/SWAVES level-2 CDF reader. Arrives transitively with
+# sunpy[timeseries] today, but the analyzer imports it directly.
+cdflib==1.3.8
 sunpy[map,net,timeseries]==7.1.0
 # SunPy download stack — pinned because the app imports/relies on them directly
 parfive==2.3.1
