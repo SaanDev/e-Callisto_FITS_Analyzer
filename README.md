@@ -1,5 +1,34 @@
-# e-CALLISTO FITS Analyzer (v2.7.0)
+# e-CALLISTO FITS Analyzer (v2.8.0)
 A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data.
+
+---
+
+## What's New in v2.8.0
+
+Compared with v2.7.0, this release adds the following capabilities:
+
+### Multi-instrument coronagraph composites (SDO and STEREO over SOHO/LASCO)
+- **Overlay Layers:** a new sidebar panel in the Solar Image Analysis coronagraph views stacks SDO/AIA, SDO/HMI, SOHO/LASCO C2/C3, STEREO SECCHI (EUVI, COR1, COR2, HI) and GOES/SUVI on top of the loaded series. Each layer's frames are searched and downloaded automatically, time-matched to the loaded frames within a configurable window (30 minutes by default), reprojected onto the base series' WCS, masked to its own field-of-view annulus in solar radii, and alpha-blended widest field of view first — one continuous image from the disk out to the outer corona, so a CME front can be followed without switching windows.
+- **Per-layer appearance:** colormap, log/linear scale, opacity, midtone gamma, and inner/outer field-of-view edges in R☉ are set per layer, and any layer can be un-ticked without losing its settings. Each layer is colour-mapped to RGB *before* blending, so the EUV disk and the white-light outer corona — orders of magnitude apart in brightness — both stay visible instead of one normalisation flattening the other.
+- **Correct cross-observer geometry:** coronagraph layers reproject under a spherical-screen assumption centred on the target observer instead of the default solar-surface assumption, which otherwise discards most optically-thin structure as the STEREO/SOHO baseline grows. Layers that rely on it are reported as approximate in the build notes — cross-observer coronagraph overlays are morphological context, not photometry.
+- **Background builds:** the composite build reports progress, keeps a partial result when one layer's archive comes up short, and the finished composite works with the measurement tools, PNG save and movie export. **Clear** drops it and restores the originally loaded frames.
+- **Quieter logs:** the sunpy "missing observer metadata" and astropy header-verification warnings that SOHO/LASCO archive files raise on every frame are now shown once per session rather than thousands of times; the Earth-based-observer assumption is stated once in the composite build notes instead.
+
+### STEREO/SWAVES radio spectrograph
+- **New archive:** **Solar Events → Radio Bursts → SWAVES** loads NASA/SPDF STEREO/WAVES level-2 daily CDFs — 2.6 kHz to 16 MHz in one-minute averages, back to 2006-10-27 — for STEREO-A (Ahead) or STEREO-B (Behind), with Behind disabled for dates after contact was lost on 2014-10-01. Windows that cross UTC midnight fetch and stitch both day files, and downloads are cached locally.
+- **Split CALLISTO + SWAVES view:** SWAVES plots below the loaded spectrum on a shared time axis, so panning or zooming either panel moves both, with the CALLISTO interval outlined on the SWAVES panel. SWAVES keeps its own logarithmic frequency axis and dB-above-background colorbar while following the colormap chosen in the sidebar. Loading it with no FITS file open plots it across the full area, and it folds into the split view as soon as one is loaded.
+- **Time-window sync:** **Use CALLISTO Window** copies the loaded spectrum's range widened on both sides by a configurable padding (30 minutes by default), because a type II or III burst takes tens of minutes to hours to drift from the corona down into the SWAVES band and an exact match would cut it off. **Solar Events → Sync Current Time Window** updates an open SWAVES dialog the same way.
+- **Kept with the session:** **Solar Events → SWAVES Panel** hides and restores the panel without discarding the loaded data, and the split view is included in Save Plot exports, stored in and restored from `.efaproj` project files without re-downloading, and added to generated project report PDFs.
+
+### Hardware acceleration and compute backend
+- **Compute backend layer:** array-heavy work — background subtraction, RFI cleaning, live preview rendering, coronagraph radial filtering — now runs through `src/Backend/compute.py`, which dispatches to JAX/XLA when it is installed and the array is large enough to be worth the transfer, and to NumPy otherwise. JAX is never required: a missing import or a failing kernel falls back to NumPy and logs the reason once.
+- **Backend selection in the app:** **Processing → Hardware Acceleration → Compute Backend** offers Auto, CPU, NVIDIA GPU, Apple GPU (experimental) and NumPy (no JAX), with **Device Info…** reporting the active backend, the detected devices, available VRAM and the JAX version. Backends this machine cannot run are shown disabled rather than hidden, and the choice is remembered between sessions.
+- **Opt-in NVIDIA CUDA support:** `python3 src/Installation/install_requirements.py --gpu` installs the CUDA build (Linux x86_64; Windows through WSL2). It pulls in roughly 3 GB of NVIDIA libraries, so it is deliberately kept out of the default install and the packaged builds; the app detects CUDA at startup and Auto selects it. Kernels are pre-compiled for the loaded file's shape on a background thread so the first XLA compile never blocks the UI.
+- **Faster solar image playback:** display clip limits now take a single pass instead of two percentile sorts over a compacted copy, the matplotlib renderer updates the existing image in place instead of rebuilding the figure, axes and colorbar for every frame, and frames are no longer promoted to float64 through the render and movie-export paths. While a sequence plays, and while a clip slider is being dragged, the viewer switches to a subsampled, screen-resolution preview and reverts the instant motion stops. Measurements, statistics, region extraction, FITS export and movie export always read the full-resolution array.
+- **Measuring it:** `scripts/benchmark_compute.py` times every accelerated operation on each available backend. Kernels that measured no faster than NumPy on JAX's CPU backend — the sort-bound row statistics and the bandwidth-bound colour mapping — are marked `gpu_only` and stay on NumPy unless a GPU is present. See [Hardware Acceleration and Compute Backend](#-hardware-acceleration-and-compute-backend) for the full description.
+
+### Packaging and dependencies
+- Pinned `jax[cpu]` and `cdflib` in the runtime requirements, added a separate `requirements-gpu.txt` for the optional CUDA install, added PyInstaller hooks for `jax` and `jaxlib`, and packaged the new SWAVES, composite and compute modules across the Windows, Linux and macOS builds.
 
 ---
 
@@ -62,6 +91,7 @@ Compared with v2.6.0, this release adds the following capabilities:
 - Plot one or more light curves on top of the dynamic spectrum by entering a frequency or clicking directly on the plot, with configurable color, width, opacity, labels, and line style.
 - Combine frequency bands with improved gap-filling and overlap-handling options before importing the merged spectrum.
 - Keep polygon, line, and text annotations inside the accelerated view, with editable text styling and project persistence.
+- Run array-heavy processing through a selectable compute backend (Auto, CPU, NVIDIA GPU, or plain NumPy) from **Processing -> Hardware Acceleration -> Compute Backend**, with automatic fallback to NumPy whenever JAX is absent or a kernel fails.
 - Save and reuse processing presets, optionally choose a default preset for future FITS loads, reopen restored analysis sessions, and run batch processing for folder-based FIT/FITS exports.
 
 ### Solar-event context tools
@@ -69,6 +99,8 @@ Compared with v2.6.0, this release adds the following capabilities:
 - Overlay GOES XRS curves directly on the main spectrum with automatic legacy/modern GOES fallback and flare-class guides.
 - Analyze SDO/AIA images from **Analysis -> Solar Data Analysis** with crop, difference, active-region, composite, and movie export tools.
 - Explore external archives with the SunPy Multi-Mission Explorer for SDO, SOHO, STEREO-A, and GOES products.
+- Load STEREO/SWAVES space-based dynamic spectra (2.6 kHz - 16 MHz) below the CALLISTO spectrum on a shared time axis, and follow a burst out of the ground-based band into the interplanetary medium.
+- Blend SDO, STEREO, and SOHO/LASCO frames into one multi-instrument coronagraph composite that runs continuously from the disk out to the outer corona.
 - Sync the current analyzer time window across supported solar-event windows for faster cross-comparison.
 
 ### Reproducibility and support
@@ -388,6 +420,30 @@ Features:
 - Convert selected Learmonth chunks into FIT files
 - Import converted Learmonth FIT files directly into the Analyzer for the same noise reduction, visualization, and analysis workflow used by e-CALLISTO data
 
+### STEREO/SWAVES Radio Spectrograph
+
+Open via **Solar Events → Radio Bursts → SWAVES**.
+
+SWAVES covers 2.6 kHz to 16 MHz from space, directly below the CALLISTO band, so a burst that drifts out of the
+ground-based range can be followed into the interplanetary medium on the same figure.
+
+Features:
+
+- Choose a UTC start date and time plus a duration; data are NASA/SPDF level-2 one-minute averages served as one file per UTC day, and a window crossing midnight fetches and stitches both days automatically
+- Select **STEREO-A (Ahead)** or **STEREO-B (Behind)**; Behind is disabled for dates after 2014-10-01, when contact with that spacecraft was lost
+- The archive starts on 2006-10-27; downloaded day files are cached locally and reused
+- **Use CALLISTO Window** copies the loaded spectrum's time range widened on both sides by the **Sync padding** value (30 minutes by default), so a slow-drifting type II or III burst is not cut off. **Solar Events → Sync Current Time Window** updates an open SWAVES dialog the same way
+- Once loaded, the plotting area splits: CALLISTO above, SWAVES below, on a shared time axis, so panning or zooming either panel moves both. The CALLISTO interval is outlined on the SWAVES panel
+- The SWAVES frequency axis is logarithmic and its intensity is decibels above the instrument background, so it keeps its own colorbar and color scaling while following the colormap chosen in the sidebar
+- Loading SWAVES with no CALLISTO file open plots it across the full area; it folds into the split view as soon as a FITS file is loaded
+- **Solar Events → SWAVES Panel** hides and restores the panel without discarding the loaded data
+- The split view is included in **Save Plot** exports, saved in and restored from project files without re-downloading, and added to generated PDF reports
+
+Notes:
+
+- The drawing, lasso, drift, and measurement tools still act on the CALLISTO panel only
+- Data-reduction controls do not yet apply to the SWAVES panel
+
 ---
 
 # 15. Combine FITS Files
@@ -562,9 +618,31 @@ Features:
 - Create simple RGB composites from loaded AIA frames
 - Export the current plot, cropped FITS products, animated GIFs, and MP4 movies
 
+### Overlay Layers (multi-instrument coronagraph composites)
+
+A CME is never visible in one instrument: the eruption starts on the disk (AIA, EUVI), crosses the low corona
+(LASCO C2, COR1), and expands into the outer corona (LASCO C3, COR2), each imager blind to the others' domain
+because of its occulter. The **Overlay Layers** panel appears in the sidebar for coronagraph views and blends
+them into one image.
+
+Features:
+
+- Add SDO/AIA, SDO/HMI, SOHO/LASCO C2/C3, STEREO SECCHI (EUVI, COR1, COR2, HI), or GOES/SUVI as a layer over the loaded coronagraph series
+- Each layer's frames are searched and downloaded automatically, then time-matched to every loaded frame within the **Time match** window (30 minutes by default; widen it for a slow cadence or a patchy archive)
+- Layers are reprojected onto the loaded series' WCS, masked to their own field-of-view annulus in solar radii, and alpha-blended widest field of view first
+- Set **Colormap**, **Scale** (log/linear), **Opacity**, **Midtones** (gamma), and the **Inner / outer** field-of-view edges in R☉ for each layer independently; un-tick a layer to leave it out without losing its settings
+- **Build Composite** runs in the background with a progress bar; the result replaces the view and works with the measurement tools, PNG save, and movie export
+- **Clear** drops the composite and restores the originally loaded frames
+
 Notes:
 
-- JSOC server-side cutout requests are not part of v2.7.0; cropping is performed locally after files are loaded.
+- Each layer is color-mapped to RGB before blending, because the EUV disk and the white-light outer corona differ by orders of magnitude and a single normalization would make one of them invisible
+- Coronagraph layers reproject under a spherical-screen assumption rather than the solar-surface assumption used for disk emission, since an optically-thin white-light feature has no unique line-of-sight depth. Layers that use it are flagged as approximate in the build notes: cross-observer coronagraph overlays are morphological context, not photometry
+- SOHO/LASCO archive files carry no observer keywords, so an Earth-based observer is assumed (SOHO sits at L1, about 0.99 AU, so this is accurate to roughly 1%). The build notes state this once instead of warning per frame
+
+Notes:
+
+- JSOC server-side cutout requests are not part of v2.8.0; cropping is performed locally after files are loaded.
 - Metadata overlays require network access, but image-based region detection works on local files.
 
 ---
@@ -784,10 +862,10 @@ are therefore expected to match.
     - `gem install --no-document fpm`
     - `PYTHON_BIN=/usr/bin/python3 PIP_INDEX_URL=https://pypi.org/simple bash src/Installation/build_deb_linux.sh`
 - Expected output on `amd64`:
-  - `dist/e-callisto-fits-analyzer_2.7.0_amd64.deb`
+  - `dist/e-callisto-fits-analyzer_2.8.0_amd64.deb`
 - Install the generated local package using a path, not a bare filename:
-  - `sudo apt install -y ./dist/e-callisto-fits-analyzer_2.7.0_amd64.deb`
-  - If you are already inside `dist`, use `sudo apt install -y ./e-callisto-fits-analyzer_2.7.0_amd64.deb`
+  - `sudo apt install -y ./dist/e-callisto-fits-analyzer_2.8.0_amd64.deb`
+  - If you are already inside `dist`, use `sudo apt install -y ./e-callisto-fits-analyzer_2.8.0_amd64.deb`
 - Manual PyInstaller build only creates the Linux app folder, not the `.deb`:
   - `pyinstaller src/Installation/FITS_Analyzer_linux.spec`
 
