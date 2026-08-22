@@ -1,0 +1,13 @@
+# Optional NVIDIA GPU acceleration (pinned to match requirements-runtime.txt).
+#
+# Install with:
+#     python3 src/Installation/install_requirements.py --gpu
+#
+# This pulls in roughly 3 GB of NVIDIA CUDA libraries, which is why it is kept
+# out of the default install and out of the packaged builds. The application
+# detects CUDA at runtime and uses it automatically when present; nothing else
+# needs configuring.
+#
+# Linux x86_64 only. JAX publishes no native Windows CUDA build — Windows users
+# need WSL2 and should install this inside the WSL environment.
+jax[cuda12]==0.11.1 ; sys_platform == "linux"
