@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 e-CALLISTO FITS Analyzer
-Version 2.6.0
+Version 2.8.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
