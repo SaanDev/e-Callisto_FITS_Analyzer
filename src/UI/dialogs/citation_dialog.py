@@ -23,19 +23,26 @@ from PySide6.QtWidgets import (
 RECOMMENDED_CITATION_TEXT = (
     "If you use e-CALLISTO FITS Analyzer in your research, please cite this article.\n\n"
     "G. L. S. S. Liyanage, J. Adassuriya, K. P. S. C. Jayaratne, C. Monstein, and "
-    "P. K. Manoharan. \"e-CALLISTO FITS Analyzer: A Software Framework for CALLISTO Solar "
-    "Radio Data.\" arXiv:2603.26086 [astro-ph.SR], 2026.\n"
-    "URL: https://arxiv.org/abs/2603.26086"
+    "P. K. Manoharan. \"e-CALLISTO FITS analyzer: a software framework for CALLISTO solar "
+    "radio data.\" RAS Techniques and Instruments, 5, rzag056, 2026.\n"
+    "DOI: 10.1093/rasti/rzag056\n"
+    "URL: https://doi.org/10.1093/rasti/rzag056"
 )
 
-CITATION_BIBTEX = """@misc{liyanage2026ecallistofitsanalyzersoftware,
-      title={e-CALLISTO FITS Analyzer: A Software Framework for CALLISTO Solar Radio Data},
-      author={G. L. S. S. Liyanage and J. Adassuriya and K. P. S. C. Jayaratne and C. Monstein and P. K. Manoharan},
+# Published in RAS Techniques and Instruments; supersedes the arXiv preprint
+# entry used before v2.8.0. The citation key is deliberately unchanged so that
+# manuscripts already referencing it keep resolving.
+CITATION_BIBTEX = """@article{liyanage2026ecallistofitsanalyzersoftware,
+      title={e-CALLISTO FITS analyzer: a software framework for CALLISTO solar radio data},
+      author={Liyanage, G L S S and Adassuriya, J and Jayaratne, K P S C and Monstein, C and Manoharan, P K},
+      journal={RAS Techniques and Instruments},
+      volume={5},
+      pages={rzag056},
       year={2026},
-      eprint={2603.26086},
-      archivePrefix={arXiv},
-      primaryClass={astro-ph.SR},
-      url={https://arxiv.org/abs/2603.26086},
+      month={01},
+      issn={2752-8200},
+      doi={10.1093/rasti/rzag056},
+      url={https://doi.org/10.1093/rasti/rzag056},
 }"""
 
 

@@ -27,8 +27,9 @@ Compared with v2.7.0, this release adds the following capabilities:
 - **Faster solar image playback:** display clip limits now take a single pass instead of two percentile sorts over a compacted copy, the matplotlib renderer updates the existing image in place instead of rebuilding the figure, axes and colorbar for every frame, and frames are no longer promoted to float64 through the render and movie-export paths. While a sequence plays, and while a clip slider is being dragged, the viewer switches to a subsampled, screen-resolution preview and reverts the instant motion stops. Measurements, statistics, region extraction, FITS export and movie export always read the full-resolution array.
 - **Measuring it:** `scripts/benchmark_compute.py` times every accelerated operation on each available backend. Kernels that measured no faster than NumPy on JAX's CPU backend — the sort-bound row statistics and the bandwidth-bound colour mapping — are marked `gpu_only` and stay on NumPy unless a GPU is present. See [Hardware Acceleration and Compute Backend](#-hardware-acceleration-and-compute-backend) for the full description.
 
-### Packaging and dependencies
+### Packaging, dependencies, and citation
 - Pinned `jax[cpu]` and `cdflib` in the runtime requirements, added a separate `requirements-gpu.txt` for the optional CUDA install, added PyInstaller hooks for `jax` and `jaxlib`, and packaged the new SWAVES, composite and compute modules across the Windows, Linux and macOS builds.
+- **Cite this Software** now gives the published article — *RAS Techniques and Instruments* **5**, rzag056 (2026), [doi:10.1093/rasti/rzag056](https://doi.org/10.1093/rasti/rzag056) — in place of the earlier arXiv preprint entry. The BibTeX key is unchanged, so manuscripts that already reference it keep resolving.
 
 ---
 
@@ -688,10 +689,30 @@ Use **About → Report a Bug...** to open the in-app diagnostics workflow.
 
 ### Cite this Software
 
-Use the **Cite this Software** button in the main window to open the citation dialog.
+If you use e-CALLISTO FITS Analyzer in your research, please cite:
 
-- Copy the recommended citation text for the e-CALLISTO FITS Analyzer paper.
-- Copy the BibTeX entry directly into your manuscript or reference manager workflow.
+> G. L. S. S. Liyanage, J. Adassuriya, K. P. S. C. Jayaratne, C. Monstein, and P. K. Manoharan.
+> "e-CALLISTO FITS analyzer: a software framework for CALLISTO solar radio data."
+> *RAS Techniques and Instruments*, **5**, rzag056, 2026.
+> DOI: [10.1093/rasti/rzag056](https://doi.org/10.1093/rasti/rzag056)
+
+```bibtex
+@article{liyanage2026ecallistofitsanalyzersoftware,
+      title={e-CALLISTO FITS analyzer: a software framework for CALLISTO solar radio data},
+      author={Liyanage, G L S S and Adassuriya, J and Jayaratne, K P S C and Monstein, C and Manoharan, P K},
+      journal={RAS Techniques and Instruments},
+      volume={5},
+      pages={rzag056},
+      year={2026},
+      month={01},
+      issn={2752-8200},
+      doi={10.1093/rasti/rzag056},
+      url={https://doi.org/10.1093/rasti/rzag056},
+}
+```
+
+The same details are available in the app: use the **Cite this Software** button in the main window to open
+the citation dialog, which copies either the formatted citation or the BibTeX entry to the clipboard.
 
 ### Check for Updates
 
