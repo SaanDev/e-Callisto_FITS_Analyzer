@@ -12,6 +12,7 @@ import platform
 import re
 import sys
 import tempfile
+import threading
 import math
 import json
 import io
@@ -76,6 +77,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.Backend import compute
 from src.Backend.analysis_log import append_csv_log, append_txt_summary, build_log_row
 from src.Backend.analysis_session import (
     from_legacy_max_intensity,
@@ -219,6 +221,7 @@ class MainWindow(QMainWindow):
     RAW_FITS_VMAX_PERCENTILE = 98.0
     DEFAULT_PRESET_SETTINGS_KEY = "processing/default_preset_name"
     DISPLAY_RANGE_PRESETS_SETTINGS_KEY = "view/display_range_presets_json"
+    COMPUTE_BACKEND_SETTINGS_KEY = "processing/compute_backend"
     HW_DEFAULT_TICK_FONT_PX = 14
     HW_DEFAULT_AXIS_FONT_PX = 16
     HW_DEFAULT_TITLE_FONT_PX = 22
@@ -1131,6 +1134,23 @@ class MainWindow(QMainWindow):
         self.hw_live_preview_action.setEnabled(bool(self.accel_canvas.is_available))
         hw_menu.addAction(self.hw_live_preview_action)
 
+        # Device discovery imports JAX, which costs over a second, so it is not
+        # done here. The entries are filled in when the menu is first opened.
+        self.compute_backend_menu = hw_menu.addMenu("Compute Backend")
+        backend_menu = self.compute_backend_menu
+        self.compute_backend_group = QActionGroup(self)
+        self.compute_backend_group.setExclusive(True)
+        self.compute_backend_actions = {}
+        for backend in compute.BACKEND_CHOICES:
+            action = QAction(compute.BACKEND_LABELS.get(backend, backend), self, checkable=True)
+            action.setData(backend)
+            self.compute_backend_group.addAction(action)
+            backend_menu.addAction(action)
+            self.compute_backend_actions[backend] = action
+        backend_menu.addSeparator()
+        self.compute_device_info_action = QAction("Device Info…", self)
+        backend_menu.addAction(self.compute_device_info_action)
+
         rfi_menu = processing_menu.addMenu("RFI Cleaning")
         self.rfi_open_action = QAction("Open RFI Panel", self)
         self.rfi_apply_action = QAction("Apply RFI", self)
@@ -1206,6 +1226,9 @@ class MainWindow(QMainWindow):
         self.mode_action_classic.triggered.connect(lambda checked: checked and self.set_view_mode("classic"))
         self.mode_action_modern.triggered.connect(lambda checked: checked and self.set_view_mode("modern"))
         self.hw_live_preview_action.toggled.connect(self.set_hardware_live_preview_enabled)
+        self.compute_backend_group.triggered.connect(self._on_compute_backend_selected)
+        self.compute_device_info_action.triggered.connect(self.show_compute_device_info)
+        self.compute_backend_menu.aboutToShow.connect(self._sync_compute_backend_availability)
 
         # About Menu
         about_menu = menubar.addMenu("About")
@@ -1361,6 +1384,7 @@ class MainWindow(QMainWindow):
         # Ensure project actions reflect initial state
         self._sync_project_actions()
         self._sync_hardware_preview_action()
+        self._restore_compute_backend()
         self.set_hardware_live_preview_enabled(self.use_hw_live_preview)
         self._refresh_analysis_summary_panel()
         QTimer.singleShot(300, self._prompt_recovery_if_needed)
@@ -2117,6 +2141,131 @@ class MainWindow(QMainWindow):
             self._refresh_accel_plot(view=mpl_view, preserve_view=False)
             self._show_accel_canvas()
         self._sync_toolbar_enabled_states()
+
+    def _warm_compute_kernels(self, data) -> None:
+        """Pre-compile the accelerated kernels for this file's shape.
+
+        No-op unless a GPU backend is active. Runs on a worker thread so the
+        XLA compile never blocks the UI, and failures are ignored — warmup is
+        an optimisation, not a requirement.
+        """
+        try:
+            shape = tuple(np.asarray(data).shape)
+        except Exception:
+            return
+        if len(shape) != 2:
+            return
+
+        def _run():
+            try:
+                from src.Backend.compute_kernels import warmup_thunks
+
+                compute.warmup(warmup_thunks(shape))
+            except Exception:
+                pass
+
+        threading.Thread(target=_run, name="compute-warmup", daemon=True).start()
+
+    def _restore_compute_backend(self) -> None:
+        """Apply the backend saved in settings, falling back to Auto.
+
+        Only records the preference — resolving it would import JAX on the
+        startup path. A background thread warms that up instead.
+        """
+        stored = str(self._ui_settings.value(self.COMPUTE_BACKEND_SETTINGS_KEY, compute.BACKEND_AUTO, type=str) or "")
+        stored = compute.set_requested_backend(stored)
+        self._sync_compute_backend_actions(stored)
+        # Importing JAX holds the GIL in bursts, so let the window finish coming
+        # up before warming it in the background. compute.prewarm() is a no-op
+        # after the first call, so extra windows cost nothing.
+        if not compute.is_probed():
+            QTimer.singleShot(1500, self._start_compute_prewarm)
+
+    @staticmethod
+    def _start_compute_prewarm() -> None:
+        if compute.is_probed():
+            return
+        threading.Thread(target=compute.prewarm, name="compute-prewarm", daemon=True).start()
+
+    def _sync_compute_backend_availability(self) -> None:
+        """Enable only the backends this machine actually has.
+
+        Runs when the menu is first opened, which is the first moment the state
+        is visible to anyone, so probing here costs the user nothing at startup.
+        """
+        actions = getattr(self, "compute_backend_actions", None)
+        if not actions:
+            return
+        try:
+            available = {device.backend for device in compute.available_devices()}
+        except Exception:
+            available = {compute.BACKEND_NUMPY}
+        for backend, action in actions.items():
+            # Auto and NumPy always work; the rest depend on the hardware.
+            action.setEnabled(
+                backend in (compute.BACKEND_AUTO, compute.BACKEND_NUMPY) or backend in available
+            )
+        self._sync_compute_backend_actions(compute.requested_backend())
+
+    def _sync_compute_backend_actions(self, backend: str) -> None:
+        actions = getattr(self, "compute_backend_actions", None)
+        if not actions:
+            return
+        for name, action in actions.items():
+            checked = name == backend
+            if action.isChecked() != checked:
+                was_blocked = action.blockSignals(True)
+                action.setChecked(checked)
+                action.blockSignals(was_blocked)
+
+    def _on_compute_backend_selected(self, action) -> None:
+        backend = str(action.data() or compute.BACKEND_AUTO)
+        try:
+            device = compute.select_backend(backend)
+        except Exception as exc:
+            QMessageBox.warning(self, "Compute Backend", f"Could not select {backend}: {exc}")
+            self._sync_compute_backend_actions(compute.requested_backend())
+            return
+
+        self._ui_settings.setValue(self.COMPUTE_BACKEND_SETTINGS_KEY, backend)
+        self._sync_compute_backend_actions(backend)
+        if backend != compute.BACKEND_AUTO and device.backend != backend:
+            self.statusBar().showMessage(
+                f"{compute.BACKEND_LABELS.get(backend, backend)} is not available here — using {device.label}.",
+                5000,
+            )
+        else:
+            self.statusBar().showMessage(f"Compute backend: {compute.describe_active()}", 4000)
+
+    def show_compute_device_info(self) -> None:
+        devices = compute.available_devices()
+        active = compute.active_device()
+
+        lines = [f"Active: {compute.describe_active()}", ""]
+        lines.append("Available backends:")
+        for device in devices:
+            marker = "  * " if device.backend == active.backend else "    "
+            detail = device.label
+            if device.memory_bytes:
+                detail += f", {device.memory_bytes / (1024 ** 3):.1f} GB"
+            if device.experimental:
+                detail += " [experimental]"
+            lines.append(f"{marker}{compute.BACKEND_LABELS.get(device.backend, device.backend)} — {detail}")
+
+        version = compute.jax_version()
+        lines.append("")
+        lines.append(f"JAX: {version}" if version else "JAX: not installed")
+        error = compute.jax_import_error()
+        if error:
+            lines.append(f"JAX import error: {error}")
+        if not any(d.is_gpu for d in devices):
+            lines.append("")
+            lines.append(
+                "No GPU backend detected. NVIDIA acceleration needs jax[cuda12] on Linux "
+                "(see Installation/requirements-gpu.txt); on Windows it requires WSL2."
+            )
+
+        QMessageBox.information(self, "Compute Device Info", "\n".join(lines))
 
     def _sync_mpl_view_from_accel(self):
         if not self._hardware_mode_enabled():
@@ -3321,6 +3470,7 @@ class MainWindow(QMainWindow):
             ut_start_sec = extract_ut_start_sec(header0)
         self.ut_start_sec = ut_start_sec
 
+        self._warm_compute_kernels(data)
         self._reset_runtime_state_for_loaded_data()
         self._reset_noise_controls_to_defaults()
         default_preset_applied = self._apply_default_preset_for_loaded_data()
@@ -3820,7 +3970,13 @@ class MainWindow(QMainWindow):
         if not self.use_db:
             return data
         cold_digits, _ = self._db_hot_cold_digits()
-        return (np.asarray(data, dtype=float) - cold_digits) * self.DB_SCALE
+        arr = np.asarray(data)
+        # Keep float32 inputs in float32. The live preview runs this on every
+        # slider move, and promoting to float64 there doubles the memory
+        # traffic without adding precision — the spectrogram is float32 already.
+        dtype = np.float32 if arr.dtype == np.float32 else np.float64
+        arr = np.asarray(arr, dtype=dtype)
+        return (arr - dtype(cold_digits)) * dtype(self.DB_SCALE)
 
     def _intensity_range_for_display(self, vmin, vmax):
         if vmin is None or vmax is None:

@@ -12,6 +12,9 @@ from typing import Any
 
 import numpy as np
 
+from src.Backend import compute
+from src.Backend.array_stats import row_quantiles
+
 try:
     from scipy.ndimage import median_filter as _median_filter
 except Exception:  # pragma: no cover - scipy optional in isolated environments
@@ -43,10 +46,42 @@ def _ensure_odd(v: int) -> int:
     return out
 
 
-def _median2d(arr: np.ndarray, kernel_freq: int, kernel_time: int) -> np.ndarray:
+def _median2d_scipy(arr: np.ndarray, kernel_freq: int, kernel_time: int) -> np.ndarray:
     if _median_filter is None:
         return arr.copy()
-    return _median_filter(arr, size=(_ensure_odd(kernel_freq), _ensure_odd(kernel_time)), mode="nearest")
+    return _median_filter(arr, size=(kernel_freq, kernel_time), mode="nearest")
+
+
+def _median2d_jax(arr: np.ndarray, kernel_freq: int, kernel_time: int) -> np.ndarray:
+    from src.Backend.compute_kernels import MAX_STACK_MEDIAN_KERNEL, median_filter_2d_kernel
+
+    # The shifted-stack median needs kernel_freq * kernel_time copies of the
+    # image. Past a small kernel that stops being a good trade, so hand back to
+    # scipy rather than allocating a large stack on the device.
+    if kernel_freq > MAX_STACK_MEDIAN_KERNEL or kernel_time > MAX_STACK_MEDIAN_KERNEL:
+        return _median2d_scipy(arr, kernel_freq, kernel_time)
+
+    result = median_filter_2d_kernel(compute.to_device(arr), kernel_freq, kernel_time)
+    return compute.to_numpy(result)
+
+
+def _median2d(arr: np.ndarray, kernel_freq: int, kernel_time: int) -> np.ndarray:
+    kf = _ensure_odd(kernel_freq)
+    kt = _ensure_odd(kernel_time)
+    if _median_filter is None and not compute.should_accelerate(arr, gpu_only=True):
+        return arr.copy()
+
+    return compute.dispatch(
+        _median2d_jax,
+        _median2d_scipy,
+        arr,
+        kf,
+        kt,
+        size_hint=arr,
+        # scipy's C implementation already matches a hand-rolled NumPy stack
+        # median, so this only moves on a GPU.
+        gpu_only=True,
+    )
 
 
 def _mask_hot_channels(data: np.ndarray, z_thresh: float) -> list[int]:
@@ -54,8 +89,8 @@ def _mask_hot_channels(data: np.ndarray, z_thresh: float) -> list[int]:
         return []
 
     # Per-frequency score: blend absolute channel level and channel variability.
-    row_med = np.nanmedian(data, axis=1)
-    row_centered = np.nanmedian(np.abs(data - row_med[:, None]), axis=1)
+    row_med = row_quantiles(data, (50.0,), dtype=np.float64)[0]
+    row_centered = row_quantiles(np.abs(data - row_med[:, None]), (50.0,), dtype=np.float64)[0]
     score = np.abs(row_med) + row_centered
     z = _robust_z(score)
     idx = np.where(z > float(z_thresh))[0]
@@ -89,12 +124,9 @@ def _percentile_clip_per_channel(data: np.ndarray, upper_percentile: float) -> n
     if pct <= 0 or pct >= 100:
         return data
 
-    out = data.copy()
     # clip only high outliers; preserve low side for burst morphology
-    highs = np.nanpercentile(out, pct, axis=1)
-    for i in range(out.shape[0]):
-        out[i] = np.minimum(out[i], highs[i])
-    return out
+    highs = row_quantiles(data, (pct,), dtype=data.dtype)[0]
+    return np.minimum(data, highs[:, None])
 
 
 def clean_rfi(
@@ -113,7 +145,6 @@ def clean_rfi(
         return RFIResult(data=arr.copy(), masked_channel_indices=[])
 
     filtered = _median2d(arr, kernel_freq=kernel_freq, kernel_time=kernel_time)
-    residual = arr - filtered
     masked = _mask_hot_channels(arr, z_thresh=float(channel_z_threshold))
     repaired = _repair_masked_channels(filtered, masked)
     clipped = _percentile_clip_per_channel(repaired, upper_percentile=float(percentile_clip))

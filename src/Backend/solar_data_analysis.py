@@ -14,6 +14,8 @@ from typing import Any, Iterable, Sequence
 
 import numpy as np
 
+from src.Backend import compute
+
 
 CropBounds = tuple[int, int, int, int]
 
@@ -910,11 +912,16 @@ def iter_rendered_movie_frames(
         raise ValueError(f"Unsupported difference mode: {mode}")
 
     def _cropped(i: int) -> np.ndarray:
-        arr = np.asarray(crop_array(getattr(frames[i], "data"), crop_bounds), dtype=float)
+        raw = np.asarray(crop_array(getattr(frames[i], "data"), crop_bounds))
+        # Solar frames arrive as int16/uint16 or float32. Promoting them all to
+        # float64 doubles every allocation along the export path — 134 MB per
+        # 4096x4096 frame — and adds no precision the 8-bit output can show.
+        dtype = np.float32 if raw.dtype.itemsize <= 4 else np.float64
+        arr = np.asarray(raw, dtype=dtype)
         if normalize:
             exptime = frame_exposure_time(frames[i])
             if exptime and exptime > 0:
-                arr = arr / exptime
+                arr = arr / dtype(exptime)
         return arr
 
     def _render(arr: np.ndarray) -> np.ndarray:
@@ -1244,21 +1251,153 @@ def _prepare_image_array(data: Any) -> np.ndarray:
     raise ValueError(f"Unsupported AIA image shape: {arr.shape}")
 
 
+def finite_percentiles(data: Any, percentiles: Sequence[float]) -> np.ndarray:
+    """Percentiles over the finite values of ``data``, in a single pass.
+
+    Equivalent to ``np.nanpercentile(data[np.isfinite(data)], percentiles)`` but
+    without materialising the compacted copy, and taking one pass over the data
+    for the whole set of percentiles rather than one per percentile. On a
+    4096x4096 AIA frame the old form allocated two full float64 copies and
+    sorted twice.
+    """
+    arr = np.asarray(data)
+    if arr.size == 0:
+        return np.full(len(percentiles), np.nan, dtype=float)
+
+    # nanpercentile ignores NaN but treats infinities as ordinary values, so
+    # they have to be turned into NaN to match compaction on np.isfinite.
+    # The check is a cheap pass and almost always false.
+    if np.isinf(arr).any():
+        arr = np.where(np.isfinite(arr), arr, np.nan)
+
+    with np.errstate(invalid="ignore"):
+        return np.asarray(np.nanpercentile(arr, list(percentiles)), dtype=float)
+
+
+def subsample_for_statistics(data: Any, max_samples: int = 1_000_000) -> np.ndarray:
+    """Stride ``data`` down to roughly ``max_samples`` points.
+
+    Display clip limits are percentiles, and a percentile of a regular subsample
+    of a megapixel-scale image tracks the exact value to well under one of the
+    256 display levels. Used for live playback, where the exact sort over a
+    full 4096x4096 frame costs more than everything else in the frame put
+    together. Anything that is kept — measurements, statistics, exports — uses
+    the full array.
+    """
+    arr = np.asarray(data)
+    if arr.ndim < 2 or arr.size <= max_samples:
+        return arr
+    step = int(np.ceil(np.sqrt(arr.size / float(max_samples))))
+    if step <= 1:
+        return arr
+    return arr[::step, ::step]
+
+
 def _normalize_to_unit(data: Any, p_low: float, p_high: float) -> np.ndarray:
-    arr = np.asarray(data, dtype=float)
+    arr = np.asarray(data)
     if arr.ndim == 3:
         arr = np.nanmean(arr[..., :3], axis=2)
-    finite = arr[np.isfinite(arr)]
-    if finite.size == 0:
-        return np.zeros(arr.shape[:2], dtype=float)
-    lo = float(np.nanpercentile(finite, float(p_low)))
-    hi = float(np.nanpercentile(finite, float(p_high)))
+    # Keep float32 input in float32: these are up to 4096x4096, and promoting
+    # doubles every allocation in the render path for no added precision.
+    if arr.dtype != np.float32:
+        arr = np.asarray(arr, dtype=float)
+
+    lo, hi = finite_percentiles(arr, (float(p_low), float(p_high)))
     if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        with np.errstate(invalid="ignore"):
+            finite = arr[np.isfinite(arr)]
+        if finite.size == 0:
+            return np.zeros(arr.shape[:2], dtype=arr.dtype)
         lo = float(np.nanmin(finite))
         hi = float(np.nanmax(finite))
     if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
-        return np.zeros(arr.shape[:2], dtype=float)
-    return np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
+        return np.zeros(arr.shape[:2], dtype=arr.dtype)
+
+    scale = arr.dtype.type(1.0) / arr.dtype.type(hi - lo)
+    out = (arr - arr.dtype.type(lo)) * scale
+    return np.clip(out, 0.0, 1.0, out=out)
+
+
+_RGB_LUT_CACHE: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+
+
+def _rgb_lut_for_colormap(name: str) -> tuple[np.ndarray, np.ndarray] | None:
+    """A ``(lut, bad_rgb)`` pair of uint8 colours for ``name``.
+
+    Cached because building it imports sunpy's colormap registry and rebuilds a
+    256-entry table — work the old code repeated on every rendered frame.
+
+    Matplotlib buckets a float ``x`` as ``int(x * N)`` clamped to ``N - 1`` and
+    the caller truncated rather than rounded when scaling to bytes, so the table
+    is built the same way and the output is byte-identical.
+    """
+    key = str(name or "inferno")
+    cached = _RGB_LUT_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    try:
+        try:
+            import sunpy.visualization.colormaps  # noqa: F401
+        except Exception:
+            pass
+        from matplotlib import colormaps
+
+        cmap = colormaps.get_cmap(key)
+        levels = int(getattr(cmap, "N", 256) or 256)
+        # Integer input indexes the colormap's table directly.
+        table = np.asarray(cmap(np.arange(levels)), dtype=float)[:, :3]
+        lut = np.ascontiguousarray((table * 255.0).astype(np.uint8))
+        bad = np.asarray(cmap(np.array([np.nan])), dtype=float)[0, :3]
+        bad_rgb = (bad * 255.0).astype(np.uint8)
+    except Exception:
+        return None
+
+    _RGB_LUT_CACHE[key] = (lut, bad_rgb)
+    return lut, bad_rgb
+
+
+def _apply_rgb_lut_numpy(norm: np.ndarray, lut: np.ndarray, bad_rgb: np.ndarray) -> np.ndarray:
+    levels = lut.shape[0]
+    index = np.asarray(norm, dtype=np.float32) * np.float32(levels)
+    invalid = ~np.isfinite(index)
+    np.nan_to_num(index, copy=False, nan=0.0, posinf=float(levels), neginf=0.0)
+    np.clip(index, 0.0, float(levels - 1), out=index)
+
+    index_dtype = np.uint8 if levels <= 256 else np.intp
+    rgb = np.take(lut, index.astype(index_dtype), axis=0)
+    if invalid.any():
+        rgb[invalid] = bad_rgb
+    return rgb
+
+
+def _apply_rgb_lut_jax(norm: np.ndarray, lut: np.ndarray, bad_rgb: np.ndarray) -> np.ndarray:
+    from src.Backend.compute_kernels import rgb_lut_kernel
+
+    rgb = compute.to_numpy(
+        rgb_lut_kernel(
+            compute.to_device(norm, dtype="float32"),
+            compute.to_device(lut),
+        )
+    )
+    invalid = ~np.isfinite(np.asarray(norm))
+    if invalid.any():
+        rgb[invalid] = bad_rgb
+    return rgb
+
+
+def _apply_rgb_lut(norm: np.ndarray, lut_pair: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
+    lut, bad_rgb = lut_pair
+    return compute.dispatch(
+        _apply_rgb_lut_jax,
+        _apply_rgb_lut_numpy,
+        norm,
+        lut,
+        bad_rgb,
+        size_hint=norm,
+        # Bandwidth-bound gather: only a GPU beats NumPy here.
+        gpu_only=True,
+    )
 
 
 def array_to_rgb_uint8(
@@ -1294,22 +1433,16 @@ def array_to_rgb_uint8(
     if exponent > 0 and abs(exponent - 1.0) > 1e-9:
         with np.errstate(invalid="ignore"):
             norm = np.power(np.clip(norm, 0.0, 1.0), exponent)
-    try:
-        try:
-            import sunpy.visualization.colormaps  # noqa: F401
-        except Exception:
-            pass
-        from matplotlib import colormaps
 
-        rgba = colormaps.get_cmap(str(colormap_name or "inferno"))(norm)
-        rgb = np.asarray(rgba[..., :3] * 255.0, dtype=np.uint8)
-        return rgb
-    except Exception:
-        fallback = _fallback_colormap_rgb(norm, str(colormap_name or "inferno"))
-        if fallback is not None:
-            return fallback
-        gray = np.asarray(norm * 255.0, dtype=np.uint8)
-        return np.dstack([gray, gray, gray])
+    lut = _rgb_lut_for_colormap(str(colormap_name or "inferno"))
+    if lut is not None:
+        return _apply_rgb_lut(norm, lut)
+
+    fallback = _fallback_colormap_rgb(norm, str(colormap_name or "inferno"))
+    if fallback is not None:
+        return fallback
+    gray = np.asarray(np.nan_to_num(norm, nan=0.0) * 255.0, dtype=np.uint8)
+    return np.dstack([gray, gray, gray])
 
 
 def _fallback_colormap_rgb(norm: np.ndarray, name: str) -> np.ndarray | None:

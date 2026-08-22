@@ -38,6 +38,8 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from src.Backend import compute
+
 
 # Solar radius in kilometres (IAU 2015 nominal).
 RSUN_KM = 695_700.0
@@ -78,12 +80,34 @@ def solar_center_from_meta(meta: Any, data_shape: tuple[int, int] | None = None)
     raise ValueError("Cannot determine solar centre: no CRPIX and no data_shape.")
 
 
-def radial_distance_grid(shape: tuple[int, int], center: tuple[float, float]) -> np.ndarray:
-    """Return an array of radial distance (pixels) from ``center`` for every pixel."""
+def _radial_distance_grid_numpy(shape: tuple[int, int], center: tuple[float, float]) -> np.ndarray:
     ny, nx = shape
     cx, cy = center
-    yy, xx = np.mgrid[0:ny, 0:nx]
-    return np.hypot(xx - cx, yy - cy)
+    # Broadcasting the two axis vectors avoids materialising the pair of full
+    # index grids np.mgrid would build (two int64 arrays the size of the image).
+    yy = np.arange(int(ny), dtype=float)[:, None] - float(cy)
+    xx = np.arange(int(nx), dtype=float)[None, :] - float(cx)
+    return np.hypot(xx, yy)
+
+
+def _radial_distance_grid_jax(shape: tuple[int, int], center: tuple[float, float]) -> np.ndarray:
+    from src.Backend.compute_kernels import radial_distance_kernel
+
+    ny, nx = shape
+    cx, cy = center
+    return compute.to_numpy(radial_distance_kernel(int(ny), int(nx), float(cy), float(cx)))
+
+
+def radial_distance_grid(shape: tuple[int, int], center: tuple[float, float]) -> np.ndarray:
+    """Return an array of radial distance (pixels) from ``center`` for every pixel."""
+    return compute.dispatch(
+        _radial_distance_grid_jax,
+        _radial_distance_grid_numpy,
+        shape,
+        center,
+        size_hint=tuple(shape),
+        gpu_only=True,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -106,15 +130,19 @@ def radial_profile(
     n_bins: int = 100,
     r_min: float | None = None,
     r_max: float | None = None,
+    radius: np.ndarray | None = None,
 ) -> RadialProfile:
     """Compute the azimuthal mean and std of ``image`` in ``n_bins`` annuli.
 
-    NaNs are ignored. Empty annuli get ``mean=nan``/``std=nan``.
+    NaNs are ignored. Empty annuli get ``mean=nan``/``std=nan``. Pass ``radius``
+    when the caller already holds the distance grid for this image and centre,
+    so it is not rebuilt.
     """
     image = np.asarray(image, dtype=float)
     if image.ndim != 2:
         raise ValueError(f"radial_profile expects a 2-D image, got shape {image.shape}.")
-    radius = radial_distance_grid(image.shape, center)
+    if radius is None:
+        radius = radial_distance_grid(image.shape, center)
 
     lo = 0.0 if r_min is None else float(r_min)
     hi = float(radius.max()) if r_max is None else float(r_max)
@@ -160,8 +188,8 @@ def nrgf(
     annuli with zero spread are set to ``fill``.
     """
     image = np.asarray(image, dtype=float)
-    profile = radial_profile(image, center, n_bins=n_bins, r_min=r_min, r_max=r_max)
     radius = radial_distance_grid(image.shape, center)
+    profile = radial_profile(image, center, n_bins=n_bins, r_min=r_min, r_max=r_max, radius=radius)
 
     edges = profile.r_edges
     idx = np.digitize(radius, edges) - 1
@@ -193,8 +221,8 @@ def radial_graded_normalize(
     over the fully contrast-stretched NRGF.
     """
     image = np.asarray(image, dtype=float)
-    profile = radial_profile(image, center, n_bins=n_bins, r_min=r_min, r_max=r_max)
     radius = radial_distance_grid(image.shape, center)
+    profile = radial_profile(image, center, n_bins=n_bins, r_min=r_min, r_max=r_max, radius=radius)
 
     idx = np.digitize(radius, profile.r_edges) - 1
     inside = (idx >= 0) & (idx < n_bins)

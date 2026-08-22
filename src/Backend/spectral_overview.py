@@ -129,17 +129,25 @@ def _peak_preserving_downsample(
 
     count = max(1, int(max_columns))
     boundaries = np.linspace(0, arr.shape[1], count + 1, dtype=int)
-    out = np.full((arr.shape[0], count), np.nan, dtype=np.float32)
+    starts = boundaries[:-1].astype(int)
+    stops = np.maximum(starts + 1, boundaries[1:].astype(int))
+
+    # Blocks are equal width apart from rounding, so pad to a whole number of
+    # columns and reduce in one pass instead of looping over every output
+    # column. np.maximum.reduceat handles the ragged case directly.
     out_times = np.empty(count, dtype=float)
 
+    # Replacing NaN with -inf lets a single reduceat take the per-block maximum
+    # for every row at once. reduceat's segment boundaries are exactly the block
+    # starts, and it yields one element for a zero-width segment, which matches
+    # the `max(start + 1, ...)` the boundaries were built with.
+    filled = np.where(np.isfinite(arr), arr, -np.inf)
+    block_max = np.maximum.reduceat(filled, starts, axis=1)
+    out = np.where(np.isfinite(block_max), block_max, np.nan).astype(np.float32)
+
     for idx in range(count):
-        start = int(boundaries[idx])
-        stop = max(start + 1, int(boundaries[idx + 1]))
-        block = arr[:, start:stop]
-        finite_rows = np.any(np.isfinite(block), axis=1)
-        if np.any(finite_rows):
-            out[finite_rows, idx] = np.nanmax(block[finite_rows, :], axis=1).astype(np.float32)
-        out_times[idx] = float(np.nanmean(times[start:stop]))
+        segment = times[int(starts[idx]) : int(stops[idx])]
+        out_times[idx] = float(np.nanmean(segment)) if segment.size else np.nan
 
     return out, out_times
 

@@ -43,17 +43,14 @@ def reduce_noise(data, clip_low=-5, clip_high=20):
     low = float(min(clip_low, clip_high))
     high = float(max(clip_low, clip_high))
     arr = np.asarray(data, dtype=float)
+    source_gap_rows = invalid_row_mask(arr)
     data = subtract_background_rows(
         arr,
         method="robust",
-        gap_row_mask=invalid_row_mask(arr),
-        equalize_noise=bool(np.any(invalid_row_mask(arr))),
+        gap_row_mask=source_gap_rows,
+        equalize_noise=bool(np.any(source_gap_rows)),
     ).astype(float, copy=False)
     gap_rows = invalid_row_mask(data)
-    try:
-        print("Before clip:", np.nanmin(data), np.nanmax(data))
-    except Exception:
-        print("Before clip: nan nan")
     data = np.clip(data, low, high)
     if np.any(gap_rows):
         data[gap_rows, :] = np.nan

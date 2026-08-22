@@ -1115,18 +1115,22 @@ class SunPyPlotCanvas(QWidget):
             self._apply_image_colormap()
             self.map_image.setImage(data, autoLevels=False)
 
-            finite = data[np.isfinite(data)]
             if vmin is not None and vmax is not None and float(vmax) > float(vmin):
                 levels = (float(vmin), float(vmax))
-            elif finite.size > 0:
-                lo = float(np.nanmin(finite))
-                hi = float(np.nanmax(finite))
-                if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
-                    levels = (lo, hi)
-                else:
-                    levels = (lo - 1.0, lo + 1.0)
             else:
-                levels = (0.0, 1.0)
+                # Only pay for the data scan when the caller has no levels to
+                # give. Compacting a 4096x4096 frame here cost ~10 ms on every
+                # rendered frame even when the result went straight in the bin.
+                finite = data[np.isfinite(data)]
+                if finite.size > 0:
+                    lo = float(np.nanmin(finite))
+                    hi = float(np.nanmax(finite))
+                    if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+                        levels = (lo, hi)
+                    else:
+                        levels = (lo - 1.0, lo + 1.0)
+                else:
+                    levels = (0.0, 1.0)
             self.map_image.setLevels(list(levels))
             self._last_map_levels = levels
             if self._colorbar is not None:

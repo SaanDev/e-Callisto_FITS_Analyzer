@@ -12,6 +12,7 @@ from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
+from src.Backend import compute
 from src.Backend.frequency_axis import finite_data_limits, invalid_row_mask
 from src.Backend.goes_overlay import GOES_OVERLAY_CHANNEL_ORDER, goes_class_ticks_for_limits, goes_flux_axis_limits
 from src.Backend.swaves import format_log_frequency, log_frequency_ticks
@@ -23,9 +24,20 @@ except Exception:
     pg = None
 
 
+_GAP_FILL_RGBA = np.rint(np.array([0.70, 0.70, 0.70, 0.78]) * 255.0).astype(np.ubyte)
+_GAP_STRIPE_RGBA = np.rint(np.array([0.42, 0.42, 0.42, 0.90]) * 255.0).astype(np.ubyte)
+
+# One-entry identity caches. A slider drag re-renders with the same colormap
+# object every frame, so rebuilding the lookup tables each time was pure waste.
+_LOOKUP_CACHE: dict[str, object] = {"cmap": None, "color_map": None, "lut": None}
+_RGBA_LUT_CACHE: dict[str, object] = {"cmap": None, "lut": None}
+
+
 def _mpl_cmap_to_lookup(cmap):
     if pg is None or cmap is None:
         return None, None
+    if _LOOKUP_CACHE["cmap"] is cmap:
+        return _LOOKUP_CACHE["color_map"], _LOOKUP_CACHE["lut"]
     try:
         sample = np.linspace(0.0, 1.0, 256)
         rgba = np.asarray(cmap(sample), dtype=float)
@@ -34,9 +46,64 @@ def _mpl_cmap_to_lookup(cmap):
         colors = [tuple(int(v) for v in row[:4]) for row in rgba]
         color_map = pg.ColorMap(sample, colors)
         lut = color_map.getLookupTable(0.0, 1.0, 256)
-        return color_map, lut
     except Exception:
         return None, None
+
+    _LOOKUP_CACHE.update({"cmap": cmap, "color_map": color_map, "lut": lut})
+    return color_map, lut
+
+
+def _rgba_lut_for_cmap(cmap):
+    """A (N, 4) uint8 colour table equivalent to calling ``cmap`` per element.
+
+    Matplotlib colormaps hold exactly ``cmap.N`` distinct colours and accept an
+    integer array as direct lookup indices, so the table is exact for them. Any
+    other callable is sampled on [0, 1] instead, which the uint8 output can
+    represent to within one level.
+    """
+    if cmap is None:
+        return None
+    if _RGBA_LUT_CACHE["cmap"] is cmap:
+        return _RGBA_LUT_CACHE["lut"]
+
+    try:
+        levels = int(getattr(cmap, "N", 0) or 0)
+        if levels > 0:
+            samples = np.arange(levels)
+        else:
+            levels = 256
+            samples = np.linspace(0.0, 1.0, levels)
+        rgba = np.asarray(cmap(samples), dtype=float).reshape(levels, -1)
+        if rgba.shape[1] < 4:
+            return None
+        lut = np.rint(np.clip(rgba[:, :4], 0.0, 1.0) * 255.0).astype(np.ubyte)
+    except Exception:
+        return None
+
+    _RGBA_LUT_CACHE.update({"cmap": cmap, "lut": lut})
+    return lut
+
+
+def _lut_gather_numpy(work: np.ndarray, lut: np.ndarray, vmin: float, scale: float) -> np.ndarray:
+    levels = lut.shape[0]
+    index = (work - np.float32(vmin)) * np.float32(levels / scale)
+    np.nan_to_num(index, copy=False, nan=0.0, posinf=float(levels), neginf=0.0)
+    np.clip(index, 0.0, float(levels - 1), out=index)
+    index_dtype = np.uint8 if levels <= 256 else np.intp
+    # np.take is about twice as fast as fancy indexing for the same gather.
+    return np.take(lut, index.astype(index_dtype), axis=0)
+
+
+def _lut_gather_jax(work: np.ndarray, lut: np.ndarray, vmin: float, scale: float) -> np.ndarray:
+    from src.Backend.compute_kernels import rgba_from_lut_kernel
+
+    result = rgba_from_lut_kernel(
+        compute.to_device(work, dtype="float32"),
+        compute.to_device(lut),
+        np.float32(vmin),
+        np.float32(vmin + scale),
+    )
+    return compute.to_numpy(result)
 
 
 def _rgba_image_from_cmap(
@@ -49,9 +116,28 @@ def _rgba_image_from_cmap(
 ) -> np.ndarray:
     work = np.asarray(arr, dtype=np.float32)
     scale = max(float(vmax) - float(vmin), 1e-12)
-    norm = np.clip((work - float(vmin)) / scale, 0.0, 1.0)
-    rgba = np.asarray(cmap(norm.reshape(-1)), dtype=float).reshape(work.shape + (4,))
-    rgba = np.clip(rgba, 0.0, 1.0)
+
+    lut = _rgba_lut_for_cmap(cmap)
+    if lut is None:
+        # Unknown callable: fall back to evaluating it per element.
+        norm = np.clip((work - float(vmin)) / scale, 0.0, 1.0)
+        rgba_f = np.asarray(cmap(norm.reshape(-1)), dtype=float).reshape(work.shape + (4,))
+        rgba = np.rint(np.clip(rgba_f, 0.0, 1.0) * 255.0).astype(np.ubyte)
+    else:
+        # Index the table directly in uint8. Evaluating the colormap per element
+        # instead allocated several float64 arrays the size of the image, which
+        # is what made this the dominant cost of a live-preview frame.
+        rgba = compute.dispatch(
+            _lut_gather_jax,
+            _lut_gather_numpy,
+            work,
+            lut,
+            float(vmin),
+            scale,
+            size_hint=work,
+            # Memory-bandwidth bound: measured no faster on JAX's CPU backend.
+            gpu_only=True,
+        )
 
     alpha = np.isfinite(work)
 
@@ -65,11 +151,12 @@ def _rgba_image_from_cmap(
             explicit_gap_rows = None
 
     if explicit_gap_rows is not None and np.any(explicit_gap_rows):
-        yy, xx = np.indices(work.shape)
-        stripes = ((xx + yy) % 6) < 3
-        rgba[explicit_gap_rows, :, :] = np.array([0.70, 0.70, 0.70, 0.78], dtype=float)
-        stripe_mask = explicit_gap_rows[:, None] & stripes
-        rgba[stripe_mask, :] = np.array([0.42, 0.42, 0.42, 0.90], dtype=float)
+        gap_indices = np.flatnonzero(explicit_gap_rows)
+        columns = np.arange(work.shape[1])
+        # Only the gap rows need the hatch pattern, so build it at that size
+        # rather than over the whole image.
+        stripes = ((gap_indices[:, None] + columns[None, :]) % 6) < 3
+        rgba[gap_indices] = np.where(stripes[..., None], _GAP_STRIPE_RGBA, _GAP_FILL_RGBA)
         alpha[explicit_gap_rows, :] = True
 
     row_mask = invalid_row_mask(work, None)
@@ -79,8 +166,8 @@ def _rgba_image_from_cmap(
             invalid_non_gap &= ~explicit_gap_rows
         alpha[invalid_non_gap, :] = False
 
-    rgba[..., 3] = np.where(alpha, rgba[..., 3], 0.0)
-    return np.ascontiguousarray(np.rint(rgba * 255.0).astype(np.ubyte))
+    rgba[..., 3] = np.where(alpha, rgba[..., 3], np.ubyte(0))
+    return np.ascontiguousarray(rgba)
 
 
 if pg is not None:

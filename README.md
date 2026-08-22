@@ -626,6 +626,100 @@ Use **About → Check for Updates...** to query the latest release from GitHub.
 
 ---
 
+## ⚡ Hardware Acceleration and Compute Backend
+
+Array-heavy work — background subtraction, RFI cleaning, live preview rendering,
+coronagraph radial filtering — runs through a compute backend layer
+(`src/Backend/compute.py`). NumPy is always available; JAX/XLA is used when it
+is installed and the workload is large enough to be worth the transfer.
+
+### Choosing a backend
+
+**Processing → Hardware Acceleration → Compute Backend**
+
+| Option | Meaning |
+| --- | --- |
+| Auto | Prefer an NVIDIA GPU, then CPU JAX, then NumPy. This is the default. |
+| CPU | JAX's CPU backend. |
+| NVIDIA GPU | CUDA. Only selectable when a CUDA device is detected. |
+| Apple GPU | Experimental, see below. Off unless explicitly enabled. |
+| NumPy (no JAX) | Bypass JAX entirely. |
+
+**Device Info…** in the same menu reports the active backend, the detected
+devices, available VRAM and the JAX version. Backends this machine cannot run
+are shown disabled rather than hidden, so it is clear what is missing. The
+choice is remembered between sessions.
+
+The app never requires JAX. If it is absent, fails to import, or a kernel
+raises, the affected call falls back to NumPy and logs the reason once.
+
+### NVIDIA GPU support
+
+CUDA is an **opt-in install** — it pulls in roughly 3 GB of NVIDIA libraries and
+is deliberately kept out of the default install and out of the packaged builds.
+
+- **Linux (x86_64)**: `python3 src/Installation/install_requirements.py --gpu`
+- **Windows**: JAX publishes no native Windows CUDA build. Use WSL2 and run the
+  command above inside the WSL environment.
+- **macOS**: no NVIDIA support exists; the CPU backend is used.
+
+Nothing else needs configuring — the app detects CUDA at startup and Auto
+selects it.
+
+### Apple GPU (experimental, likely non-functional)
+
+`jax-metal` has not been released since October 2024 and is built against a much
+older jaxlib C API, so it very probably will not load against the pinned JAX
+version. It is never probed unless you opt in:
+
+```bash
+ECALLISTO_ENABLE_JAX_METAL=1 python src/UI/main.py
+```
+
+Even then the app runs a smoke computation first and silently ignores the device
+if it misbehaves. Using it in practice means pinning an older JAX in a separate
+environment.
+
+### Solar image playback
+
+High-resolution image sequences (AIA/HMI at 4096x4096, EUVI, LASCO) are rendered
+through the same layer. Three things dominated a frame and have been fixed:
+
+- Display clip limits were computed with two separate percentile sorts over a
+  compacted copy of the frame. They now take a single pass with no copy.
+- The matplotlib renderer rebuilt the figure, axes and colorbar for every frame.
+  It now updates the existing image in place whenever nothing structural changed.
+- Frames were promoted to float64 throughout the render and movie-export paths,
+  doubling every allocation for precision an 8-bit image cannot show.
+
+While a sequence is **playing**, and while a **clip slider is being dragged**,
+the viewer switches to a fast preview: display limits come from a subsample of
+the frame (accurate to well under one of the 256 display levels) and the
+matplotlib canvas is fed an image decimated to the widget's own pixel count,
+scaled for Retina/4K displays. Both revert the instant playback stops or the
+slider settles, so stepping, zooming and inspection stay at full resolution.
+
+**This never affects analysis.** Measurements, statistics, region extraction,
+FITS export and movie export all read the full-resolution array; only what is
+painted on screen during motion is approximated.
+
+### Measuring
+
+`scripts/benchmark_compute.py` times each accelerated operation on every
+available backend:
+
+```bash
+python3 scripts/benchmark_compute.py
+python3 scripts/benchmark_compute.py --backend numpy --backend jax-cpu --shape 2048x4096
+```
+
+Kernels that measured no faster than NumPy on JAX's CPU backend — the sort-bound
+row statistics and the bandwidth-bound colour mapping — are marked `gpu_only`
+and stay on NumPy unless a GPU is present. Without a GPU the benchmark columns
+are therefore expected to match.
+
+---
+
 ## 🛠️ Build and Packaging
 
 ### Prerequisites

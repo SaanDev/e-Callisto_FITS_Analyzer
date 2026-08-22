@@ -95,6 +95,10 @@ OPTIONS = {
     "strip": False,
     "packages": [
         "src",
+        # Accelerated compute backend. CPU-only in the bundle: there is no
+        # NVIDIA support on macOS, and CUDA is an opt-in install elsewhere.
+        "jax",
+        "jaxlib",
         "netCDF4",
         "cdflib",
         "cftime",

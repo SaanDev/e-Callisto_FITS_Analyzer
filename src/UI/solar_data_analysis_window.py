@@ -68,6 +68,8 @@ from src.Backend.solar_data_analysis import (
     AiaRegion,
     CropBounds,
     apply_display_scale,
+    finite_percentiles,
+    subsample_for_statistics,
     crop_array,
     crop_maps,
     detect_active_regions,
@@ -1027,6 +1029,8 @@ class SolarMatplotlibCanvas(QWidget):
         self._axis_transform = self._default_axis_transform()
         self._colormap_name = "inferno"
         self._colorbar_visible = True
+        self._plot_signature = None
+        self._display_pixel_limit: int | None = None
         self._image_artist = None
         self._colorbar_artist = None
         self._overlay_artists: list[Any] = []
@@ -1109,6 +1113,7 @@ class SolarMatplotlibCanvas(QWidget):
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)
         self._image_artist = None
+        self._plot_signature = None
         self._colorbar_artist = None
         self._overlay_artists = []
         self._vector_geometry = None
@@ -1126,6 +1131,71 @@ class SolarMatplotlibCanvas(QWidget):
         fg = "#e1e8f0" if self._is_dark_ui() else "#1e2a38"
         self.ax.set_title(str(title), color=fg)
         self.canvas.draw_idle()
+
+    def set_display_pixel_limit(self, limit: int | None) -> None:
+        """Cap the resolution handed to matplotlib, or ``None`` for full detail.
+
+        Matplotlib resamples the whole array to the widget on every draw, so a
+        4096x4096 frame costs an order of magnitude more than the ~900 px it can
+        actually show. Used during playback; stepping and paused viewing stay at
+        full resolution so zooming still reveals real detail.
+        """
+        value = int(limit) if limit else None
+        if value == self._display_pixel_limit:
+            return
+        self._display_pixel_limit = value
+        self._plot_signature = None
+
+    def _decimate_for_display(self, arr: np.ndarray) -> tuple[np.ndarray, int]:
+        limit = self._display_pixel_limit
+        if not limit or arr.ndim < 2:
+            return arr, 1
+        longest = max(int(arr.shape[0]), int(arr.shape[1]))
+        if longest <= limit:
+            return arr, 1
+        step = int(np.ceil(longest / float(limit)))
+        if step <= 1:
+            return arr, 1
+        return np.ascontiguousarray(arr[::step, ::step]), step
+
+    def _update_image_in_place(
+        self,
+        arr: np.ndarray,
+        title: str,
+        *,
+        vmin: float | None,
+        vmax: float | None,
+        is_rgb: bool,
+        dark: bool,
+    ) -> bool:
+        """Swap the data on the existing image artist. Returns False to rebuild.
+
+        Only reached when the shape, extent, colormap, colorbar visibility and
+        theme all match the previous frame, which is exactly the case during
+        playback and while scrubbing the frame slider.
+        """
+        try:
+            if is_rgb:
+                self._image_artist.set_data(_rgb_to_uint8(arr))
+            else:
+                self._image_artist.set_data(
+                    arr if arr.dtype == np.float32 else np.asarray(arr, dtype=float)
+                )
+                if vmin is None or vmax is None:
+                    self._image_artist.autoscale()
+                else:
+                    self._image_artist.set_clim(float(vmin), float(vmax))
+
+            fg = "#e1e8f0" if dark else "#1e2a38"
+            self.ax.set_title(title, color=fg)
+            self._draw_overlays()
+            self.canvas.draw_idle()
+            return True
+        except Exception:
+            # Fall through to the full rebuild; correctness beats the shortcut.
+            self._image_artist = None
+            self._plot_signature = None
+            return False
 
     def plot_map_data(
         self,
@@ -1146,12 +1216,33 @@ class SolarMatplotlibCanvas(QWidget):
         self._axis_transform = dict(axis_transform or self._default_axis_transform())
         arr = np.asarray(image_data)
         is_rgb = bool(arr.ndim == 3 and arr.shape[-1] in (3, 4))
+        # The extent must come from the full shape: a decimated image still
+        # spans the same patch of sky.
         x0, y0, width, height = self._map_rect_from_transform(arr.shape)
         extent = (x0, x0 + width, y0, y0 + height)
+        dark = self._is_dark_ui()
+        arr, display_step = self._decimate_for_display(arr)
+
+        # Rebuilding the figure, axes and colorbar for every frame costs far more
+        # than the image itself and puts a hard ceiling on playback frame rate
+        # (~1.6 fps at 4096x4096). When nothing structural has changed, update
+        # the existing image artist in place instead.
+        signature = (
+            tuple(arr.shape),
+            is_rgb,
+            tuple(round(float(v), 6) for v in extent),
+            str(self._colormap_name),
+            bool(self._colorbar_visible),
+            bool(dark),
+            int(display_step),
+        )
+        if self._image_artist is not None and signature == getattr(self, "_plot_signature", None):
+            if self._update_image_in_place(arr, title, vmin=vmin, vmax=vmax, is_rgb=is_rgb, dark=dark):
+                return
 
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)
-        dark = self._is_dark_ui()
+        self._plot_signature = signature
         bg = "#0c0c0c" if dark else "#ffffff"
         fg = "#e1e8f0" if dark else "#1e2a38"
         self.figure.patch.set_facecolor(bg)
@@ -1169,7 +1260,9 @@ class SolarMatplotlibCanvas(QWidget):
         else:
             cmap = self._matplotlib_colormap(self._colormap_name)
             self._image_artist = self.ax.imshow(
-                np.asarray(arr, dtype=float),
+                # float32 is left alone: promoting a 4096x4096 frame to float64
+                # allocates 134 MB per frame for no display benefit.
+                arr if arr.dtype == np.float32 else np.asarray(arr, dtype=float),
                 origin="lower",
                 extent=extent,
                 interpolation="nearest",
@@ -1591,6 +1684,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._regions: list[AiaRegion] = []
         self._metadata_regions: list[Any] = []
         self._current_frame_index = 0
+        self._fast_preview_active = False
         self._current_map_data: np.ndarray | None = None
         self._current_axis_transform: dict[str, float] = self._default_axis_transform()
         # Observation-config bookkeeping for the loaded sequence (see
@@ -4734,16 +4828,68 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._current_frame_index = max(0, min(int(value), max(0, len(self._map_frames) - 1)))
         self._render_current_frame()
 
+    # Playback only has to fill the on-screen widget; handing matplotlib a full
+    # 4096x4096 frame for a ~900 px box costs an order of magnitude more per
+    # frame. Full resolution comes back the moment playback stops.
+    PLAYBACK_DISPLAY_PIXEL_LIMIT = 1024
+
+    def _set_fast_preview(self, active: bool) -> bool:
+        """Trade exactness for frame rate while the view is in motion.
+
+        Applies while playing and while a clip slider is being dragged: display
+        limits come from a subsample and the matplotlib canvas is fed a
+        decimated image. Both are restored the moment the motion stops, and
+        neither touches the arrays the analysis tools read.
+        """
+        active = bool(active)
+        if active == self._fast_preview_active:
+            return False
+        self._fast_preview_active = active
+        self._set_playback_display_quality(active)
+        return True
+
+    def _playback_display_pixel_limit(self) -> int:
+        """Decimation target: never below the pixels the widget can show.
+
+        Scaled by the device pixel ratio so the image does not go soft on a
+        Retina or 4K display, and given headroom above the widget size so a
+        modest zoom during playback still has detail behind it.
+        """
+        limit = self.PLAYBACK_DISPLAY_PIXEL_LIMIT
+        try:
+            canvas = self._active_canvas()
+            ratio = float(canvas.devicePixelRatioF() or 1.0)
+            widget_px = max(canvas.width(), canvas.height()) * ratio
+            limit = max(limit, int(widget_px * 1.5))
+        except Exception:
+            pass
+        return int(limit)
+
+    def _set_playback_display_quality(self, playing: bool) -> bool:
+        limit = self._playback_display_pixel_limit() if playing else None
+        changed = False
+        for canvas in self._all_plot_canvases():
+            setter = getattr(canvas, "set_display_pixel_limit", None)
+            if callable(setter):
+                before = getattr(canvas, "_display_pixel_limit", None)
+                setter(limit)
+                changed = changed or before != getattr(canvas, "_display_pixel_limit", None)
+        return changed
+
     def play_frames(self) -> None:
         if len(self._map_frames) <= 1:
             return
         if self._current_frame_index >= len(self._map_frames) - 1:
             self.rewind_frames()
+        self._set_fast_preview(True)
         self._refresh_play_timer()
         self._play_timer.start()
 
     def pause_frames(self) -> None:
         self._play_timer.stop()
+        if self._set_fast_preview(False) and self._map_frames:
+            # Repaint the frame we stopped on at full resolution.
+            self._render_current_frame()
 
     def _refresh_play_timer(self) -> None:
         if self._play_timer.isActive():
@@ -4784,6 +4930,9 @@ class SolarDataAnalysisWindow(QMainWindow):
         if self._clip_render_timer.isActive():
             self._clip_render_pending = True
             return
+        # Dragging a clip slider re-renders the same frame over and over; the
+        # exact percentile sort makes that unusable at full resolution.
+        self._set_fast_preview(True)
         self._render_current_frame()
         self._clip_render_timer.start()
 
@@ -4791,8 +4940,12 @@ class SolarDataAnalysisWindow(QMainWindow):
         if self._clip_render_pending:
             self._clip_render_pending = False
             self._render_current_frame()
-        else:
-            self._clip_render_timer.stop()
+            return
+        self._clip_render_timer.stop()
+        # The handle has settled: redraw once at full quality, unless playback
+        # is running and still wants the fast path.
+        if not self._play_timer.isActive() and self._set_fast_preview(False):
+            self._render_current_frame()
 
     def _render_current_frame(self) -> None:
         if not self._map_frames:
@@ -4879,14 +5032,21 @@ class SolarDataAnalysisWindow(QMainWindow):
             # use identical scaling.
             display_data = apply_display_scale(current, self.scale_combo.currentText())
 
-            finite = display_data[np.isfinite(display_data)]
             vmin = None
             vmax = None
-            if finite.size > 0:
+            if display_data.size > 0:
                 lo = min(float(self.clip_low_slider.value()), float(self.clip_high_slider.value()) - 0.1)
                 hi = max(float(self.clip_high_slider.value()), lo + 0.1)
-                vmin = float(np.nanpercentile(finite, lo))
-                vmax = float(np.nanpercentile(finite, hi))
+                # One pass for both bounds, with no compacted copy of the frame:
+                # the old form allocated two full arrays and sorted twice, which
+                # on a 4096x4096 frame cost more than everything else combined.
+                # While playing, take them from a subsample — the difference is
+                # far below one display level and the exact sort is the single
+                # biggest per-frame cost at full resolution.
+                sample = display_data
+                if self._fast_preview_active:
+                    sample = subsample_for_statistics(display_data)
+                vmin, vmax = (float(v) for v in finite_percentiles(sample, (lo, hi)))
                 if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
                     vmin = None
                     vmax = None

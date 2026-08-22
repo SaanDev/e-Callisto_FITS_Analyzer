@@ -16,6 +16,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 RUNTIME_REQUIREMENTS = HERE / "requirements-runtime.txt"
 BUILD_REQUIREMENTS = HERE / "requirements-build.txt"
+GPU_REQUIREMENTS = HERE / "requirements-gpu.txt"
 QT_BINDING_PACKAGES = (
     "PySide6",
     "PySide6-Addons",
@@ -48,9 +49,11 @@ def _package_name(requirement: str) -> str:
 
 runtime_requirements = _requirement_lines(RUNTIME_REQUIREMENTS)
 build_requirements = _requirement_lines(BUILD_REQUIREMENTS)
+gpu_requirements = _requirement_lines(GPU_REQUIREMENTS)
 
 packages = [_package_name(item) for item in runtime_requirements if _package_name(item)]
 build_packages = [_package_name(item) for item in build_requirements if _package_name(item)]
+gpu_packages = [_package_name(item) for item in gpu_requirements if _package_name(item)]
 
 
 def ensure_pip_available() -> None:
@@ -135,6 +138,19 @@ def warm_runtime_imports() -> None:
         ) from exc
 
 
+def report_compute_backend() -> None:
+    """Print which compute backend the freshly installed environment resolves to."""
+    code = (
+        "import sys; sys.path.insert(0, '.'); "
+        "from src.Backend import compute; "
+        "print('Compute backend:', compute.describe_active())"
+    )
+    try:
+        subprocess.check_call([sys.executable, "-c", code], cwd=str(HERE.parents[1]))
+    except subprocess.CalledProcessError:
+        print("Could not query the compute backend; the app will fall back to NumPy.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Install pinned dependencies for e-CALLISTO FITS Analyzer."
@@ -143,6 +159,14 @@ def main() -> None:
         "--with-build",
         action="store_true",
         help="Also install build tooling from requirements-build.txt.",
+    )
+    parser.add_argument(
+        "--gpu",
+        action="store_true",
+        help=(
+            "Also install NVIDIA CUDA support for JAX (Linux x86_64, ~3 GB). "
+            "The app falls back to CPU automatically when this is absent."
+        ),
     )
     args = parser.parse_args()
 
@@ -155,6 +179,18 @@ def main() -> None:
     if args.with_build:
         print("\n=== Installing build requirements ===")
         install_requirements_file(BUILD_REQUIREMENTS)
+
+    if args.gpu:
+        print("\n=== Installing NVIDIA GPU support (JAX CUDA) ===")
+        if not sys.platform.startswith("linux"):
+            print(
+                "Skipping: JAX has no native CUDA build for this platform.\n"
+                "  Windows: install inside WSL2 and run this command there.\n"
+                "  macOS:   no NVIDIA support; the app uses the CPU backend."
+            )
+        else:
+            install_requirements_file(GPU_REQUIREMENTS)
+            report_compute_backend()
 
     print("\nInstall complete.")
     print("You can start the application with:\n   python3 src/UI/main.py")
