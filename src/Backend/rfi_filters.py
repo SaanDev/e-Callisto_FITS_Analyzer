@@ -12,7 +12,6 @@ from typing import Any
 
 import numpy as np
 
-from src.Backend import compute
 from src.Backend.array_stats import row_quantiles
 
 try:
@@ -46,41 +45,13 @@ def _ensure_odd(v: int) -> int:
     return out
 
 
-def _median2d_scipy(arr: np.ndarray, kernel_freq: int, kernel_time: int) -> np.ndarray:
+def _median2d(arr: np.ndarray, kernel_freq: int, kernel_time: int) -> np.ndarray:
     if _median_filter is None:
         return arr.copy()
-    return _median_filter(arr, size=(kernel_freq, kernel_time), mode="nearest")
-
-
-def _median2d_jax(arr: np.ndarray, kernel_freq: int, kernel_time: int) -> np.ndarray:
-    from src.Backend.compute_kernels import MAX_STACK_MEDIAN_KERNEL, median_filter_2d_kernel
-
-    # The shifted-stack median needs kernel_freq * kernel_time copies of the
-    # image. Past a small kernel that stops being a good trade, so hand back to
-    # scipy rather than allocating a large stack on the device.
-    if kernel_freq > MAX_STACK_MEDIAN_KERNEL or kernel_time > MAX_STACK_MEDIAN_KERNEL:
-        return _median2d_scipy(arr, kernel_freq, kernel_time)
-
-    result = median_filter_2d_kernel(compute.to_device(arr), kernel_freq, kernel_time)
-    return compute.to_numpy(result)
-
-
-def _median2d(arr: np.ndarray, kernel_freq: int, kernel_time: int) -> np.ndarray:
-    kf = _ensure_odd(kernel_freq)
-    kt = _ensure_odd(kernel_time)
-    if _median_filter is None and not compute.should_accelerate(arr, gpu_only=True):
-        return arr.copy()
-
-    return compute.dispatch(
-        _median2d_jax,
-        _median2d_scipy,
+    return _median_filter(
         arr,
-        kf,
-        kt,
-        size_hint=arr,
-        # scipy's C implementation already matches a hand-rolled NumPy stack
-        # median, so this only moves on a GPU.
-        gpu_only=True,
+        size=(_ensure_odd(kernel_freq), _ensure_odd(kernel_time)),
+        mode="nearest",
     )
 
 

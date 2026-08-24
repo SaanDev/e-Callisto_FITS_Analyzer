@@ -41,10 +41,6 @@ a = Analysis(
         (backend_pgf.__file__, "matplotlib/backends"),
     ],
     hiddenimports=[
-        # Accelerated compute backend (src/Backend/compute.py). CPU-only here:
-        # CUDA is an opt-in user install, never bundled.
-        "jax",
-        "jaxlib",
         "PySide6",
         "matplotlib",
         "reportlab",

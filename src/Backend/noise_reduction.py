@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.Backend import compute
 from src.Backend.array_stats import row_quantiles
 from src.Backend.frequency_axis import invalid_row_mask
 
@@ -137,56 +136,6 @@ def _subtract_background_numpy(
     return out
 
 
-def _subtract_background_numpy_entry(
-    arr: np.ndarray,
-    row_invalid: np.ndarray,
-    gap_row_mask: np.ndarray | None,
-    mode_code: int,
-    robust_percentile: float,
-    equalize_noise: bool,
-    equalize_percentile: float,
-    attenuate_only: bool,
-) -> np.ndarray:
-    """Shared dispatch signature; ``gap_row_mask`` is already folded into
-    ``row_invalid`` for the NumPy path."""
-    return _subtract_background_numpy(
-        arr,
-        row_invalid,
-        mode_code,
-        robust_percentile,
-        equalize_noise,
-        equalize_percentile,
-        attenuate_only,
-    )
-
-
-def _subtract_background_jax(
-    arr: np.ndarray,
-    row_invalid: np.ndarray,
-    gap_row_mask: np.ndarray | None,
-    mode_code: int,
-    robust_percentile: float,
-    equalize_noise: bool,
-    equalize_percentile: float,
-    attenuate_only: bool,
-) -> np.ndarray:
-    """Same signature as the NumPy entry point; ``row_invalid`` is recomputed
-    on the device from ``gap_row_mask`` so the whole chain stays in one kernel."""
-    from src.Backend.compute_kernels import subtract_background_kernel
-
-    device_arr = compute.to_device(arr, dtype="float32")
-    result = subtract_background_kernel(
-        device_arr,
-        gap_row_mask,
-        mode_code,
-        float(robust_percentile),
-        bool(equalize_noise),
-        float(equalize_percentile),
-        bool(attenuate_only),
-    )
-    return compute.to_numpy(result).astype(np.float32, copy=False)
-
-
 def subtract_background_rows(
     data: np.ndarray,
     *,
@@ -208,19 +157,12 @@ def subtract_background_rows(
         out[row_invalid, :] = np.nan
         return out
 
-    return compute.dispatch(
-        _subtract_background_jax,
-        _subtract_background_numpy_entry,
+    return _subtract_background_numpy(
         arr,
         row_invalid,
-        gap_row_mask,
         mode_code,
         robust_percentile,
         equalize_noise,
         equalize_percentile,
         attenuate_only,
-        size_hint=arr,
-        # Row statistics are sort-bound: XLA's CPU backend runs the same
-        # algorithm as NumPy and measured no faster. Only a GPU pays here.
-        gpu_only=True,
     )

@@ -20,15 +20,12 @@ Compared with v2.7.0, this release adds the following capabilities:
 - **Time-window sync:** **Use CALLISTO Window** copies the loaded spectrum's range widened on both sides by a configurable padding (30 minutes by default), because a type II or III burst takes tens of minutes to hours to drift from the corona down into the SWAVES band and an exact match would cut it off. **Solar Events → Sync Current Time Window** updates an open SWAVES dialog the same way.
 - **Kept with the session:** **Solar Events → SWAVES Panel** hides and restores the panel without discarding the loaded data, and the split view is included in Save Plot exports, stored in and restored from `.efaproj` project files without re-downloading, and added to generated project report PDFs.
 
-### Hardware acceleration and compute backend
-- **Compute backend layer:** array-heavy work — background subtraction, RFI cleaning, live preview rendering, coronagraph radial filtering — now runs through `src/Backend/compute.py`, which dispatches to JAX/XLA when it is installed and the array is large enough to be worth the transfer, and to NumPy otherwise. JAX is never required: a missing import or a failing kernel falls back to NumPy and logs the reason once.
-- **Backend selection in the app:** **Processing → Hardware Acceleration → Compute Backend** offers Auto, CPU, NVIDIA GPU, Apple GPU (experimental) and NumPy (no JAX), with **Device Info…** reporting the active backend, the detected devices, available VRAM and the JAX version. Backends this machine cannot run are shown disabled rather than hidden, and the choice is remembered between sessions.
-- **Opt-in NVIDIA CUDA support:** `python3 src/Installation/install_requirements.py --gpu` installs the CUDA build (Linux x86_64; Windows through WSL2). It pulls in roughly 3 GB of NVIDIA libraries, so it is deliberately kept out of the default install and the packaged builds; the app detects CUDA at startup and Auto selects it. Kernels are pre-compiled for the loaded file's shape on a background thread so the first XLA compile never blocks the UI.
+### Solar image playback performance
 - **Faster solar image playback:** display clip limits now take a single pass instead of two percentile sorts over a compacted copy, the matplotlib renderer updates the existing image in place instead of rebuilding the figure, axes and colorbar for every frame, and frames are no longer promoted to float64 through the render and movie-export paths. While a sequence plays, and while a clip slider is being dragged, the viewer switches to a subsampled, screen-resolution preview and reverts the instant motion stops. Measurements, statistics, region extraction, FITS export and movie export always read the full-resolution array.
-- **Measuring it:** `scripts/benchmark_compute.py` times every accelerated operation on each available backend. Kernels that measured no faster than NumPy on JAX's CPU backend — the sort-bound row statistics and the bandwidth-bound colour mapping — are marked `gpu_only` and stay on NumPy unless a GPU is present. See [Hardware Acceleration and Compute Backend](#-hardware-acceleration-and-compute-backend) for the full description.
+- **Faster row statistics:** background subtraction and RFI cleaning read every row quantile they need from one sort (`src/Backend/array_stats.py`) instead of running a separate `nanmedian`/`nanpercentile` pass per statistic, and the live preview keeps float32 data in float32 rather than promoting it. See [Solar Image Playback Performance](#-solar-image-playback-performance) for the full description.
 
 ### Packaging, dependencies, and citation
-- Pinned `jax[cpu]` and `cdflib` in the runtime requirements, added a separate `requirements-gpu.txt` for the optional CUDA install, added PyInstaller hooks for `jax` and `jaxlib`, and packaged the new SWAVES, composite and compute modules across the Windows, Linux and macOS builds.
+- Pinned `cdflib` in the runtime requirements and packaged the new SWAVES and composite modules across the Windows, Linux and macOS builds.
 - **Cite this Software** now gives the published article — *RAS Techniques and Instruments* **5**, rzag056 (2026), [doi:10.1093/rasti/rzag056](https://doi.org/10.1093/rasti/rzag056) — in place of the earlier arXiv preprint entry. The BibTeX key is unchanged, so manuscripts that already reference it keep resolving.
 
 ---
@@ -92,7 +89,6 @@ Compared with v2.6.0, this release adds the following capabilities:
 - Plot one or more light curves on top of the dynamic spectrum by entering a frequency or clicking directly on the plot, with configurable color, width, opacity, labels, and line style.
 - Combine frequency bands with improved gap-filling and overlap-handling options before importing the merged spectrum.
 - Keep polygon, line, and text annotations inside the accelerated view, with editable text styling and project persistence.
-- Run array-heavy processing through a selectable compute backend (Auto, CPU, NVIDIA GPU, or plain NumPy) from **Processing -> Hardware Acceleration -> Compute Backend**, with automatic fallback to NumPy whenever JAX is absent or a kernel fails.
 - Save and reuse processing presets, optionally choose a default preset for future FITS loads, reopen restored analysis sessions, and run batch processing for folder-based FIT/FITS exports.
 
 ### Solar-event context tools
@@ -725,64 +721,11 @@ Use **About → Check for Updates...** to query the latest release from GitHub.
 
 ---
 
-## ⚡ Hardware Acceleration and Compute Backend
-
-Array-heavy work — background subtraction, RFI cleaning, live preview rendering,
-coronagraph radial filtering — runs through a compute backend layer
-(`src/Backend/compute.py`). NumPy is always available; JAX/XLA is used when it
-is installed and the workload is large enough to be worth the transfer.
-
-### Choosing a backend
-
-**Processing → Hardware Acceleration → Compute Backend**
-
-| Option | Meaning |
-| --- | --- |
-| Auto | Prefer an NVIDIA GPU, then CPU JAX, then NumPy. This is the default. |
-| CPU | JAX's CPU backend. |
-| NVIDIA GPU | CUDA. Only selectable when a CUDA device is detected. |
-| Apple GPU | Experimental, see below. Off unless explicitly enabled. |
-| NumPy (no JAX) | Bypass JAX entirely. |
-
-**Device Info…** in the same menu reports the active backend, the detected
-devices, available VRAM and the JAX version. Backends this machine cannot run
-are shown disabled rather than hidden, so it is clear what is missing. The
-choice is remembered between sessions.
-
-The app never requires JAX. If it is absent, fails to import, or a kernel
-raises, the affected call falls back to NumPy and logs the reason once.
-
-### NVIDIA GPU support
-
-CUDA is an **opt-in install** — it pulls in roughly 3 GB of NVIDIA libraries and
-is deliberately kept out of the default install and out of the packaged builds.
-
-- **Linux (x86_64)**: `python3 src/Installation/install_requirements.py --gpu`
-- **Windows**: JAX publishes no native Windows CUDA build. Use WSL2 and run the
-  command above inside the WSL environment.
-- **macOS**: no NVIDIA support exists; the CPU backend is used.
-
-Nothing else needs configuring — the app detects CUDA at startup and Auto
-selects it.
-
-### Apple GPU (experimental, likely non-functional)
-
-`jax-metal` has not been released since October 2024 and is built against a much
-older jaxlib C API, so it very probably will not load against the pinned JAX
-version. It is never probed unless you opt in:
-
-```bash
-ECALLISTO_ENABLE_JAX_METAL=1 python src/UI/main.py
-```
-
-Even then the app runs a smoke computation first and silently ignores the device
-if it misbehaves. Using it in practice means pinning an older JAX in a separate
-environment.
-
-### Solar image playback
+## ⚡ Solar Image Playback Performance
 
 High-resolution image sequences (AIA/HMI at 4096x4096, EUVI, LASCO) are rendered
-through the same layer. Three things dominated a frame and have been fixed:
+by the Solar Image Analysis window. Three things dominated a frame and have been
+fixed:
 
 - Display clip limits were computed with two separate percentile sorts over a
   compacted copy of the frame. They now take a single pass with no copy.
@@ -802,20 +745,14 @@ slider settles, so stepping, zooming and inspection stay at full resolution.
 FITS export and movie export all read the full-resolution array; only what is
 painted on screen during motion is approximated.
 
-### Measuring
+### Row statistics
 
-`scripts/benchmark_compute.py` times each accelerated operation on every
-available backend:
-
-```bash
-python3 scripts/benchmark_compute.py
-python3 scripts/benchmark_compute.py --backend numpy --backend jax-cpu --shape 2048x4096
-```
-
-Kernels that measured no faster than NumPy on JAX's CPU backend — the sort-bound
-row statistics and the bandwidth-bound colour mapping — are marked `gpu_only`
-and stay on NumPy unless a GPU is present. Without a GPU the benchmark columns
-are therefore expected to match.
+Background subtraction and RFI cleaning need several quantiles from the same
+rows. `np.nanmedian` and `np.nanpercentile` each sort internally, so the chain
+used to sort the same rows five or six times over. `src/Backend/array_stats.py`
+sorts once and reads every requested quantile off the sorted rows, matching
+`np.nanpercentile(..., axis=1)` semantics exactly — including its treatment of
+infinities and all-NaN rows.
 
 ---
 

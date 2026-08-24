@@ -38,8 +38,6 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from src.Backend import compute
-
 
 # Solar radius in kilometres (IAU 2015 nominal).
 RSUN_KM = 695_700.0
@@ -80,7 +78,8 @@ def solar_center_from_meta(meta: Any, data_shape: tuple[int, int] | None = None)
     raise ValueError("Cannot determine solar centre: no CRPIX and no data_shape.")
 
 
-def _radial_distance_grid_numpy(shape: tuple[int, int], center: tuple[float, float]) -> np.ndarray:
+def radial_distance_grid(shape: tuple[int, int], center: tuple[float, float]) -> np.ndarray:
+    """Return an array of radial distance (pixels) from ``center`` for every pixel."""
     ny, nx = shape
     cx, cy = center
     # Broadcasting the two axis vectors avoids materialising the pair of full
@@ -88,26 +87,6 @@ def _radial_distance_grid_numpy(shape: tuple[int, int], center: tuple[float, flo
     yy = np.arange(int(ny), dtype=float)[:, None] - float(cy)
     xx = np.arange(int(nx), dtype=float)[None, :] - float(cx)
     return np.hypot(xx, yy)
-
-
-def _radial_distance_grid_jax(shape: tuple[int, int], center: tuple[float, float]) -> np.ndarray:
-    from src.Backend.compute_kernels import radial_distance_kernel
-
-    ny, nx = shape
-    cx, cy = center
-    return compute.to_numpy(radial_distance_kernel(int(ny), int(nx), float(cy), float(cx)))
-
-
-def radial_distance_grid(shape: tuple[int, int], center: tuple[float, float]) -> np.ndarray:
-    """Return an array of radial distance (pixels) from ``center`` for every pixel."""
-    return compute.dispatch(
-        _radial_distance_grid_jax,
-        _radial_distance_grid_numpy,
-        shape,
-        center,
-        size_hint=tuple(shape),
-        gpu_only=True,
-    )
 
 
 # --------------------------------------------------------------------------- #

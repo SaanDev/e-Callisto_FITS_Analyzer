@@ -14,8 +14,6 @@ from typing import Any, Iterable, Sequence
 
 import numpy as np
 
-from src.Backend import compute
-
 
 CropBounds = tuple[int, int, int, int]
 
@@ -1357,7 +1355,8 @@ def _rgb_lut_for_colormap(name: str) -> tuple[np.ndarray, np.ndarray] | None:
     return lut, bad_rgb
 
 
-def _apply_rgb_lut_numpy(norm: np.ndarray, lut: np.ndarray, bad_rgb: np.ndarray) -> np.ndarray:
+def _apply_rgb_lut(norm: np.ndarray, lut_pair: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
+    lut, bad_rgb = lut_pair
     levels = lut.shape[0]
     index = np.asarray(norm, dtype=np.float32) * np.float32(levels)
     invalid = ~np.isfinite(index)
@@ -1369,35 +1368,6 @@ def _apply_rgb_lut_numpy(norm: np.ndarray, lut: np.ndarray, bad_rgb: np.ndarray)
     if invalid.any():
         rgb[invalid] = bad_rgb
     return rgb
-
-
-def _apply_rgb_lut_jax(norm: np.ndarray, lut: np.ndarray, bad_rgb: np.ndarray) -> np.ndarray:
-    from src.Backend.compute_kernels import rgb_lut_kernel
-
-    rgb = compute.to_numpy(
-        rgb_lut_kernel(
-            compute.to_device(norm, dtype="float32"),
-            compute.to_device(lut),
-        )
-    )
-    invalid = ~np.isfinite(np.asarray(norm))
-    if invalid.any():
-        rgb[invalid] = bad_rgb
-    return rgb
-
-
-def _apply_rgb_lut(norm: np.ndarray, lut_pair: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
-    lut, bad_rgb = lut_pair
-    return compute.dispatch(
-        _apply_rgb_lut_jax,
-        _apply_rgb_lut_numpy,
-        norm,
-        lut,
-        bad_rgb,
-        size_hint=norm,
-        # Bandwidth-bound gather: only a GPU beats NumPy here.
-        gpu_only=True,
-    )
 
 
 def array_to_rgb_uint8(

@@ -12,7 +12,6 @@ from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
-from src.Backend import compute
 from src.Backend.frequency_axis import finite_data_limits, invalid_row_mask
 from src.Backend.goes_overlay import GOES_OVERLAY_CHANNEL_ORDER, goes_class_ticks_for_limits, goes_flux_axis_limits
 from src.Backend.swaves import format_log_frequency, log_frequency_ticks
@@ -84,7 +83,7 @@ def _rgba_lut_for_cmap(cmap):
     return lut
 
 
-def _lut_gather_numpy(work: np.ndarray, lut: np.ndarray, vmin: float, scale: float) -> np.ndarray:
+def _lut_gather(work: np.ndarray, lut: np.ndarray, vmin: float, scale: float) -> np.ndarray:
     levels = lut.shape[0]
     index = (work - np.float32(vmin)) * np.float32(levels / scale)
     np.nan_to_num(index, copy=False, nan=0.0, posinf=float(levels), neginf=0.0)
@@ -92,18 +91,6 @@ def _lut_gather_numpy(work: np.ndarray, lut: np.ndarray, vmin: float, scale: flo
     index_dtype = np.uint8 if levels <= 256 else np.intp
     # np.take is about twice as fast as fancy indexing for the same gather.
     return np.take(lut, index.astype(index_dtype), axis=0)
-
-
-def _lut_gather_jax(work: np.ndarray, lut: np.ndarray, vmin: float, scale: float) -> np.ndarray:
-    from src.Backend.compute_kernels import rgba_from_lut_kernel
-
-    result = rgba_from_lut_kernel(
-        compute.to_device(work, dtype="float32"),
-        compute.to_device(lut),
-        np.float32(vmin),
-        np.float32(vmin + scale),
-    )
-    return compute.to_numpy(result)
 
 
 def _rgba_image_from_cmap(
@@ -127,17 +114,7 @@ def _rgba_image_from_cmap(
         # Index the table directly in uint8. Evaluating the colormap per element
         # instead allocated several float64 arrays the size of the image, which
         # is what made this the dominant cost of a live-preview frame.
-        rgba = compute.dispatch(
-            _lut_gather_jax,
-            _lut_gather_numpy,
-            work,
-            lut,
-            float(vmin),
-            scale,
-            size_hint=work,
-            # Memory-bandwidth bound: measured no faster on JAX's CPU backend.
-            gpu_only=True,
-        )
+        rgba = _lut_gather(work, lut, float(vmin), scale)
 
     alpha = np.isfinite(work)
 
