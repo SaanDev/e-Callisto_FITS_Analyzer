@@ -329,8 +329,9 @@ detection works on local files.</p>
 <ul>
 <li><b>Single Station</b>: pick station, date, and hour, show available files, then preview, download, compare,
 or import them into the analyzer.</li>
-<li><b>Multi-Station Event</b>: select stations and a UTC event window, search matching files, then download or
-send them to the comparison workspace.</li>
+<li><b>Multi-Station Event</b>: select stations and a UTC event window, search matching files, then download,
+import compatible selections with automatic time/frequency combination, or open the comparison workspace with
+the explicit <b>Compare</b> button.</li>
 <li><b>Spectral Overview</b>: generate a station's full UTC-day spectrum as six four-hour panels with a day-wide
 median_dB baseline, with per-focus-code preview tabs, and export it.</li>
 </ul>

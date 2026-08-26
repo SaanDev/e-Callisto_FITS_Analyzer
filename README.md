@@ -48,7 +48,7 @@ Compared with v2.6.0, this release adds the following capabilities:
 - **Multi-Station Comparison workspace:** open multiple FITS files in stacked synchronized panels, align them by UT clock or seconds from file start, and automatically combine compatible time-only, frequency-only, or time + frequency grids per station.
 - **Comparison noise-reduction controls:** apply mean, median, robust, or clipping-based noise reduction to every panel or an individual panel, with live threshold previews and synchronized colormaps.
 - **Flexible comparison exports:** export the visible comparison or a compact publication-style grid with shared display ranges and configurable shared, per-station, or manual color scaling.
-- **Multi-Station Event downloader:** search selected stations across a UTC event window, download matching FITS files, and send the selected or downloaded files directly to the comparison workspace. The standard downloader also includes a direct **Compare** action.
+- **Multi-Station Event downloader:** search selected stations across a UTC event window, download matching FITS files, or import a compatible selection with automatic time-only, frequency-only, or time + frequency combination. The comparison workspace opens only through the explicit **Compare** action.
 
 ### Spectrum tools and reproducible views
 - **Ruler measurements:** click two points on the main spectrum or a comparison panel to measure duration, frequency change, and drift slope.

@@ -345,12 +345,14 @@ def test_downloader_event_tab_defaults_and_empty_state():
     dlg = CallistoDownloaderApp()
 
     assert dlg.tabs.tabText(1) == "Multi-Station Event"
-    assert dlg.event_auto_open_chk.isChecked() is True
+    assert dlg.event_import_btn.text() == "Import"
 
     dlg.display_event_search_results({"candidates": [], "warnings": [], "missing_stations": ["BIR"]})
 
     assert dlg.event_results_table.rowCount() == 0
     assert dlg.event_download_btn.isEnabled() is False
+    assert dlg.event_import_btn.isEnabled() is False
+    assert dlg.event_compare_btn.isEnabled() is False
     assert "No matching FITS files" in dlg.event_status_label.text()
     dlg.close()
 
@@ -686,7 +688,7 @@ def test_single_station_compare_emits_selected_urls_and_closes():
     assert dlg.result() == QDialog.Accepted
 
 
-def test_event_results_default_to_checked_and_auto_open_emits(monkeypatch, tmp_path):
+def test_event_download_completion_does_not_open_comparison(monkeypatch, tmp_path):
     _app()
     dlg = CallistoDownloaderApp()
     monkeypatch.setattr("src.UI.callisto_downloader.QMessageBox.information", lambda *_args, **_kwargs: None)
@@ -711,7 +713,57 @@ def test_event_results_default_to_checked_and_auto_open_emits(monkeypatch, tmp_p
     dlg._event_download_failures = []
     dlg.finish_event_download()
 
-    assert emitted == [[path_a, path_b]]
+    assert emitted == []
+    assert dlg.event_status_label.text() == "Downloaded 2 of 2 selected FITS file(s)."
+    dlg.close()
+
+
+def test_event_import_emits_all_checked_candidate_urls_without_opening_comparison():
+    _app()
+    dlg = CallistoDownloaderApp()
+    imported = []
+    compared = []
+    dlg.import_request.connect(lambda urls: imported.append(urls))
+    dlg.comparison_request.connect(lambda urls: compared.append(urls))
+
+    candidates = [
+        CallistoEventCandidate(
+            station="AUSTRALIA-ASSA",
+            observed_at_utc=datetime(2026, 2, 1, 23, 30),
+            filename="AUSTRALIA-ASSA_20260201_233000_57.fit.gz",
+            url="https://example.test/AUSTRALIA-ASSA_20260201_233000_57.fit.gz",
+            receiver_id="57",
+        ),
+        CallistoEventCandidate(
+            station="AUSTRALIA-ASSA",
+            observed_at_utc=datetime(2026, 2, 1, 23, 30),
+            filename="AUSTRALIA-ASSA_20260201_233000_62.fit.gz",
+            url="https://example.test/AUSTRALIA-ASSA_20260201_233000_62.fit.gz",
+            receiver_id="62",
+        ),
+        CallistoEventCandidate(
+            station="AUSTRALIA-ASSA",
+            observed_at_utc=datetime(2026, 2, 1, 23, 45),
+            filename="AUSTRALIA-ASSA_20260201_234500_57.fit.gz",
+            url="https://example.test/AUSTRALIA-ASSA_20260201_234500_57.fit.gz",
+            receiver_id="57",
+        ),
+        CallistoEventCandidate(
+            station="AUSTRALIA-ASSA",
+            observed_at_utc=datetime(2026, 2, 1, 23, 45),
+            filename="AUSTRALIA-ASSA_20260201_234500_62.fit.gz",
+            url="https://example.test/AUSTRALIA-ASSA_20260201_234500_62.fit.gz",
+            receiver_id="62",
+        ),
+    ]
+    for candidate in candidates:
+        dlg._append_event_candidate_row(candidate)
+
+    dlg.import_selected_event_files()
+
+    assert imported == [[candidate.url for candidate in candidates]]
+    assert compared == []
+    assert dlg.result() != QDialog.Accepted
     dlg.close()
 
 

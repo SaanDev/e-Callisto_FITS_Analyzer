@@ -1189,28 +1189,27 @@ class CallistoDownloaderApp(QDialog):
         self.event_results_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
         results_layout.addWidget(self.event_results_table)
 
-        action_group = QGroupBox("Download")
+        action_group = QGroupBox("Actions")
         action_group.setObjectName("DownloaderSection")
         action_layout = QHBoxLayout(action_group)
         action_layout.setSpacing(8)
         self.event_select_all_results_btn = QPushButton("Select All")
         self.event_clear_results_btn = QPushButton("Clear Selection")
-        self.event_compare_btn = QPushButton("Compare")
         self.event_download_btn = QPushButton("Download Selected")
         self.event_download_btn.setObjectName("PrimaryDownloaderButton")
-        self.event_auto_open_chk = QCheckBox("Open in Multi-Station Comparison after download")
-        self.event_auto_open_chk.setObjectName("AutoOpenComparison")
-        self.event_auto_open_chk.setChecked(True)
+        self.event_import_btn = QPushButton("Import")
+        self.event_compare_btn = QPushButton("Compare")
         self.event_select_all_results_btn.clicked.connect(self.select_all_event_results)
         self.event_clear_results_btn.clicked.connect(self.clear_event_results_selection)
-        self.event_compare_btn.clicked.connect(self.compare_selected_event_files)
         self.event_download_btn.clicked.connect(self.download_selected_event_files)
+        self.event_import_btn.clicked.connect(self.import_selected_event_files)
+        self.event_compare_btn.clicked.connect(self.compare_selected_event_files)
         action_layout.addWidget(self.event_select_all_results_btn)
         action_layout.addWidget(self.event_clear_results_btn)
-        action_layout.addWidget(self.event_compare_btn)
         action_layout.addWidget(self.event_download_btn)
+        action_layout.addWidget(self.event_import_btn)
+        action_layout.addWidget(self.event_compare_btn)
         action_layout.addStretch(1)
-        action_layout.addWidget(self.event_auto_open_chk)
 
         self.event_progress_bar = QProgressBar(self)
         self.event_progress_bar.setVisible(False)
@@ -1624,8 +1623,9 @@ class CallistoDownloaderApp(QDialog):
         has_results = self.event_results_table.rowCount() > 0
         self.event_select_all_results_btn.setEnabled(has_results)
         self.event_clear_results_btn.setEnabled(has_results)
-        self.event_compare_btn.setEnabled(has_results)
         self.event_download_btn.setEnabled(has_results)
+        self.event_import_btn.setEnabled(has_results)
+        self.event_compare_btn.setEnabled(has_results)
 
     def search_event_fits(self):
         stations = self._checked_event_stations()
@@ -1771,6 +1771,16 @@ class CallistoDownloaderApp(QDialog):
         self.comparison_request.emit([candidate.url for candidate in selected])
         self.accept()
 
+    def import_selected_event_files(self):
+        selected = self._checked_event_candidates()
+        if not selected:
+            QMessageBox.warning(self, "No Selection", "Please select files to import.")
+            return
+
+        # The main-window import worker inspects the complete selection and
+        # applies time-only, frequency-only, or time + frequency combination.
+        self.import_request.emit([candidate.url for candidate in selected])
+
     def download_selected_event_files(self):
         selected = self._checked_event_candidates()
         if not selected:
@@ -1832,11 +1842,6 @@ class CallistoDownloaderApp(QDialog):
         status = f"Downloaded {success_count} of {self._event_download_total} selected FITS file(s)."
         if failed_count:
             status += f" {failed_count} failed."
-        auto_open = self.event_auto_open_chk.isChecked()
-        if auto_open and success_count >= 2:
-            status += " Opening Multi-Station Comparison."
-        elif auto_open:
-            status += " At least two successful downloads are required to open comparison mode."
         self.event_status_label.setText(status)
 
         details = [status]
@@ -1847,9 +1852,6 @@ class CallistoDownloaderApp(QDialog):
             if len(self._event_download_failures) > 8:
                 details.append("...")
         QMessageBox.information(self, "Download Complete", "\n".join(details))
-
-        if auto_open and success_count >= 2:
-            self.comparison_request.emit(list(self._event_download_success_paths))
 
     # -----------------------------
     # Fetch list
