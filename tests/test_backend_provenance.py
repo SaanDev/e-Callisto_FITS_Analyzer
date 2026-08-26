@@ -16,7 +16,7 @@ def test_provenance_payload_and_markdown(tmp_path):
     payload = build_provenance_payload(
         {
             "app": {"name": "e-CALLISTO FITS Analyzer", "version": "2.6.0"},
-            "data_source": {"filename": "x.fit", "shape": [10, 20]},
+            "data_source": {"filename": "x.fit", "shape": [10, 20], "combined_mode": "time_frequency"},
             "processing": {"plot_type": "Raw", "use_db": False},
             "rfi": {"enabled": True},
             "annotations": [{"id": "1", "kind": "text", "points": [[1, 2]], "visible": True}],
@@ -28,6 +28,7 @@ def test_provenance_payload_and_markdown(tmp_path):
     md = payload_to_markdown(payload)
     assert "Provenance" in md
     assert "x.fit" in md
+    assert "combined_mode: `time + frequency`" in md
     assert "loaded" in md
 
     json_path, md_path = write_provenance_files(str(tmp_path / "report"), payload)

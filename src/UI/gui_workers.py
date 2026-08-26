@@ -119,40 +119,33 @@ class DownloaderImportWorker(QObject):
                 self.failed.emit(f"Could not load FITS file:\n{e}")
             return
 
-        from src.Backend.burst_processor import (
-            are_time_combinable,
-            are_frequency_combinable,
-            combine_time,
-            combine_frequency,
-            describe_frequency_combination,
-        )
+        from src.Backend.burst_processor import combine_compatible, inspect_combination
 
         try:
             self.progress_text.emit("Checking file compatibility...")
-            if are_time_combinable(local_files):
-                self.progress_text.emit("Combining files (time mode)...")
-                combined = combine_time(local_files)
-                self.finished.emit({"kind": "combined", "combined": combined})
+            inspection = inspect_combination(local_files)
+            if not inspection.get("valid", False):
+                self.finished.emit({"kind": "invalid", "error": inspection.get("error", "")})
                 return
 
-            if are_frequency_combinable(local_files):
-                relation = describe_frequency_combination(local_files)
+            combine_type = str(inspection.get("combine_type") or "")
+            if combine_type in {"frequency", "time_frequency"}:
+                relation = dict(inspection.get("frequency_relation") or {})
                 if relation.get("has_gap", False) or relation.get("has_overlap", False):
                     self.finished.emit(
                         {
                             "kind": "frequency_options_required",
                             "files": local_files,
                             "relation": relation,
+                            "combine_type": combine_type,
                         }
                     )
                     return
 
-                self.progress_text.emit("Combining files (frequency mode)...")
-                combined = combine_frequency(local_files)
-                self.finished.emit({"kind": "combined", "combined": combined})
-                return
-
-            self.finished.emit({"kind": "invalid"})
+            mode_label = "time + frequency" if combine_type == "time_frequency" else combine_type
+            self.progress_text.emit(f"Combining files ({mode_label} mode)...")
+            combined = combine_compatible(local_files)
+            self.finished.emit({"kind": "combined", "combined": combined})
         except Exception as e:
             self.failed.emit(f"An error occurred while combining files:\n{e}")
 

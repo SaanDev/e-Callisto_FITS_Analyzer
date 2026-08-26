@@ -161,7 +161,12 @@ from src.UI.dialogs.batch_processing_dialog import BatchProcessingDialog
 from src.UI.dialogs.bug_report_dialog import BugReportDialog
 from src.UI.dialogs.citation_dialog import CitationDialog
 from src.UI.dialogs.user_guide_dialog import UserGuideDialog
-from src.UI.dialogs.combine_dialogs import CombineFrequencyDialog, CombineTimeDialog, FrequencyCombineOptionsDialog
+from src.UI.dialogs.combine_dialogs import (
+    CombineFitsDialog,
+    CombineFrequencyDialog,
+    CombineTimeDialog,
+    FrequencyCombineOptionsDialog,
+)
 from src.UI.dialogs.display_range_dialog import DisplayRangeDialog
 from src.UI.dialogs.light_curve_frequency_dialog import LightCurveFrequencyDialog
 from src.UI.dialogs.light_curve_settings_dialog import LightCurveSettingsDialog
@@ -888,6 +893,9 @@ class MainWindow(QMainWindow):
         self.open_action = QAction("Open", self)
         file_menu.addAction(self.open_action)
 
+        self.combine_fits_action = QAction("Combine FITS Files...", self)
+        file_menu.addAction(self.combine_fits_action)
+
         file_menu.addSeparator()
 
         # --- Project (session) ---
@@ -1245,6 +1253,7 @@ class MainWindow(QMainWindow):
         self.noise_log_scale_chk.toggled.connect(self._on_noise_scale_mode_toggled)
         self.cmap_combo.currentTextChanged.connect(self.change_cmap)
         self.open_action.triggered.connect(self.load_file)
+        self.combine_fits_action.triggered.connect(self.open_combine_fits_window)
         self.open_project_action.triggered.connect(self.open_project)
         self.save_project_action.triggered.connect(self.save_project)
         self.save_project_as_action.triggered.connect(self.save_project_as)
@@ -1343,7 +1352,7 @@ class MainWindow(QMainWindow):
         self._fits_source_path = None  # original single-file path (if any)
 
         self._is_combined = False
-        self._combined_mode = None  # "time" or "frequency"
+        self._combined_mode = None  # "time", "frequency", or "time_frequency"
         self._combined_sources = []  # list of source files used to combine
         self._gap_row_mask = None
         self._frequency_step_mhz = None
@@ -3373,43 +3382,31 @@ class MainWindow(QMainWindow):
             )
             return
 
-        from src.Backend.burst_processor import (
-            are_time_combinable,
-            are_frequency_combinable,
-            combine_time,
-            combine_frequency,
-        )
+        from src.Backend.burst_processor import combine_compatible, inspect_combination
 
         try:
-            if are_time_combinable(file_paths):
-                combined = combine_time(file_paths)
-            elif are_frequency_combinable(file_paths):
-                options = self._choose_frequency_combine_options(file_paths)
+            inspection = inspect_combination(file_paths)
+            if not inspection.get("valid", False):
+                error_msg = inspection.get("error") or "The selected FITS files cannot be combined."
+                QMessageBox.warning(
+                    self,
+                    "Invalid Combination Selection",
+                    f"{error_msg}\n\n"
+                    "Valid selections are consecutive time segments, distinct frequency bands at one "
+                    "timestamp, or a complete consecutive timestamp × focus-code grid.",
+                )
+                return
+
+            combine_type = inspection.get("combine_type")
+            options = {}
+            if combine_type in {"frequency", "time_frequency"}:
+                options = self._choose_frequency_combine_options(
+                    file_paths,
+                    relation=inspection.get("frequency_relation"),
+                )
                 if options is None:
                     return
-                combined = combine_frequency(file_paths, **options)
-            else:
-                error_msg = (
-                    "The selected FITS files cannot be combined.\n\n"
-                    "Valid combinations are:\n"
-                    "1. Frequency Combine:\n"
-                    "   • Same station\n"
-                    "   • Same date\n"
-                    "   • Same timestamp (HHMMSS)\n"
-                    "   • Distinct focus codes\n"
-                    "   • Matching time bases\n"
-                    "   • Frequency bands with gaps or resolvable overlaps\n\n"
-                    "2. Time Combine:\n"
-                    "   • Same station\n"
-                    "   • Same receiver ID\n"
-                    "   • Same date\n"
-                    "   • Different timestamps (continuous time segments)\n"
-                    "   • Matching frequency arrays\n\n"
-                    "Your selection does not match either rule.\n"
-                    "Please choose files that follow one of the above patterns."
-                )
-                QMessageBox.warning(self, "Invalid Combination Selection", error_msg)
-                return
+            combined = combine_compatible(file_paths, **options)
 
             self.load_combined_into_main(combined)
             self.statusBar().showMessage(f"Loaded {len(file_paths)} files (combined)", 5000)
@@ -3418,9 +3415,9 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Combine Error", f"An error occurred while combining files:\n{e}")
             return
 
-    def _choose_frequency_combine_options(self, file_paths):
+    def _choose_frequency_combine_options(self, file_paths, relation=None):
         try:
-            return FrequencyCombineOptionsDialog.choose(self, file_paths)
+            return FrequencyCombineOptionsDialog.choose(self, file_paths, relation=relation)
         except Exception as exc:
             QMessageBox.critical(
                 self,
@@ -7992,6 +7989,10 @@ class MainWindow(QMainWindow):
         dialog = CombineTimeDialog(self)
         dialog.exec()
 
+    def open_combine_fits_window(self):
+        dialog = CombineFitsDialog(self, parent=self)
+        dialog.exec()
+
     def _on_batch_processing_dialog_destroyed(self, *_):
         self._batch_processing_dialog = None
 
@@ -8307,15 +8308,18 @@ class MainWindow(QMainWindow):
                     QMessageBox.critical(self, "Import Failed", "Frequency-combine file list is missing.")
                     return
 
-                options = self._choose_frequency_combine_options(file_paths)
+                options = self._choose_frequency_combine_options(
+                    file_paths,
+                    relation=payload.get("relation", None) if isinstance(payload, dict) else None,
+                )
                 if options is None:
                     return
 
-                from src.Backend.burst_processor import combine_frequency
+                from src.Backend.burst_processor import combine_compatible
 
                 try:
                     QApplication.setOverrideCursor(Qt.WaitCursor)
-                    combined = combine_frequency(file_paths, **options)
+                    combined = combine_compatible(file_paths, **options)
                 finally:
                     QApplication.restoreOverrideCursor()
 
@@ -8324,11 +8328,13 @@ class MainWindow(QMainWindow):
                 return
 
             if kind == "invalid":
+                detail = str(payload.get("error", "") or "") if isinstance(payload, dict) else ""
                 QMessageBox.warning(
                     self,
                     "Invalid Selection",
-                    "Selected files cannot be time-combined or frequency-combined.\n"
-                    "Please ensure they are consecutive in time or use frequency bands with matching time bases."
+                    (detail + "\n\n" if detail else "")
+                    + "Select consecutive time segments, matching frequency bands, or a complete "
+                    "timestamp × focus-code grid."
                 )
                 return
 

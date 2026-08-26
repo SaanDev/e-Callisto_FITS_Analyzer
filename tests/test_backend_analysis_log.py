@@ -66,7 +66,7 @@ def test_txt_append_creates_segmented_summary(tmp_path):
         project_path="/tmp/demo.efaproj",
         fits_primary="A.fit",
         fits_sources=["A.fit"],
-        combined_mode="",
+        combined_mode="time_frequency",
         station="A",
         date_obs="2026-02-14",
         session=_sample_session(),
@@ -79,6 +79,7 @@ def test_txt_append_creates_segmented_summary(tmp_path):
     text = txt_path.read_text(encoding="utf-8")
     assert text.count("Analysis Log Entry UTC") == 2
     assert "Analysis Run ID: run-123" in text
+    assert "Combined mode: time + frequency" in text
     assert "Shock parameters:" in text
 
 

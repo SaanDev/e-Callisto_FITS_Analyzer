@@ -53,14 +53,21 @@ def _flush_events():
         app.processEvents()
 
 
-def _write_fit(path: Path, *, label: str, time_obs: str | None = "12:00:00", base: float = 0.0) -> None:
+def _write_fit(
+    path: Path,
+    *,
+    label: str,
+    time_obs: str | None = "12:00:00",
+    base: float = 0.0,
+    freq_start: float = 100.0,
+) -> None:
     data = (np.arange(12, dtype=np.float32).reshape(3, 4) + float(base)).astype(np.float32)
     hdu = fits.PrimaryHDU(data=data)
     hdr = hdu.header
     hdr["CRVAL1"] = 0.0
     hdr["CDELT1"] = 1.0
     hdr["CRPIX1"] = 1.0
-    hdr["CRVAL2"] = 100.0
+    hdr["CRVAL2"] = float(freq_start)
     hdr["CDELT2"] = -5.0
     hdr["CRPIX2"] = 1.0
     hdr["INSTRUME"] = label
@@ -128,6 +135,31 @@ def test_time_combinable_files_render_as_combined_view(tmp_path: Path):
     assert dialog._active_datasets()[0].combine_type == "time"
     assert dialog.canvas.fig.axes[0].get_title(loc="left") == "STAT - 2026-01-01"
     assert "Combined time view" in dialog.status_label.text()
+    dialog.close()
+
+
+def test_time_frequency_grid_renders_as_one_friendly_combined_view(tmp_path: Path):
+    _app()
+    paths = [
+        tmp_path / "STAT_20260101_120000_A.fit",
+        tmp_path / "STAT_20260101_120000_B.fit",
+        tmp_path / "STAT_20260101_121500_A.fit",
+        tmp_path / "STAT_20260101_121500_B.fit",
+    ]
+    _write_fit(paths[0], label="STAT", time_obs="12:00:00", base=1.0, freq_start=100.0)
+    _write_fit(paths[1], label="STAT", time_obs="12:00:00", base=20.0, freq_start=80.0)
+    _write_fit(paths[2], label="STAT", time_obs="12:15:00", base=100.0, freq_start=100.0)
+    _write_fit(paths[3], label="STAT", time_obs="12:15:00", base=200.0, freq_start=80.0)
+    dialog = MultiStationComparisonDialog(plot_mode_provider=lambda: "classic")
+
+    dialog.add_files([str(path) for path in reversed(paths)])
+    dialog._render_now()
+
+    active = dialog._active_datasets()
+    assert len(active) == 1
+    assert active[0].combine_type == "time_frequency"
+    assert active[0].data.shape == (7, 8)
+    assert "Combined time + frequency view" in dialog.status_label.text()
     dialog.close()
 
 

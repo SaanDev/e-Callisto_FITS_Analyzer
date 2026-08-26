@@ -400,3 +400,29 @@ def test_grouped_frequency_combinable_paths_return_one_combined_dataset_per_stat
     assert [dataset.label for dataset in grouped] == ["STA - 2026-01-01", "STB - 2026-01-01"]
     assert [dataset.combine_type for dataset in grouped] == ["frequency", "frequency"]
     assert [dataset.data.shape for dataset in grouped] == [(6, 4), (6, 4)]
+
+
+def test_complete_time_frequency_grid_returns_one_combined_station_dataset(tmp_path: Path):
+    paths = [
+        tmp_path / "STAT_20260101_120000_A.fit",
+        tmp_path / "STAT_20260101_120000_B.fit",
+        tmp_path / "STAT_20260101_121500_A.fit",
+        tmp_path / "STAT_20260101_121500_B.fit",
+    ]
+    _write_fit(paths[0], label="STAT", time_obs="12:00:00", base=1.0, freq_start=100.0)
+    _write_fit(paths[1], label="STAT", time_obs="12:00:00", base=20.0, freq_start=80.0)
+    _write_fit(paths[2], label="STAT", time_obs="12:15:00", base=100.0, freq_start=100.0)
+    _write_fit(paths[3], label="STAT", time_obs="12:15:00", base=200.0, freq_start=80.0)
+
+    combined = combined_comparison_datasets_from_paths([str(path) for path in reversed(paths)])
+
+    assert len(combined) == 1
+    assert combined[0].combine_type == "time_frequency"
+    assert combined[0].label == "STAT - 2026-01-01"
+    assert combined[0].data.shape == (7, 8)
+    assert combined[0].sources == (
+        str(paths[1]),
+        str(paths[0]),
+        str(paths[3]),
+        str(paths[2]),
+    )

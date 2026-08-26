@@ -32,7 +32,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from src.Backend.burst_processor import combine_frequency, describe_frequency_combination
+from src.Backend.burst_processor import (
+    combine_compatible,
+    combine_frequency,
+    describe_frequency_combination,
+    inspect_combination,
+)
 from src.Backend.frequency_axis import (
     finite_data_limits,
     frequency_gap_spans,
@@ -45,10 +50,10 @@ from src.UI.mpl_style import style_axes
 
 
 class FrequencyCombineOptionsDialog(QDialog):
-    def __init__(self, file_paths, parent=None):
+    def __init__(self, file_paths, parent=None, relation=None):
         super().__init__(parent)
         self.file_paths = list(file_paths or [])
-        self.relation = describe_frequency_combination(self.file_paths)
+        self.relation = dict(relation) if isinstance(relation, dict) else describe_frequency_combination(self.file_paths)
         self.setWindowTitle("Frequency Combine Options")
         self.setMinimumWidth(520)
 
@@ -98,8 +103,8 @@ class FrequencyCombineOptionsDialog(QDialog):
         self._sync_connection_controls()
 
     @classmethod
-    def choose(cls, parent, file_paths):
-        relation = describe_frequency_combination(file_paths)
+    def choose(cls, parent, file_paths, relation=None):
+        relation = dict(relation) if isinstance(relation, dict) else describe_frequency_combination(file_paths)
         if not relation.get("has_gap", False) and not relation.get("has_overlap", False):
             return {
                 "gap_fill": "background",
@@ -107,7 +112,7 @@ class FrequencyCombineOptionsDialog(QDialog):
                 "overlap_connection_mhz": None,
             }
 
-        dialog = cls(file_paths, parent=parent)
+        dialog = cls(file_paths, parent=parent, relation=relation)
         if dialog.exec() != QDialog.Accepted:
             return None
         return dialog.selected_options()
@@ -163,6 +168,255 @@ class FrequencyCombineOptionsDialog(QDialog):
         if len(overlaps) == 1:
             return f"Use higher-frequency file ({os.path.basename(str(overlaps[0]['higher_file']))})"
         return "Use higher-frequency file(s)"
+
+
+class CombineFitsDialog(QDialog):
+    """Unified time, frequency, and time + frequency combination workflow."""
+
+    def __init__(self, main_window, parent=None):
+        super().__init__(parent)
+        self.main_window = main_window
+        self.file_paths = []
+        self.inspection = None
+        self.combined = None
+
+        self.setWindowTitle("Combine FITS Files")
+        self.setMinimumWidth(620)
+
+        self.load_button = QPushButton("Select FITS Files")
+        self.load_button.clicked.connect(self.load_files)
+
+        self.summary_label = QLabel(
+            "Select consecutive time segments, matching frequency bands, or a complete "
+            "timestamp × focus-code grid."
+        )
+        self.summary_label.setWordWrap(True)
+        self.summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        self.gap_fill_combo = QComboBox()
+        self.gap_fill_combo.addItem("Interpolated background", "background")
+        self.gap_fill_combo.addItem("Gray hatched gap", "hatched")
+        self.gap_fill_combo.addItem("Average edge background", "average")
+        self.gap_fill_combo.addItem("Zero fill", "zero")
+
+        self.overlap_policy_combo = QComboBox()
+        self.overlap_policy_combo.addItem("Split at connection frequency", "split")
+        self.overlap_policy_combo.addItem("Keep low band in overlap", "low")
+        self.overlap_policy_combo.addItem("Keep high band in overlap", "high")
+        self.overlap_policy_combo.addItem("Reject overlap", "reject")
+        self.overlap_policy_combo.currentIndexChanged.connect(self._sync_connection_control)
+
+        self.connection_spin = QDoubleSpinBox()
+        self.connection_spin.setDecimals(3)
+        self.connection_spin.setRange(0.0, 10000.0)
+        self.connection_spin.setSuffix(" MHz")
+        self.connection_spin.setEnabled(False)
+
+        self.options_group = QGroupBox("Frequency Combine Options")
+        options_layout = QFormLayout()
+        options_layout.addRow("Gap handling", self.gap_fill_combo)
+        options_layout.addRow("Overlap handling", self.overlap_policy_combo)
+        options_layout.addRow("Connection frequency", self.connection_spin)
+        self.options_group.setLayout(options_layout)
+        self.options_group.setVisible(False)
+
+        self.combine_button = QPushButton("Combine and Preview")
+        self.combine_button.clicked.connect(self.combine_files)
+        self.combine_button.setEnabled(False)
+
+        self.import_button = QPushButton("Import to Analyzer")
+        self.import_button.clicked.connect(self.import_to_main)
+        self.import_button.setEnabled(False)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(False)
+
+        self.image_label = QLabel("Combined output will appear here.")
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.setMinimumHeight(300)
+
+        layout = QVBoxLayout()
+        layout.addWidget(self.load_button)
+        layout.addWidget(self.summary_label)
+        layout.addWidget(self.options_group)
+        layout.addWidget(self.combine_button)
+        layout.addWidget(self.import_button)
+        layout.addWidget(self.image_label)
+        layout.addWidget(self.progress_bar)
+        self.setLayout(layout)
+
+    @staticmethod
+    def _mode_label(combine_type: str) -> str:
+        labels = {
+            "time": "Time",
+            "frequency": "Frequency",
+            "time_frequency": "Time + frequency",
+        }
+        return labels.get(str(combine_type or ""), str(combine_type or "Unknown"))
+
+    def load_files(self):
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select FITS Files to Combine",
+            "",
+            "FITS files (*.fit *.fits *.fit.gz *.fits.gz)",
+        )
+        if not files:
+            return
+        if len(files) < 2:
+            QMessageBox.warning(self, "Invalid Selection", "Select at least two FITS files.")
+            return
+
+        self.file_paths = list(files)
+        self.combined = None
+        self.import_button.setEnabled(False)
+        self.combine_button.setEnabled(False)
+        self.options_group.setVisible(False)
+        self.image_label.setText("Inspecting selected files...")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            self.inspection = inspect_combination(self.file_paths)
+        except Exception as exc:
+            self.inspection = {"valid": False, "error": str(exc)}
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if not self.inspection.get("valid", False):
+            error = str(self.inspection.get("error") or "The selected files cannot be combined.")
+            self.summary_label.setText(error)
+            self.image_label.setText("Select a valid FITS combination to continue.")
+            QMessageBox.warning(self, "Invalid Combination", error)
+            return
+
+        combine_type = str(self.inspection.get("combine_type") or "")
+        timestamps = list(self.inspection.get("timestamp_groups") or [])
+        focus_codes = list(self.inspection.get("focus_codes") or [])
+        focus_text = ", ".join(focus_codes) if focus_codes else "n/a"
+        self.summary_label.setText(
+            f"Detected mode: {self._mode_label(combine_type)}\n"
+            f"Station: {self.inspection.get('station', '')} | Files: {len(self.file_paths)} | "
+            f"Timestamps: {len(timestamps)} | Focus codes: {focus_text}"
+        )
+        if combine_type in {"frequency", "time_frequency"}:
+            self.options_group.setVisible(True)
+            self._configure_frequency_options(dict(self.inspection.get("frequency_relation") or {}))
+        self.combine_button.setEnabled(True)
+        self.image_label.setText("Selection is valid. Click Combine and Preview.")
+
+    def _configure_frequency_options(self, relation: dict):
+        overlaps = list(relation.get("overlaps") or [])
+        if overlaps:
+            low = min(float(item["low"]) for item in overlaps)
+            high = max(float(item["high"]) for item in overlaps)
+            if high < low:
+                low, high = high, low
+            self.connection_spin.setRange(low, high)
+            self.connection_spin.setValue(0.5 * (low + high))
+        self._sync_connection_control()
+
+    def _sync_connection_control(self):
+        relation = dict((self.inspection or {}).get("frequency_relation") or {})
+        has_overlap = bool(relation.get("has_overlap", False))
+        policy = str(self.overlap_policy_combo.currentData() or "split")
+        self.connection_spin.setEnabled(has_overlap and policy == "split")
+
+    def _frequency_options(self) -> dict:
+        connection = float(self.connection_spin.value()) if self.connection_spin.isEnabled() else None
+        return {
+            "gap_fill": str(self.gap_fill_combo.currentData() or "background"),
+            "overlap_policy": str(self.overlap_policy_combo.currentData() or "split"),
+            "overlap_connection_mhz": connection,
+        }
+
+    def combine_files(self):
+        if not self.inspection or not self.inspection.get("valid", False):
+            QMessageBox.warning(self, "Invalid Selection", "Select a valid FITS combination first.")
+            return
+
+        combine_type = str(self.inspection.get("combine_type") or "")
+        options = self._frequency_options() if combine_type in {"frequency", "time_frequency"} else {}
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(10)
+        self.combine_button.setEnabled(False)
+        QApplication.processEvents()
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            self.combined = combine_compatible(self.file_paths, **options)
+            self.progress_bar.setValue(75)
+            self._render_preview(self.combined)
+            self.progress_bar.setValue(100)
+            self.import_button.setEnabled(True)
+        except Exception as exc:
+            self.combined = None
+            self.import_button.setEnabled(False)
+            QMessageBox.critical(self, "Combine Error", str(exc))
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.combine_button.setEnabled(True)
+
+    def _render_preview(self, combined: dict):
+        data = np.asarray(combined["data"])
+        freqs = np.asarray(combined["freqs"], dtype=float)
+        time_axis = np.asarray(combined["time"], dtype=float)
+        frequency_step = combined.get("frequency_step_mhz", None)
+
+        fig = Figure(figsize=(7, 4))
+        ax = fig.subplots()
+        style_axes(ax)
+        cmap = transparent_bad_cmap(
+            mcolors.LinearSegmentedColormap.from_list(
+                "combined_preview", [(0.0, "#123a8c"), (0.5, "#d83b34"), (1.0, "#ffd447")]
+            )
+        )
+        image = ax.imshow(
+            masked_display_data(data),
+            aspect="auto",
+            extent=matplotlib_extent(freqs, time_axis, default_step=frequency_step),
+            cmap=cmap,
+        )
+        vmin, vmax = finite_data_limits(data)
+        if vmin is not None and vmax is not None:
+            image.set_clim(vmin, vmax)
+        for low, high in frequency_gap_spans(
+            freqs,
+            combined.get("gap_row_mask", None),
+            default_step=frequency_step or 1.0,
+        ):
+            ax.axhspan(
+                low,
+                high,
+                facecolor="#b8b8b8",
+                edgecolor="#555555",
+                alpha=0.35,
+                hatch="///",
+                linewidth=0.0,
+                zorder=3,
+            )
+        ax.set_xlabel("Time [s]")
+        ax.set_ylabel("Frequency [MHz]")
+        ax.set_title(f"{self._mode_label(combined.get('combine_type'))} combined preview")
+        fig.tight_layout()
+
+        buffer = io.BytesIO()
+        fig.savefig(buffer, format="png", dpi=110)
+        buffer.seek(0)
+        preview = QImage()
+        preview.loadFromData(buffer.read())
+        self.image_label.setPixmap(QPixmap.fromImage(preview).scaled(590, 340, Qt.KeepAspectRatio))
+        buffer.close()
+        fig.clear()
+
+    def import_to_main(self):
+        if self.combined is None:
+            QMessageBox.warning(self, "No Data", "Combine the selected files first.")
+            return
+        maybe_prompt = getattr(self.main_window, "_maybe_prompt_save_dirty", None)
+        if callable(maybe_prompt) and not maybe_prompt():
+            return
+        self.main_window.load_combined_into_main(self.combined)
+        self.close()
 
 
 class CombineFrequencyDialog(QDialog):

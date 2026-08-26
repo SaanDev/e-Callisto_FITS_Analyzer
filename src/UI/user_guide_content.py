@@ -160,7 +160,8 @@ on the right, the live cursor readout (time, frequency, intensity) and the updat
 <h2>3. File menu</h2>
 <table>
 <tr><th>Item</th><th>What it does</th></tr>
-<tr><td><b>Open</b> ({_kbd('Ctrl+O')})</td><td>Load a FITS file into the analyzer.</td></tr>
+<tr><td><b>Open</b> ({_kbd('Ctrl+O')})</td><td>Load one FITS file, or automatically combine a compatible multi-file time, frequency, or time + frequency selection.</td></tr>
+<tr><td><b>Combine FITS Files...</b></td><td>Select, validate, preview, and import time-only, frequency-only, or complete timestamp × focus-code grid combinations.</td></tr>
 <tr><td><b>Open Project</b> ({_kbd('Ctrl+Shift+O')})</td><td>Reopen a saved <code>.efaproj</code> session.</td></tr>
 <tr><td><b>Save Project</b> ({_kbd('Ctrl+S')})</td><td>Save the full state: view, thresholds, units, colormap, styling, data, and analysis session.</td></tr>
 <tr><td><b>Save Project As</b> ({_kbd('Ctrl+Shift+S')})</td><td>Save the project to a new file.</td></tr>

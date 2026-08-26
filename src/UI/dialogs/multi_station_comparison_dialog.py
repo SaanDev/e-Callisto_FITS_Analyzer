@@ -1661,7 +1661,8 @@ class MultiStationComparisonDialog(QDialog):
         panel_count = len(active)
         parts = [f"{panel_count} rendered panel(s) from {len(self._datasets)} selected file(s)."]
         if self._combined_mode:
-            parts.append(f"Combined {self._combined_mode} view.")
+            mode_label = "time + frequency" if self._combined_mode == "time_frequency" else self._combined_mode
+            parts.append(f"Combined {mode_label} view.")
         parts.append("Hardware-accelerated." if self._use_hardware_view() else "Matplotlib.")
         if any(setting.method != NOISE_METHOD_NONE for setting in self._effective_noise_settings()):
             parts.append("Noise reduction active.")

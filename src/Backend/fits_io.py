@@ -362,7 +362,7 @@ def build_combined_header(
 
     # Provenance
     hdr["COMBINED"] = (True, "Data are combined from multiple FITS files")
-    hdr["COMBMETH"] = (mode_norm, "Combine method (time|frequency)")
+    hdr["COMBMETH"] = (mode_norm, "Combine method (time|frequency|time_frequency)")
     hdr["NFILES"] = (len(sources), "Number of source FITS files used")
 
     # Ranges (safe even if caller passed None)

@@ -101,6 +101,35 @@ def test_downloader_import_worker_requests_options_for_frequency_combine(tmp_pat
     assert finished[0]["relation"]["has_overlap"] is False
 
 
+def test_downloader_import_worker_requests_one_option_set_for_time_frequency(monkeypatch, tmp_path):
+    paths = [
+        tmp_path / "STAT_20260201_233000_57.fit",
+        tmp_path / "STAT_20260201_233000_62.fit",
+        tmp_path / "STAT_20260201_234500_57.fit",
+        tmp_path / "STAT_20260201_234500_62.fit",
+    ]
+    for path in paths:
+        path.write_bytes(b"placeholder")
+
+    relation = {"has_gap": True, "has_overlap": False, "gaps": [], "overlaps": [], "blocks": []}
+    monkeypatch.setattr(
+        "src.Backend.burst_processor.inspect_combination",
+        lambda _paths: {
+            "valid": True,
+            "combine_type": "time_frequency",
+            "frequency_relation": relation,
+        },
+    )
+
+    finished, failed = _run_worker(DownloaderImportWorker([str(path) for path in paths]))
+
+    assert failed == []
+    assert finished[0]["kind"] == "frequency_options_required"
+    assert finished[0]["combine_type"] == "time_frequency"
+    assert finished[0]["files"] == [str(path) for path in paths]
+    assert finished[0]["relation"] == relation
+
+
 def test_downloader_import_worker_marks_non_consecutive_local_fits_invalid(tmp_path):
     freqs = np.array([25.0, 26.0])
     time = np.array([0.0, 3.0])

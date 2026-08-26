@@ -69,6 +69,11 @@ def _fmt_number(value: Any, *, digits: int = 4) -> str:
         return ""
 
 
+def _display_combined_mode(value: Any) -> str:
+    text = str(value or "")
+    return "time + frequency" if text == "time_frequency" else text
+
+
 def build_log_row(
     *,
     project_path: str | None,
@@ -153,7 +158,7 @@ def _txt_block(row: Mapping[str, Any]) -> str:
         f"Project: {row.get('project_path', '')}",
         f"FITS primary: {row.get('fits_primary', '')}",
         f"FITS sources: {row.get('fits_sources', '')}",
-        f"Combined mode: {row.get('combined_mode', '')}",
+        f"Combined mode: {_display_combined_mode(row.get('combined_mode', ''))}",
         f"Station: {row.get('station', '')}",
         f"Date obs: {row.get('date_obs', '')}",
         "",

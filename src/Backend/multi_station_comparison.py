@@ -324,7 +324,7 @@ def comparison_dataset_from_combined(combined: dict[str, Any]) -> ComparisonData
     sources = tuple(str(path) for path in combined.get("sources", ()) or ())
     label = station_date_label(filename, combined.get("header0", None), sources=sources)
     warnings: list[str] = []
-    if combine_type == "frequency" and combined.get("gap_row_mask") is not None:
+    if combine_type in {"frequency", "time_frequency"} and combined.get("gap_row_mask") is not None:
         try:
             gap_count = int(np.count_nonzero(np.asarray(combined.get("gap_row_mask"), dtype=bool)))
             if gap_count:
@@ -353,21 +353,12 @@ def combined_comparison_dataset_from_paths(file_paths: Iterable[str]) -> Compari
     if len(paths) < 2:
         return None
 
-    from src.Backend.burst_processor import (
-        are_frequency_combinable,
-        are_time_combinable,
-        combine_frequency,
-        combine_time,
-    )
+    from src.Backend.burst_processor import combine_compatible, inspect_combination
 
     try:
-        if are_time_combinable(paths):
-            return comparison_dataset_from_combined(combine_time(paths))
-    except Exception:
-        pass
-    try:
-        if are_frequency_combinable(paths):
-            return comparison_dataset_from_combined(combine_frequency(paths))
+        inspection = inspect_combination(paths)
+        if inspection.get("valid", False):
+            return comparison_dataset_from_combined(combine_compatible(paths))
     except Exception:
         pass
     return None
@@ -392,8 +383,10 @@ def combined_comparison_datasets_from_paths(file_paths: Iterable[str]) -> list[C
     from src.Backend.burst_processor import (
         are_frequency_combinable,
         are_time_combinable,
+        combine_compatible,
         combine_frequency,
         combine_time,
+        inspect_combination,
         parse_filename,
     )
 
@@ -417,6 +410,18 @@ def combined_comparison_datasets_from_paths(file_paths: Iterable[str]) -> list[C
         for path in group:
             consumed.add(path)
         output.append((min(path_index[path] for path in group), dataset))
+
+    # A complete time x focus-code grid must be handled before the legacy
+    # time-only grouping consumes each focus code as a separate panel.
+    for group in _group_by(lambda path: (parse_filename(path)[0],)):
+        if len(group) < 4:
+            continue
+        try:
+            inspection = inspect_combination(group)
+            if inspection.get("valid", False) and inspection.get("combine_type") == "time_frequency":
+                _append_combined(group, comparison_dataset_from_combined(combine_compatible(group)))
+        except Exception:
+            continue
 
     for group in _group_by(lambda path: (parse_filename(path)[0], parse_filename(path)[3])):
         if len(group) < 2:

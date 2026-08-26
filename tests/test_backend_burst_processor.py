@@ -614,3 +614,203 @@ def test_combine_time_sorts_across_midnight(monkeypatch):
     assert np.array_equal(result["data"][:, :3], data1)
     assert np.array_equal(result["data"][:, 3:], data2)
     assert result["filename"] == "STAT_20240331_combined_time"
+
+
+def test_combine_time_frequency_builds_complete_grid_independent_of_input_order(monkeypatch):
+    first_time = np.array([0.0, 1.0])
+    second_time = np.array([0.0, 1.0, 2.0])
+    mapping = {
+        "Australia-ASSA_20260201_233000_57.fit.gz": {
+            "data": np.array([[10.0, 11.0], [20.0, 21.0]]),
+            "freqs": np.array([20.0, 10.0]),
+            "time": first_time,
+            "header0": _header(10.0, 20.0, step=10.0, focus="57"),
+        },
+        "Australia-ASSA_20260201_233000_62.fit.gz": {
+            "data": np.array([[30.0, 31.0], [40.0, 41.0]]),
+            "freqs": np.array([40.0, 30.0]),
+            "time": first_time,
+            "header0": _header(30.0, 40.0, step=10.0, focus="62"),
+        },
+        "Australia-ASSA_20260201_234500_57.fit.gz": {
+            "data": np.array([[110.0, 111.0, 112.0], [120.0, 121.0, 122.0]]),
+            "freqs": np.array([20.0, 10.0]),
+            "time": second_time,
+            "header0": _header(10.0, 20.0, step=10.0, focus="57"),
+        },
+        "Australia-ASSA_20260201_234500_62.fit.gz": {
+            "data": np.array([[130.0, 131.0, 132.0], [140.0, 141.0, 142.0]]),
+            "freqs": np.array([40.0, 30.0]),
+            "time": second_time,
+            "header0": _header(30.0, 40.0, step=10.0, focus="62"),
+        },
+    }
+    _install_preview_and_load(monkeypatch, mapping)
+    unordered = [
+        "Australia-ASSA_20260201_234500_62.fit.gz",
+        "Australia-ASSA_20260201_233000_57.fit.gz",
+        "Australia-ASSA_20260201_234500_57.fit.gz",
+        "Australia-ASSA_20260201_233000_62.fit.gz",
+    ]
+
+    inspection = burst_processor.inspect_combination(unordered)
+    result = burst_processor.combine_compatible(unordered)
+
+    assert inspection["valid"] is True
+    assert inspection["combine_type"] == "time_frequency"
+    assert inspection["focus_codes"] == ["57", "62"]
+    assert result["combine_type"] == "time_frequency"
+    assert result["filename"] == "Australia-ASSA_20260201_time_frequency_combined"
+    assert result["data"].shape == (4, 5)
+    assert np.array_equal(result["freqs"], np.array([40.0, 30.0, 20.0, 10.0]))
+    assert np.array_equal(result["time"], np.array([0.0, 1.0, 2.0, 3.0, 4.0]))
+    assert np.array_equal(
+        result["data"][:, :2],
+        np.array([[30.0, 31.0], [40.0, 41.0], [10.0, 11.0], [20.0, 21.0]]),
+    )
+    assert np.array_equal(
+        result["data"][:, 2:],
+        np.array(
+            [
+                [130.0, 131.0, 132.0],
+                [140.0, 141.0, 142.0],
+                [110.0, 111.0, 112.0],
+                [120.0, 121.0, 122.0],
+            ]
+        ),
+    )
+    assert result["header0"]["COMBMETH"] == "time_frequency"
+    assert result["header0"]["NFILES"] == 4
+
+
+def test_inspect_time_frequency_rejects_incomplete_or_duplicate_grid():
+    incomplete = burst_processor.inspect_combination(
+        [
+            "STAT_20260201_233000_57.fit",
+            "STAT_20260201_233000_62.fit",
+            "STAT_20260201_234500_57.fit",
+        ]
+    )
+    duplicate = burst_processor.inspect_combination(
+        [
+            "STAT_20260201_233000_57.fit",
+            "STAT_20260201_233000_57.fits",
+        ]
+    )
+
+    assert incomplete["valid"] is False
+    assert incomplete["combine_type"] == "time_frequency"
+    assert "missing focus code(s): 62" in incomplete["error"]
+    assert duplicate["valid"] is False
+    assert "Duplicate focus code '57'" in duplicate["error"]
+
+
+def test_inspect_time_frequency_allows_consecutive_sequence_across_midnight(monkeypatch):
+    time = np.array([0.0, 1.0])
+    mapping = {}
+    for stamp in ("20260331_235500", "20260401_001100"):
+        mapping[f"STAT_{stamp}_57.fit"] = {
+            "data": np.ones((2, 2)),
+            "freqs": np.array([20.0, 10.0]),
+            "time": time,
+            "header0": _header(10.0, 20.0, step=10.0, focus="57"),
+        }
+        mapping[f"STAT_{stamp}_62.fit"] = {
+            "data": np.ones((2, 2)),
+            "freqs": np.array([40.0, 30.0]),
+            "time": time,
+            "header0": _header(30.0, 40.0, step=10.0, focus="62"),
+        }
+    _install_preview_and_load(monkeypatch, mapping)
+
+    inspection = burst_processor.inspect_combination(list(mapping))
+
+    assert inspection["valid"] is True
+    assert inspection["combine_type"] == "time_frequency"
+
+
+@pytest.mark.parametrize(
+    ("timestamps", "focus_codes"),
+    [
+        (["120000", "121500"], ["A", "B", "C"]),
+        (["120000", "121500", "123000"], ["A", "B"]),
+    ],
+)
+def test_combine_time_frequency_supports_arbitrary_complete_rectangles(
+    monkeypatch,
+    timestamps,
+    focus_codes,
+):
+    time = np.array([0.0, 1.0])
+    mapping = {}
+    for timestamp_index, timestamp in enumerate(timestamps):
+        for focus_index, focus in enumerate(focus_codes):
+            low = 10.0 + 20.0 * focus_index
+            high = low + 10.0
+            value = 100.0 * timestamp_index + 10.0 * focus_index
+            path = f"STAT_20260101_{timestamp}_{focus}.fit"
+            mapping[path] = {
+                "data": np.array([[value + 1.0, value + 2.0], [value + 3.0, value + 4.0]]),
+                "freqs": np.array([high, low]),
+                "time": time,
+                "header0": _header(low, high, step=10.0, focus=focus),
+            }
+    _install_preview_and_load(monkeypatch, mapping)
+
+    result = burst_processor.combine_time_frequency(list(reversed(mapping)))
+
+    assert result["data"].shape == (2 * len(focus_codes), 2 * len(timestamps))
+    assert result["timestamp_count"] == len(timestamps)
+    assert result["focus_codes"] == focus_codes
+    assert result["header0"]["NFILES"] == len(timestamps) * len(focus_codes)
+
+
+def test_combine_time_frequency_propagates_shared_hatched_gap(monkeypatch):
+    time = np.array([0.0, 1.0])
+    mapping = {}
+    for timestamp in ("120000", "121500"):
+        mapping[f"STAT_20260101_{timestamp}_A.fit"] = {
+            "data": np.ones((2, 2)),
+            "freqs": np.array([20.0, 10.0]),
+            "time": time,
+            "header0": _header(10.0, 20.0, step=10.0, focus="A"),
+        }
+        mapping[f"STAT_20260101_{timestamp}_B.fit"] = {
+            "data": np.full((2, 2), 2.0),
+            "freqs": np.array([60.0, 50.0]),
+            "time": time,
+            "header0": _header(50.0, 60.0, step=10.0, focus="B"),
+        }
+    _install_preview_and_load(monkeypatch, mapping)
+
+    result = burst_processor.combine_time_frequency(list(mapping), gap_fill="hatched")
+
+    assert np.array_equal(
+        result["gap_row_mask"],
+        np.array([False, False, True, True, False, False]),
+    )
+    assert np.all(np.isnan(result["data"][2:4]))
+
+
+def test_inspect_time_frequency_rejects_non_consecutive_or_mixed_station_grid():
+    non_consecutive = burst_processor.inspect_combination(
+        [
+            "STAT_20260101_120000_A.fit",
+            "STAT_20260101_120000_B.fit",
+            "STAT_20260101_150000_A.fit",
+            "STAT_20260101_150000_B.fit",
+        ]
+    )
+    mixed_station = burst_processor.inspect_combination(
+        [
+            "STA_20260101_120000_A.fit",
+            "STA_20260101_120000_B.fit",
+            "STB_20260101_121500_A.fit",
+            "STB_20260101_121500_B.fit",
+        ]
+    )
+
+    assert non_consecutive["valid"] is False
+    assert "Non-consecutive observation timestamps" in non_consecutive["error"]
+    assert mixed_station["valid"] is False
+    assert "same station" in mixed_station["error"]

@@ -34,6 +34,11 @@ OVERLAP_SPLIT = "split"
 OVERLAP_LOW = "low"
 OVERLAP_HIGH = "high"
 OVERLAP_REJECT = "reject"
+COMBINE_TIME = "time"
+COMBINE_FREQUENCY = "frequency"
+COMBINE_TIME_FREQUENCY = "time_frequency"
+MIN_CONSECUTIVE_SECONDS = 750.0
+MAX_CONSECUTIVE_SECONDS = 1050.0
 
 def load_fits(filepath):
     res = load_callisto_fits(filepath, memmap=False)
@@ -85,6 +90,162 @@ def _parse_observation_datetime(filepath):
     station, obs_date, obs_time, receiver_id = parse_filename(filepath)
     observed_at = datetime.strptime(f"{obs_date}{obs_time}", "%Y%m%d%H%M%S")
     return station, observed_at, receiver_id
+
+
+def _invalid_inspection(error: str, **details) -> dict:
+    result = {
+        "valid": False,
+        "combine_type": details.pop("combine_type", None),
+        "station": details.pop("station", ""),
+        "timestamp_groups": details.pop("timestamp_groups", []),
+        "focus_codes": details.pop("focus_codes", []),
+        "frequency_relation": details.pop("frequency_relation", None),
+        "error": str(error),
+    }
+    result.update(details)
+    return result
+
+
+def _classify_combination_structure(file_paths) -> dict:
+    paths = [str(path) for path in list(file_paths or []) if str(path or "").strip()]
+    if len(paths) < 2:
+        return _invalid_inspection("Select at least two FITS files to combine.")
+
+    records = []
+    for path in paths:
+        try:
+            station, observed_at, focus_code = _parse_observation_datetime(path)
+        except Exception as exc:
+            return _invalid_inspection(
+                f"Invalid CALLISTO filename format: {os.path.basename(path)}"
+            )
+        records.append(
+            {
+                "path": path,
+                "station": station,
+                "observed_at": observed_at,
+                "focus_code": _normalize_focus_code(focus_code),
+            }
+        )
+
+    stations = sorted({record["station"] for record in records})
+    if len(stations) != 1:
+        return _invalid_inspection(
+            "All files in one combined dataset must come from the same station; "
+            f"found: {', '.join(stations)}."
+        )
+
+    station = stations[0]
+    grouped: dict[datetime, dict[str, str]] = {}
+    for record in records:
+        observed_at = record["observed_at"]
+        focus_code = record["focus_code"]
+        cells = grouped.setdefault(observed_at, {})
+        if focus_code in cells:
+            stamp = observed_at.strftime("%Y-%m-%d %H:%M:%S")
+            return _invalid_inspection(
+                f"Duplicate focus code '{focus_code}' at {stamp}: "
+                f"{os.path.basename(cells[focus_code])} and {os.path.basename(record['path'])}.",
+                station=station,
+            )
+        cells[focus_code] = record["path"]
+
+    ordered_times = sorted(grouped)
+    all_focus_codes = sorted({focus for cells in grouped.values() for focus in cells})
+    timestamp_groups = [
+        [grouped[observed_at][focus] for focus in sorted(grouped[observed_at])]
+        for observed_at in ordered_times
+    ]
+
+    common = {
+        "station": station,
+        "timestamp_groups": timestamp_groups,
+        "focus_codes": all_focus_codes,
+        "observed_at": ordered_times,
+    }
+
+    if len(ordered_times) == 1:
+        if len(all_focus_codes) < 2:
+            return _invalid_inspection(
+                "Frequency combine requires at least two distinct focus codes at one timestamp.",
+                **common,
+            )
+        return {"valid": True, "combine_type": COMBINE_FREQUENCY, "error": None, **common}
+
+    expected_focus = set(all_focus_codes)
+    if len(expected_focus) > 1:
+        for observed_at in ordered_times:
+            actual_focus = set(grouped[observed_at])
+            if actual_focus != expected_focus:
+                missing = sorted(expected_focus - actual_focus)
+                extra = sorted(actual_focus - expected_focus)
+                parts = []
+                if missing:
+                    parts.append(f"missing focus code(s): {', '.join(missing)}")
+                if extra:
+                    parts.append(f"unexpected focus code(s): {', '.join(extra)}")
+                stamp = observed_at.strftime("%Y-%m-%d %H:%M:%S")
+                return _invalid_inspection(
+                    f"Incomplete time/frequency grid at {stamp} ({'; '.join(parts)}).",
+                    combine_type=COMBINE_TIME_FREQUENCY,
+                    **common,
+                )
+        combine_type = COMBINE_TIME_FREQUENCY
+    else:
+        combine_type = COMBINE_TIME
+
+    for previous, current in zip(ordered_times, ordered_times[1:]):
+        delta = float((current - previous).total_seconds())
+        if not (MIN_CONSECUTIVE_SECONDS <= delta <= MAX_CONSECUTIVE_SECONDS):
+            return _invalid_inspection(
+                "Non-consecutive observation timestamps: "
+                f"{previous.strftime('%Y-%m-%d %H:%M:%S')} to "
+                f"{current.strftime('%Y-%m-%d %H:%M:%S')} is {delta:.0f} seconds; "
+                f"expected {MIN_CONSECUTIVE_SECONDS:.0f}-{MAX_CONSECUTIVE_SECONDS:.0f} seconds.",
+                combine_type=combine_type,
+                **common,
+            )
+
+    return {"valid": True, "combine_type": combine_type, "error": None, **common}
+
+
+def inspect_combination(file_paths) -> dict:
+    """Inspect and fully validate a multi-file FITS combination selection."""
+    structural = _classify_combination_structure(file_paths)
+    if not structural.get("valid", False):
+        return structural
+
+    combine_type = structural["combine_type"]
+    relation = None
+    try:
+        if combine_type == COMBINE_TIME:
+            combine_time(file_paths)
+        elif combine_type == COMBINE_FREQUENCY:
+            group = structural["timestamp_groups"][0]
+            relation = describe_frequency_combination(group)
+            combine_frequency(group)
+        elif combine_type == COMBINE_TIME_FREQUENCY:
+            first_group = structural["timestamp_groups"][0]
+            relation = describe_frequency_combination(first_group)
+            combine_time_frequency(file_paths)
+        else:
+            raise ValueError(f"Unsupported combine type: {combine_type}")
+    except Exception as exc:
+        return _invalid_inspection(
+            str(exc),
+            combine_type=combine_type,
+            station=structural.get("station", ""),
+            timestamp_groups=structural.get("timestamp_groups", []),
+            focus_codes=structural.get("focus_codes", []),
+            frequency_relation=relation,
+            observed_at=structural.get("observed_at", []),
+        )
+
+    result = dict(structural)
+    result["frequency_relation"] = relation
+    result["valid"] = True
+    result["error"] = None
+    return result
 
 
 def are_frequency_combinable(
@@ -748,83 +909,93 @@ def _grid_align_tol(step_mhz: float) -> float:
 
 
 
-def are_time_combinable(file_paths):
-    if len(file_paths) < 2:
-        return False
-
-    try:
-        sorted_paths = sorted(
-            file_paths,
-            key=lambda p: _parse_observation_datetime(p)[1]
-        )
-    except Exception:
-        return False
-
-    s_ref, dt_ref, foc_ref = _parse_observation_datetime(sorted_paths[0])
-    _, freqs_ref, _ = load_fits(sorted_paths[0])
-    t_prev = dt_ref
-
-    for fp in sorted_paths[1:]:
-        s, t_now, foc = _parse_observation_datetime(fp)
-
-        if s != s_ref:
-            return False
-        if foc != foc_ref:
-            return False
-
-        _, freqs, _ = load_fits(fp)
-        if not np.allclose(freqs, freqs_ref, atol=0.01):
-            return False
-
-        diff = abs((t_now - t_prev).total_seconds())
-
-        if not (750 <= diff <= 1050):
-            return False
-
-        t_prev = t_now
-
-    return True
+def _validated_time_paths(file_paths) -> list[str]:
+    structural = _classify_combination_structure(file_paths)
+    if not structural.get("valid", False) or structural.get("combine_type") != COMBINE_TIME:
+        raise ValueError(structural.get("error") or "The selected files are not time-combinable.")
+    return [group[0] for group in structural["timestamp_groups"]]
 
 
-def combine_time(file_paths):
-    sorted_paths = sorted(
-        file_paths,
-        key=lambda p: _parse_observation_datetime(p)[1]
-    )
+def _time_sample_step(time_axis, *, source_label: str) -> float:
+    arr = np.asarray(time_axis, dtype=float).ravel()
+    if arr.size < 2:
+        raise ValueError(f"{source_label} must contain at least two time samples.")
+    step = float(arr[1] - arr[0])
+    if not np.isfinite(step) or step <= 0.0:
+        raise ValueError(f"{source_label} has an invalid time sample interval.")
+    return step
+
+
+def _normalized_gap_mask(value, row_count: int):
+    if value is None:
+        return None
+    mask = np.asarray(value, dtype=bool).ravel()
+    if mask.size != int(row_count):
+        raise ValueError("Frequency gap mask does not match the combined frequency axis.")
+    return mask
+
+
+def _stitch_time_segments(segments, *, combine_type: str, filename: str, sources) -> dict:
+    if len(segments) < 2:
+        raise ValueError("Need at least two time segments to combine.")
 
     combined_data = None
     combined_time = None
     reference_freqs = None
+    reference_gap_mask = None
+    reference_step = None
     header0 = None
 
-    for idx, f in enumerate(sorted_paths):
-        res = load_callisto_fits(f, memmap=False)
-        data, freqs, time = res.data, res.freqs, res.time
+    for index, segment in enumerate(segments):
+        data = np.asarray(segment["data"])
+        freqs = np.asarray(segment["freqs"], dtype=float).ravel()
+        time_axis = np.asarray(segment["time"], dtype=float).ravel()
+        label = str(segment.get("filename") or f"segment {index + 1}")
 
-        if reference_freqs is None:
+        if data.ndim != 2 or data.shape != (freqs.size, time_axis.size):
+            raise ValueError(
+                f"{label} data shape {data.shape} does not match its frequency/time axes "
+                f"({freqs.size}, {time_axis.size})."
+            )
+        step = _time_sample_step(time_axis, source_label=label)
+        gap_mask = _normalized_gap_mask(segment.get("gap_row_mask"), freqs.size)
+
+        if index == 0:
             reference_freqs = freqs
+            reference_gap_mask = gap_mask
+            reference_step = segment.get("frequency_step_mhz", None)
             combined_data = data
-            combined_time = time
-            dt = time[1] - time[0]
-            header0 = res.header0
-        else:
+            combined_time = time_axis
+            header0 = segment.get("header0", None)
+            continue
 
-            dt = time[1] - time[0]
-            shift = combined_time[-1] + dt
-            adjusted_time = time + shift
+        if not _axes_match(freqs, reference_freqs, atol=0.01):
+            raise ValueError(f"Combined frequency axis mismatch in {label}.")
+        if (reference_gap_mask is None) != (gap_mask is None):
+            raise ValueError(f"Frequency gap layout mismatch in {label}.")
+        if reference_gap_mask is not None and not np.array_equal(gap_mask, reference_gap_mask):
+            raise ValueError(f"Frequency gap layout mismatch in {label}.")
 
-            combined_data = np.concatenate((combined_data, data), axis=1)
-            combined_time = np.concatenate((combined_time, adjusted_time))
+        step_mhz = segment.get("frequency_step_mhz", None)
+        if reference_step is not None or step_mhz is not None:
+            try:
+                if reference_step is None or step_mhz is None or not np.isclose(
+                    float(step_mhz), float(reference_step), atol=FREQUENCY_ALIGN_ATOL_MHZ, rtol=0.0
+                ):
+                    raise ValueError(f"Frequency channel spacing mismatch in {label}.")
+            except (TypeError, ValueError):
+                raise ValueError(f"Frequency channel spacing mismatch in {label}.")
 
-    s, d, t, foc = parse_filename(sorted_paths[0])
-    combined_name = f"{s}_{d}_combined_time"
+        shift = float(combined_time[-1]) + step
+        adjusted_time = time_axis + shift
+        combined_data = np.concatenate((combined_data, data), axis=1)
+        combined_time = np.concatenate((combined_time, adjusted_time))
 
-    ut_start_sec = extract_ut_start_sec(header0)
-
+    source_list = [str(path) for path in list(sources or [])]
     combined_header = build_combined_header(
         header0,
-        mode="time",
-        sources=sorted_paths,
+        mode=combine_type,
+        sources=source_list,
         data_shape=combined_data.shape,
         freqs=reference_freqs,
         time=combined_time,
@@ -834,9 +1005,174 @@ def combine_time(file_paths):
         "data": combined_data,
         "freqs": reference_freqs,
         "time": combined_time,
-        "filename": combined_name,
-        "ut_start_sec": ut_start_sec,
+        "filename": filename,
+        "ut_start_sec": extract_ut_start_sec(header0),
         "header0": combined_header,
-        "sources": list(sorted_paths),
-        "combine_type": "time",
+        "sources": source_list,
+        "combine_type": combine_type,
+        "gap_row_mask": reference_gap_mask,
+        "frequency_step_mhz": reference_step,
     }
+
+
+def are_time_combinable(file_paths):
+    try:
+        sorted_paths = _validated_time_paths(file_paths)
+        reference_freqs = None
+        for path in sorted_paths:
+            _data, freqs, _time = load_fits(path)
+            if reference_freqs is None:
+                reference_freqs = np.asarray(freqs, dtype=float).ravel()
+            elif not _axes_match(freqs, reference_freqs, atol=0.01):
+                return False
+    except Exception:
+        return False
+    return True
+
+
+def combine_time(file_paths):
+    sorted_paths = _validated_time_paths(file_paths)
+    segments = []
+    for path in sorted_paths:
+        result = load_callisto_fits(path, memmap=False)
+        segments.append(
+            {
+                "data": result.data,
+                "freqs": result.freqs,
+                "time": result.time,
+                "filename": os.path.basename(path),
+                "header0": result.header0,
+            }
+        )
+
+    station, obs_date, _obs_time, _focus = parse_filename(sorted_paths[0])
+    return _stitch_time_segments(
+        segments,
+        combine_type=COMBINE_TIME,
+        filename=f"{station}_{obs_date}_combined_time",
+        sources=sorted_paths,
+    )
+
+
+def _frequency_relations_match(first: dict, second: dict) -> bool:
+    for key in ("gaps", "overlaps"):
+        first_ranges = np.asarray(
+            [(float(item["low"]), float(item["high"])) for item in list(first.get(key) or [])],
+            dtype=float,
+        ).reshape(-1, 2)
+        second_ranges = np.asarray(
+            [(float(item["low"]), float(item["high"])) for item in list(second.get(key) or [])],
+            dtype=float,
+        ).reshape(-1, 2)
+        if first_ranges.shape != second_ranges.shape:
+            return False
+        if first_ranges.size and not np.allclose(
+            first_ranges,
+            second_ranges,
+            atol=FREQUENCY_ALIGN_ATOL_MHZ,
+            rtol=0.0,
+        ):
+            return False
+    return True
+
+
+def combine_time_frequency(
+    file_paths,
+    *,
+    gap_fill: str = GAP_FILL_BACKGROUND,
+    overlap_policy: str = OVERLAP_SPLIT,
+    overlap_connection_mhz: float | None = None,
+):
+    """Frequency-combine each timestamp in a complete grid, then stitch in time."""
+    structural = _classify_combination_structure(file_paths)
+    if not structural.get("valid", False) or structural.get("combine_type") != COMBINE_TIME_FREQUENCY:
+        raise ValueError(structural.get("error") or "The selected files are not time-and-frequency combinable.")
+
+    segments = []
+    sources = []
+    reference_relation = None
+    for group in structural["timestamp_groups"]:
+        relation = describe_frequency_combination(group)
+        if reference_relation is None:
+            reference_relation = relation
+        elif not _frequency_relations_match(reference_relation, relation):
+            stamp = parse_filename(group[0])[2]
+            raise ValueError(
+                f"Frequency gap/overlap layout at timestamp {stamp} does not match the first timestamp."
+            )
+
+        combined = combine_frequency(
+            group,
+            gap_fill=gap_fill,
+            overlap_policy=overlap_policy,
+            overlap_connection_mhz=overlap_connection_mhz,
+        )
+        segments.append(combined)
+        sources.extend(combined.get("sources", group))
+
+    station = structural["station"]
+    first_date = structural["observed_at"][0].strftime("%Y%m%d")
+    result = _stitch_time_segments(
+        segments,
+        combine_type=COMBINE_TIME_FREQUENCY,
+        filename=f"{station}_{first_date}_time_frequency_combined",
+        sources=sources,
+    )
+    result.update(
+        {
+            "gap_fill": _normalize_gap_fill(gap_fill),
+            "overlap_policy": _normalize_overlap_policy(overlap_policy),
+            "overlap_connection_mhz": _optional_float(overlap_connection_mhz),
+            "timestamp_count": len(structural["timestamp_groups"]),
+            "focus_codes": list(structural["focus_codes"]),
+        }
+    )
+    try:
+        result["header0"]["NTIMES"] = (len(structural["timestamp_groups"]), "Number of observation timestamps")
+        result["header0"]["NFOCUS"] = (len(structural["focus_codes"]), "Number of receiver focus codes")
+    except Exception:
+        pass
+    return result
+
+
+def are_time_frequency_combinable(file_paths):
+    try:
+        structural = _classify_combination_structure(file_paths)
+        if not structural.get("valid", False) or structural.get("combine_type") != COMBINE_TIME_FREQUENCY:
+            return False
+        combine_time_frequency(file_paths)
+    except Exception:
+        return False
+    return True
+
+
+def combine_compatible(
+    file_paths,
+    *,
+    gap_fill: str = GAP_FILL_BACKGROUND,
+    overlap_policy: str = OVERLAP_SPLIT,
+    overlap_connection_mhz: float | None = None,
+):
+    """Detect and combine a valid time, frequency, or time-frequency selection."""
+    structural = _classify_combination_structure(file_paths)
+    if not structural.get("valid", False):
+        raise ValueError(structural.get("error") or "The selected FITS files cannot be combined.")
+
+    combine_type = structural["combine_type"]
+    if combine_type == COMBINE_TIME:
+        return combine_time(file_paths)
+    if combine_type == COMBINE_FREQUENCY:
+        return combine_frequency(
+            file_paths,
+            gap_fill=gap_fill,
+            overlap_policy=overlap_policy,
+            overlap_connection_mhz=overlap_connection_mhz,
+        )
+    if combine_type == COMBINE_TIME_FREQUENCY:
+        return combine_time_frequency(
+            file_paths,
+            gap_fill=gap_fill,
+            overlap_policy=overlap_policy,
+            overlap_connection_mhz=overlap_connection_mhz,
+        )
+    raise ValueError(f"Unsupported combine type: {combine_type}")

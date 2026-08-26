@@ -394,6 +394,9 @@ def generate_project_report_pdf(
         path.parent.mkdir(parents=True, exist_ok=True)
 
     rl = _import_reportlab()
+    data_source = dict(_as_mapping(report.data_source))
+    if data_source.get("combined_mode") == "time_frequency":
+        data_source["combined_mode"] = "time + frequency"
     styles = _make_styles(rl)
     SimpleDocTemplate = rl["SimpleDocTemplate"]
     Paragraph = rl["Paragraph"]
@@ -440,7 +443,7 @@ def generate_project_report_pdf(
                 ("Station", report.station),
                 ("Observation date", report.date_obs),
                 ("Current plot", _as_mapping(report.processing).get("plot_type")),
-                ("Source file", _as_mapping(report.data_source).get("filename")),
+                ("Source file", data_source.get("filename")),
             ],
             doc.width,
         )
@@ -454,7 +457,7 @@ def generate_project_report_pdf(
             rl,
             styles,
             _available_pairs(
-                report.data_source,
+                data_source,
                 [
                     ("Filename", "filename"),
                     ("Combined", "is_combined"),

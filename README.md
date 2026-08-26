@@ -45,7 +45,7 @@ Compared with v2.6.0, this release adds the following capabilities:
 - **Self-contained sessions:** save and reopen the full workspace as an `.ecsolar` file (Session menu, `Ctrl+S`) that embeds the original FITS bytes and restores frames, view state, crop, and CME height-time picks exactly.
 
 ### Multi-station analysis
-- **Multi-Station Comparison workspace:** open multiple FITS files in stacked synchronized panels, align them by UT clock or seconds from file start, and automatically combine compatible time/frequency files per station.
+- **Multi-Station Comparison workspace:** open multiple FITS files in stacked synchronized panels, align them by UT clock or seconds from file start, and automatically combine compatible time-only, frequency-only, or time + frequency grids per station.
 - **Comparison noise-reduction controls:** apply mean, median, robust, or clipping-based noise reduction to every panel or an individual panel, with live threshold previews and synchronized colormaps.
 - **Flexible comparison exports:** export the visible comparison or a compact publication-style grid with shared display ranges and configurable shared, per-station, or manual color scaling.
 - **Multi-Station Event downloader:** search selected stations across a UTC event window, download matching FITS files, and send the selected or downloaded files directly to the comparison workspace. The standard downloader also includes a direct **Compare** action.
@@ -75,7 +75,7 @@ Compared with v2.6.0, this release adds the following capabilities:
 ## ✨ Current Feature Highlights
 
 ### Dynamic spectrum workflow
-- Load `.fit`, `.fits`, `.fit.gz`, and `.fits.gz` files, including combined time/frequency datasets.
+- Load `.fit`, `.fits`, `.fit.gz`, and `.fits.gz` files, including datasets combined across time, frequency, or both dimensions.
 - Download and analyze e-CALLISTO and Learmonth Station radio data, including Learmonth chunk conversion to FIT format for the main Analyzer.
 - Use hardware-accelerated plotting with live cursor readouts, rectangular zoom, lock/unlock navigation, and **Edit → Reset to Raw** controls.
 - Adjust intensity thresholds live with high-resolution sliders, value readouts, optional signed-log scaling, dB or Digits/ADU display modes, and graph-property controls.
@@ -249,7 +249,7 @@ Features:
 - **View → Set Display Range...:** enter exact start/stop times and frequency bounds for aligned station comparisons
 - **View → Save/Apply Display Range Preset...:** reuse the same visible window on later files
 - **View → Export/Import View Config...:** share display range, units, thresholds, colormap, and graph styling as `.efaview.json`
-- **View → Multi-Station Comparison...:** compare several station spectra in vertically stacked panels with shared time/frequency axes, UT or seconds alignment, shared/per-station/manual color scaling, automatic time/frequency-combined views for combinable FITS selections, Modern-mode hardware rendering, Classic-mode Matplotlib rendering, and visible-view export as PNG/PDF/EPS/SVG/TIFF
+- **View → Multi-Station Comparison...:** compare several station spectra in vertically stacked panels with shared time/frequency axes, UT or seconds alignment, shared/per-station/manual color scaling, automatic time-only, frequency-only, and time + frequency combined views, Modern-mode hardware rendering, Classic-mode Matplotlib rendering, and visible-view export as PNG/PDF/EPS/SVG/TIFF
 - Navigation works alongside noise reduction and colormap changes
 
 This allows precise inspection of fine spectral structures.
@@ -394,7 +394,7 @@ Features:
 - Preview selected files
 - Download multiple FITS files
 - Import selected FITS files directly into the Analyzer
-- Automatic detection of frequency or time stitching compatibility
+- Automatic detection of time-only, frequency-only, or complete time × focus-code grid compatibility
 - Clear error messages when selected files cannot be combined
 - Generate a station's full UTC-day spectral overview from the **Spectral Overview** tab
 - Generate separate preview tabs for every focus code available for the selected station/date, or regenerate one selected code
@@ -445,17 +445,20 @@ Notes:
 
 # 15. Combine FITS Files
 
-Two combination modes are supported.
+Open **File → Combine FITS Files...** for a unified workflow that detects time-only, frequency-only, and combined time + frequency selections. Compatible multi-file selections made through **File → Open** or imported from the downloader are detected automatically as well.
 
 ### **Combine Frequency**
 Merge frequency bands with matching time bases. Frequency combining now has improved gap filling and overlap handling before the combined result is imported. When selected files contain a frequency gap or overlap, the app prompts for combine options. Gaps can be filled with interpolated background, average edge background, zeros, or a gray-hatched blank region. Overlapping bands can be split at a connection frequency, kept from the low band, kept from the high band, or rejected. The selected gap/overlap handling is retained in the combined dataset metadata where applicable.
 
 ### **Combine Time**
-Merge consecutive time segments from the same station and date.
+Merge consecutive time segments from the same station and focus code. Consecutive observations may continue across UTC midnight.
+
+### **Combine Time + Frequency**
+Merge a complete grid containing two or more consecutive timestamps and two or more focus codes. Every timestamp must contain the same focus-code set. The Analyzer first merges the frequency bands at each timestamp using one shared gap/overlap policy, verifies that every result has the same frequency grid, and then appends the results in time order. Incomplete grids, duplicate timestamp/focus pairs, non-consecutive timestamps, and incompatible axes are rejected with a detailed message.
 
 If files do not meet the required criteria, a message box alerts the user.
 
-Combined data can be imported directly into the Analyzer.
+The dialog previews the combined spectrum before importing it directly into the Analyzer. Combined exports and saved projects retain the original source list and the `time`, `frequency`, or `time_frequency` combine method.
 
 ---
 
@@ -485,7 +488,7 @@ Export options:
 
 - **Raw view**
 - **Background-subtracted view**
-- **Combined datasets** (time/frequency) with compatibility-preserving metadata updates
+- **Combined datasets** (time, frequency, or time + frequency) with compatibility-preserving metadata updates
 
 Path:
 
@@ -512,7 +515,7 @@ This supports publication workflows across operating systems.
 
 Batch plot exports are available from **Processing → Batch Processing**. Background subtraction options include per-channel mean, per-channel median, and **median_dB**, which applies the `2500 / 255 / 25.4` digit-to-dB scale before median background removal and defaults to the median_dB `-1` to `8 dB` display range. Enable **Use current display range** or load a saved `.efaview.json` config to export multiple station spectra with identical time/frequency axes.
 
-For visual station-to-station comparison, open **View → Multi-Station Comparison...**. Add multiple FITS files, choose UT-clock or seconds-from-file-start alignment, select shared/per-station/manual color scaling, set a shared display range, and export the visible comparison view as PNG, PDF, EPS, SVG, or TIFF. If the selected files are time- or frequency-combinable, the workspace renders combined views automatically; mixed-station selections are combined per station before comparison. The comparison workspace follows the app mode: Modern uses hardware-accelerated panels when available, while Classic uses Matplotlib.
+For visual station-to-station comparison, open **View → Multi-Station Comparison...**. Add multiple FITS files, choose UT-clock or seconds-from-file-start alignment, select shared/per-station/manual color scaling, set a shared display range, and export the visible comparison view as PNG, PDF, EPS, SVG, or TIFF. If the selected files are combinable across time, frequency, or a complete time × focus-code grid, the workspace renders combined views automatically; mixed-station selections are combined per station before comparison. The comparison workspace follows the app mode: Modern uses hardware-accelerated panels when available, while Classic uses Matplotlib.
 
 ### Provenance and Analysis Logs
 
@@ -827,9 +830,38 @@ infinities and all-NaN rows.
 - Manual PyInstaller build only creates the Linux app folder, not the `.deb`:
   - `pyinstaller src/Installation/FITS_Analyzer_linux.spec`
 
-### macOS (py2app)
-- Build app bundle:
+### macOS (.dmg + py2app)
+- Build the `.app` and the disk image in one step:
+  - `bash src/Installation/build_macos_dmg.sh`
+- Expected output on Apple silicon:
+  - `dist/e-callisto-fits-analyzer_2.8.0_macOS_arm64.dmg`
+- Re-wrap an existing `dist/*.app` without rebuilding it:
+  - `SKIP_APP=1 bash src/Installation/build_macos_dmg.sh`
+- Build the app bundle only:
   - `python src/Installation/setup.py py2app`
+- The build needs roughly 6 GB of free disk: the bundle is about 2.2 GB, and the
+  temporary read-write image adds another 3.2 GB before it is compressed. The
+  script reports both numbers and falls back to a plain `hdiutil` layout when
+  there is not enough room for `dmgbuild`; force that path with `DMG_STYLE=plain`.
+- Signing: `codesign --deep` is not sufficient for a py2app bundle. py2app
+  rewrites Mach-O load commands in every bundled library, which invalidates
+  their signatures, and `--deep` never descends into
+  `Contents/Resources/lib/python3.13/` where PySide6's Qt frameworks live. The
+  app then launches but is killed with `SIGKILL (Code Signature Invalid)` as
+  soon as it loads QtWebEngine. `src/Installation/codesign_macos_bundle.py`
+  signs every Mach-O inside-out and is run automatically by the build script.
+  Note that `codesign --verify --deep --strict` passes on an affected bundle,
+  so it cannot be used to detect this.
+- Builds are ad-hoc signed and not notarized, so other machines need
+  right-click -> Open on first launch. For public distribution, sign with a
+  Developer ID identity:
+  - `CODESIGN_IDENTITY="Developer ID Application: ..." bash src/Installation/build_macos_dmg.sh`
+- Notarization is a separate step the build script does not perform. After
+  signing with a Developer ID, submit the image yourself:
+  - `xcrun notarytool submit dist/<name>.dmg --keychain-profile <profile> --wait`
+  - `xcrun stapler staple dist/<name>.dmg`
+- Verify a finished build:
+  - `python src/Installation/smoke_test_packaged.py --timeout 25`
 
 ### Generic cross-platform spec
 - Alternative build entry:

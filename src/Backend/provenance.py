@@ -86,7 +86,10 @@ def payload_to_markdown(payload: dict[str, Any]) -> str:
 
     lines.append("## Data Source")
     for key in ("filename", "is_combined", "combined_mode", "shape", "freq_range_mhz", "time_range_s", "sources"):
-        lines.append(f"- {key}: `{source.get(key)}`")
+        value = source.get(key)
+        if key == "combined_mode" and value == "time_frequency":
+            value = "time + frequency"
+        lines.append(f"- {key}: `{value}`")
     lines.append("")
 
     lines.append("## Processing")
