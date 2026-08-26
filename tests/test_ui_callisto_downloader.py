@@ -17,7 +17,7 @@ requests = pytest.importorskip("requests")
 pytest.importorskip("astropy")
 pytest.importorskip("matplotlib")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QDate, QDateTime, QTime, QTimeZone, Qt
 from PySide6.QtWidgets import QApplication, QDialog, QSpinBox
 from matplotlib.figure import Figure
 
@@ -354,6 +354,35 @@ def test_downloader_event_tab_defaults_and_empty_state():
     assert dlg.event_import_btn.isEnabled() is False
     assert dlg.event_compare_btn.isEnabled() is False
     assert "No matching FITS files" in dlg.event_status_label.text()
+    dlg.close()
+
+
+def test_downloader_date_time_state_round_trip_preserves_active_observation_window():
+    _app()
+    dlg = CallistoDownloaderApp()
+    single_date = QDate(2026, 2, 1)
+    event_start = QDateTime(single_date, QTime(23, 30, 0), QTimeZone.utc())
+    event_stop = QDateTime(single_date, QTime(23, 45, 0), QTimeZone.utc())
+    overview_date = QDate(2026, 2, 2)
+    dlg.date_edit.setDate(single_date)
+    dlg.event_start_dt_edit.setDateTime(event_start)
+    dlg.event_stop_dt_edit.setDateTime(event_stop)
+    dlg.overview_date_edit.setDate(overview_date)
+    dlg.tabs.setCurrentIndex(1)
+
+    state = dlg.date_time_state()
+    dlg.date_edit.setDate(QDate.currentDate())
+    dlg.event_start_dt_edit.setDateTime(QDateTime.currentDateTimeUtc().addSecs(-3600))
+    dlg.event_stop_dt_edit.setDateTime(QDateTime.currentDateTimeUtc())
+    dlg.overview_date_edit.setDate(QDate.currentDate())
+    dlg.tabs.setCurrentIndex(0)
+    dlg.restore_date_time_state(state)
+
+    assert dlg.date_edit.date() == single_date
+    assert dlg.event_start_dt_edit.dateTime() == event_start
+    assert dlg.event_stop_dt_edit.dateTime() == event_stop
+    assert dlg.overview_date_edit.date() == overview_date
+    assert dlg.tabs.currentIndex() == 1
     dlg.close()
 
 

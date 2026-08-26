@@ -853,6 +853,44 @@ class CallistoDownloaderApp(QDialog):
         self._fit_to_available_screen()
         self._connect_theme_updates()
 
+    def date_time_state(self) -> dict[str, object]:
+        """Return the observation dates/times that should survive a reopen."""
+        return {
+            "active_tab": int(self.tabs.currentIndex()),
+            "single_station_date": self.date_edit.date(),
+            "event_start_utc": self.event_start_dt_edit.dateTime(),
+            "event_stop_utc": self.event_stop_dt_edit.dateTime(),
+            "overview_date": self.overview_date_edit.date(),
+        }
+
+    def restore_date_time_state(self, state: dict[str, object] | None) -> None:
+        """Restore a state returned by :meth:`date_time_state`."""
+        if not isinstance(state, dict):
+            return
+
+        single_date = state.get("single_station_date")
+        if isinstance(single_date, QDate) and single_date.isValid():
+            self.date_edit.setDate(single_date)
+
+        event_start = state.get("event_start_utc")
+        if isinstance(event_start, QDateTime) and event_start.isValid():
+            self.event_start_dt_edit.setDateTime(event_start)
+
+        event_stop = state.get("event_stop_utc")
+        if isinstance(event_stop, QDateTime) and event_stop.isValid():
+            self.event_stop_dt_edit.setDateTime(event_stop)
+
+        overview_date = state.get("overview_date")
+        if isinstance(overview_date, QDate) and overview_date.isValid():
+            self.overview_date_edit.setDate(overview_date)
+
+        try:
+            tab_index = int(state.get("active_tab", 0))
+        except (TypeError, ValueError):
+            tab_index = 0
+        if 0 <= tab_index < self.tabs.count():
+            self.tabs.setCurrentIndex(tab_index)
+
     def init_ui(self):
         layout = QVBoxLayout()
         layout.setContentsMargins(14, 14, 14, 14)
@@ -1486,18 +1524,21 @@ class CallistoDownloaderApp(QDialog):
 
     @Slot(int)
     def _on_overview_preview_tab_changed(self, index: int) -> None:
+        export_button = getattr(self, "overview_export_btn", None)
         if index < 0:
             self._overview_result = None
             self._overview_figure = None
-            self.overview_export_btn.setEnabled(False)
+            if export_button is not None:
+                export_button.setEnabled(False)
             return
         focus_code = self.overview_preview_tabs.tabText(index).removeprefix("Focus ").strip()
         self._overview_result = self._overview_results.get(focus_code)
         self._overview_figure = self._overview_figures.get(focus_code)
-        self.overview_export_btn.setEnabled(
-            self._overview_figure is not None
-            and not (self._overview_thread is not None and self._overview_thread.isRunning())
-        )
+        if export_button is not None:
+            export_button.setEnabled(
+                self._overview_figure is not None
+                and not (self._overview_thread is not None and self._overview_thread.isRunning())
+            )
 
     @Slot(object)
     def _on_spectral_overview_finished(self, payload):

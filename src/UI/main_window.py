@@ -380,6 +380,7 @@ class MainWindow(QMainWindow):
         self._import_progress_dialog = None
         self._batch_processing_dialog = None
         self._multi_station_comparison_dialog = None
+        self._downloader_date_time_state = None
         self._bug_report_dialog = None
         self._citation_dialog = None
         self._user_guide_dialog = None
@@ -8605,14 +8606,19 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Drag a rectangle on the plot to zoom.", 4000)
 
     def launch_downloader(self):
+        previous_date_time_state = getattr(self, "_downloader_date_time_state", None)
         self.downloader_dialog = CallistoDownloaderApp()
+        self.downloader_dialog.restore_date_time_state(previous_date_time_state)
         self.downloader_dialog.import_request.connect(self.process_imported_files)
         self.downloader_dialog.comparison_request.connect(self.process_comparison_sources)
 
         self.import_success_signal = lambda: self.downloader_dialog.accept()
         self.downloader_dialog.import_success.connect(self.import_success_signal)
 
-        self.downloader_dialog.exec()
+        try:
+            self.downloader_dialog.exec()
+        finally:
+            self._downloader_date_time_state = self.downloader_dialog.date_time_state()
 
     def _swaves_base_utc(self) -> datetime | None:
         """UTC instant of x=0 on the CALLISTO time axis."""
