@@ -174,6 +174,40 @@ def test_specs_bundle_type_ii_band_splitting_icons():
     assert "assets/band_splitting_icons/dark" in py2app_setup
 
 
+def test_macos_signing_is_deferred_until_py2app_finishes():
+    setup_text = (ROOT / "src" / "Installation" / "setup.py").read_text(encoding="utf-8")
+    build_text = (ROOT / "src" / "Installation" / "build_macos_dmg.sh").read_text(encoding="utf-8")
+    signer_text = (ROOT / "src" / "Installation" / "codesign_macos_bundle.py").read_text(encoding="utf-8")
+    repair_text = (ROOT / "src" / "Installation" / "repair_macos_openssl.py").read_text(encoding="utf-8")
+
+    assert "shutil.copy2(source_lzma, bundled_lzma)" in setup_text
+    assert '"codesign", "--force", "--deep"' not in setup_text
+    assert "codesign_macos_bundle.py" in build_text
+    assert "repair_macos_openssl.py" in build_text
+    assert build_text.index('echo "==> Repairing bundled OpenSSL libraries"') < build_text.index(
+        'echo "==> Signing the bundle"'
+    )
+    assert 'TARGET_MACOS="${MACOSX_DEPLOYMENT_TARGET:-13.0}"' in build_text
+    assert 'grep -q -- "--target-macos"' in build_text
+    assert build_text.index('grep -q -- "--target-macos"') < build_text.index("Running py2app")
+    assert "codesign --verify --deep --strict" in build_text
+    assert "smoke_test_packaged.py" in build_text
+    assert build_text.index("codesign --verify --deep --strict") < build_text.index("smoke_test_packaged.py")
+    assert build_text.index("smoke_test_packaged.py") < build_text.index("Building disk image")
+    assert 'libssl.3.dylib libcrypto.3.dylib libcurl.4.dylib' in build_text
+    assert 'codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE" &&' not in build_text
+    assert '["codesign", "--remove-signature"' in signer_text
+    assert '["codesign", "--verify", "--strict"' in signer_text
+    assert '["codesign", "--verify", "--deep", "--strict"' in signer_text
+    assert '"--target-macos"' in signer_text
+    assert "minimum_macos_versions" in signer_text
+    assert "libssl.3.dylib" in repair_text
+    assert "libcrypto.3.dylib" in repair_text
+    assert "install_name_tool" in repair_text
+    assert "@loader_path/{dependency_name}" in repair_text
+    assert '"LSMinimumSystemVersion"' in setup_text
+
+
 def test_runtime_requirements_include_sunpy_network_stack():
     text = (ROOT / "src" / "Installation" / "requirements-runtime.txt").read_text(encoding="utf-8")
     assert "shiboken6==" in text

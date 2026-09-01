@@ -8,7 +8,6 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
 import shutil
 import os
-import subprocess
 import sys
 from glob import glob
 from setuptools import setup
@@ -42,7 +41,7 @@ def SVG_FILES(folder: str):
     return files
 
 
-def _repair_lzma_signature(app_path: str) -> None:
+def _replace_bundled_lzma(app_path: str) -> None:
     if sys.platform != "darwin":
         return
 
@@ -55,16 +54,18 @@ def _repair_lzma_signature(app_path: str) -> None:
     if not source_lzma or not os.path.exists(bundled_lzma):
         return
 
+    # py2app rewrites Mach-O load commands while assembling the bundle, so the
+    # copied library must be installed before the final signing pass. Do not
+    # sign here: build_macos_dmg.sh signs every Mach-O file inside-out after
+    # py2app has finished making all bundle changes.
     shutil.copy2(source_lzma, bundled_lzma)
-    subprocess.run(["codesign", "--force", "--sign", "-", bundled_lzma], check=True)
-    subprocess.run(["codesign", "--force", "--deep", "--sign", "-", app_path], check=True)
 
 
 if py2app_cmd is not None:
     class Py2AppCommand(py2app_cmd):
         def run(self):
             super().run()
-            _repair_lzma_signature(os.path.join(self.dist_dir, f"{self.distribution.get_name()}.app"))
+            _replace_bundled_lzma(os.path.join(self.dist_dir, f"{self.distribution.get_name()}.app"))
 
 
     CMDCLASS = {"py2app": Py2AppCommand}
@@ -236,6 +237,7 @@ OPTIONS = {
         "CFBundleShortVersionString": APP_VERSION,
         "CFBundleVersion": APP_VERSION,
         "CFBundleIdentifier": "com.sahansliyanage.callisto.fitsanalyzer",
+        "LSMinimumSystemVersion": os.environ.get("MACOSX_DEPLOYMENT_TARGET", "13.0"),
     },
 }
 

@@ -1151,7 +1151,16 @@ def load_downloaded(
     map_loader: Callable[..., Any] | None = None,
     timeseries_loader: Callable[..., Any] | None = None,
     instrument: str | None = None,
+    level: str | None = None,
 ) -> SunPyLoadResult:
+    """Load downloaded files into maps/timeseries.
+
+    ``level`` is the processing level these files were *requested* at. It is
+    carried into the result metadata so the analyzer knows which archive product
+    it is holding: the level selector needs a trustworthy baseline to decide
+    whether a chosen level can be derived locally or has to be downloaded, and
+    not every mission records the level in its own header.
+    """
     normalized = [str(Path(p).expanduser().resolve()) for p in paths if str(p).strip()]
     if not normalized:
         raise ValueError("No files were provided for SunPy loading.")
@@ -1187,6 +1196,7 @@ def load_downloaded(
             "detector": _safe_str(getattr(maps[0], "detector", "")) if maps else "",
             "wavelength": _safe_str(getattr(maps[0], "wavelength", "")) if maps else "",
             "date": _safe_str(getattr(maps[0], "date", "")) if maps else "",
+            "level": _safe_str(level or ""),
         }
         return SunPyLoadResult(
             data_kind=DATA_KIND_MAP,

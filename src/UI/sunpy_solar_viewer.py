@@ -207,6 +207,7 @@ class SunPyWorker(QObject):
                     fetch_result.paths,
                     data_kind=self.search_result.data_kind,
                     instrument=self.search_result.spec.instrument,
+                    level=self.search_result.spec.level,
                 )
                 self.progress.emit(96, "Finalizing data...")
                 self.progress.emit(100, "Data loaded.")

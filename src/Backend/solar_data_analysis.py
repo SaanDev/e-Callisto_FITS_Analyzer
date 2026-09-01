@@ -569,22 +569,18 @@ def register_aia_maps(frames: Sequence[Any], *, aiapy_register: Any | None = Non
     pixel-aligned and quantitatively correct. Requires the optional ``aiapy``
     package; when it is missing we raise a clear, actionable error rather than
     silently returning misaligned data.
+
+    Kept as the geometry-only entry point: it registers and nothing else, with
+    no network access. The full level-1 to level-1.5 pipeline — which also
+    applies the 3-hourly master pointing table — lives in
+    :func:`src.Backend.calibration_levels.register_level_1_5`, and this function
+    delegates to it so there is a single ``aiapy`` wrapper in the project.
     """
-    if aiapy_register is None:
-        try:
-            from aiapy.calibrate import register as aiapy_register
-        except Exception as exc:  # pragma: no cover - exercised only without aiapy
-            raise RuntimeError(
-                "AIA registration needs the optional 'aiapy' package.\n"
-                "Install it with: python3 -m pip install aiapy"
-            ) from exc
-    out: list[Any] = []
-    for frame in frames:
-        try:
-            out.append(aiapy_register(frame))
-        except Exception:
-            out.append(frame)
-    return out
+    from src.Backend.calibration_levels import register_level_1_5
+
+    return register_level_1_5(
+        frames, use_pointing=False, register_fn=aiapy_register
+    ).frames
 
 
 def extract_region_lightcurve(

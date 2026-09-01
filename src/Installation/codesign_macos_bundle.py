@@ -27,10 +27,14 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import os
+import platform
 import struct
 import subprocess
 import sys
 from pathlib import Path
+
+from macholib.MachO import MachO
+from macholib.mach_o import LC_BUILD_VERSION, LC_VERSION_MIN_MACOSX
 
 MACHO_MAGIC = {
     0xFEEDFACE, 0xFEEDFACF,  # 32/64-bit, native order
@@ -51,16 +55,68 @@ def is_macho(path: Path) -> bool:
 
 
 def sign(target: Path, identity: str) -> tuple[Path, bool, str]:
+    # py2app/macholib may leave a now-invalid signature after rewriting load
+    # commands. Remove that stale signature first so codesign creates a fresh
+    # code directory and, for bundles, a fresh resource seal.
+    subprocess.run(
+        ["codesign", "--remove-signature", str(target)],
+        capture_output=True,
+        text=True,
+    )
+
     result = subprocess.run(
         ["codesign", "--force", "--sign", identity, "--timestamp=none", str(target)],
         capture_output=True,
         text=True,
     )
-    return target, result.returncode == 0, (result.stderr or "").strip()
+    if result.returncode != 0:
+        return target, False, (result.stderr or result.stdout or "").strip()
+
+    verification = subprocess.run(
+        ["codesign", "--verify", "--strict", "--verbose=2", str(target)],
+        capture_output=True,
+        text=True,
+    )
+    return (
+        target,
+        verification.returncode == 0,
+        (verification.stderr or verification.stdout or "").strip(),
+    )
 
 
 def depth(path: Path) -> int:
     return len(path.parts)
+
+
+def version_tuple(value: str) -> tuple[int, int, int]:
+    parts: list[int] = []
+    for component in value.split("."):
+        digits = "".join(character for character in component if character.isdigit())
+        if not digits:
+            break
+        parts.append(int(digits))
+    padded = (parts + [0, 0, 0])[:3]
+    return padded[0], padded[1], padded[2]
+
+
+def decode_macho_version(value: int) -> tuple[int, int, int]:
+    return (value >> 16, (value >> 8) & 0xFF, value & 0xFF)
+
+
+def minimum_macos_versions(path: Path) -> set[tuple[int, int, int]]:
+    versions: set[tuple[int, int, int]] = set()
+    try:
+        headers = MachO(str(path)).headers
+    except (OSError, ValueError, struct.error):
+        return versions
+
+    for header in headers:
+        for load_command, command, _data in header.commands:
+            if load_command.cmd == LC_BUILD_VERSION and getattr(command, "platform", None) == 1:
+                versions.add(decode_macho_version(command.minos))
+            elif load_command.cmd == LC_VERSION_MIN_MACOSX:
+                versions.add(decode_macho_version(command.version))
+    return versions
 
 
 def main() -> int:
@@ -68,6 +124,11 @@ def main() -> int:
     parser.add_argument("bundle", help="Path to the .app bundle")
     parser.add_argument("--identity", default="-", help="Signing identity ('-' for ad-hoc)")
     parser.add_argument("--jobs", type=int, default=8, help="Parallel codesign workers")
+    parser.add_argument(
+        "--target-macos",
+        default=platform.mac_ver()[0] or "13.0",
+        help="Reject bundled binaries that require a newer macOS version",
+    )
     args = parser.parse_args()
 
     bundle = Path(args.bundle).resolve()
@@ -84,6 +145,8 @@ def main() -> int:
     machos: list[Path] = []
     nested: list[Path] = []
     seen: set[Path] = set()
+    incompatible: list[tuple[Path, tuple[int, int, int]]] = []
+    target_macos = version_tuple(args.target_macos)
 
     for root, dirs, files in os.walk(bundle, followlinks=False):
         root_path = Path(root)
@@ -103,8 +166,9 @@ def main() -> int:
             # rather than that one file, which would run concurrently with the
             # workers signing the bundle's other contents. The bundle phases
             # below cover these binaries anyway.
-            if path.parent.name == "MacOS" and path.parent.parent.name == "Contents":
-                continue
+            bundle_main_executable = (
+                path.parent.name == "MacOS" and path.parent.parent.name == "Contents"
+            )
             try:
                 real = path.resolve()
             except OSError:
@@ -113,9 +177,36 @@ def main() -> int:
                 continue
             if is_macho(path):
                 seen.add(real)
-                machos.append(path)
+                for minimum in minimum_macos_versions(path):
+                    if minimum > target_macos:
+                        incompatible.append((path, minimum))
+                if not bundle_main_executable:
+                    machos.append(path)
 
-    print(f"    {len(machos)} Mach-O files, {len(nested)} nested bundles")
+    if incompatible:
+        print(
+            f"    {len(incompatible)} binary slice(s) require a macOS version newer "
+            f"than {args.target_macos}:",
+            file=sys.stderr,
+        )
+        for target, minimum in incompatible[:30]:
+            required = ".".join(str(part) for part in minimum)
+            print(
+                f"      {target.relative_to(bundle)} requires macOS {required}",
+                file=sys.stderr,
+            )
+        print(
+            "    Reinstall the named dependency from a macOS-compatible wheel or build it "
+            "from source with MACOSX_DEPLOYMENT_TARGET set.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(
+        f"    inside-out signer: {len(machos)} Mach-O files, "
+        f"{len(nested)} nested bundles",
+        flush=True,
+    )
 
     failures: list[tuple[Path, str]] = []
 
@@ -144,7 +235,22 @@ def main() -> int:
             print(f"      {target.relative_to(bundle.parent)}: {err}", file=sys.stderr)
         return 1
 
-    print("    all binaries signed")
+    # Check the complete nested-code graph as a final guard against leaving a
+    # valid outer seal around an invalid dylib or framework.
+    verification = subprocess.run(
+        ["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(bundle)],
+        capture_output=True,
+        text=True,
+    )
+    if verification.returncode != 0:
+        print("    final bundle verification failed:", file=sys.stderr)
+        print(
+            f"      {(verification.stderr or verification.stdout or '').strip()}",
+            file=sys.stderr,
+        )
+        return 1
+
+    print("    all binaries signed and verified")
     return 0
 
 

@@ -7,6 +7,7 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -3009,3 +3010,608 @@ def test_partial_overlap_is_reported(monkeypatch):
 
     notes = captured["notes"]
     assert any("overlaps the base view" in n and "partial disk" in n for n in notes)
+
+
+# ---------------------------------------------------------------------------
+# Processing level and solar derotation
+# ---------------------------------------------------------------------------
+
+
+class FakeWorldMap(FakeMap):
+    """A frame that passes the "real sunpy map" test.
+
+    Only the presence of the world-coordinate attributes matters — the window
+    checks for them before allowing registration or derotation, and the maths
+    itself lives in the (separately tested) backend modules.
+    """
+
+    def __init__(self, data, *, instrument="AIA", level=1.0):
+        super().__init__(data)
+        self.instrument = instrument
+        self.meta = {"instrume": instrument, "lvl_num": level}
+        self.wcs = object()
+        self.coordinate_frame = object()
+        self.observer_coordinate = object()
+
+    def submap(self, *args, **kwargs):  # pragma: no cover - presence is the point
+        return self
+
+
+def _run_worker(win, monkeypatch, timeout_s: float = 10.0):
+    """Wait for a background worker, turning a failure into a readable error.
+
+    Waits on the window's own "is anything running" flag rather than on the
+    QThread object: the thread is scheduled for ``deleteLater`` as soon as it
+    finishes, so calling ``wait()`` on it races with its destruction.
+
+    The window reports worker failures through a modal dialog, which blocks
+    forever in a headless run instead of failing the test, so the failure
+    handler is captured and re-raised as an assertion with the real traceback.
+    """
+    failures = []
+    monkeypatch.setattr(
+        SolarDataAnalysisWindow, "_on_worker_failed", lambda self, tb: failures.append(tb)
+    )
+    _wait_until_idle(win, timeout_s)
+
+    assert not failures, f"worker failed:\n{failures[0]}"
+    assert not win.is_operation_running(), "the worker never finished"
+
+
+def _wait_until_idle(win, timeout_s: float = 10.0):
+    """Spin the event loop until the window reports no running operation."""
+    deadline = time.monotonic() + timeout_s
+    while win.is_operation_running() and time.monotonic() < deadline:
+        QApplication.processEvents()
+        time.sleep(0.005)
+    QApplication.processEvents()
+    QApplication.processEvents()
+
+
+def _load_frames(win, monkeypatch, frames, *, metadata=None):
+    """Drive the window's normal local-upload path with prepared frames."""
+
+    def fake_load(paths, *, progress_cb=None, cancel_cb=None):
+        return AiaFrameSet(
+            paths=list(paths),
+            maps=list(frames),
+            metadata=metadata or {"n_frames": len(frames), "instrument": "AIA"},
+        )
+
+    monkeypatch.setattr(solar_mod, "load_aia_maps_streaming", fake_load)
+    win.load_local_paths([f"f{i}.fits" for i in range(len(frames))])
+    _wait_until_idle(win)
+
+
+def test_level_card_is_hidden_until_data_is_loaded():
+    _app()
+    win = SolarDataAnalysisWindow()
+    assert win.calibration_group.isVisibleTo(win) is False
+    win.close()
+
+
+def test_level_card_offers_aia_levels_after_loading(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load_frames(win, monkeypatch, [FakeWorldMap(np.ones((8, 8)))])
+
+    keys = [win.level_combo.itemData(i) for i in range(win.level_combo.count())]
+    assert keys == ["1", "1.5"]
+    # The as-downloaded level is preselected, not an aspirational one.
+    assert win.level_combo.currentData() == "1"
+    assert win._base_level == "1"
+    win.close()
+
+
+def test_level_card_stays_hidden_for_instruments_with_one_level(monkeypatch):
+    """HMI products are already science-ready; an empty combo would only confuse."""
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load_frames(
+        win,
+        monkeypatch,
+        [FakeWorldMap(np.ones((8, 8)), instrument="HMI")],
+        metadata={"n_frames": 1, "instrument": "HMI"},
+    )
+    assert win.level_combo.count() == 0
+    assert win.calibration_group.isVisibleTo(win) is False
+    win.close()
+
+
+def test_level_baseline_comes_from_the_archive_metadata(monkeypatch):
+    """What was requested beats what the header happens to say."""
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load_frames(
+        win,
+        monkeypatch,
+        [FakeWorldMap(np.ones((8, 8)), instrument="SUVI", level=None)],
+        metadata={"n_frames": 1, "instrument": "SUVI", "level": "1b"},
+    )
+    assert win._base_level == "1b"
+    win.close()
+
+
+def test_level_status_names_the_level_and_where_it_came_from(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load_frames(win, monkeypatch, [FakeWorldMap(np.ones((8, 8)))])
+    assert "as downloaded" in win.level_status_label.text()
+    win.close()
+
+
+def test_applying_level_1p5_replaces_the_working_frames(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    frames = [FakeWorldMap(np.ones((8, 8))), FakeWorldMap(np.full((8, 8), 2.0))]
+    _load_frames(win, monkeypatch, frames)
+
+    registered = [FakeWorldMap(np.full((8, 8), 9.0), level=1.5) for _ in frames]
+    captured = {}
+
+    def fake_apply_level(work, level, **kwargs):
+        captured["level"] = level
+        captured["base"] = kwargs.get("base_level")
+        return solar_mod.LevelResult(frames=registered, level="1.5", warnings=[])
+
+    monkeypatch.setattr(solar_mod, "apply_level", fake_apply_level)
+    win.level_combo.setCurrentIndex(win.level_combo.findData("1.5"))
+    win.apply_calibration_level()
+    _run_worker(win, monkeypatch)
+
+    assert captured == {"level": "1.5", "base": "1"}
+    assert win._current_level == "1.5"
+    assert win._map_frames == registered
+    assert win._leveled_frames == registered
+    # The as-downloaded frames are never thrown away.
+    assert win._original_frames == frames
+    assert "computed locally" in win.level_status_label.text()
+    win.close()
+
+
+def test_level_warnings_are_surfaced_to_the_user(monkeypatch):
+    """A level 1.5 without the pointing table is a different product."""
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load_frames(win, monkeypatch, [FakeWorldMap(np.ones((8, 8)))])
+
+    monkeypatch.setattr(
+        solar_mod,
+        "apply_level",
+        lambda work, level, **kw: solar_mod.LevelResult(
+            frames=list(work),
+            level="1.5",
+            warnings=["Could not fetch the master pointing table from JSOC."],
+        ),
+    )
+    win.level_combo.setCurrentIndex(win.level_combo.findData("1.5"))
+    win.apply_calibration_level()
+    _run_worker(win, monkeypatch)
+
+    assert "pointing table" in win.level_status_label.text()
+    assert "pointing table" in win.analysis_text.toPlainText()
+    win.close()
+
+
+def test_returning_to_the_base_level_restores_the_downloaded_frames(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    frames = [FakeWorldMap(np.ones((8, 8)))]
+    _load_frames(win, monkeypatch, frames)
+
+    monkeypatch.setattr(
+        solar_mod,
+        "apply_level",
+        lambda work, level, **kw: solar_mod.LevelResult(
+            frames=[FakeWorldMap(np.zeros((8, 8)), level=1.5)], level="1.5"
+        ),
+    )
+    win.level_combo.setCurrentIndex(win.level_combo.findData("1.5"))
+    win.apply_calibration_level()
+    _run_worker(win, monkeypatch)
+    assert win._current_level == "1.5"
+
+    # Going back is a restore, not a recomputation — no worker should run.
+    monkeypatch.setattr(
+        solar_mod,
+        "apply_level",
+        lambda *a, **k: pytest.fail("returning to the base level must not recompute"),
+    )
+    win.level_combo.setCurrentIndex(win.level_combo.findData("1"))
+    win.apply_calibration_level()
+
+    assert win._current_level == "1"
+    assert win._map_frames == frames
+    win.close()
+
+
+def test_an_archive_only_level_offers_a_re_download(monkeypatch):
+    """SUVI L2 is a different set of files, so it cannot be computed locally."""
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load_frames(
+        win,
+        monkeypatch,
+        [FakeWorldMap(np.ones((8, 8)), instrument="SUVI")],
+        metadata={"n_frames": 1, "instrument": "SUVI", "level": "1b"},
+    )
+
+    monkeypatch.setattr(
+        solar_mod.QMessageBox, "question", lambda *a, **k: solar_mod.QMessageBox.Yes
+    )
+    searched = []
+    monkeypatch.setattr(
+        SolarDataAnalysisWindow, "search_archives", lambda self: searched.append(True)
+    )
+    monkeypatch.setattr(
+        solar_mod, "apply_level", lambda *a, **k: pytest.fail("L2 must not be computed")
+    )
+
+    win.level_combo.setCurrentIndex(win.level_combo.findData("2"))
+    win.apply_calibration_level()
+
+    assert searched == [True]
+    assert win._requested_level == "2"
+    win.close()
+
+
+def test_declining_the_re_download_leaves_the_level_unchanged(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load_frames(
+        win,
+        monkeypatch,
+        [FakeWorldMap(np.ones((8, 8)), instrument="SUVI")],
+        metadata={"n_frames": 1, "instrument": "SUVI", "level": "1b"},
+    )
+    monkeypatch.setattr(
+        solar_mod.QMessageBox, "question", lambda *a, **k: solar_mod.QMessageBox.No
+    )
+    monkeypatch.setattr(
+        SolarDataAnalysisWindow, "search_archives", lambda self: pytest.fail("no search")
+    )
+
+    win.level_combo.setCurrentIndex(win.level_combo.findData("2"))
+    win.apply_calibration_level()
+
+    assert win._current_level == "1b"
+    # The combo snaps back to what is actually on screen.
+    assert win.level_combo.currentData() == "1b"
+    win.close()
+
+
+def test_searches_use_the_base_level_then_the_requested_one_once():
+    _app()
+    win = SolarDataAnalysisWindow()
+    assert win._level_for_query("SUVI") == "1b"
+    assert win._level_for_query("AIA") is None
+
+    win._requested_level = "2"
+    assert win._level_for_query("SUVI") == "2"
+    # The override is consumed, so the next search goes back to the base level.
+    assert win._level_for_query("SUVI") == "1b"
+    win.close()
+
+
+def test_level_change_is_refused_for_derived_arrays(monkeypatch):
+    """After a plain crop the frames lose their WCS, so aiapy cannot run."""
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load_frames(win, monkeypatch, [FakeMap(np.ones((8, 8)))])
+
+    warned = []
+    monkeypatch.setattr(
+        solar_mod.QMessageBox, "warning", lambda *a, **k: warned.append(a[2])
+    )
+    monkeypatch.setattr(
+        solar_mod, "apply_level", lambda *a, **k: pytest.fail("must not run")
+    )
+    win.level_combo.setCurrentIndex(win.level_combo.findData("1.5"))
+    win.apply_calibration_level()
+
+    assert warned and "world coordinates" in warned[0]
+    win.close()
+
+
+def test_derotation_controls_are_disabled_without_world_coordinates(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load_frames(win, monkeypatch, [FakeMap(np.ones((8, 8))), FakeMap(np.ones((8, 8)))])
+
+    assert win.derotate_check.isEnabled() is False
+    assert "world coordinates" in win.derotation_status_label.text()
+    win.close()
+
+
+def test_derotation_controls_enable_for_a_real_sequence(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load_frames(
+        win, monkeypatch, [FakeWorldMap(np.ones((8, 8))), FakeWorldMap(np.ones((8, 8)))]
+    )
+
+    assert win.derotate_check.isEnabled() is True
+    # Apply stays off until the user actually asks for derotation.
+    assert win.apply_derotation_btn.isEnabled() is False
+    win.derotate_check.setChecked(True)
+    assert win.apply_derotation_btn.isEnabled() is True
+    win.close()
+
+
+def test_padding_only_applies_to_reproject_mode(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load_frames(
+        win, monkeypatch, [FakeWorldMap(np.ones((8, 8))), FakeWorldMap(np.ones((8, 8)))]
+    )
+    win.derotate_check.setChecked(True)
+
+    win.derotate_mode_combo.setCurrentIndex(
+        win.derotate_mode_combo.findData(solar_mod.MODE_TRACK)
+    )
+    assert win.derotate_pad_spin.isEnabled() is False
+    win.derotate_mode_combo.setCurrentIndex(
+        win.derotate_mode_combo.findData(solar_mod.MODE_REPROJECT)
+    )
+    assert win.derotate_pad_spin.isEnabled() is True
+    win.close()
+
+
+def test_applying_derotation_replaces_the_frames_and_keeps_the_originals(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    frames = [FakeWorldMap(np.ones((8, 8))), FakeWorldMap(np.full((8, 8), 2.0))]
+    _load_frames(win, monkeypatch, frames)
+
+    cut = [FakeWorldMap(np.ones((4, 4))), FakeWorldMap(np.ones((4, 4)))]
+    captured = {}
+
+    def fake_derotate(work, spec, **kwargs):
+        captured["spec"] = spec
+        return solar_mod.DerotationResult(
+            frames=cut,
+            kept_indexes=[0, 1],
+            mode=spec.mode,
+            reference_index=spec.reference_index,
+            reference_time="2026-02-10T01:00:00",
+        )
+
+    monkeypatch.setattr(solar_mod, "derotate_region", fake_derotate)
+    win.derotate_check.setChecked(True)
+    for spin, value in (
+        (win.crop_x0_spin, 100.0),
+        (win.crop_x1_spin, 300.0),
+        (win.crop_y0_spin, -50.0),
+        (win.crop_y1_spin, 150.0),
+    ):
+        spin.setValue(value)
+    win.apply_derotation()
+    _run_worker(win, monkeypatch)
+
+    assert captured["spec"].bounds_arcsec == (100.0, 300.0, -50.0, 150.0)
+    assert captured["spec"].mode == solar_mod.MODE_TRACK
+    assert win._map_frames == cut
+    assert win._derotation_applied is True
+    # The full frames at the current level are still available to go back to.
+    assert win._leveled_frames == frames
+    assert "Derotation: on" in win.derotation_status_label.text()
+    win.close()
+
+
+def test_derotation_reference_follows_the_reference_selector(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    frames = [FakeWorldMap(np.ones((8, 8))) for _ in range(4)]
+    _load_frames(win, monkeypatch, frames)
+
+    win.derotate_check.setChecked(True)
+    win.derotate_ref_combo.setCurrentIndex(win.derotate_ref_combo.findData("index"))
+    win.derotate_ref_spin.setValue(3)
+    # The spin box is 1-based for the user, zero-based for the backend.
+    assert win._derotation_reference_index() == 2
+
+    win.derotate_ref_combo.setCurrentIndex(win.derotate_ref_combo.findData("first"))
+    assert win._derotation_reference_index() == 0
+    win.close()
+
+
+def test_resetting_derotation_restores_the_full_frames(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    frames = [FakeWorldMap(np.ones((8, 8))), FakeWorldMap(np.ones((8, 8)))]
+    _load_frames(win, monkeypatch, frames)
+
+    monkeypatch.setattr(
+        solar_mod,
+        "derotate_region",
+        lambda work, spec, **kw: solar_mod.DerotationResult(
+            frames=[FakeWorldMap(np.ones((4, 4)))], kept_indexes=[0], mode=spec.mode
+        ),
+    )
+    win.derotate_check.setChecked(True)
+    win.crop_x1_spin.setValue(300.0)
+    win.crop_y1_spin.setValue(300.0)
+    win.apply_derotation()
+    _run_worker(win, monkeypatch)
+    assert win._derotation_applied is True
+
+    win.reset_derotation()
+    assert win._derotation_applied is False
+    assert win._map_frames == frames
+    assert win.derotation_status_label.text() == "Derotation: off"
+    win.close()
+
+
+def test_derotation_needs_a_selected_region(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load_frames(
+        win, monkeypatch, [FakeWorldMap(np.ones((8, 8))), FakeWorldMap(np.ones((8, 8)))]
+    )
+    informed = []
+    monkeypatch.setattr(
+        solar_mod.QMessageBox, "information", lambda *a, **k: informed.append(a[2])
+    )
+    monkeypatch.setattr(
+        solar_mod, "derotate_region", lambda *a, **k: pytest.fail("must not run")
+    )
+
+    win.derotate_check.setChecked(True)
+    for spin in (win.crop_x0_spin, win.crop_x1_spin, win.crop_y0_spin, win.crop_y1_spin):
+        spin.setValue(0.0)
+    win.apply_derotation()
+
+    assert informed and "rectangle" in informed[0]
+    win.close()
+
+
+def test_session_records_the_level_and_derotation(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    frames = [FakeWorldMap(np.ones((8, 8))), FakeWorldMap(np.ones((8, 8)))]
+    _load_frames(win, monkeypatch, frames)
+
+    monkeypatch.setattr(
+        solar_mod,
+        "derotate_region",
+        lambda work, spec, **kw: solar_mod.DerotationResult(
+            frames=[FakeWorldMap(np.ones((4, 4)))],
+            kept_indexes=[0],
+            mode=spec.mode,
+            reference_time="2026-02-10T01:00:00",
+        ),
+    )
+    win.derotate_check.setChecked(True)
+    win.derotate_mode_combo.setCurrentIndex(
+        win.derotate_mode_combo.findData(solar_mod.MODE_REPROJECT)
+    )
+    win.crop_x1_spin.setValue(300.0)
+    win.crop_y1_spin.setValue(300.0)
+    win.apply_derotation()
+    _run_worker(win, monkeypatch)
+
+    view = win._collect_session_meta()["view"]
+    assert view["base_level"] == "1"
+    assert view["calibration_level"] == "1"
+    assert view["derotation"]["mode"] == solar_mod.MODE_REPROJECT
+    assert view["derotation_settings"]["mode"] == solar_mod.MODE_REPROJECT
+    win.close()
+
+
+def test_session_restore_puts_the_processing_settings_back(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load_frames(
+        win, monkeypatch, [FakeWorldMap(np.ones((8, 8))), FakeWorldMap(np.ones((8, 8)))]
+    )
+
+    win._restore_processing_widgets(
+        {
+            "calibration_level": "1.5",
+            "derotation": {"mode": solar_mod.MODE_REPROJECT},
+            "derotation_settings": {
+                "mode": solar_mod.MODE_REPROJECT,
+                "reference": "index",
+                "reference_index": 2,
+                "pad_arcsec": 120.0,
+            },
+        }
+    )
+
+    assert win.derotate_mode_combo.currentData() == solar_mod.MODE_REPROJECT
+    assert win.derotate_ref_combo.currentData() == "index"
+    assert win.derotate_ref_spin.value() == 2
+    assert win.derotate_pad_spin.value() == pytest.approx(120.0)
+    assert win.level_combo.currentData() == "1.5"
+    assert win.derotate_check.isChecked() is True
+    # Re-deriving needs a worker, so the user is told rather than left guessing.
+    assert "Apply" in win.derotation_status_label.text()
+    win.close()
+
+
+def test_reset_frames_also_returns_to_the_downloaded_level(monkeypatch):
+    """"Restored" must mean restored — including the processing level.
+
+    Otherwise the level card keeps advertising 1.5 while showing level-1 pixels.
+    """
+    _app()
+    win = SolarDataAnalysisWindow()
+    frames = [FakeWorldMap(np.ones((8, 8))), FakeWorldMap(np.ones((8, 8)))]
+    _load_frames(win, monkeypatch, frames)
+
+    monkeypatch.setattr(
+        solar_mod,
+        "apply_level",
+        lambda work, level, **kw: solar_mod.LevelResult(
+            frames=[FakeWorldMap(np.zeros((8, 8)), level=1.5) for _ in work], level="1.5"
+        ),
+    )
+    win.level_combo.setCurrentIndex(win.level_combo.findData("1.5"))
+    win.apply_calibration_level()
+    _run_worker(win, monkeypatch)
+    assert win._current_level == "1.5"
+
+    win.reset_loaded_frames()
+
+    assert win._current_level == "1"
+    assert win._leveled_frames == frames
+    assert win._map_frames == frames
+    assert win._derotation_applied is False
+    assert "as downloaded" in win.level_status_label.text()
+    win.close()
+
+
+def test_reset_all_clears_the_processing_state(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load_frames(
+        win, monkeypatch, [FakeWorldMap(np.ones((8, 8))), FakeWorldMap(np.ones((8, 8)))]
+    )
+    win.derotate_check.setChecked(True)
+    win.derotate_pad_spin.setValue(200.0)
+    win._requested_level = "2"
+
+    monkeypatch.setattr(
+        solar_mod.QMessageBox, "question", lambda *a, **k: solar_mod.QMessageBox.Yes
+    )
+    win.reset_all()
+
+    assert win._base_level is None
+    assert win._current_level is None
+    assert win._leveled_frames == []
+    assert win._requested_level is None
+    assert win.derotate_check.isChecked() is False
+    assert win.derotate_pad_spin.value() == pytest.approx(60.0)
+    assert win.derotation_status_label.text() == "Derotation: off"
+    win.close()
+
+
+def test_unknown_baseline_asks_instead_of_failing(monkeypatch):
+    """A file whose header records no level must not produce a traceback dialog.
+
+    Guessing would either fabricate data or blow up in the worker, so the window
+    offers a fresh archive search instead.
+    """
+    _app()
+    win = SolarDataAnalysisWindow()
+    frames = [FakeWorldMap(np.ones((8, 8)), instrument="SUVI", level=None)]
+    _load_frames(
+        win, monkeypatch, frames, metadata={"n_frames": 1, "instrument": "SUVI"}
+    )
+    assert win._base_level is None
+
+    asked = []
+    monkeypatch.setattr(
+        solar_mod.QMessageBox,
+        "question",
+        lambda *a, **k: asked.append(a[2]) or solar_mod.QMessageBox.No,
+    )
+    monkeypatch.setattr(
+        solar_mod, "apply_level", lambda *a, **k: pytest.fail("must not compute")
+    )
+
+    win.level_combo.setCurrentIndex(win.level_combo.findData("1b"))
+    win.apply_calibration_level()
+
+    assert asked and "archive product" in asked[0]
+    win.close()

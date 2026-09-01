@@ -831,6 +831,8 @@ infinities and all-NaN rows.
   - `pyinstaller src/Installation/FITS_Analyzer_linux.spec`
 
 ### macOS (.dmg + py2app)
+- For a non-programmer-friendly walkthrough, see
+  [Build the macOS app from source](MACOS_BUILD_GUIDE.md).
 - Build the `.app` and the disk image in one step:
   - `bash src/Installation/build_macos_dmg.sh`
 - Expected output on Apple silicon:

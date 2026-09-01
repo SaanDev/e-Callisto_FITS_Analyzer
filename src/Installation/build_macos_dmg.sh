@@ -19,10 +19,13 @@ VERSION="${VERSION:-$DEFAULT_VERSION}"
 PYTHON_BIN="${PYTHON_BIN:-}"
 SKIP_APP="${SKIP_APP:-0}"
 ARCH="$(uname -m)"
+TARGET_MACOS="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
 APP_BUNDLE="$ROOT/dist/${APP_NAME}.app"
 OUT_DMG="$ROOT/dist/${APP_ID}_${VERSION}_macOS_${ARCH}.dmg"
 DMG_SETTINGS="$ROOT/src/Installation/dmg_settings.py"
 ICON_FILE="$ROOT/assets/icon.icns"
+SIGNER_SCRIPT="$ROOT/src/Installation/codesign_macos_bundle.py"
+OPENSSL_REPAIR_SCRIPT="$ROOT/src/Installation/repair_macos_openssl.py"
 
 cd "$ROOT"
 
@@ -38,6 +41,8 @@ fi
 
 echo "==> Project root: $ROOT"
 echo "==> Building version: $VERSION (macOS $ARCH)"
+echo "==> Deployment target: macOS $TARGET_MACOS"
+export MACOSX_DEPLOYMENT_TARGET="$TARGET_MACOS"
 
 if [ -z "$PYTHON_BIN" ]; then
   if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "${VIRTUAL_ENV}/bin/python" ]; then
@@ -76,6 +81,18 @@ for module in py2app dmgbuild; do
   fi
 done
 
+if [ ! -f "$OPENSSL_REPAIR_SCRIPT" ]; then
+  echo "Missing current OpenSSL repair script: $OPENSSL_REPAIR_SCRIPT" >&2
+  echo "Update all files under src/Installation before building." >&2
+  exit 1
+fi
+
+if ! "$PYTHON_BIN" "$SIGNER_SCRIPT" --help 2>&1 | grep -q -- "--target-macos"; then
+  echo "The codesign_macos_bundle.py file is older than build_macos_dmg.sh." >&2
+  echo "Update both files from the same repository revision before building." >&2
+  exit 1
+fi
+
 if [ ! -f "$ICON_FILE" ]; then
   echo "Missing application icon: $ICON_FILE" >&2
   exit 1
@@ -101,6 +118,13 @@ else
   fi
 fi
 
+# macholib can leave OpenSSL's Mach-O layout failing Apple's strict validator
+# after changing its install names. Restore pristine copies and use Apple's
+# install_name_tool for the two required relocations before signing anything.
+echo "==> Repairing bundled OpenSSL libraries"
+"$PYTHON_BIN" "$OPENSSL_REPAIR_SCRIPT" \
+  "$APP_BUNDLE" --target-macos "$TARGET_MACOS"
+
 # --- 2. Ad-hoc signature ---------------------------------------------------
 # `codesign --deep` is NOT enough here. py2app's macholib pass rewrites load
 # commands in every bundled library, which invalidates their signatures, but
@@ -112,10 +136,24 @@ fi
 # Ad-hoc ("-") is enough for local and self-distributed builds; pass
 # CODESIGN_IDENTITY="Developer ID Application: ..." to notarize a public release.
 echo "==> Signing the bundle"
-"$PYTHON_BIN" "$ROOT/src/Installation/codesign_macos_bundle.py" \
-  "$APP_BUNDLE" --identity "${CODESIGN_IDENTITY:--}"
+"$PYTHON_BIN" "$SIGNER_SCRIPT" \
+  "$APP_BUNDLE" --identity "${CODESIGN_IDENTITY:--}" --target-macos "$TARGET_MACOS"
 
-codesign --verify --strict "$APP_BUNDLE" && echo "    signature OK"
+echo "==> Verifying critical bundled libraries"
+for library_name in libssl.3.dylib libcrypto.3.dylib libcurl.4.dylib; do
+  library_path="$APP_BUNDLE/Contents/Frameworks/$library_name"
+  if [ -e "$library_path" ]; then
+    codesign --verify --strict --verbose=2 "$library_path"
+  fi
+done
+
+# Keep this as a standalone command. Putting it on the left side of `&&`
+# disables `set -e` for the verification and can package a broken app.
+codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
+echo "    signature OK"
+
+echo "==> Smoke-testing the signed application"
+"$PYTHON_BIN" "$ROOT/src/Installation/smoke_test_packaged.py" --timeout 12
 
 # --- 3. Disk image ---------------------------------------------------------
 # dmgbuild gives the nicer window (background, icon positions) but works by

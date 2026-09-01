@@ -88,6 +88,24 @@ from src.Backend.solar_data_analysis import (
     radio_euv_lag,
     write_cropped_fits,
 )
+from src.Backend.calibration_levels import (
+    LevelOption,
+    LevelResult,
+    apply_level,
+    detect_frame_level,
+    find_level_option,
+    levels_for_frame,
+    requires_download,
+)
+from src.Backend.derotation import (
+    MODE_LABELS as DEROTATION_MODE_LABELS,
+    MODE_REPROJECT,
+    MODE_TRACK,
+    DerotationResult,
+    DerotationSpec,
+    derotate_region,
+    supports_derotation,
+)
 from src.Backend.download_manager import format_bytes, format_eta
 from src.Backend.image_measure import ruler_measurement
 from src.Backend.solar_session import (
@@ -872,6 +890,104 @@ class MapLoadWorker(QObject):
                 self.finished.emit(
                     list(frame_set.maps), list(frame_set.paths), dict(frame_set.metadata)
                 )
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
+def _has_world_coordinates(frame: Any) -> bool:
+    """Whether ``frame`` is a real sunpy map rather than a derived array.
+
+    Both features in this pipeline need one: aiapy's registration reads the WCS
+    to build the level-1.5 grid, and derotation needs the observer and
+    coordinate frame to compute where the region has turned to. The plain
+    rectangle crop produces ``AiaArrayMap``, which has neither, so operations
+    are refused with an explanation instead of failing halfway through.
+    """
+    return supports_derotation(frame)
+
+
+class CalibrationLevelWorker(QObject):
+    """Re-derives the loaded frames at a different processing level.
+
+    Registration is not cheap — about 1.3 s per 4096x4096 AIA frame — so a
+    sequence of any size would freeze the window if this ran inline. The
+    pointing-table lookup it does first is a network call, which is the other
+    reason this belongs off the UI thread.
+    """
+
+    progress = Signal(object, object)   # value 0-100 (or None), text
+    finished = Signal(object)          # LevelResult
+    failed = Signal(str)
+    cancelled = Signal()
+
+    def __init__(self, frames: list[Any], level: str, *, base_level: str | None = None):
+        super().__init__()
+        self._frames = list(frames)
+        self._level = str(level)
+        self._base_level = base_level
+        self._cancel = threading.Event()
+
+    def cancel(self):
+        self._cancel.set()
+
+    @Slot()
+    def run(self):
+        try:
+            result = apply_level(
+                self._frames,
+                self._level,
+                base_level=self._base_level,
+                progress_cb=lambda done, total: self.progress.emit(
+                    int(done * 100 / max(total, 1)),
+                    f"Applying level {self._level} to frame {done}/{total}...",
+                ),
+                cancel_cb=self._cancel.is_set,
+            )
+            if result.cancelled:
+                self.cancelled.emit()
+            else:
+                self.finished.emit(result)
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
+class DerotationWorker(QObject):
+    """Cuts the selected region out of every frame, following solar rotation.
+
+    Track mode is fast enough to run inline, but both modes go through the
+    worker so there is one code path and a cancel button that always works.
+    """
+
+    progress = Signal(object, object)   # value 0-100 (or None), text
+    finished = Signal(object)          # DerotationResult
+    failed = Signal(str)
+    cancelled = Signal()
+
+    def __init__(self, frames: list[Any], spec: DerotationSpec):
+        super().__init__()
+        self._frames = list(frames)
+        self._spec = spec
+        self._cancel = threading.Event()
+
+    def cancel(self):
+        self._cancel.set()
+
+    @Slot()
+    def run(self):
+        try:
+            result = derotate_region(
+                self._frames,
+                self._spec,
+                progress_cb=lambda done, total: self.progress.emit(
+                    int(done * 100 / max(total, 1)),
+                    f"Derotating frame {done}/{total}...",
+                ),
+                cancel_cb=self._cancel.is_set,
+            )
+            if result.cancelled:
+                self.cancelled.emit()
+            else:
+                self.finished.emit(result)
         except Exception:
             self.failed.emit(traceback.format_exc())
 
@@ -1679,6 +1795,22 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._crop_applied = False
         self._applied_crop_arcsec: list[float] | None = None
         self._original_frames: list[Any] = []
+        # Frames at the currently selected processing level. The pipeline is
+        # _original_frames -> (level) -> _leveled_frames -> (crop/derotation) ->
+        # _map_frames, so changing any stage re-derives from the pristine set
+        # rather than compounding on already-processed data.
+        self._leveled_frames: list[Any] = []
+        # The level the frames were downloaded at, and the one on screen.
+        self._base_level: str | None = None
+        self._current_level: str | None = None
+        self._level_warnings: list[str] = []
+        # Set for exactly one search when the level card asks for an archive
+        # level that cannot be produced from the frames already loaded.
+        self._requested_level: str | None = None
+        # Derotation state, kept so a session can restore it and so the level
+        # selector can re-apply it after re-deriving the frames.
+        self._derotation_applied = False
+        self._derotation_meta: dict[str, Any] = {}
         self._map_frames: list[Any] = []
         self._map_metadata: dict[str, Any] = {}
         self._regions: list[AiaRegion] = []
@@ -1813,7 +1945,9 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._build_data_source_group(controls_layout)
         self._build_archive_results_group(controls_layout)
         self._build_mode_group(controls_layout)
+        self._build_calibration_group(controls_layout)
         self._build_plot_controls_group(controls_layout)
+        self._build_derotation_group(controls_layout)
         self._build_movie_group(controls_layout)
         self._build_coronagraph_group(controls_layout)
         self._build_overlay_group(controls_layout)
@@ -2992,6 +3126,128 @@ class SolarDataAnalysisWindow(QMainWindow):
         layout.addWidget(self.export_movie_btn, 2, 0, 1, 2)
         layout.addWidget(hint, 3, 0, 1, 2)
 
+    def _build_calibration_group(self, parent_layout: QVBoxLayout) -> None:
+        """Processing-level selector.
+
+        Downloads always fetch the archive's base product, so this is where the
+        level actually visualised is chosen. The card hides itself for
+        instruments that publish only one level (HMI, STEREO/SECCHI) rather than
+        showing a combo with nothing to choose.
+        """
+        group = QGroupBox("Processing Level")
+        self.calibration_group = group
+        layout = QGridLayout(group)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(8)
+        parent_layout.addWidget(group)
+
+        self.level_combo = QComboBox()
+        self.level_combo.setToolTip(
+            "Processing level to visualise. Data is always downloaded at the\n"
+            "archive's base level; higher levels are either computed here or\n"
+            "re-downloaded, and each entry says which."
+        )
+        self.level_status_label = QLabel("Level: no data loaded")
+        self.level_status_label.setWordWrap(True)
+        self.apply_level_btn = QPushButton("Apply Level")
+        self.apply_level_btn.setToolTip(
+            "Re-derive the loaded sequence at the selected level.\n"
+            "Any crop or derotation is re-applied afterwards."
+        )
+
+        row = 0
+        layout.addWidget(self._field_label("Level"), row, 0)
+        layout.addWidget(self.level_combo, row, 1)
+        row += 1
+        layout.addWidget(self.level_status_label, row, 0, 1, 2)
+        row += 1
+        layout.addWidget(self.apply_level_btn, row, 0, 1, 2)
+        group.setVisible(False)
+
+    def _build_derotation_group(self, parent_layout: QVBoxLayout) -> None:
+        """Solar-rotation compensation for the selected region.
+
+        Sits directly under the crop card because it consumes the same arcsec
+        rectangle: the crop fields say *where*, this says *how it should follow
+        the Sun*.
+        """
+        group = QGroupBox("Solar Derotation")
+        self.derotation_group = group
+        layout = QGridLayout(group)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(8)
+        parent_layout.addWidget(group)
+
+        self.derotate_check = QCheckBox("Derotate selected area")
+        self.derotate_check.setToolTip(
+            "Follow solar differential rotation so the selected region stays on\n"
+            "the same piece of the Sun for the whole sequence. Without it a fixed\n"
+            "rectangle slowly drifts onto neighbouring surface."
+        )
+
+        self.derotate_mode_combo = QComboBox()
+        for mode in (MODE_TRACK, MODE_REPROJECT):
+            self.derotate_mode_combo.addItem(DEROTATION_MODE_LABELS[mode], mode)
+        self.derotate_mode_combo.setToolTip(
+            "Track — move the window with the rotation and keep the original\n"
+            "pixels. Nothing is resampled, so use it for photometry and light\n"
+            "curves.\n"
+            "Reproject — resample every frame onto the reference time's grid.\n"
+            "Corrects foreshortening and gives every frame one shared WCS, at\n"
+            "the cost of interpolating the data."
+        )
+
+        self.derotate_ref_combo = QComboBox()
+        self.derotate_ref_combo.addItem("First frame", "first")
+        self.derotate_ref_combo.addItem("Current frame", "current")
+        self.derotate_ref_combo.addItem("Specific frame...", "index")
+        self.derotate_ref_combo.setToolTip(
+            "The frame the region is read from, and the epoch every other frame\n"
+            "is rotated to."
+        )
+
+        self.derotate_ref_spin = QSpinBox()
+        self.derotate_ref_spin.setRange(1, 1)
+        self.derotate_ref_spin.setEnabled(False)
+        self.derotate_ref_spin.setToolTip("1-based index of the reference frame.")
+
+        self.derotate_pad_spin = QDoubleSpinBox()
+        self.derotate_pad_spin.setRange(0.0, 600.0)
+        self.derotate_pad_spin.setDecimals(0)
+        self.derotate_pad_spin.setValue(60.0)
+        self.derotate_pad_spin.setSuffix(" arcsec")
+        self.derotate_pad_spin.setToolTip(
+            "Extra margin cut around the region before reprojecting, so the\n"
+            "interpolation has data right up to the output edge. Reproject mode\n"
+            "only."
+        )
+
+        self.apply_derotation_btn = QPushButton("Apply Derotation")
+        self.reset_derotation_btn = QPushButton("Reset to Full Frames")
+        self.reset_derotation_btn.setToolTip(
+            "Discard the derotated cut-out and restore the full frames at the\n"
+            "current processing level."
+        )
+        self.derotation_status_label = QLabel("Derotation: off")
+        self.derotation_status_label.setWordWrap(True)
+
+        row = 0
+        layout.addWidget(self.derotate_check, row, 0, 1, 2)
+        row += 1
+        layout.addWidget(self._field_label("Mode"), row, 0)
+        layout.addWidget(self.derotate_mode_combo, row, 1)
+        row += 1
+        layout.addWidget(self._field_label("Reference"), row, 0)
+        layout.addWidget(self._two_widgets(self.derotate_ref_combo, self.derotate_ref_spin), row, 1)
+        row += 1
+        layout.addWidget(self._field_label("Padding"), row, 0)
+        layout.addWidget(self.derotate_pad_spin, row, 1)
+        row += 1
+        layout.addWidget(self.apply_derotation_btn, row, 0)
+        layout.addWidget(self.reset_derotation_btn, row, 1)
+        row += 1
+        layout.addWidget(self.derotation_status_label, row, 0, 1, 2)
+
     def _build_plot_controls_group(self, parent_layout: QVBoxLayout) -> None:
         group = QGroupBox("Display & Crop")
         layout = QGridLayout(group)
@@ -3478,6 +3734,16 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.clip_high_slider.valueChanged.connect(lambda _v: self._schedule_clip_render())
         self.crop_check.toggled.connect(self._on_crop_toggled)
         self.apply_crop_btn.clicked.connect(self.apply_axis_crop)
+        self.apply_level_btn.clicked.connect(self.apply_calibration_level)
+        self.derotate_check.toggled.connect(self._on_derotate_toggled)
+        self.derotate_mode_combo.currentIndexChanged.connect(
+            lambda _i: self._refresh_derotation_controls()
+        )
+        self.derotate_ref_combo.currentIndexChanged.connect(
+            lambda _i: self._refresh_derotation_controls()
+        )
+        self.apply_derotation_btn.clicked.connect(self.apply_derotation)
+        self.reset_derotation_btn.clicked.connect(self.reset_derotation)
         self.solar_limb_check.toggled.connect(lambda _checked: self._render_current_frame())
         # Measurement tools (controller owns the click state machine).
         self.ruler_tool_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("ruler", on))
@@ -3627,10 +3893,14 @@ class SolarDataAnalysisWindow(QMainWindow):
             self.apply_crop_btn,
             self.export_crop_btn,
             self.export_plot_btn,
+            self.level_combo,
+            self.apply_level_btn,
         ):
             widget.setEnabled(bool(loaded))
         if not loaded:
             self._set_crop_mode_checked(False)
+            self.calibration_group.setVisible(False)
+        self._refresh_derotation_controls()
         # A light curve is a time profile: it needs at least two frames.
         self.lightcurve_btn.setEnabled(bool(loaded) and len(self._map_frames) >= 2)
         # Measurement tools follow the loaded state AND the Measurements switch;
@@ -3863,9 +4133,12 @@ class SolarDataAnalysisWindow(QMainWindow):
                 max_records=int(self.max_records_spin.value()),
             )
         if instrument == "SUVI":
-            # GOES/SUVI EUV imager (NOAA dataretriever), L1b. GOES-18 carries the
+            # GOES/SUVI EUV imager (NOAA dataretriever). GOES-18 carries the
             # operational SUVI for current dates (16 retired to storage in 2025;
             # 19 is not registered in sunpy 7.1's SUVIClient).
+            # Searches download the base level (L1b) unless the Processing Level
+            # card explicitly asked for a different archive product, since L2 is
+            # a separate set of files rather than something derivable locally.
             return SunPyQuerySpec(
                 start_dt=start_dt,
                 end_dt=end_dt,
@@ -3873,7 +4146,7 @@ class SolarDataAnalysisWindow(QMainWindow):
                 instrument="SUVI",
                 wavelength_angstrom=float(value),
                 satellite_number=18,
-                level="1b",
+                level=self._level_for_query("SUVI"),
                 max_records=int(self.max_records_spin.value()),
             )
         return SunPyQuerySpec(
@@ -3886,6 +4159,23 @@ class SolarDataAnalysisWindow(QMainWindow):
             resolution=AIA_FULL_RESOLUTION if self.high_resolution_check.isChecked() else None,
             max_records=int(self.max_records_spin.value()),
         )
+
+    # Level the archive is queried at when the user has not asked for another.
+    # These are the base products every download starts from.
+    BASE_QUERY_LEVELS = {"SUVI": "1b"}
+
+    def _level_for_query(self, instrument: str) -> str | None:
+        """Archive level for the next search.
+
+        Normally the instrument's base product. The Processing Level card sets
+        ``_requested_level`` for exactly one search when the user asks for a
+        level that has to be downloaded rather than computed.
+        """
+        requested = getattr(self, "_requested_level", None)
+        if requested:
+            self._requested_level = None
+            return str(requested)
+        return self.BASE_QUERY_LEVELS.get(str(instrument).upper())
 
     def set_time_window(self, start_dt: datetime, end_dt: datetime, *, auto_query: bool = False) -> bool:
         if end_dt <= start_dt:
@@ -4214,6 +4504,20 @@ class SolarDataAnalysisWindow(QMainWindow):
         elif isinstance(worker, MapLoadWorker):
             worker.load_progress.connect(self._on_load_maps_progress)
             worker.finished.connect(self._on_local_maps_loaded)
+            worker.failed.connect(self._on_worker_failed)
+            worker.cancelled.connect(self._on_worker_cancelled)
+            worker.finished.connect(thread.quit)
+            worker.failed.connect(thread.quit)
+            worker.cancelled.connect(thread.quit)
+        elif isinstance(worker, CalibrationLevelWorker):
+            worker.finished.connect(self._on_level_finished)
+            worker.failed.connect(self._on_worker_failed)
+            worker.cancelled.connect(self._on_worker_cancelled)
+            worker.finished.connect(thread.quit)
+            worker.failed.connect(thread.quit)
+            worker.cancelled.connect(thread.quit)
+        elif isinstance(worker, DerotationWorker):
+            worker.finished.connect(self._on_derotation_finished)
             worker.failed.connect(self._on_worker_failed)
             worker.cancelled.connect(self._on_worker_cancelled)
             worker.finished.connect(thread.quit)
@@ -4620,7 +4924,12 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._applied_crop_arcsec = None
         self._loaded_paths = list(paths or [])
         self._original_frames = list(frames)
+        self._leveled_frames = list(frames)
         self._map_frames = list(frames)
+        # The frames arrive at whatever level the archive was queried at; that
+        # becomes the baseline the level selector derives everything else from.
+        self._reset_level_state(frames, dict(metadata or {}))
+        self._reset_derotation_state()
         # A composite belongs to the series it was built from; a new load makes
         # both the pixels and the layers' time matching meaningless.
         self._composite_frames = []
@@ -4659,6 +4968,8 @@ class SolarDataAnalysisWindow(QMainWindow):
         details_bar.setValue(details_bar.maximum())
         self._update_load_summary()
         self._apply_instrument_visibility()
+        self._refresh_level_controls()
+        self._refresh_derotation_controls()
         # If these frames were loaded to restore a saved session, replay the
         # saved display state and CME picks now that the sequence is in memory.
         if self._pending_session_restore is not None:
@@ -6035,6 +6346,357 @@ class SolarDataAnalysisWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Apply Crop", str(exc))
 
+    # ------------------------------------------------------------------
+    # Processing level
+    # ------------------------------------------------------------------
+
+    def _reset_level_state(self, frames: list[Any], metadata: dict[str, Any]) -> None:
+        """Record the level a freshly loaded sequence arrived at.
+
+        The archive metadata is trusted first because it says what was actually
+        requested; the FITS header is the fallback for locally uploaded files,
+        which carry no query context at all.
+        """
+        level = str(metadata.get("level") or "").strip()
+        if not level and frames:
+            level = detect_frame_level(frames[0]) or ""
+        self._base_level = level or None
+        self._current_level = self._base_level
+        self._level_warnings = []
+
+    def _reset_derotation_state(self) -> None:
+        self._derotation_applied = False
+        self._derotation_meta = {}
+
+    def _refresh_level_controls(self) -> None:
+        """Repopulate the level card for the loaded instrument.
+
+        Instruments with a single published level get no card at all — an empty
+        combo would only invite the question of what the other options are.
+        """
+        if not hasattr(self, "level_combo"):
+            return
+        frames = self._leveled_frames or self._map_frames
+        options: tuple[LevelOption, ...] = levels_for_frame(frames[0]) if frames else ()
+
+        self.level_combo.blockSignals(True)
+        self.level_combo.clear()
+        for option in options:
+            self.level_combo.addItem(option.label, option.key)
+            index = self.level_combo.count() - 1
+            self.level_combo.setItemData(index, option.description, Qt.ToolTipRole)
+        if self._current_level:
+            match = self.level_combo.findData(self._current_level)
+            if match >= 0:
+                self.level_combo.setCurrentIndex(match)
+        self.level_combo.blockSignals(False)
+
+        self.calibration_group.setVisible(bool(options))
+        self.level_status_label.setText(self._level_status_text())
+
+    def _level_status_text(self) -> str:
+        """One line saying which level is on screen and where it came from."""
+        if not self._map_frames:
+            return "Level: no data loaded"
+        if not self._current_level:
+            return "Level: not recorded by the archive or the file header"
+
+        frames = self._leveled_frames or self._map_frames
+        option = find_level_option(frames[0], self._current_level)
+        if option is None:
+            return f"Level: {self._current_level}"
+        origin = "computed locally" if option.is_local else "as downloaded"
+        text = f"Current: {option.label} — {origin}"
+        if option.is_local and self._level_warnings:
+            text += "\n⚠ " + self._level_warnings[0]
+        return text
+
+    def apply_calibration_level(self) -> None:
+        """Re-derive the sequence at the level chosen in the combo."""
+        if self.is_operation_running():
+            QMessageBox.information(
+                self, "Processing Level", "Another operation is still running."
+            )
+            return
+        if not self._original_frames:
+            QMessageBox.information(
+                self, "Processing Level", "Load or upload solar frames first."
+            )
+            return
+
+        target = self.level_combo.currentData()
+        if not target:
+            return
+        option = find_level_option(self._original_frames[0], target)
+        if option is None:
+            return
+
+        if target == self._current_level:
+            self.statusBar().showMessage(f"Already showing {option.label}.", 4000)
+            return
+
+        # An archive level we cannot derive locally means going back to the
+        # archive. That includes the case where the baseline is unknown (a
+        # locally uploaded file whose header does not record a level): guessing
+        # would either fabricate data or fail with a traceback, so ask instead.
+        if requires_download(option, self._base_level) or (
+            not option.is_local and not self._base_level
+        ):
+            self._prompt_level_redownload(option)
+            return
+
+        if target == self._base_level:
+            # The pristine frames are still in memory — no work to redo.
+            self._restore_base_level(option)
+            return
+
+        if not _has_world_coordinates(self._original_frames[0]):
+            QMessageBox.warning(
+                self,
+                "Processing Level",
+                "The loaded frames are derived arrays without full world "
+                "coordinates, so they cannot be re-processed. Reload the series "
+                "and change the level before cropping.",
+            )
+            return
+
+        self._start_worker(
+            CalibrationLevelWorker(
+                self._original_frames, str(target), base_level=self._base_level
+            )
+        )
+
+    def _prompt_level_redownload(self, option: LevelOption) -> None:
+        """Offer to re-query the archive for a level that must be downloaded."""
+        answer = QMessageBox.question(
+            self,
+            "Processing Level",
+            f"{option.label} is a separate archive product, so it cannot be "
+            "computed from the frames already loaded.\n\n"
+            "Search the archive again at this level and download it?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if answer != QMessageBox.Yes:
+            # Put the combo back on what is actually on screen.
+            self._refresh_level_controls()
+            return
+        self._requested_level = option.key
+        self.search_archives()
+
+    def _restore_base_level(self, option: LevelOption) -> None:
+        """Go back to the as-downloaded frames, which were never discarded."""
+        discarded = self._derotation_applied or self._crop_applied
+        self._leveled_frames = list(self._original_frames)
+        self._map_frames = list(self._leveled_frames)
+        self._current_level = self._base_level
+        self._level_warnings = []
+        self._after_frames_replaced(
+            f"Restored {option.label}.", discarded=discarded
+        )
+
+    def _on_level_finished(self, result: LevelResult) -> None:
+        """Adopt the newly levelled frames as the working sequence."""
+        discarded = self._derotation_applied or self._crop_applied
+        self._leveled_frames = list(result.frames)
+        self._map_frames = list(self._leveled_frames)
+        self._current_level = result.level
+        self._level_warnings = list(result.warnings)
+
+        option = find_level_option(self._map_frames[0], result.level)
+        label = option.label if option else f"Level {result.level}"
+        message = f"Applied {label} to {len(self._map_frames)} frame(s)."
+        if result.warnings:
+            message += "\n" + "\n".join(result.warnings)
+        self._after_frames_replaced(message, discarded=discarded)
+
+    # ------------------------------------------------------------------
+    # Derotation
+    # ------------------------------------------------------------------
+
+    def _refresh_derotation_controls(self) -> None:
+        """Enable the derotation card only when the loaded data can support it."""
+        if not hasattr(self, "derotate_check"):
+            return
+        frames = self._leveled_frames or self._map_frames
+        usable = len(frames) >= 2 and bool(frames) and _has_world_coordinates(frames[0])
+
+        self.derotate_ref_spin.setRange(1, max(1, len(frames)))
+        for widget in (
+            self.derotate_check,
+            self.derotate_mode_combo,
+            self.derotate_ref_combo,
+            self.derotate_pad_spin,
+        ):
+            widget.setEnabled(usable)
+        self.apply_derotation_btn.setEnabled(usable and self.derotate_check.isChecked())
+        self.reset_derotation_btn.setEnabled(self._derotation_applied)
+        self.derotate_ref_spin.setEnabled(
+            usable and self.derotate_ref_combo.currentData() == "index"
+        )
+        self.derotate_pad_spin.setEnabled(
+            usable and self.derotate_mode_combo.currentData() == MODE_REPROJECT
+        )
+
+        if frames and len(frames) >= 2 and not _has_world_coordinates(frames[0]):
+            self.derotation_status_label.setText(
+                "Derotation needs frames with full world coordinates. Reload the "
+                "series and derotate before cropping."
+            )
+        elif not self._derotation_applied:
+            self.derotation_status_label.setText("Derotation: off")
+
+    def _on_derotate_toggled(self, checked: bool) -> None:
+        # The region comes from the crop rectangle, so offer it straight away.
+        if checked and not self.crop_check.isChecked() and self._map_frames:
+            self._set_crop_mode_checked(True)
+            self._on_crop_toggled(True)
+        self._refresh_derotation_controls()
+
+    def _derotation_reference_index(self) -> int:
+        choice = self.derotate_ref_combo.currentData()
+        if choice == "current":
+            return int(self._current_frame_index)
+        if choice == "index":
+            return max(0, int(self.derotate_ref_spin.value()) - 1)
+        return 0
+
+    def apply_derotation(self) -> None:
+        """Cut the selected region out of every frame, following solar rotation."""
+        if self.is_operation_running():
+            QMessageBox.information(
+                self, "Solar Derotation", "Another operation is still running."
+            )
+            return
+        frames = self._leveled_frames or self._map_frames
+        if len(frames) < 2:
+            QMessageBox.information(
+                self, "Solar Derotation", "Load at least two frames to derotate."
+            )
+            return
+        if not _has_world_coordinates(frames[0]):
+            QMessageBox.warning(
+                self,
+                "Solar Derotation",
+                "These frames are derived arrays without full world coordinates, "
+                "so solar rotation cannot be computed for them. Reload the series "
+                "and derotate before cropping.",
+            )
+            return
+
+        bounds = (
+            float(self.crop_x0_spin.value()),
+            float(self.crop_x1_spin.value()),
+            float(self.crop_y0_spin.value()),
+            float(self.crop_y1_spin.value()),
+        )
+        if bounds[0] == bounds[1] or bounds[2] == bounds[3]:
+            QMessageBox.information(
+                self,
+                "Solar Derotation",
+                "Draw a rectangle on the image (or type X/Y arcsec bounds) to "
+                "choose the area to derotate.",
+            )
+            return
+
+        spec = DerotationSpec(
+            bounds_arcsec=bounds,
+            mode=str(self.derotate_mode_combo.currentData() or MODE_TRACK),
+            reference_index=self._derotation_reference_index(),
+            pad_arcsec=float(self.derotate_pad_spin.value()),
+        )
+        self._start_worker(DerotationWorker(list(frames), spec))
+
+    def _on_derotation_finished(self, result: DerotationResult) -> None:
+        """Adopt the derotated cut-out as the working sequence."""
+        self._map_frames = list(result.frames)
+        self._derotation_applied = True
+        self._derotation_meta = {
+            "mode": result.mode,
+            "reference_index": int(result.reference_index),
+            "reference_time": result.reference_time,
+            "bounds_arcsec": [
+                float(self.crop_x0_spin.value()),
+                float(self.crop_x1_spin.value()),
+                float(self.crop_y0_spin.value()),
+                float(self.crop_y1_spin.value()),
+            ],
+            "pad_arcsec": float(self.derotate_pad_spin.value()),
+            "kept_indexes": list(result.kept_indexes),
+        }
+        # The cut-out is a new grid: composites and region hits belong to the
+        # full frames they were measured on.
+        self._composite_frames = []
+        self._composite_token = ""
+        self._crop_applied = False
+        self._applied_crop_arcsec = None
+
+        mode_label = DEROTATION_MODE_LABELS.get(result.mode, result.mode)
+        message = (
+            f"Derotated {len(result.frames)} frame(s) — {mode_label}, "
+            f"reference {result.reference_time or 'frame 1'}."
+        )
+        if result.warnings:
+            message += "\n" + "\n".join(result.warnings)
+        self._after_frames_replaced(message, discarded=False)
+        self.derotation_status_label.setText(
+            f"Derotation: on — {mode_label}, {len(result.frames)} frame(s)"
+        )
+        self._set_crop_mode_checked(False)
+
+    def reset_derotation(self) -> None:
+        """Discard the cut-out and go back to the full frames."""
+        if self.is_operation_running():
+            QMessageBox.information(
+                self, "Solar Derotation", "Another operation is still running."
+            )
+            return
+        if not self._leveled_frames:
+            return
+        self._map_frames = list(self._leveled_frames)
+        self._reset_derotation_state()
+        self._composite_frames = []
+        self._composite_token = ""
+        self._crop_applied = False
+        self._applied_crop_arcsec = None
+        self._after_frames_replaced("Restored the full frames.", discarded=False)
+        self.derotation_status_label.setText("Derotation: off")
+
+    def _after_frames_replaced(self, message: str, *, discarded: bool) -> None:
+        """Shared clean-up for any operation that swaps out ``_map_frames``.
+
+        Region hits, the frame index and the canvas view all belong to the
+        previous sequence, so they are reset together rather than left to go
+        stale one at a time.
+        """
+        if discarded:
+            self._reset_derotation_state()
+            self._crop_applied = False
+            self._applied_crop_arcsec = None
+            self._composite_frames = []
+            self._composite_token = ""
+            message += "\nThe previous crop/derotation was cleared — re-apply it if you need it."
+
+        self._regions = []
+        self._metadata_regions = []
+        self.region_table.setRowCount(0)
+        self._current_frame_index = 0
+        self.frame_slider.blockSignals(True)
+        self.frame_slider.setRange(0, max(0, len(self._map_frames) - 1))
+        self.frame_slider.setValue(0)
+        self.frame_slider.setEnabled(len(self._map_frames) > 1)
+        self.frame_slider.blockSignals(False)
+        self._reset_canvas_views()
+        self._render_current_frame()
+        self._set_loaded_state(bool(self._map_frames))
+        self._refresh_level_controls()
+        self._refresh_derotation_controls()
+        self._update_load_summary()
+        self.analysis_text.setPlainText(
+            message + "\n" + self._frame_resolution_status(self._map_frames)
+        )
+        self.statusBar().showMessage(message.splitlines()[0], 6000)
+
     def _reset_canvas_views(self) -> None:
         for canvas in self._all_plot_canvases():
             reset = getattr(canvas, "reset_map_view", None)
@@ -6048,6 +6710,14 @@ class SolarDataAnalysisWindow(QMainWindow):
         if not self._original_frames:
             return
         self._map_frames = list(self._original_frames)
+        # "Restored" means restored to what was downloaded, so the processing
+        # level and derotation go back to their as-downloaded state too —
+        # otherwise the level card would keep claiming a level these frames are
+        # no longer at.
+        self._leveled_frames = list(self._original_frames)
+        self._current_level = self._base_level
+        self._level_warnings = []
+        self._reset_derotation_state()
         # Composites were cropped in step with the frames, so they cannot be
         # un-cropped; drop them and let the user rebuild on the restored series.
         self._composite_frames = []
@@ -6068,6 +6738,9 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.analysis_text.setPlainText(self._loaded_frame_status_text("Restored", self._map_frames))
         self._update_load_summary()
         self._apply_instrument_visibility()
+        self._refresh_level_controls()
+        self.derotation_status_label.setText("Derotation: off")
+        self._refresh_derotation_controls()
 
     def reset_all(self):
         """Return the tool to a clean slate: clear data + UI defaults + cache."""
@@ -6093,7 +6766,13 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._search_result = None
         self._loaded_paths = []
         self._original_frames = []
+        self._leveled_frames = []
         self._map_frames = []
+        self._base_level = None
+        self._current_level = None
+        self._level_warnings = []
+        self._requested_level = None
+        self._reset_derotation_state()
         self._loaded_config_key = None
         self._exposure_varies = False
         self._map_metadata = {}
@@ -6145,6 +6824,17 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.crop_y0_spin.setValue(-1100.0)
         self.crop_y1_spin.setValue(1100.0)
         self._set_crop_mode_checked(False)
+        self.derotate_check.setChecked(False)
+        self.derotate_mode_combo.setCurrentIndex(
+            max(0, self.derotate_mode_combo.findData(MODE_TRACK))
+        )
+        self.derotate_ref_combo.setCurrentIndex(
+            max(0, self.derotate_ref_combo.findData("first"))
+        )
+        self.derotate_ref_spin.setValue(1)
+        self.derotate_pad_spin.setValue(60.0)
+        self.derotation_status_label.setText("Derotation: off")
+        self.level_status_label.setText("Level: no data loaded")
         self.vector_show_check.setChecked(False)
         self.vector_arrows_check.setChecked(True)
         self.vector_stream_check.setChecked(False)
@@ -6658,6 +7348,18 @@ class SolarDataAnalysisWindow(QMainWindow):
             "mag_threshold": int(self.mag_threshold_spin.value()),
             "crop_applied": bool(self._crop_applied),
             "crop_bounds": list(self._applied_crop_arcsec) if self._applied_crop_arcsec else None,
+            # Processing level and derotation are provenance, not just display
+            # state: the same files at level 1 and level 1.5 are different data.
+            "base_level": self._base_level,
+            "calibration_level": self._current_level,
+            "level_warnings": list(self._level_warnings),
+            "derotation": dict(self._derotation_meta) if self._derotation_applied else None,
+            "derotation_settings": {
+                "mode": str(self.derotate_mode_combo.currentData() or MODE_TRACK),
+                "reference": str(self.derotate_ref_combo.currentData() or "first"),
+                "reference_index": int(self.derotate_ref_spin.value()),
+                "pad_arcsec": float(self.derotate_pad_spin.value()),
+            },
             "current_frame_index": int(self._current_frame_index),
             "frame_count": len(self._map_frames),
         }
@@ -6797,6 +7499,12 @@ class SolarDataAnalysisWindow(QMainWindow):
                 self.apply_axis_crop()
                 n = len(self._map_frames)
 
+        # Level and derotation are re-derived by background workers, which the
+        # synchronous restore path cannot chain. The settings come back so the
+        # work is one click away, and the user is told rather than left to
+        # wonder why the frames look different from when they saved.
+        self._restore_processing_widgets(view)
+
         # Restore height-time picks, dropping any that fall outside the range.
         picks = deserialize_picks((meta.get("measurements") or {}).get("height_time_picks"))
         picks = {idx: entry for idx, entry in picks.items() if 0 <= idx < n}
@@ -6838,6 +7546,45 @@ class SolarDataAnalysisWindow(QMainWindow):
             was = edit.blockSignals(True)
             edit.setDateTime(QDateTime(dt))
             edit.blockSignals(was)
+
+    def _restore_processing_widgets(self, view: dict[str, Any]) -> None:
+        """Put the saved level/derotation choices back into the controls."""
+        settings = view.get("derotation_settings") or {}
+        mode = settings.get("mode")
+        if mode:
+            index = self.derotate_mode_combo.findData(str(mode))
+            if index >= 0:
+                self.derotate_mode_combo.setCurrentIndex(index)
+        reference = settings.get("reference")
+        if reference:
+            index = self.derotate_ref_combo.findData(str(reference))
+            if index >= 0:
+                self.derotate_ref_combo.setCurrentIndex(index)
+        try:
+            self.derotate_ref_spin.setValue(int(settings.get("reference_index", 1)))
+            self.derotate_pad_spin.setValue(float(settings.get("pad_arcsec", 60.0)))
+        except (TypeError, ValueError):
+            pass
+
+        saved_level = view.get("calibration_level")
+        if saved_level:
+            index = self.level_combo.findData(str(saved_level))
+            if index >= 0:
+                was = self.level_combo.blockSignals(True)
+                self.level_combo.setCurrentIndex(index)
+                self.level_combo.blockSignals(was)
+
+        pending = []
+        if saved_level and str(saved_level) != str(self._current_level or ""):
+            pending.append(f"processing level {saved_level}")
+        if view.get("derotation"):
+            self.derotate_check.setChecked(True)
+            pending.append("derotation")
+        self._refresh_derotation_controls()
+        if pending:
+            self.derotation_status_label.setText(
+                "Saved " + " and ".join(pending) + " — click Apply to reproduce it."
+            )
 
     def _restore_view_widgets(self, view: dict[str, Any]) -> None:
         for combo, text in (
