@@ -95,8 +95,11 @@ from src.Backend.annotations import (
 )
 from src.Backend.frequency_axis import (
     finite_data_limits,
+    format_frequency_mhz,
+    frequency_edges,
     frequency_gap_spans,
     invalid_row_mask,
+    log_frequency_ticks_mhz,
     masked_display_data,
     matplotlib_extent,
     percentile_data_limits,
@@ -211,6 +214,9 @@ from src.version import APP_NAME, APP_ORG, APP_VERSION
 from src.UI.widgets.collapsible_sections import make_groups_collapsible
 
 SIDEBAR_SECTIONS_SETTINGS_KEY = "ui/sidebar_sections_main"
+FREQ_AXIS_SETTINGS_KEY = "ui/frequency_axis_scale"
+FREQ_AXIS_LINEAR = "linear"
+FREQ_AXIS_LOG = "log"
 
 
 def _make_settings() -> QSettings:
@@ -289,6 +295,10 @@ class MainWindow(QMainWindow):
             if (self.theme and hasattr(self.theme, "view_mode"))
             else self._normalize_view_mode(self._ui_settings.value("ui/view_mode", "modern"))
         )
+        self._freq_axis_scale = self._normalize_freq_axis_scale(
+            self._ui_settings.value(FREQ_AXIS_SETTINGS_KEY, FREQ_AXIS_LINEAR)
+        )
+
         self._timeline_thread = None
         self._timeline_worker = None
         self._timeline_undo_state = None
@@ -682,6 +692,32 @@ class MainWindow(QMainWindow):
         units_layout.addLayout(units_row)
         units_layout.addStretch(1)
 
+        self.axis_group_box = QGroupBox("Axis")
+        self.axis_group_box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+
+        axis_layout = QVBoxLayout(self.axis_group_box)
+        axis_layout.setContentsMargins(12, 12, 12, 12)
+        axis_layout.setSpacing(6)
+
+        axis_label = QLabel("Frequency scale")
+        axis_label.setProperty("section", True)
+
+        self.axis_linear_radio = QRadioButton("Linear")
+        self.axis_log_radio = QRadioButton("Log")
+        self.axis_linear_radio.setToolTip("Frequency axis proportional to MHz")
+        self.axis_log_radio.setToolTip("Frequency axis proportional to log10(MHz)")
+        self.axis_linear_radio.setChecked(self._freq_axis_scale != FREQ_AXIS_LOG)
+        self.axis_log_radio.setChecked(self._freq_axis_scale == FREQ_AXIS_LOG)
+
+        self.axis_scale_group = QButtonGroup(self)
+        self.axis_scale_group.addButton(self.axis_linear_radio)
+        self.axis_scale_group.addButton(self.axis_log_radio)
+        self.axis_linear_radio.toggled.connect(self._on_freq_axis_scale_toggled)
+
+        axis_layout.addWidget(axis_label)
+        axis_layout.addWidget(self.axis_linear_radio)
+        axis_layout.addWidget(self.axis_log_radio)
+
         # -------------------------
         # Graph Properties Group
         # -------------------------
@@ -828,6 +864,7 @@ class MainWindow(QMainWindow):
         side_panel_layout.addWidget(self.timeline_group)
         side_panel_layout.addWidget(slider_group)
         side_panel_layout.addWidget(self.units_group_box)
+        side_panel_layout.addWidget(self.axis_group_box)
         side_panel_layout.addWidget(self.graph_group)
         side_panel_layout.addWidget(self.analysis_summary_group)
         side_panel_layout.addWidget(self.measurement_readout)
@@ -838,6 +875,7 @@ class MainWindow(QMainWindow):
         self.timeline_group.setMaximumWidth(SIDEBAR_W)
         slider_group.setMaximumWidth(SIDEBAR_W)
         self.units_group_box.setMaximumWidth(SIDEBAR_W)
+        self.axis_group_box.setMaximumWidth(SIDEBAR_W)
         self.graph_group.setMaximumWidth(SIDEBAR_W)
         self.analysis_summary_group.setMaximumWidth(SIDEBAR_W)
         self.measurement_readout.setMaximumWidth(SIDEBAR_W)
@@ -1437,6 +1475,138 @@ class MainWindow(QMainWindow):
         self.set_hardware_live_preview_enabled(self.use_hw_live_preview)
         self._refresh_analysis_summary_panel()
         QTimer.singleShot(300, self._prompt_recovery_if_needed)
+
+    # =========================
+    # Frequency axis scale
+    # =========================
+    @staticmethod
+    def _normalize_freq_axis_scale(value) -> str:
+        return FREQ_AXIS_LOG if str(value or "").strip().lower() == FREQ_AXIS_LOG else FREQ_AXIS_LINEAR
+
+    def frequency_axis_scale(self) -> str:
+        return self._normalize_freq_axis_scale(getattr(self, "_freq_axis_scale", FREQ_AXIS_LINEAR))
+
+    def _frequency_axis_is_log(self) -> bool:
+        return self.frequency_axis_scale() == FREQ_AXIS_LOG
+
+    def _frequency_axis_log_usable(self) -> bool:
+        """A log scale needs a positive frequency span to map onto."""
+        freqs = getattr(self, "freqs", None)
+        if freqs is None:
+            return False
+        try:
+            arr = np.asarray(freqs, dtype=float).ravel()
+        except Exception:
+            return False
+        positive = arr[np.isfinite(arr) & (arr > 0.0)]
+        return positive.size >= 2 and float(positive.max()) > float(positive.min())
+
+    def _on_freq_axis_scale_toggled(self, _checked: bool) -> None:
+        self.set_frequency_axis_scale(
+            FREQ_AXIS_LINEAR if self.axis_linear_radio.isChecked() else FREQ_AXIS_LOG
+        )
+
+    def set_frequency_axis_scale(self, scale: str) -> None:
+        """Switch the spectrogram's frequency axis between linear and log."""
+        normalized = self._normalize_freq_axis_scale(scale)
+        if normalized == self.frequency_axis_scale():
+            return
+
+        self._freq_axis_scale = normalized
+        if getattr(self, "_ui_settings", None) is not None:
+            self._ui_settings.setValue(FREQ_AXIS_SETTINGS_KEY, normalized)
+        self._sync_freq_axis_controls()
+
+        if self.raw_data is None:
+            return
+
+        if normalized == FREQ_AXIS_LOG and not self._frequency_axis_log_usable():
+            self.statusBar().showMessage(
+                "This dataset has no positive frequency range, so a log axis is not available.",
+                6000,
+            )
+            return
+
+        # The y range means something different in each scale, so start from the
+        # full extent rather than carrying a linear zoom into log space.
+        data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
+        self.plot_data(data, title=self.current_plot_type)
+        self._log_operation(f"Frequency axis set to {normalized}.")
+
+    def _positive_frequency_bounds(self):
+        """(low, high) MHz for a log axis: the channel edges, kept positive.
+
+        Linear mode frames the band edge to edge, so log mode does too.  The
+        bottom edge sits half a channel below the lowest frequency and can
+        reach zero, which a log axis cannot show — the channel centres are the
+        fallback for that case.
+        """
+        try:
+            arr = np.asarray(self.freqs, dtype=float).ravel()
+        except Exception:
+            return None
+        positive = arr[np.isfinite(arr) & (arr > 0.0)]
+        if positive.size < 2:
+            return None
+        lo, hi = float(positive.min()), float(positive.max())
+        if hi <= lo:
+            return None
+
+        try:
+            edges = frequency_edges(arr, default_step=self._frequency_step_mhz)
+            edge_lo, edge_hi = float(np.nanmin(edges)), float(np.nanmax(edges))
+            if np.isfinite(edge_lo) and np.isfinite(edge_hi) and edge_lo > 0.0 and edge_hi > edge_lo:
+                lo, hi = edge_lo, edge_hi
+        except Exception:
+            pass
+        return (lo, hi)
+
+    def _sync_freq_axis_controls(self) -> None:
+        linear = getattr(self, "axis_linear_radio", None)
+        log = getattr(self, "axis_log_radio", None)
+        if linear is None or log is None:
+            return
+        is_log = self._frequency_axis_is_log()
+        for button, wanted in ((linear, not is_log), (log, is_log)):
+            blocked = button.blockSignals(True)
+            button.setChecked(wanted)
+            button.blockSignals(blocked)
+
+    def _apply_frequency_axis_scale(self, ax) -> None:
+        """Put a matplotlib axis on the requested frequency scale.
+
+        matplotlib warps an AxesImage under a log axis correctly, so the data
+        stays in MHz and every overlay keeps its coordinates.
+
+        The ticks are placed explicitly.  matplotlib's own log locator only
+        offers decades, and a CALLISTO band rarely contains one: 20-80 MHz has
+        no decade inside it at all, which left the axis with no labels.
+        """
+        if ax is None:
+            return
+        want_log = self._frequency_axis_is_log() and self._frequency_axis_log_usable()
+        try:
+            # Both scales reinstate their own locators and formatters, so the
+            # linear branch needs nothing beyond the switch itself.
+            if not want_log:
+                ax.set_yscale("linear")
+                return
+
+            ax.set_yscale("log")
+            bounds = self._positive_frequency_bounds()
+            if bounds is None:
+                return
+            ax.set_ylim(bounds)
+
+            labelled, minor = log_frequency_ticks_mhz(*bounds)
+            ax.yaxis.set_major_locator(FixedLocator(labelled))
+            ax.yaxis.set_minor_locator(FixedLocator(minor))
+            ax.yaxis.set_major_formatter(
+                FuncFormatter(lambda value, _pos: format_frequency_mhz(value))
+            )
+            ax.yaxis.set_minor_formatter(NullFormatter())
+        except Exception:
+            pass
 
     def _normalize_view_mode(self, mode) -> str:
         text = str(mode or "").strip().lower()
@@ -2637,6 +2807,8 @@ class MainWindow(QMainWindow):
             y_label=y_label,
             colorbar_label=cbar_label,
             view=view,
+            freqs=self.freqs,
+            log_freq=self._frequency_axis_is_log() and self._frequency_axis_log_usable(),
         )
         self.accel_canvas.set_time_mode(self.use_utc, self.ut_start_sec)
         self._refresh_accel_swaves_panel()
@@ -3847,7 +4019,6 @@ class MainWindow(QMainWindow):
         coordinates are shifted by the same amount to stay on their features.
         """
         shift = self._time_shift_for_new_axis(combined.get("time", None), align=align)
-        view = self._capture_view()
 
         self._assign_dataset_arrays(
             data=combined["data"],
@@ -3875,8 +4046,10 @@ class MainWindow(QMainWindow):
 
         plot_source, title = self._reapply_processing_chain()
 
-        restore_view = self._shifted_view(view, shift)
-        self.plot_data(plot_source, title=title, restore_view=restore_view)
+        # Rescale to the whole dataset.  Holding the previous window steady
+        # left the observation the user had just asked for off the right-hand
+        # edge, so the spectrum looked unchanged until they reset the view.
+        self.plot_data(plot_source, title=title)
         self._render_annotations()
         self._mark_project_dirty()
         self._refresh_timeline_panel()
@@ -3933,18 +4106,6 @@ class MainWindow(QMainWindow):
 
         self.current_plot_type = title
         return data, title
-
-    @staticmethod
-    def _shifted_view(view, shift: float):
-        """Offset a captured view's x-limits so it frames the same real time."""
-        if not view or not shift:
-            return view
-        xlim = view.get("xlim", None)
-        if not xlim or len(xlim) != 2:
-            return view
-        moved = dict(view)
-        moved["xlim"] = (float(xlim[0]) + shift, float(xlim[1]) + shift)
-        return moved
 
     def _shift_feature_time_coordinates(self, shift: float) -> None:
         """Move every time-based user marking by ``shift`` seconds."""
@@ -6629,6 +6790,11 @@ class MainWindow(QMainWindow):
         plot_type = self._normalize_plot_type(title)
         self.canvas.ax.set_ylabel("Frequency [MHz]")
         self.canvas.ax.set_title(self._default_graph_title(plot_type), fontsize=14)
+
+        # The SWAVES panel already works in log10 coordinates, so only the
+        # CALLISTO axis is rescaled here.
+        if not self._swaves_standalone:
+            self._apply_frequency_axis_scale(self.canvas.ax)
 
         # Draw the companion panel before capturing the home view: the shared
         # x axis spans the union of both instruments' time ranges.

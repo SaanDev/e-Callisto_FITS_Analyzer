@@ -216,3 +216,294 @@ def transparent_bad_cmap(cmap):
     except Exception:
         pass
     return out
+
+
+def format_frequency_mhz(value) -> str:
+    """Tick label for a frequency in MHz, with only the digits it needs."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if not np.isfinite(v):
+        return ""
+
+    magnitude = abs(v)
+    if magnitude >= 100.0:
+        return f"{v:.0f}"
+    if magnitude >= 10.0:
+        return f"{v:.1f}".rstrip("0").rstrip(".")
+    if magnitude >= 1.0:
+        return f"{v:.2f}".rstrip("0").rstrip(".")
+    if magnitude > 0.0:
+        return f"{v:.4g}"
+    return "0"
+
+
+#: Mantissa sets for labelled log ticks, coarse to fine.  The finest set that
+#: still fits inside the label budget wins, so a narrow band gets 20, 30, 40 ...
+#: while a three-decade band falls back to 1, 2, 5 per decade.
+_LOG_LABEL_LADDER = (
+    (1.0,),
+    (1.0, 3.0),
+    (1.0, 2.0, 5.0),
+    (1.0, 2.0, 3.0, 5.0, 7.0),
+    (1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0),
+)
+_LOG_MINOR_MANTISSAS = (1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0)
+_LOG_MINOR_FINE = tuple(1.0 + 0.5 * i for i in range(18))
+_MAX_MINOR_TICKS = 60
+_NICE_LINEAR_STEPS = (1.0, 2.0, 2.5, 5.0)
+
+
+def _clean(value: float) -> float:
+    """Drop the float noise in ``2.0 * 10 ** -2`` so 0.02 stays 0.02."""
+    return float(f"{float(value):.10g}")
+
+
+def _decade_ticks(lo: float, hi: float, mantissas) -> list[float]:
+    """Every ``mantissa x 10**k`` inside ``[lo, hi]``, ascending."""
+    lo_exp = int(np.floor(np.log10(lo)))
+    hi_exp = int(np.ceil(np.log10(hi)))
+    low = lo * (1.0 - 1e-9)
+    high = hi * (1.0 + 1e-9)
+
+    out: list[float] = []
+    for exponent in range(lo_exp, hi_exp + 1):
+        scale = 10.0 ** exponent
+        for mantissa in mantissas:
+            value = _clean(mantissa * scale)
+            if low <= value <= high:
+                out.append(value)
+    return sorted(set(out))
+
+
+def _nice_linear_ticks(lo: float, hi: float, max_labels: int) -> list[float]:
+    """Round ticks for a band too narrow to hold even one decade subdivision.
+
+    They are still placed logarithmically; only their *choice* is linear, which
+    is what any plotting library falls back to over a fraction of a decade.
+    """
+    span = float(hi) - float(lo)
+    if span <= 0.0:
+        return []
+
+    base_exp = int(np.floor(np.log10(span / max(2, max_labels - 1))))
+    for exponent in (base_exp, base_exp + 1, base_exp - 1, base_exp + 2):
+        for factor in _NICE_LINEAR_STEPS:
+            step = factor * (10.0 ** exponent)
+            if step <= 0.0:
+                continue
+            first = np.ceil(lo / step) * step
+            ticks = [_clean(v) for v in np.arange(first, hi + step * 1e-6, step)]
+            ticks = [v for v in ticks if lo - step * 1e-6 <= v <= hi + step * 1e-6]
+            if 3 <= len(ticks) <= max_labels:
+                return ticks
+    return [_clean(v) for v in np.linspace(lo, hi, min(max_labels, 5))]
+
+
+def log_frequency_ticks_mhz(
+    lo_mhz: float,
+    hi_mhz: float,
+    *,
+    max_labels: int = 10,
+) -> tuple[list[float], list[float]]:
+    """Base-10 tick frequencies for a log axis spanning ``[lo_mhz, hi_mhz]``.
+
+    Returns ``(labelled, unlabelled)`` in MHz.  Both renderers use this so the
+    matplotlib and pyqtgraph axes cannot disagree about where a tick belongs.
+    """
+    try:
+        lo = float(lo_mhz)
+        hi = float(hi_mhz)
+    except (TypeError, ValueError):
+        return [], []
+    if lo > hi:
+        lo, hi = hi, lo
+    if not (np.isfinite(lo) and np.isfinite(hi)) or lo <= 0.0 or hi <= lo:
+        return [], []
+
+    budget = max(2, int(max_labels))
+
+    labelled: list[float] = []
+    for mantissas in _LOG_LABEL_LADDER:
+        ticks = _decade_ticks(lo, hi, mantissas)
+        if len(ticks) > budget:
+            break
+        if len(ticks) >= 2:
+            labelled = ticks
+
+    if not labelled:
+        decades = _decade_ticks(lo, hi, (1.0,))
+        if len(decades) > budget:
+            # More decades than labels allowed: keep every n-th one.
+            stride = int(np.ceil(len(decades) / budget))
+            labelled = decades[::stride]
+        else:
+            # Less than one subdivided decade: round numbers, log-placed.
+            labelled = _nice_linear_ticks(lo, hi, budget)
+
+    labels = set(labelled)
+    minor = [v for v in _decade_ticks(lo, hi, _LOG_MINOR_MANTISSAS) if v not in labels]
+    if not minor:
+        minor = [v for v in _decade_ticks(lo, hi, _LOG_MINOR_FINE) if v not in labels]
+    if len(minor) > _MAX_MINOR_TICKS:
+        minor = minor[:: int(np.ceil(len(minor) / _MAX_MINOR_TICKS))]
+
+    return labelled, minor
+
+
+def log_frequency_rows(freqs: np.ndarray, *, count: int | None = None) -> np.ndarray:
+    """Uniform log10(frequency) row centres spanning ``freqs``.
+
+    Row order follows the input, so a descending frequency axis (the CALLISTO
+    convention) yields descending log rows.
+    """
+    arr = np.asarray(freqs, dtype=float).ravel()
+    finite = arr[np.isfinite(arr) & (arr > 0.0)]
+    if finite.size < 2:
+        raise ValueError("A log frequency axis needs at least two positive frequencies.")
+
+    lo = float(np.log10(finite.min()))
+    hi = float(np.log10(finite.max()))
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        raise ValueError("Frequency axis does not span a usable range for a log scale.")
+
+    rows = int(count) if count else int(arr.size)
+    rows = max(2, rows)
+    grid = np.linspace(lo, hi, rows)
+    descending = arr.size >= 2 and float(arr[0]) > float(arr[-1])
+    return grid[::-1] if descending else grid
+
+
+def log_frequency_bin_rows(
+    lo_mhz: float,
+    hi_mhz: float,
+    count: int,
+    *,
+    descending: bool = True,
+) -> np.ndarray:
+    """Centres of ``count`` equal log10 bins filling ``[lo_mhz, hi_mhz]``.
+
+    Rows chosen this way tile the band exactly, so the image drawn from them
+    can be placed on the band's own edges instead of half a row outside them --
+    which is what lets the accelerated renderer frame precisely the span the
+    matplotlib axis frames.
+    """
+    lo, hi = float(lo_mhz), float(hi_mhz)
+    if lo > hi:
+        lo, hi = hi, lo
+    if not (np.isfinite(lo) and np.isfinite(hi)) or lo <= 0.0 or hi <= lo:
+        raise ValueError("A log frequency band needs a positive, increasing range.")
+
+    rows = max(2, int(count))
+    edges = np.linspace(np.log10(lo), np.log10(hi), rows + 1)
+    centres = 0.5 * (edges[:-1] + edges[1:])
+    return centres[::-1] if descending else centres
+
+
+def resample_rows_to_log_frequency(
+    data: np.ndarray,
+    freqs: np.ndarray,
+    *,
+    count: int | None = None,
+    bounds: tuple[float, float] | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Map a spectrogram onto a uniformly log-spaced frequency grid.
+
+    Returns ``(resampled, log_rows)`` where ``log_rows`` holds log10(frequency)
+    centres in the same order as the input rows.  Renderers that can only place
+    an image on a linear axis (pyqtgraph's ImageItem) need this to show a log
+    frequency scale; matplotlib warps the image itself and does not.
+
+    ``bounds`` gives the band the rows must fill, in MHz -- normally the
+    channel edges, so the result covers the same span the data does.  Without
+    it the rows run from the lowest to the highest channel centre.
+    """
+    arr = np.asarray(data, dtype=float)
+    if arr.ndim != 2:
+        raise ValueError(f"Expected 2D data, got ndim={arr.ndim}.")
+
+    source = np.asarray(freqs, dtype=float).ravel()
+    if source.size != arr.shape[0]:
+        raise ValueError("Frequency axis length does not match the data rows.")
+
+    if bounds is None:
+        log_rows = log_frequency_rows(source, count=count)
+    else:
+        log_rows = log_frequency_bin_rows(
+            bounds[0],
+            bounds[1],
+            int(count) if count else int(source.size),
+            descending=source.size >= 2 and float(source[0]) > float(source[-1]),
+        )
+
+    # np.interp needs an ascending sample axis.
+    valid = np.isfinite(source) & (source > 0.0)
+    if valid.sum() < 2:
+        raise ValueError("A log frequency axis needs at least two positive frequencies.")
+    src_log = np.log10(source[valid])
+    block = arr[valid, :]
+    order = np.argsort(src_log)
+    src_log = src_log[order]
+    block = block[order, :]
+
+    out = np.empty((log_rows.size, arr.shape[1]), dtype=arr.dtype)
+    for column in range(arr.shape[1]):
+        out[:, column] = np.interp(log_rows, src_log, block[:, column])
+    return out, log_rows
+
+
+def log_frequency_row_indices(
+    freqs: np.ndarray,
+    *,
+    count: int | None = None,
+    bounds: tuple[float, float] | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """``(log_rows, nearest_source_row)`` for a log-resampled spectrogram.
+
+    Anything indexed by row rather than interpolated — a gap mask, a channel
+    flag — has to follow the rows to their new places, or it ends up describing
+    the wrong frequencies once the image is re-sampled.
+    """
+    source = np.asarray(freqs, dtype=float).ravel()
+    if bounds is None:
+        log_rows = log_frequency_rows(source, count=count)
+    else:
+        log_rows = log_frequency_bin_rows(
+            bounds[0],
+            bounds[1],
+            int(count) if count else int(source.size),
+            descending=source.size >= 2 and float(source[0]) > float(source[-1]),
+        )
+
+    usable = np.flatnonzero(np.isfinite(source) & (source > 0.0))
+    if usable.size < 2:
+        raise ValueError("A log frequency axis needs at least two positive frequencies.")
+
+    src_log = np.log10(source[usable])
+    order = np.argsort(src_log)
+    src_log = src_log[order]
+    src_index = usable[order]
+
+    right = np.clip(np.searchsorted(src_log, log_rows), 1, src_log.size - 1)
+    left = right - 1
+    take_right = (log_rows - src_log[left]) > (src_log[right] - log_rows)
+    return log_rows, np.where(take_right, src_index[right], src_index[left])
+
+
+def resample_row_mask_to_log_frequency(
+    mask: np.ndarray | None,
+    freqs: np.ndarray,
+    *,
+    count: int | None = None,
+    bounds: tuple[float, float] | None = None,
+) -> np.ndarray | None:
+    """Carry a per-row boolean mask onto the log-resampled rows."""
+    if mask is None:
+        return None
+    flags = np.asarray(mask, dtype=bool).ravel()
+    source = np.asarray(freqs, dtype=float).ravel()
+    if flags.size != source.size:
+        return None
+    _rows, nearest = log_frequency_row_indices(source, count=count, bounds=bounds)
+    return flags[nearest]

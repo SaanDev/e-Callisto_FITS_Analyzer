@@ -247,7 +247,13 @@ def _flush(win, ticks: int = 30):
         QThread.msleep(5)
 
 
-def test_prepending_keeps_the_view_on_the_same_real_time(window):
+@pytest.mark.parametrize("direction", ["next", "previous"])
+def test_extending_rescales_to_show_the_new_observation(window, direction):
+    """The point of adding an observation is to see it.
+
+    Holding the previous window steady left the new data off the edge of the
+    plot, so the spectrum looked unchanged until the view was reset.
+    """
     window.plot_data(window.raw_data, title="Raw")
     _flush(window)
 
@@ -259,13 +265,37 @@ def test_prepending_keeps_the_view_on_the_same_real_time(window):
     window._restore_view({"xlim": (400.0, 500.0), "ylim": view["ylim"]})
     assert window._capture_view()["xlim"] == pytest.approx((400.0, 500.0))
 
-    _run_extend(window, "previous")
+    _run_extend(window, direction)
     _flush(window)
 
-    span = NCOLS * SAMPLE_STEP_S
     low, high = window._capture_view()["xlim"]
-    assert low == pytest.approx(400.0 + span, abs=1.0)
-    assert high == pytest.approx(500.0 + span, abs=1.0)
+    assert low <= float(window.time[0]) + 1.0
+    assert high >= float(window.time[-1]) - 1.0
+
+
+def test_extending_rescales_even_when_the_view_was_already_full(window):
+    _run_extend(window, "next")
+    _flush(window)
+    first_high = window._capture_view()["xlim"][1]
+
+    _run_extend(window, "next")
+    _flush(window)
+
+    low, high = window._capture_view()["xlim"]
+    assert high > first_high
+    assert low <= float(window.time[0]) + 1.0
+    assert high >= float(window.time[-1]) - 1.0
+
+
+def test_trimming_rescales_to_what_is_left(window):
+    _run_extend(window, "next")
+    _flush(window)
+    window.trim_timeline("end")
+    _flush(window)
+
+    low, high = window._capture_view()["xlim"]
+    assert low <= float(window.time[0]) + 1.0
+    assert high >= float(window.time[-1]) - 1.0
 
 
 # -----------------------------

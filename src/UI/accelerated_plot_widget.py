@@ -12,7 +12,15 @@ from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
-from src.Backend.frequency_axis import finite_data_limits, invalid_row_mask
+from src.Backend.frequency_axis import (
+    axis_edges,
+    finite_data_limits,
+    format_frequency_mhz,
+    invalid_row_mask,
+    log_frequency_ticks_mhz,
+    resample_row_mask_to_log_frequency,
+    resample_rows_to_log_frequency,
+)
 from src.Backend.goes_overlay import GOES_OVERLAY_CHANNEL_ORDER, goes_class_ticks_for_limits, goes_flux_axis_limits
 from src.Backend.swaves import format_log_frequency, log_frequency_ticks
 from src.UI.font_utils import normalize_font_family
@@ -297,6 +305,8 @@ class AcceleratedPlotWidget(QWidget):
         self._swaves_title = ""
         self._swaves_colorbar_label = ""
         self._title = ""
+        self._log_freq = False
+        self._axis_ylim = None
         self._x_label = "Time [s]"
         self._y_label = "Frequency [MHz]"
         self._colorbar_label = ""
@@ -453,6 +463,77 @@ class AcceleratedPlotWidget(QWidget):
         scene.sigMouseMoved.connect(self._on_scene_mouse_moved)
         scene.sigMouseClicked.connect(self._on_scene_mouse_clicked)
 
+    # ------------------------------------------------------------------
+    # Frequency axis scale
+    #
+    # pyqtgraph places an ImageItem with a plain rectangle, so it cannot warp
+    # an image onto a log axis the way matplotlib does. Log mode therefore
+    # re-samples the rows onto a uniform log10 grid and works in log10(MHz)
+    # plot coordinates. That is an implementation detail: every public method
+    # and signal on this widget stays in MHz, converted at the boundary below.
+    # ------------------------------------------------------------------
+    def _to_axis_y(self, values):
+        """MHz -> plot coordinates."""
+        if not self._log_freq:
+            return values
+        arr = np.asarray(values, dtype=float)
+        out = np.full(arr.shape, np.nan, dtype=float)
+        usable = np.isfinite(arr) & (arr > 0.0)
+        out[usable] = np.log10(arr[usable])
+        return out
+
+    def _to_data_y(self, values):
+        """Plot coordinates -> MHz."""
+        if not self._log_freq:
+            return values
+        return np.power(10.0, np.asarray(values, dtype=float))
+
+    def _axis_y_scalar(self, value: float) -> float:
+        if not self._log_freq:
+            return float(value)
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return float("nan")
+        return float(np.log10(v)) if v > 0.0 else float("nan")
+
+    def _data_y_scalar(self, value: float) -> float:
+        if not self._log_freq:
+            return float(value)
+        try:
+            return float(10.0 ** float(value))
+        except (TypeError, ValueError, OverflowError):
+            return float("nan")
+
+    def _apply_log_frequency_ticks(self) -> None:
+        """Label the log10 axis with real frequencies (or restore automatic ticks).
+
+        The tick frequencies come from the backend, which the matplotlib canvas
+        also uses, so the two renderers put their labels in the same places.
+        """
+        try:
+            axis = self._plot.getAxis("left")
+        except Exception:
+            return
+        if not self._log_freq or self._axis_ylim is None:
+            try:
+                axis.setTicks(None)
+            except Exception:
+                pass
+            return
+        try:
+            lo, hi = self._axis_ylim
+            labelled, minor = log_frequency_ticks_mhz(10.0 ** float(lo), 10.0 ** float(hi))
+            if not labelled:
+                axis.setTicks(None)
+                return
+            axis.setTicks([
+                [(float(np.log10(f)), format_frequency_mhz(f)) for f in labelled],
+                [(float(np.log10(f)), "") for f in minor],
+            ])
+        except Exception:
+            pass
+
     @property
     def is_available(self) -> bool:
         return bool(self._available and self._plot is not None and self._image is not None and self._viewbox is not None)
@@ -481,7 +562,10 @@ class AcceleratedPlotWidget(QWidget):
             x_range, y_range = self._viewbox.viewRange()
             return {
                 "xlim": (float(x_range[0]), float(x_range[1])),
-                "ylim": (float(y_range[0]), float(y_range[1])),
+                "ylim": (
+                    self._data_y_scalar(y_range[0]),
+                    self._data_y_scalar(y_range[1]),
+                ),
             }
         except Exception:
             return None
@@ -495,9 +579,16 @@ class AcceleratedPlotWidget(QWidget):
             if xlim is None or ylim is None:
                 return
             self._block_range_signals = True
+            y_lo = self._axis_y_scalar(ylim[0])
+            y_hi = self._axis_y_scalar(ylim[1])
+            if not (np.isfinite(y_lo) and np.isfinite(y_hi)):
+                if self._axis_ylim is not None:
+                    y_lo, y_hi = self._axis_ylim
+                else:
+                    return
             self._viewbox.setRange(
                 xRange=(float(xlim[0]), float(xlim[1])),
-                yRange=(float(ylim[0]), float(ylim[1])),
+                yRange=(float(y_lo), float(y_hi)),
                 padding=0.0,
             )
         except Exception:
@@ -1029,7 +1120,7 @@ class AcceleratedPlotWidget(QWidget):
                 )
             )
             item.setZValue(19)
-            item.setData(xs, ys)
+            item.setData(xs, self._to_axis_y(ys))
             self._plot.addItem(item)
             self._light_curve_items.append(item)
 
@@ -1043,7 +1134,10 @@ class AcceleratedPlotWidget(QWidget):
                             anchor=(0.0, 1.0),
                         )
                         text_item.setZValue(20)
-                        text_item.setPos(float(curve.get("label_x", xs[0])), float(curve.get("label_y", ys[0])))
+                        text_item.setPos(
+                            float(curve.get("label_x", xs[0])),
+                            self._axis_y_scalar(curve.get("label_y", ys[0])),
+                        )
                         self._plot.addItem(text_item)
                         self._light_curve_label_items.append(text_item)
                     except Exception:
@@ -1151,14 +1245,14 @@ class AcceleratedPlotWidget(QWidget):
 
         if line_points:
             xs = [p[0] for p in line_points]
-            ys = [p[1] for p in line_points]
+            ys = self._to_axis_y([p[1] for p in line_points])
             self._annotation_capture_line_item.setData(xs, ys)
         else:
             self._annotation_capture_line_item.setData([], [])
 
         if vertex_points:
             xs = [p[0] for p in vertex_points]
-            ys = [p[1] for p in vertex_points]
+            ys = self._to_axis_y([p[1] for p in vertex_points])
             self._annotation_capture_vertex_item.setData(xs, ys)
         else:
             self._annotation_capture_vertex_item.setData([], [])
@@ -1455,6 +1549,8 @@ class AcceleratedPlotWidget(QWidget):
         y_label: str = "Frequency [MHz]",
         colorbar_label: str = "",
         view=None,
+        freqs=None,
+        log_freq: bool = False,
     ) -> None:
         if not self.is_available or data is None:
             return
@@ -1463,15 +1559,53 @@ class AcceleratedPlotWidget(QWidget):
         if arr.ndim != 2 or arr.size == 0:
             return
 
-        arr = np.ascontiguousarray(arr, dtype=np.float32)
-
         x0, x1, y0, y1 = (float(extent[0]), float(extent[1]), float(extent[2]), float(extent[3]))
+
+        # Log mode needs uniformly log-spaced rows, because the image is placed
+        # with a plain rectangle that maps rows linearly onto the axis.
+        self._log_freq = False
+        if log_freq and freqs is not None:
+            # Fill the band the extent already describes -- the channel edges --
+            # so this canvas frames exactly what the matplotlib axis frames.
+            # The bottom edge sits half a channel below the lowest frequency and
+            # can reach zero, which no log axis can show; the channel centres
+            # are the fallback for that case.
+            edge_lo, edge_hi = min(y0, y1), max(y0, y1)
+            bounds = (edge_lo, edge_hi) if edge_lo > 0.0 and edge_hi > edge_lo else None
+            try:
+                resampled, log_rows = resample_rows_to_log_frequency(arr, freqs, bounds=bounds)
+            except Exception:
+                resampled, log_rows = None, None
+            if resampled is not None:
+                arr = resampled
+                # The rectangle has to keep the row order the linear branch
+                # gets from ``pyqtgraph_extent``: y0 is where row 0 lands.
+                # Taking min/max here instead flips a descending CALLISTO axis
+                # and draws the whole spectrum upside down.
+                if bounds is None:
+                    log_edges = axis_edges(log_rows)
+                    y0, y1 = float(log_edges[0]), float(log_edges[-1])
+                else:
+                    low, high = float(np.log10(edge_lo)), float(np.log10(edge_hi))
+                    y0, y1 = (high, low) if log_rows[0] > log_rows[-1] else (low, high)
+                # Row-indexed data has to follow the rows to their new places.
+                gap_row_mask = resample_row_mask_to_log_frequency(
+                    gap_row_mask, freqs, bounds=bounds
+                )
+                self._log_freq = True
+
+        arr = np.ascontiguousarray(arr, dtype=np.float32)
         image_rect = QRectF(x0, y0, x1 - x0, y1 - y0)
         self._image.setRect(image_rect)
+        self._axis_ylim = (min(y0, y1), max(y0, y1))
         self._full_view = {
             "xlim": (min(x0, x1), max(x0, x1)),
-            "ylim": (min(y0, y1), max(y0, y1)),
+            "ylim": (
+                self._data_y_scalar(min(y0, y1)),
+                self._data_y_scalar(max(y0, y1)),
+            ),
         }
+        self._apply_log_frequency_ticks()
 
         vmin, vmax = finite_data_limits(arr)
         if levels is not None:
@@ -1606,13 +1740,14 @@ class AcceleratedPlotWidget(QWidget):
                 pen=pg.mkPen(40, 40, 40, 240),
             )
             self._plot.addItem(self._drift_scatter_item)
-        self._drift_scatter_item.setData(pts[:, 0], pts[:, 1])
+        ys = self._to_axis_y(pts[:, 1])
+        self._drift_scatter_item.setData(pts[:, 0], ys)
 
         if with_segments:
             if self._drift_line_item is None:
                 self._drift_line_item = pg.PlotDataItem(pen=pg.mkPen(40, 255, 120, width=2))
                 self._plot.addItem(self._drift_line_item)
-            self._drift_line_item.setData(pts[:, 0], pts[:, 1])
+            self._drift_line_item.setData(pts[:, 0], ys)
         elif self._drift_line_item is not None:
             self._drift_line_item.setData([], [])
 
@@ -1637,14 +1772,15 @@ class AcceleratedPlotWidget(QWidget):
             )
             self._measurement_scatter_item.setZValue(35)
             self._plot.addItem(self._measurement_scatter_item)
-        self._measurement_scatter_item.setData(pts[:, 0], pts[:, 1])
+        axis_ys = self._to_axis_y(pts[:, 1])
+        self._measurement_scatter_item.setData(pts[:, 0], axis_ys)
 
         if pts.shape[0] >= 2:
             if self._measurement_line_item is None:
                 self._measurement_line_item = pg.PlotDataItem(pen=pg.mkPen(24, 180, 255, width=2))
                 self._measurement_line_item.setZValue(34)
                 self._plot.addItem(self._measurement_line_item)
-            self._measurement_line_item.setData(pts[:2, 0], pts[:2, 1])
+            self._measurement_line_item.setData(pts[:2, 0], axis_ys[:2])
         elif self._measurement_line_item is not None:
             self._measurement_line_item.setData([], [])
 
@@ -1655,7 +1791,7 @@ class AcceleratedPlotWidget(QWidget):
                 self._measurement_text_item.setZValue(36)
                 self._plot.addItem(self._measurement_text_item)
             self._measurement_text_item.setText(text)
-            self._measurement_text_item.setPos(float(pts[-1, 0]), float(pts[-1, 1]))
+            self._measurement_text_item.setPos(float(pts[-1, 0]), float(axis_ys[-1]))
         elif self._measurement_text_item is not None:
             self._measurement_text_item.setText("")
 
@@ -1739,7 +1875,7 @@ class AcceleratedPlotWidget(QWidget):
             if not self._plot.sceneBoundingRect().contains(scene_pos):
                 return None
             point = self._viewbox.mapSceneToView(scene_pos)
-            return float(point.x()), float(point.y())
+            return float(point.x()), self._data_y_scalar(point.y())
         except Exception:
             return None
 
@@ -1760,7 +1896,7 @@ class AcceleratedPlotWidget(QWidget):
             self._lasso_line_item.setData([], [])
             return
         xs = [p[0] for p in self._lasso_points]
-        ys = [p[1] for p in self._lasso_points]
+        ys = self._to_axis_y([p[1] for p in self._lasso_points])
         self._lasso_line_item.setData(xs, ys)
 
     def _handle_annotation_drag_scene_event(self, event, annotation_kind: str) -> bool:

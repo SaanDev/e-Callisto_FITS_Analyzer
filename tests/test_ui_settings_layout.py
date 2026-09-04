@@ -372,6 +372,7 @@ def test_sidebar_sections_are_collapsible_cards():
             "Timeline",
             "Noise Clipping Thresholds",
             "Units",
+            "Axis",
             "Graph Properties",
             "Analysis Summary",
             "Ruler Measurement",
