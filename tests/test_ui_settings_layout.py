@@ -15,11 +15,17 @@ pytest.importorskip("matplotlib")
 pytest.importorskip("astropy")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QGroupBox, QScrollArea, QToolBar
+from PySide6.QtWidgets import QApplication, QScrollArea, QToolBar, QToolButton
 
 from src.Backend.presets import build_preset
 from src.UI.main_window import MainWindow
-from src.UI.widgets.collapsible_sections import group_base_title
+from src.UI.widgets.collapsible_sections import (
+    collapsible_groups,
+    collapsible_sections,
+    group_base_title,
+    section_for,
+    set_group_expanded,
+)
 
 
 def _app():
@@ -87,8 +93,10 @@ def test_sidebar_toggle_and_controls_still_work():
     assert toolbars[0].iconSize().width() == 36
     assert toolbars[0].iconSize().height() == 36
 
+    # The group box's own title is cleared when it is wrapped; the section
+    # header carries the name now.
     section_titles = {
-        group_base_title(group) for group in win.side_scroll.findChildren(QGroupBox) if group.title()
+        group_base_title(group) for group in collapsible_groups(win.side_scroll.widget())
     }
     assert {
         "Timeline", "Noise Clipping Thresholds", "Units", "Graph Properties", "Analysis Summary"
@@ -353,16 +361,14 @@ def test_reset_all_restores_sidebar_controls_to_defaults():
     win.close()
 
 
-def test_sidebar_sections_are_collapsible_accordion_cards():
+def test_sidebar_sections_are_collapsible_cards():
     _app()
     win = MainWindow(theme=None)
     win.show()
     QApplication.processEvents()
     try:
-        groups = win.side_scroll.widget().findChildren(
-            QGroupBox, options=Qt.FindDirectChildrenOnly
-        )
-        assert [group_base_title(g) for g in groups] == [
+        sections = collapsible_sections(win.side_scroll.widget())
+        assert [section.title() for section in sections] == [
             "Timeline",
             "Noise Clipping Thresholds",
             "Units",
@@ -370,23 +376,51 @@ def test_sidebar_sections_are_collapsible_accordion_cards():
             "Analysis Summary",
             "Ruler Measurement",
         ]
-        assert all(group.isCheckable() for group in groups)
-        assert win.units_group_box.title().startswith("▾")
+        # The header row is the control; there is no check box to hit.
+        assert all(isinstance(s.header(), QToolButton) for s in sections)
+        assert not any(g.isCheckable() for g in collapsible_groups(win.side_scroll.widget()))
 
-        expanded_height = win.units_group_box.maximumHeight()
-        win.units_group_box.setChecked(False)
+        units = section_for(win.units_group_box)
+        assert units is not None
+        assert units.isExpanded() is True
+        assert units.header().arrowType() == Qt.DownArrow
+
+        expanded_height = units.sizeHint().height()
+        units.header().click()
         QApplication.processEvents()
 
+        assert units.isExpanded() is False
+        assert units.header().arrowType() == Qt.RightArrow
         assert win.units_digits_radio.isHidden()
-        assert win.units_group_box.title().startswith("▸")
-        # Hiding the children is not enough on its own; the card itself must
-        # stop reserving a body or the "collapse" saves no space.
-        assert win.units_group_box.maximumHeight() < expanded_height
-        assert win.units_group_box.maximumHeight() == MainWindow.SIDEBAR_HEADER_HEIGHT
+        # Collapsing has to actually reclaim the space, not just hide content.
+        assert units.sizeHint().height() < expanded_height
 
-        win.units_group_box.setChecked(True)
+        units.header().click()
         QApplication.processEvents()
+        assert units.isExpanded() is True
         assert not win.units_digits_radio.isHidden()
+    finally:
+        win.close()
+
+
+def test_clicking_a_header_collapses_only_its_own_section():
+    _app()
+    win = MainWindow(theme=None)
+    win.show()
+    QApplication.processEvents()
+    try:
+        units = section_for(win.units_group_box)
+        thresholds = section_for(win.slider_group)
+        units.setExpanded(True)
+        thresholds.setExpanded(True)
+        QApplication.processEvents()
+
+        units.header().click()
+        QApplication.processEvents()
+
+        assert units.isExpanded() is False
+        assert thresholds.isExpanded() is True
+        assert not win.lower_slider.isHidden()
     finally:
         win.close()
 
@@ -395,11 +429,11 @@ def test_expanding_a_section_does_not_defeat_its_gating():
     _app()
     win = MainWindow(theme=None)
     try:
-        # Nothing loaded, so Graph Properties must stay disabled even though a
-        # checkable QGroupBox re-enables all its children when re-checked.
+        # Nothing loaded, so Graph Properties must stay disabled even though
+        # re-opening a card re-shows all of its children.
         assert win.graph_group.isEnabled() is False
-        win.graph_group.setChecked(False)
-        win.graph_group.setChecked(True)
+        set_group_expanded(win.graph_group, False)
+        set_group_expanded(win.graph_group, True)
         QApplication.processEvents()
         assert win.graph_group.isEnabled() is False
     finally:
@@ -410,36 +444,36 @@ def test_section_expanded_state_survives_a_restart():
     _app()
     first = MainWindow(theme=None)
     try:
-        first.units_group_box.setChecked(False)
+        set_group_expanded(first.units_group_box, False)
         QApplication.processEvents()
     finally:
         first.close()
 
     second = MainWindow(theme=None)
     try:
-        assert second.units_group_box.isChecked() is False
+        assert section_for(second.units_group_box).isExpanded() is False
         assert second.units_digits_radio.isHidden()
-        assert second.slider_group.isChecked() is True
+        assert section_for(second.slider_group).isExpanded() is True
     finally:
         second.close()
 
 
-def test_every_collapsed_card_is_the_same_header_height():
+def test_every_collapsed_card_shrinks_to_its_header_row():
     _app()
     win = MainWindow(theme=None)
     win.show()
     QApplication.processEvents()
     try:
-        groups = win.side_scroll.widget().findChildren(
-            QGroupBox, options=Qt.FindDirectChildrenOnly
-        )
-        for group in groups:
-            group.setChecked(False)
+        sections = collapsible_sections(win.side_scroll.widget())
+        for section in sections:
+            section.setExpanded(False)
         QApplication.processEvents()
 
-        heights = {group.height() for group in groups}
+        heights = {section.sizeHint().height() for section in sections}
         # A ragged accordion reads as broken; every collapsed card is one row.
-        assert heights == {MainWindow.SIDEBAR_HEADER_HEIGHT}
+        assert len(heights) == 1
+        header_height = sections[0].header().sizeHint().height()
+        assert heights.pop() == pytest.approx(header_height, abs=2)
     finally:
         win.close()
 
@@ -448,12 +482,14 @@ def test_collapsed_cards_carry_the_style_property_the_sidebar_qss_keys_on():
     _app()
     win = MainWindow(theme=None)
     try:
-        assert win.units_group_box.property("collapsed") is False
-        win.units_group_box.setChecked(False)
+        units = section_for(win.units_group_box)
+        units.setExpanded(True)
+        assert units.property("collapsed") is False
+        units.setExpanded(False)
         QApplication.processEvents()
-        assert win.units_group_box.property("collapsed") is True
-        win.units_group_box.setChecked(True)
+        assert units.property("collapsed") is True
+        units.setExpanded(True)
         QApplication.processEvents()
-        assert win.units_group_box.property("collapsed") is False
+        assert units.property("collapsed") is False
     finally:
         win.close()

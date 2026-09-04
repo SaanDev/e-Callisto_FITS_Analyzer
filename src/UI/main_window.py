@@ -233,9 +233,6 @@ class MainWindow(QMainWindow):
     #: Segment rows shown before the timeline list starts scrolling.
     TIMELINE_VISIBLE_ROWS = 5
 
-    #: Height of a sidebar card's header row. The section QSS reserves this
-    #: much top padding, and a collapsed card is exactly this tall.
-    SIDEBAR_HEADER_HEIGHT = 40
 
     # Convert digit differences (e.g., Ihot - Icold) to dB.
     DB_SCALE = 2500.0 / 256.0 / 25.4
@@ -282,7 +279,7 @@ class MainWindow(QMainWindow):
         if self.theme and hasattr(self.theme, "themeChanged"):
             self.theme.themeChanged.connect(self._on_theme_changed)
         if self.theme and hasattr(self.theme, "viewModeChanged"):
-            self.theme.viewModeChanged.connect(lambda _mode: self._sync_view_mode_actions())
+            self.theme.viewModeChanged.connect(lambda _mode: self._on_view_mode_changed())
         self._ui_settings = _make_settings()
         self._max_auto_clean_isolated = bool(
             self._ui_settings.value("processing/max_auto_clean_isolated", True, type=bool)
@@ -295,6 +292,7 @@ class MainWindow(QMainWindow):
         self._timeline_thread = None
         self._timeline_worker = None
         self._timeline_undo_state = None
+        self._timeline_running = False
         self._timeline_probe_worker = None
         self._combined_options = {}
         self._cme_helper_client = CMEHelperClient(theme_manager=self.theme, parent=self)
@@ -877,13 +875,10 @@ class MainWindow(QMainWindow):
         # Style (safe sizes, no tiny max-heights)
         # -------------------------
         if not (self.theme and hasattr(self.theme, "set_view_mode")):
-            sidebar_style = self._classic_sidebar_qss(self._is_dark_ui())
-            self.timeline_group.setStyleSheet(sidebar_style)
-            slider_group.setStyleSheet(sidebar_style)
-            self.units_group_box.setStyleSheet(sidebar_style)
-            self.graph_group.setStyleSheet(sidebar_style)
-            self.analysis_summary_group.setStyleSheet(sidebar_style)
-            self.measurement_readout.setStyleSheet(sidebar_style)
+            dark = self._is_dark_ui()
+            self.side_scroll.setStyleSheet(
+                self._sidebar_panel_qss(dark) + self._classic_sidebar_qss(dark)
+            )
 
         # -------------------------
         # Main layout: draggable splitter (sidebar | viewer) with the
@@ -924,10 +919,9 @@ class MainWindow(QMainWindow):
         self._normalize_sidebar_section_layouts()
         make_groups_collapsible(
             self.side_scroll.widget(),
-            on_expand=self._sync_toolbar_enabled_states,
+            on_expand=self._reapply_sidebar_gating,
             settings=self._ui_settings,
             settings_key=SIDEBAR_SECTIONS_SETTINGS_KEY,
-            collapsed_height=self.SIDEBAR_HEADER_HEIGHT,
         )
         self._refresh_timeline_panel()
 
@@ -1016,6 +1010,15 @@ class MainWindow(QMainWindow):
         self.timeline_next_action.setEnabled(False)
         self.timeline_next_action.triggered.connect(lambda: self.extend_timeline("next"))
         edit_menu.addAction(self.timeline_next_action)
+
+        self.timeline_prefetch_action = QAction("Prefetch Adjacent Observations", self)
+        self.timeline_prefetch_action.setCheckable(True)
+        self.timeline_prefetch_action.setChecked(True)
+        self.timeline_prefetch_action.setToolTip(
+            "Download the neighbouring observations in the background so the next "
+            "step is instant. Turn off to avoid unrequested archive traffic."
+        )
+        edit_menu.addAction(self.timeline_prefetch_action)
 
         edit_menu.addSeparator()
 
@@ -1423,8 +1426,7 @@ class MainWindow(QMainWindow):
         self.lasso_mask = None
         self.noise_reduced_data = None
 
-        if not (self.theme and hasattr(self.theme, "set_view_mode")):
-            self._apply_view_mode_styling()
+        self._apply_view_mode_styling()
 
         self.noise_reduced_original = None  # backup before lasso
         self.noise_reduced_original_plot_type = "Background Subtracted"
@@ -1441,6 +1443,10 @@ class MainWindow(QMainWindow):
         if text in {"classic", "modern"}:
             return text
         return "modern"
+
+    def _on_view_mode_changed(self) -> None:
+        self._sync_view_mode_actions()
+        self._apply_view_mode_styling()
 
     def _sync_view_mode_actions(self):
         if self.theme and hasattr(self.theme, "view_mode"):
@@ -1490,20 +1496,12 @@ class MainWindow(QMainWindow):
             main_qss = self._modern_main_qss(dark)
             sidebar_qss = self._modern_sidebar_qss(dark)
 
-        self.setStyleSheet(main_qss)
+        if not (self.theme and hasattr(self.theme, "set_view_mode")):
+            # Without a theme manager nothing else styles the window.
+            self.setStyleSheet(main_qss)
         side_scroll = getattr(self, "side_scroll", None)
         if side_scroll is not None:
-            side_scroll.setStyleSheet(self._sidebar_panel_qss(dark))
-        for widget in (
-            getattr(self, "timeline_group", None),
-            getattr(self, "slider_group", None),
-            getattr(self, "units_group_box", None),
-            getattr(self, "graph_group", None),
-            getattr(self, "analysis_summary_group", None),
-            getattr(self, "measurement_readout", None),
-        ):
-            if widget is not None:
-                widget.setStyleSheet(sidebar_qss)
+            side_scroll.setStyleSheet(self._sidebar_panel_qss(dark) + sidebar_qss)
 
     def _classic_main_qss(self) -> str:
         return """
@@ -1596,32 +1594,40 @@ class MainWindow(QMainWindow):
             control = "#f4f7fb"
 
         return f"""
-        QGroupBox {{
+        QWidget#CollapsibleSection {{
             background-color: {card};
+            border: 1px solid {hairline};
+            border-radius: 10px;
+        }}
+        QWidget#CollapsibleSection[collapsed="true"] {{
+            background-color: {card_collapsed};
+        }}
+        QWidget#SectionBody {{
+            background: transparent;
+        }}
+        QToolButton#SectionHeader {{
+            background: transparent;
             border: none;
             border-radius: 10px;
-            margin: 0px;
-            padding: 36px 12px 12px 12px;
-            font-size: 12px;
+            padding: 13px 14px;
+            text-align: left;
+            font-size: 15px;
             font-weight: bold;
             color: {text};
         }}
-        QGroupBox[collapsed="true"] {{
-            background-color: {card_collapsed};
-            padding-bottom: 0px;
-        }}
-        QGroupBox[collapsed="true"]:hover {{
+        QToolButton#SectionHeader:hover {{
             background-color: {card_hover};
         }}
-        QGroupBox::title {{
-            subcontrol-origin: border;
-            subcontrol-position: top left;
-            padding: 10px 12px;
-            color: {text};
+        QToolButton#SectionHeader:focus {{
+            background-color: {accent_soft};
         }}
-        QGroupBox::indicator {{
-            width: 0px;
-            height: 0px;
+        QGroupBox[sectionBody="true"] {{
+            background: transparent;
+            border: none;
+            margin: 0px;
+            padding: 0px;
+            font-weight: normal;
+            color: {text};
         }}
         QLabel {{
             font-size: 12px;
@@ -1693,10 +1699,49 @@ class MainWindow(QMainWindow):
         QSpinBox {{
             min-width: 90px;
         }}
-        QSpinBox#TimelineStepSpin {{
-            min-width: 30px;
+        /* A compact chip showing the step multiplier. The native drop-down
+           chrome cannot be restyled on macOS, so it is given no width and the
+           value itself is the control. */
+        QComboBox#TimelineStepCombo {{
+            min-width: 44px;
             max-width: 52px;
-            padding: 4px 2px;
+            padding: 4px 6px;
+        }}
+        QComboBox#TimelineStepCombo::drop-down {{
+            width: 0px;
+        }}
+        /* A partly-styled subcontrol falls back to the native drawing, which
+           paints a light chrome block on the dark field, so these are fully
+           specified: box, then arrow. */
+        QSpinBox::up-button {{
+            subcontrol-origin: border;
+            subcontrol-position: top right;
+            background: transparent;
+            border: none;
+            width: 15px;
+            margin-right: 2px;
+        }}
+        QSpinBox::down-button {{
+            subcontrol-origin: border;
+            subcontrol-position: bottom right;
+            background: transparent;
+            border: none;
+            width: 15px;
+            margin-right: 2px;
+        }}
+        QSpinBox::up-arrow {{
+            width: 0px;
+            height: 0px;
+            border-left: 4px solid transparent;
+            border-right: 4px solid transparent;
+            border-bottom: 5px solid {muted};
+        }}
+        QSpinBox::down-arrow {{
+            width: 0px;
+            height: 0px;
+            border-left: 4px solid transparent;
+            border-right: 4px solid transparent;
+            border-top: 5px solid {muted};
         }}
         QListWidget {{
             border: 1px solid {hairline};
@@ -1709,7 +1754,7 @@ class MainWindow(QMainWindow):
         }}
         QListWidget::item {{
             padding: 5px 8px;
-            border-radius: 6px;
+            border: none;
         }}
         QListWidget::item:alternate {{
             background-color: {field_alt};
@@ -1948,38 +1993,43 @@ class MainWindow(QMainWindow):
 
         return f"""
         /* ---------- Section card ---------- */
-        QGroupBox {{
+        QWidget#CollapsibleSection {{
             background-color: {card};
+            border: 1px solid {hairline};
+            border-radius: 12px;
+        }}
+        QWidget#CollapsibleSection[collapsed="true"] {{
+            background-color: {card_collapsed};
+        }}
+        QWidget#SectionBody {{
+            background: transparent;
+        }}
+        /* The header row is the whole control: full width, click anywhere. */
+        QToolButton#SectionHeader {{
+            background: transparent;
             border: none;
             border-radius: 12px;
-            margin: 0px;
-            padding: 38px 14px 14px 14px;
-            font-size: 12px;
+            padding: 13px 14px;
+            text-align: left;
+            font-size: 15px;
             font-weight: 600;
-            color: {text};
+            color: {heading};
         }}
-        QGroupBox[collapsed="true"] {{
-            background-color: {card_collapsed};
-            padding-bottom: 0px;
-        }}
-        /* A collapsed card is one big click target, so it lights up on hover.
-           Expanded cards do not: there the pointer is usually over content. */
-        QGroupBox[collapsed="true"]:hover {{
+        QToolButton#SectionHeader:hover {{
             background-color: {control};
         }}
-        QGroupBox::title {{
-            subcontrol-origin: border;
-            subcontrol-position: top left;
-            padding: 11px 14px;
-            color: {heading};
-            font-size: 12px;
-            font-weight: 600;
+        QToolButton#SectionHeader:focus {{
+            background-color: {accent_soft};
         }}
-        /* The arrow in the title is the affordance; Qt's own checkbox
-           indicator would read as a second, conflicting control. */
-        QGroupBox::indicator {{
-            width: 0px;
-            height: 0px;
+        /* The group box is now just the body container. */
+        QGroupBox[sectionBody="true"] {{
+            background: transparent;
+            border: none;
+            margin: 0px;
+            padding: 0px;
+            font-size: 12px;
+            font-weight: 400;
+            color: {text};
         }}
 
         /* ---------- Type ---------- */
@@ -2071,9 +2121,13 @@ class MainWindow(QMainWindow):
             border-color: {accent};
         }}
         QComboBox::drop-down {{
+            subcontrol-origin: padding;
+            subcontrol-position: center right;
+            background: transparent;
             border: none;
-            width: 20px;
+            width: 18px;
         }}
+
         QComboBox QAbstractItemView {{
             border: 1px solid {hairline};
             border-radius: 8px;
@@ -2084,13 +2138,6 @@ class MainWindow(QMainWindow):
         }}
         QSpinBox {{
             min-width: 90px;
-        }}
-        /* The step counter shares one 250 px row with two buttons, so it opts
-           out of the wide default the font-size spinners rely on. */
-        QSpinBox#TimelineStepSpin {{
-            min-width: 30px;
-            max-width: 52px;
-            padding: 4px 2px;
         }}
 
         /* ---------- Segment list ---------- */
@@ -2106,7 +2153,7 @@ class MainWindow(QMainWindow):
         }}
         QListWidget::item {{
             padding: 5px 8px;
-            border-radius: 6px;
+            border: none;
             color: {text};
         }}
         QListWidget::item:alternate {{
@@ -2114,6 +2161,10 @@ class MainWindow(QMainWindow):
         }}
         QListWidget::item:hover {{
             background-color: {accent_soft};
+        }}
+        QListWidget::item:selected {{
+            background: transparent;
+            color: {text};
         }}
 
         /* ---------- Toggles ---------- */
@@ -2374,8 +2425,6 @@ class MainWindow(QMainWindow):
         # the sidebar gating has to be re-derived here rather than set once.
         if getattr(self, "graph_group", None) is not None:
             self.graph_group.setEnabled(has_file)
-        if getattr(self, "timeline_group", None) is not None:
-            self.timeline_group.setEnabled(self._timeline_state() is not None)
         has_undo = len(getattr(self, "_undo_stack", [])) > 0
         has_redo = len(getattr(self, "_redo_stack", [])) > 0
         filename = getattr(self, "filename", "")
@@ -2725,6 +2774,7 @@ class MainWindow(QMainWindow):
 
     def _on_theme_changed(self, dark: bool):
         self._sync_view_mode_actions()
+        self._apply_view_mode_styling()
         self._refresh_toolbar_icons()
 
         # If you already added MPL theme syncing earlier, keep it too:
@@ -3818,17 +3868,12 @@ class MainWindow(QMainWindow):
             self._shift_feature_time_coordinates(shift)
 
         # The array shape changed, so anything derived from it must be redone.
-        self.noise_reduced_data = None
-        self.noise_reduced_original = None
         self.current_display_data = None
         self._current_plot_source_data = None
         self.lasso_mask = None
+        self._rfi_preview_data = None
 
-        plot_source = self.raw_data
-        title = "Raw"
-        if self._apply_noise_clip_to_current_data():
-            plot_source = self.noise_reduced_data
-            title = "Background Subtracted"
+        plot_source, title = self._reapply_processing_chain()
 
         restore_view = self._shifted_view(view, shift)
         self.plot_data(plot_source, title=title, restore_view=restore_view)
@@ -3836,6 +3881,58 @@ class MainWindow(QMainWindow):
         self._mark_project_dirty()
         self._refresh_timeline_panel()
         self._sync_toolbar_enabled_states()
+
+    def _reapply_processing_chain(self):
+        """Rebuild the displayed product for the current ``raw_data``.
+
+        An extended dataset is the same observation with the same processing
+        applied, just longer — so the background subtraction, noise clip and RFI
+        cleaning the user had active are re-derived over the new array instead
+        of silently dropping the view back to Raw.  Returns ``(data, title)``.
+
+        The view the user was on decides how far the chain is rebuilt: someone
+        looking at Raw with thresholds still dialled in stays on Raw rather than
+        being flipped into the background-subtracted product.
+        """
+        wanted = self._normalize_plot_type(getattr(self, "current_plot_type", "Raw"))
+
+        self.noise_reduced_data = None
+        self.noise_reduced_original = None
+        self.noise_reduced_original_plot_type = "Background Subtracted"
+
+        data = self.raw_data
+        title = "Raw"
+        if wanted != "Raw" and self._apply_noise_clip_to_current_data():
+            data = self.noise_reduced_data
+            title = "Background Subtracted"
+
+        rfi = dict(getattr(self, "_rfi_config", {}) or {})
+        if wanted == "RFI Cleaned" and rfi.get("applied", False) and data is not None:
+            try:
+                result = clean_rfi(
+                    data,
+                    kernel_time=int(rfi.get("kernel_time", 3)),
+                    kernel_freq=int(rfi.get("kernel_freq", 3)),
+                    channel_z_threshold=float(rfi.get("channel_z_threshold", 6.0)),
+                    percentile_clip=float(rfi.get("percentile_clip", 99.5)),
+                    enabled=bool(rfi.get("enabled", True)),
+                )
+            except Exception:
+                result = None
+            if result is not None:
+                # Keep the pre-RFI product so "Reset to Raw" and the undo of an
+                # RFI apply still have something to fall back to.
+                self.noise_reduced_original = np.asarray(data, dtype=np.float32).copy()
+                self.noise_reduced_original_plot_type = title
+                self.noise_reduced_data = np.asarray(result.data, dtype=np.float32).copy()
+                self._rfi_preview_masked = list(result.masked_channel_indices)
+                self._rfi_config["masked_channel_indices"] = list(result.masked_channel_indices)
+                self.noise_vmin, self.noise_vmax = finite_data_limits(self.noise_reduced_data)
+                data = self.noise_reduced_data
+                title = "RFI Cleaned"
+
+        self.current_plot_type = title
+        return data, title
 
     @staticmethod
     def _shifted_view(view, shift: float):
@@ -5165,6 +5262,17 @@ class MainWindow(QMainWindow):
     # =========================
     # Timeline: walking the dataset through the archive
     # =========================
+    def _reapply_sidebar_gating(self) -> None:
+        """Re-derive every sidebar enable/visibility rule.
+
+        Opening a section re-shows its children wholesale, so anything the
+        window hides conditionally has to be hidden again here.
+        """
+        self._sync_toolbar_enabled_states()
+        if hasattr(self, "timeline_list"):
+            self._set_timeline_controls_visible(self._timeline_state() is not None)
+            self._fit_timeline_list_height()
+
     def _normalize_sidebar_section_layouts(self) -> None:
         """Give every sidebar card the same inner rhythm.
 
@@ -5189,36 +5297,43 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(6)
 
-        step_row = QHBoxLayout()
+        self.timeline_step_row = QWidget(group)
+        step_row = QHBoxLayout(self.timeline_step_row)
+        step_row.setContentsMargins(0, 0, 0, 0)
         step_row.setSpacing(4)
         self.timeline_prev_btn = QPushButton("◀ Prev")
         self.timeline_prev_btn.setObjectName("TimelineStepButton")
         self.timeline_prev_btn.setToolTip("Add the preceding observation (Ctrl+Shift+Left)")
         self.timeline_prev_btn.clicked.connect(lambda: self.extend_timeline("previous"))
-        self.timeline_step_spin = QSpinBox()
-        self.timeline_step_spin.setRange(1, 16)
-        self.timeline_step_spin.setValue(1)
-        self.timeline_step_spin.setObjectName("TimelineStepSpin")
-        self.timeline_step_spin.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.timeline_step_spin.setToolTip("How many observations to add per click")
+        # A combo rather than a spin box: macOS draws native spin buttons that
+        # ignore the sidebar stylesheet and read as a bright block on the card.
+        self.timeline_step_combo = QComboBox()
+        self.timeline_step_combo.setObjectName("TimelineStepCombo")
+        for count in (1, 2, 4, 8):
+            self.timeline_step_combo.addItem(f"\u00d7{count}", count)
+        self.timeline_step_combo.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.timeline_step_combo.setToolTip("How many observations to add per click")
         self.timeline_next_btn = QPushButton("Next ▶")
         self.timeline_next_btn.setObjectName("TimelineStepButton")
         self.timeline_next_btn.setToolTip("Add the following observation (Ctrl+Shift+Right)")
         self.timeline_next_btn.clicked.connect(lambda: self.extend_timeline("next"))
         step_row.addWidget(self.timeline_prev_btn, 1)
-        step_row.addWidget(self.timeline_step_spin, 0)
+        step_row.addWidget(self.timeline_step_combo, 0)
         step_row.addWidget(self.timeline_next_btn, 1)
-        layout.addLayout(step_row)
+        layout.addWidget(self.timeline_step_row)
 
         self.timeline_list = QListWidget()
         self.timeline_list.setObjectName("TimelineSegmentList")
         self.timeline_list.setSelectionMode(QAbstractItemView.NoSelection)
+        self.timeline_list.setFocusPolicy(Qt.NoFocus)
         self.timeline_list.setAlternatingRowColors(True)
         self.timeline_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.timeline_list.setUniformItemSizes(True)
         layout.addWidget(self.timeline_list)
 
-        trim_row = QHBoxLayout()
+        self.timeline_trim_row = QWidget(group)
+        trim_row = QHBoxLayout(self.timeline_trim_row)
+        trim_row.setContentsMargins(0, 0, 0, 0)
         trim_row.setSpacing(4)
         self.timeline_trim_start_btn = QPushButton("Trim Start")
         self.timeline_trim_start_btn.setToolTip("Remove the earliest observation")
@@ -5228,15 +5343,7 @@ class MainWindow(QMainWindow):
         self.timeline_trim_end_btn.clicked.connect(lambda: self.trim_timeline("end"))
         trim_row.addWidget(self.timeline_trim_start_btn)
         trim_row.addWidget(self.timeline_trim_end_btn)
-        layout.addLayout(trim_row)
-
-        self.timeline_prefetch_chk = QCheckBox("Prefetch adjacent files")
-        self.timeline_prefetch_chk.setChecked(True)
-        self.timeline_prefetch_chk.setToolTip(
-            "Download the neighbouring observations in the background so the next\n"
-            "step is instant. Turn off to avoid unrequested archive traffic."
-        )
-        layout.addWidget(self.timeline_prefetch_chk)
+        layout.addWidget(self.timeline_trim_row)
 
         self.timeline_status_label = QLabel("No dataset loaded.")
         self.timeline_status_label.setObjectName("TimelineStatusLabel")
@@ -5244,6 +5351,15 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.timeline_status_label)
 
         return group
+
+    def _timeline_step_count(self) -> int:
+        combo = getattr(self, "timeline_step_combo", None)
+        if combo is None:
+            return 1
+        try:
+            return max(1, int(combo.currentData()))
+        except (TypeError, ValueError):
+            return 1
 
     def _timeline_source_paths(self) -> list[str]:
         """The on-disk files backing the current dataset, if they still exist."""
@@ -5272,9 +5388,10 @@ class MainWindow(QMainWindow):
         state = self._timeline_state()
         self.timeline_list.clear()
         self._fit_timeline_list_height()
+        self._set_timeline_controls_visible(state is not None)
 
         if state is None:
-            self.timeline_group.setEnabled(False)
+            self.timeline_group.setEnabled(True)
             self.timeline_status_label.setText(
                 "Load a CALLISTO file to step through the archive."
                 if getattr(self, "raw_data", None) is None
@@ -5300,12 +5417,24 @@ class MainWindow(QMainWindow):
         self.timeline_trim_end_btn.setEnabled(count > 1)
         self._start_timeline_probe(state)
 
+    def _set_timeline_controls_visible(self, visible: bool) -> None:
+        """Show the stepping controls only when there is something to step."""
+        for widget in (
+            getattr(self, "timeline_step_row", None),
+            getattr(self, "timeline_trim_row", None),
+            getattr(self, "timeline_list", None),
+        ):
+            if widget is not None:
+                widget.setVisible(bool(visible))
+
     def _fit_timeline_list_height(self) -> None:
         """Size the segment list to its rows, up to a scrollable ceiling."""
         rows = self.timeline_list.count()
         if rows <= 0:
+            self.timeline_list.setVisible(False)
             self.timeline_list.setFixedHeight(0)
             return
+        self.timeline_list.setVisible(True)
         row_height = self.timeline_list.sizeHintForRow(0)
         if row_height <= 0:
             row_height = self.timeline_list.fontMetrics().height() + 10
@@ -5318,7 +5447,7 @@ class MainWindow(QMainWindow):
         for widget in (
             getattr(self, "timeline_prev_btn", None),
             getattr(self, "timeline_next_btn", None),
-            getattr(self, "timeline_step_spin", None),
+            getattr(self, "timeline_step_combo", None),
             getattr(self, "timeline_trim_start_btn", None),
             getattr(self, "timeline_trim_end_btn", None),
         ):
@@ -5332,8 +5461,15 @@ class MainWindow(QMainWindow):
                 action.setEnabled(value)
 
     def _timeline_busy(self) -> bool:
-        thread = getattr(self, "_timeline_thread", None)
-        return thread is not None and thread.isRunning()
+        """Whether an extend/trim is in flight.
+
+        Tracked with an explicit flag rather than ``QThread.isRunning()``: the
+        completion handler is delivered as a queued signal *before* the thread
+        is asked to quit, so the thread still reports itself as running and the
+        refresh that follows would disable the very controls it just finished
+        with.
+        """
+        return bool(getattr(self, "_timeline_running", False))
 
     def _shutdown_timeline_threads(self, timeout_ms: int = 5000) -> None:
         """Stop timeline background work before the window goes away."""
@@ -5342,6 +5478,7 @@ class MainWindow(QMainWindow):
             worker.cancel()
             self._timeline_probe_worker = None
 
+        self._timeline_running = False
         thread = getattr(self, "_timeline_thread", None)
         if thread is not None:
             try:
@@ -5359,10 +5496,8 @@ class MainWindow(QMainWindow):
         if previous is not None:
             previous.cancel()
 
-        prefetch = bool(
-            getattr(self, "timeline_prefetch_chk", None) is not None
-            and self.timeline_prefetch_chk.isChecked()
-        )
+        action = getattr(self, "timeline_prefetch_action", None)
+        prefetch = bool(action is not None and action.isChecked())
         worker = TimelineProbeWorker(state, prefetch=prefetch)
         worker.finished.connect(self._on_timeline_probe_finished)
         self._timeline_probe_worker = worker
@@ -5397,7 +5532,7 @@ class MainWindow(QMainWindow):
         if self._timeline_busy():
             return
 
-        steps = int(self.timeline_step_spin.value()) if hasattr(self, "timeline_step_spin") else 1
+        steps = self._timeline_step_count()
         self._run_timeline_worker(
             TimelineExtendWorker(
                 state,
@@ -5451,6 +5586,7 @@ class MainWindow(QMainWindow):
         self._timeline_thread = QThread(self)
         self._timeline_worker = worker
         self._timeline_undo_state = self._capture_dataset_state()
+        self._timeline_running = True
         worker.moveToThread(self._timeline_thread)
 
         self.timeline_status_label.setText(busy_text)
@@ -5476,6 +5612,7 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _on_timeline_extend_finished(self, payload):
+        self._timeline_running = False
         payload = payload or {}
         combined = payload.get("combined", None)
         if combined is None:
@@ -5495,6 +5632,7 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _on_timeline_extend_failed(self, message: str):
+        self._timeline_running = False
         self._timeline_undo_state = None
         self._refresh_timeline_panel()
         self.timeline_status_label.setText(str(message))
@@ -6445,7 +6583,6 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Loaded SWAVES: {payload.spacecraft_label}", 5000)
 
     def _plot_data_internal(self, data, title="Raw", view=None):
-
         self._stop_rect_zoom()
 
         if self.time is None or self.freqs is None:

@@ -4,92 +4,162 @@ Version 2.8.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
-Accordion behaviour for sidebar group boxes.
+Collapsible sidebar sections.
 
-Qt's checkable ``QGroupBox`` supplies the click affordance; unchecking hides the
-group's direct children so the box shrinks to a single title row.  An arrow in
-the title shows the state (the native indicator is hidden by the sidebar QSS).
+Each section is a card with a clickable header row and a content area, in the
+shape of the well-known PySide6 collapsible container: click the header, the
+body shows or hides.  There is no check box — the header itself is the control,
+and its arrow shows the state.
 
-Shared by the main window and the Solar Image Analysis window so both sidebars
-behave identically.
+An earlier version made the section's ``QGroupBox`` checkable instead.  That put
+a check box where a header belonged, re-enabled every child whenever a card was
+re-opened, and needed height caps to stop a "collapsed" card reserving a body.
+Wrapping the group box in a real header/content pair removes all three problems:
+collapsing just hides a widget and the layout does the rest.
+
+Sections are built by :func:`make_groups_collapsible`, which wraps the group
+boxes a window has already built, so windows keep their own attribute names
+(``self.units_group_box`` and friends) and their own inner layouts.
 """
 
 from __future__ import annotations
 
 import json
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QGroupBox, QWidget
+from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtWidgets import QGroupBox, QSizePolicy, QToolButton, QVBoxLayout, QWidget
 
 _BASE_TITLE_PROPERTY = "baseTitle"
-_BASE_MARGINS_PROPERTY = "baseLayoutMargins"
+_SECTION_BODY_PROPERTY = "sectionBody"
 _COLLAPSED_PROPERTY = "collapsed"
-_UNCONSTRAINED_HEIGHT = 16777215  # QWIDGETSIZE_MAX
-_EXPANDED_ARROW = "▾  "
-_COLLAPSED_ARROW = "▸  "
 
 
-def group_base_title(group: QGroupBox) -> str:
-    """Return a group's title without the accordion arrow."""
-    base = group.property(_BASE_TITLE_PROPERTY)
-    if base:
-        return str(base)
-    title = str(group.title() or "")
-    for arrow in (_EXPANDED_ARROW, _COLLAPSED_ARROW):
-        if title.startswith(arrow):
-            return title[len(arrow):]
-    return title
+def _header_text(title: str) -> str:
+    """Label for the header button, spaced off its arrow.
 
-
-def _set_title_arrow(group: QGroupBox, expanded: bool) -> None:
-    arrow = _EXPANDED_ARROW if expanded else _COLLAPSED_ARROW
-    group.setTitle(arrow + group_base_title(group))
-
-
-def set_group_expanded(group: QGroupBox, expanded: bool, *, collapsed_height: int = 0) -> None:
-    """Expand or collapse one group, updating its arrow and children.
-
-    Hiding the children is not enough on its own: the group's layout margins and
-    the style's reserved body keep the card at full height, so a "collapsed"
-    section saves no space.  Collapsing therefore does three things — hide the
-    children, zero the layout margins, and flip a ``collapsed`` style property
-    the sidebar QSS uses to drop the card's bottom padding.  What is left is
-    exactly the header row.
+    A button treats "&" as a mnemonic marker, so "Display & Crop" would render
+    as "Display _Crop"; doubling it prints a literal ampersand.
     """
-    expanded = bool(expanded)
-    group.setChecked(expanded)
-    _set_title_arrow(group, expanded)
-    for child in group.findChildren(QWidget, options=Qt.FindDirectChildrenOnly):
-        child.setVisible(expanded)
+    return "  " + str(title or "").replace("&", "&&")
 
-    layout = group.layout()
-    if layout is not None:
-        if expanded:
-            margins = group.property(_BASE_MARGINS_PROPERTY)
-            if margins is not None:
-                layout.setContentsMargins(*margins)
-        else:
-            if group.property(_BASE_MARGINS_PROPERTY) is None:
-                current = layout.contentsMargins()
-                group.setProperty(
-                    _BASE_MARGINS_PROPERTY,
-                    (current.left(), current.top(), current.right(), current.bottom()),
-                )
-            layout.setContentsMargins(0, 0, 0, 0)
 
-    group.setProperty(_COLLAPSED_PROPERTY, not expanded)
-    _repolish(group)
+class CollapsibleSection(QWidget):
+    """A card whose header row expands and collapses its content."""
 
-    # A QGroupBox reserves room for its frame even with every child hidden, so
-    # the card sits taller than the style asks for and has to be capped. Prefer
-    # an explicit height from the caller's design system: the size hint depends
-    # on when the stylesheet was applied, which makes cards collapse to
-    # different heights depending on construction order.
-    group.setMaximumHeight(_UNCONSTRAINED_HEIGHT)
-    if not expanded:
-        height = int(collapsed_height) or max(1, group.sizeHint().height())
-        group.setMaximumHeight(height)
-    group.updateGeometry()
+    toggled = Signal(bool)
+
+    #: Inset of the content inside the card (left, top, right, bottom).
+    BODY_MARGINS = (14, 0, 14, 14)
+
+    def __init__(self, title: str = "", parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("CollapsibleSection")
+        # A plain QWidget ignores a stylesheet background unless it is told to
+        # let the style paint it, which is what makes the card visible at all.
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        self.setProperty(_BASE_TITLE_PROPERTY, str(title or ""))
+
+        self._header = QToolButton(self)
+        self._header.setObjectName("SectionHeader")
+        self._header.setText(_header_text(title))
+        self._header.setCheckable(True)
+        self._header.setChecked(True)
+        self._header.setArrowType(Qt.DownArrow)
+        self._header.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self._header.setAutoRaise(True)
+        self._header.setIconSize(QSize(16, 16))
+        self._header.setCursor(Qt.PointingHandCursor)
+        self._header.setFocusPolicy(Qt.StrongFocus)
+        self._header.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._header.clicked.connect(self._on_header_clicked)
+
+        self._body = QWidget(self)
+        self._body.setObjectName("SectionBody")
+        self._body.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        self._body_layout = QVBoxLayout(self._body)
+        # Real margins, not stylesheet padding: QSS padding does not inset a
+        # plain widget's layout.
+        self._body_layout.setContentsMargins(*self.BODY_MARGINS)
+        self._body_layout.setSpacing(0)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._header)
+        layout.addWidget(self._body)
+
+        self._content: QWidget | None = None
+        self._sync_state(True)
+
+    # ---- content
+    def setContentWidget(self, widget: QWidget) -> None:
+        """Adopt ``widget`` as this section's body."""
+        if self._content is widget:
+            return
+        if self._content is not None:
+            self._body_layout.removeWidget(self._content)
+            self._content.setParent(None)
+        self._content = widget
+        if widget is not None:
+            self._body_layout.addWidget(widget)
+            widget.setVisible(self.isExpanded())
+
+    def contentWidget(self) -> QWidget | None:
+        return self._content
+
+    def header(self) -> QToolButton:
+        return self._header
+
+    # ---- title
+    def title(self) -> str:
+        return str(self.property(_BASE_TITLE_PROPERTY) or "")
+
+    def setTitle(self, title: str) -> None:
+        text = str(title or "")
+        self.setProperty(_BASE_TITLE_PROPERTY, text)
+        self._header.setText(_header_text(text))
+
+    # ---- state
+    def isExpanded(self) -> bool:
+        return bool(self._header.isChecked())
+
+    def setExpanded(self, expanded: bool, *, notify: bool = True) -> None:
+        expanded = bool(expanded)
+        changed = expanded != self.isExpanded()
+        self._header.setChecked(expanded)
+        self._sync_state(expanded)
+        if notify and changed:
+            self.toggled.emit(expanded)
+
+    def toggle(self) -> None:
+        self.setExpanded(not self.isExpanded())
+
+    def expand(self) -> None:
+        self.setExpanded(True)
+
+    def collapse(self) -> None:
+        self.setExpanded(False)
+
+    def _on_header_clicked(self, checked: bool) -> None:
+        self._sync_state(bool(checked))
+        self.toggled.emit(bool(checked))
+
+    def _sync_state(self, expanded: bool) -> None:
+        self._header.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        self._body.setVisible(expanded)
+        content = self._content
+        if content is not None:
+            # Hide the children as well: code that asks one specific control
+            # whether it is hidden must still get the right answer inside a
+            # collapsed card (Qt does not report a widget as hidden merely
+            # because an ancestor is).
+            for child in content.findChildren(QWidget, options=Qt.FindDirectChildrenOnly):
+                child.setVisible(expanded)
+            content.setVisible(expanded)
+        self.setProperty(_COLLAPSED_PROPERTY, not expanded)
+        _repolish(self)
+        _repolish(self._header)
 
 
 def _repolish(widget: QWidget) -> None:
@@ -102,8 +172,55 @@ def _repolish(widget: QWidget) -> None:
     widget.update()
 
 
-def collapsible_groups(container: QWidget) -> list[QGroupBox]:
-    """Return the accordion sections of a sidebar container, in layout order."""
+# -----------------------------
+# Working with wrapped group boxes
+# -----------------------------
+def group_base_title(group: QGroupBox) -> str:
+    """Return a section's title, whether or not it has been wrapped."""
+    base = group.property(_BASE_TITLE_PROPERTY)
+    if base:
+        return str(base)
+    return str(group.title() or "")
+
+
+def section_for(widget: QWidget):
+    """Return the section a widget lives in, or None when it is not in one."""
+    node = widget
+    while node is not None:
+        if isinstance(node, CollapsibleSection):
+            return node
+        node = node.parentWidget()
+    return None
+
+
+def is_group_expanded(group: QGroupBox) -> bool:
+    """Whether a section is open. An unwrapped widget counts as open."""
+    section = section_for(group)
+    return True if section is None else section.isExpanded()
+
+
+def set_group_expanded(group: QGroupBox, expanded: bool) -> None:
+    """Expand or collapse the section holding ``group``."""
+    section = section_for(group)
+    if section is not None:
+        section.setExpanded(expanded)
+
+
+def collapsible_sections(container: QWidget) -> list:
+    """Return a container's sections, in layout order."""
+    return list(container.findChildren(CollapsibleSection, options=Qt.FindDirectChildrenOnly))
+
+
+def collapsible_groups(container: QWidget) -> list:
+    """Return the group boxes a container's sections wrap, in layout order."""
+    groups = []
+    for section in collapsible_sections(container):
+        content = section.contentWidget()
+        if isinstance(content, QGroupBox):
+            groups.append(content)
+    if groups:
+        return groups
+    # Not wrapped yet: fall back to the container's own direct children.
     return list(container.findChildren(QGroupBox, options=Qt.FindDirectChildrenOnly))
 
 
@@ -113,42 +230,67 @@ def make_groups_collapsible(
     on_expand=None,
     settings=None,
     settings_key: str = "",
-    collapsed_height: int = 0,
-) -> list[QGroupBox]:
-    """Turn every direct-child group box of ``container`` into an accordion card.
+) -> list:
+    """Wrap every direct-child group box of ``container`` in a section card.
 
-    ``on_expand`` is called after a group is expanded: re-checking a checkable
-    QGroupBox re-enables *all* of its children wholesale, so any window that
-    gates controls on application state must re-derive that gating here.
+    The group box keeps its identity and its inner layout; it loses only its own
+    title and frame, which the section's header row now provides.
 
-    When ``settings`` and ``settings_key`` are given, each group's expanded state
-    is restored on setup and saved on every toggle.  ``collapsed_height`` pins
-    every collapsed card to the same header height; without it each card falls
-    back to its own size hint.
+    ``on_expand`` is called after a section is opened, for windows that gate
+    controls on application state and need to re-derive that gating.
     """
-    stored = _load_states(settings, settings_key)
-    groups = collapsible_groups(container)
+    layout = container.layout()
+    if layout is None:
+        return []
 
-    for group in groups:
-        base = str(group.title() or "")
-        if not base:
+    stored = _load_states(settings, settings_key)
+
+    # Collect first: the layout is rewritten as we go.
+    pending = []
+    for index in range(layout.count()):
+        item = layout.itemAt(index)
+        widget = item.widget() if item is not None else None
+        if isinstance(widget, QGroupBox):
+            pending.append((index, widget))
+
+    sections = []
+    for index, group in pending:
+        title = group_base_title(group)
+        if not title:
             continue
-        group.setProperty(_BASE_TITLE_PROPERTY, base)
-        group.setCheckable(True)
-        expanded = bool(stored.get(base, True))
-        set_group_expanded(group, expanded, collapsed_height=collapsed_height)
-        group.toggled.connect(
-            lambda checked, g=group: _on_toggled(
-                g, checked, on_expand=on_expand, settings=settings, settings_key=settings_key,
-                container=container, collapsed_height=collapsed_height,
+
+        group.setProperty(_BASE_TITLE_PROPERTY, title)
+        group.setProperty(_SECTION_BODY_PROPERTY, True)
+        group.setTitle("")
+        group.setFlat(True)
+        # Qt evaluates dynamic properties when a widget is polished, and this
+        # group was polished long ago. Without this the "sectionBody" rule never
+        # applies and the group keeps painting the frame the app stylesheet
+        # gives every QGroupBox — a second card inside the section's own.
+        _repolish(group)
+
+        section = CollapsibleSection(title, container)
+        layout.removeWidget(group)
+        section.setContentWidget(group)
+        layout.insertWidget(index, section)
+
+        section.setExpanded(bool(stored.get(title, True)), notify=False)
+        section.toggled.connect(
+            lambda expanded, s=section: _on_section_toggled(
+                s,
+                expanded,
+                on_expand=on_expand,
+                settings=settings,
+                settings_key=settings_key,
+                container=container,
             )
         )
+        sections.append(section)
 
-    return groups
+    return sections
 
 
-def _on_toggled(group, expanded, *, on_expand, settings, settings_key, container, collapsed_height=0) -> None:
-    set_group_expanded(group, expanded, collapsed_height=collapsed_height)
+def _on_section_toggled(section, expanded, *, on_expand, settings, settings_key, container) -> None:
     if expanded and callable(on_expand):
         on_expand()
     _save_states(container, settings, settings_key)
@@ -169,9 +311,9 @@ def _save_states(container, settings, settings_key: str) -> None:
     if settings is None or not settings_key:
         return
     payload = {
-        group_base_title(group): bool(group.isChecked())
-        for group in collapsible_groups(container)
-        if group.isCheckable() and group_base_title(group)
+        section.title(): bool(section.isExpanded())
+        for section in collapsible_sections(container)
+        if section.title()
     }
     try:
         settings.setValue(settings_key, json.dumps(payload))

@@ -18,6 +18,7 @@ from PySide6.QtCore import QThread
 from PySide6.QtWidgets import QApplication
 
 from src.UI.main_window import MainWindow
+from src.UI.widgets.collapsible_sections import section_for
 
 NROWS = 20
 NCOLS = 40
@@ -78,7 +79,7 @@ def offline(monkeypatch):
 def window(archive, offline):
     _app()
     win = MainWindow(theme=None)
-    win.timeline_prefetch_chk.setChecked(False)
+    win.timeline_prefetch_action.setChecked(False)
     win.load_fits_into_main(archive["10:15"])
     QApplication.processEvents()
     yield win
@@ -115,13 +116,45 @@ def test_timeline_panel_describes_a_single_loaded_file(window):
     assert window.timeline_trim_end_btn.isEnabled() is False
 
 
-def test_timeline_panel_is_disabled_without_a_dataset(offline):
+def test_timeline_panel_shows_only_its_message_without_a_dataset(offline):
+    """Controls that cannot act are hidden rather than stacked up greyed out."""
     _app()
     win = MainWindow(theme=None)
+    win.show()
+    QApplication.processEvents()
     try:
-        assert win.timeline_group.isEnabled() is False
         assert _segment_labels(win) == []
         assert "Load a CALLISTO file" in win.timeline_status_label.text()
+        assert win.timeline_step_row.isHidden()
+        assert win.timeline_trim_row.isHidden()
+        assert win.timeline_list.isHidden()
+    finally:
+        win.close()
+
+
+def test_timeline_controls_appear_once_a_dataset_is_loaded(window):
+    window.show()
+    QApplication.processEvents()
+
+    assert not window.timeline_step_row.isHidden()
+    assert not window.timeline_trim_row.isHidden()
+    assert not window.timeline_list.isHidden()
+
+
+def test_reopening_the_timeline_card_does_not_resurrect_dead_controls(offline):
+    """Opening a section re-shows its children wholesale; the gate must re-run."""
+    _app()
+    win = MainWindow(theme=None)
+    win.show()
+    QApplication.processEvents()
+    try:
+        section = section_for(win.timeline_group)
+        section.setExpanded(False)
+        section.setExpanded(True)
+        QApplication.processEvents()
+
+        assert win.timeline_step_row.isHidden()
+        assert win.timeline_list.isHidden()
     finally:
         win.close()
 
@@ -153,7 +186,7 @@ def test_extend_uses_local_files_without_touching_the_archive(window, monkeypatc
 
 
 def test_multi_step_extend_adds_several_observations_at_once(window):
-    window.timeline_step_spin.setValue(2)
+    window.timeline_step_combo.setCurrentText("\u00d72")
 
     _run_extend(window, "next")
 
@@ -162,7 +195,7 @@ def test_multi_step_extend_adds_several_observations_at_once(window):
 
 
 def test_extend_stops_with_a_reason_at_the_edge_of_the_archive(window):
-    window.timeline_step_spin.setValue(1)
+    window.timeline_step_combo.setCurrentText("\u00d71")
     _run_extend(window, "previous")  # 10:00 exists
     assert _segment_labels(window)[0] == "10:00   01"
 
@@ -207,17 +240,30 @@ def test_prepending_shifts_every_time_based_marking(window):
     assert window._measurement_result.duration_s == pytest.approx(100.0)
 
 
+def _flush(win, ticks: int = 30):
+    """Let the queued replot land; plot_data defers via a zero-timer."""
+    for _ in range(ticks):
+        QApplication.processEvents()
+        QThread.msleep(5)
+
+
 def test_prepending_keeps_the_view_on_the_same_real_time(window):
     window.plot_data(window.raw_data, title="Raw")
-    QApplication.processEvents()
-    window.canvas.ax.set_xlim(400.0, 500.0)
-    QApplication.processEvents()
+    _flush(window)
+
+    # Go through the window's own view accessors rather than a specific canvas:
+    # the app renders through pyqtgraph when it is available and matplotlib
+    # otherwise, and the zoom lives with whichever one is active.
+    view = window._capture_view()
+    assert view is not None
+    window._restore_view({"xlim": (400.0, 500.0), "ylim": view["ylim"]})
+    assert window._capture_view()["xlim"] == pytest.approx((400.0, 500.0))
 
     _run_extend(window, "previous")
-    QApplication.processEvents()
+    _flush(window)
 
     span = NCOLS * SAMPLE_STEP_S
-    low, high = window.canvas.ax.get_xlim()
+    low, high = window._capture_view()["xlim"]
     assert low == pytest.approx(400.0 + span, abs=1.0)
     assert high == pytest.approx(500.0 + span, abs=1.0)
 
@@ -258,7 +304,7 @@ def test_undo_restores_shifted_annotations(window):
 # Trimming
 # -----------------------------
 def test_trim_end_drops_the_latest_observation(window):
-    window.timeline_step_spin.setValue(2)
+    window.timeline_step_combo.setCurrentText("\u00d72")
     _run_extend(window, "next")
     assert len(_segment_labels(window)) == 3
 
@@ -304,3 +350,143 @@ def test_trim_is_a_no_op_on_a_single_observation(window):
 
     assert _segment_labels(window) == ["10:15   01"]
     assert window.raw_data.shape == (NROWS, NCOLS)
+
+
+def _click_extend(win, button, timeout_ticks: int = 800):
+    """Drive the real button, so a disabled control fails the test."""
+    button.click()
+    for _ in range(timeout_ticks):
+        QApplication.processEvents()
+        if win._timeline_thread is None:
+            return
+        QThread.msleep(5)
+    raise AssertionError("timeline extension did not finish")
+
+
+def test_step_controls_stay_enabled_after_an_extend(window):
+    """The completion handler must not leave its own controls disabled.
+
+    It runs as a queued signal *before* the worker thread is asked to quit, so a
+    busy check based on QThread.isRunning() disabled Prev/Next and the step
+    counter and nothing ever switched them back on.
+    """
+    assert window.timeline_next_btn.isEnabled()
+
+    _click_extend(window, window.timeline_next_btn)
+
+    assert window.raw_data.shape == (NROWS, NCOLS * 2)
+    assert window.timeline_next_btn.isEnabled()
+    assert window.timeline_prev_btn.isEnabled()
+    assert window.timeline_step_combo.isEnabled()
+    assert window.timeline_trim_start_btn.isEnabled()
+    assert window.timeline_trim_end_btn.isEnabled()
+
+
+def test_clicking_next_repeatedly_keeps_extending(window):
+    _click_extend(window, window.timeline_next_btn)
+    assert window.raw_data.shape == (NROWS, NCOLS * 2)
+
+    _click_extend(window, window.timeline_next_btn)
+
+    assert window.raw_data.shape == (NROWS, NCOLS * 3)
+    assert _segment_labels(window) == ["10:15   01", "10:30   01", "10:45   01"]
+
+
+def test_clicking_previous_after_next_still_extends(window):
+    _click_extend(window, window.timeline_next_btn)
+    _click_extend(window, window.timeline_prev_btn)
+
+    assert window.raw_data.shape == (NROWS, NCOLS * 3)
+    assert _segment_labels(window) == ["10:00   01", "10:15   01", "10:30   01"]
+
+
+# -----------------------------
+# Processing state
+# -----------------------------
+def _enable_background_subtraction(win):
+    win._set_noise_clip_state(-5.0, 25.0, scale=win.NOISE_CLIP_SCALE_LINEAR, sync_widgets=True)
+    win.update_noise_live()
+    QApplication.processEvents()
+
+
+def test_background_subtraction_survives_an_extend(window):
+    _enable_background_subtraction(window)
+    assert window.current_plot_type == "Background Subtracted"
+
+    _run_extend(window, "next")
+
+    assert window.current_plot_type == "Background Subtracted"
+    assert window.noise_reduced_data is not None
+    assert window.noise_reduced_data.shape == (NROWS, NCOLS * 2)
+    # The whole spectrogram is background subtracted, not just the original half.
+    assert window.current_display_data.shape == (NROWS, NCOLS * 2)
+    assert window.canvas.ax.get_title().endswith("Background Subtracted")
+
+
+def test_noise_clip_thresholds_are_reapplied_to_the_added_data(window):
+    _enable_background_subtraction(window)
+
+    _run_extend(window, "next")
+
+    assert window.noise_clip_low == pytest.approx(-5.0)
+    assert window.noise_clip_high == pytest.approx(25.0)
+    values = np.asarray(window.noise_reduced_data)
+    assert float(np.nanmin(values)) >= -5.0 - 1e-6
+    assert float(np.nanmax(values)) <= 25.0 + 1e-6
+
+
+def test_rfi_cleaning_survives_an_extend(window):
+    _enable_background_subtraction(window)
+    window.apply_rfi_now()
+    QApplication.processEvents()
+    assert window.current_plot_type == "RFI Cleaned"
+    assert window._rfi_config["applied"] is True
+
+    _run_extend(window, "next")
+
+    assert window.current_plot_type == "RFI Cleaned"
+    assert window.noise_reduced_data.shape == (NROWS, NCOLS * 2)
+    # The pre-RFI product is kept so Reset to Raw still has a fallback.
+    assert window.noise_reduced_original.shape == (NROWS, NCOLS * 2)
+    assert window.noise_reduced_original_plot_type == "Background Subtracted"
+    assert window.canvas.ax.get_title().endswith("RFI Cleaned")
+
+
+def test_a_raw_view_stays_raw_after_an_extend(window):
+    assert window.current_plot_type == "Raw"
+
+    _run_extend(window, "next")
+
+    assert window.current_plot_type == "Raw"
+    assert window.noise_reduced_data is None
+    assert window.canvas.ax.get_title().endswith("Raw")
+
+
+def test_processing_state_survives_a_trim(window):
+    _run_extend(window, "next")
+    _enable_background_subtraction(window)
+    assert window.current_plot_type == "Background Subtracted"
+
+    window.trim_timeline("end")
+    QApplication.processEvents()
+
+    assert window.current_plot_type == "Background Subtracted"
+    assert window.noise_reduced_data.shape == (NROWS, NCOLS)
+
+
+def test_a_raw_view_stays_raw_even_with_thresholds_dialled_in(window):
+    """Thresholds being set is not the same as the user looking at them.
+
+    A restored project can carry clip thresholds while displaying Raw; the
+    extend must follow the view, not the thresholds.
+    """
+    _enable_background_subtraction(window)
+    window.current_plot_type = "Raw"
+    window.plot_data(window.raw_data, title="Raw")
+    QApplication.processEvents()
+    assert window._noise_clip_thresholds_active() is True
+
+    _run_extend(window, "next")
+
+    assert window.current_plot_type == "Raw"
+    assert window.canvas.ax.get_title().endswith("Raw")

@@ -163,11 +163,13 @@ from src.UI.font_utils import preferred_monospace_font_family
 from src.UI.gui_shared import fit_window_to_screen, pick_export_path, screen_available_geometry
 from src.UI.sunpy_plot_window import SunPyPlotCanvas, _rgb_to_uint8
 from src.UI.sunpy_solar_viewer import SunPyWorker, _default_cache_dir, _get_theme
-from src.UI.widgets.collapsible_sections import make_groups_collapsible, set_group_expanded
+from src.UI.widgets.collapsible_sections import (
+    is_group_expanded,
+    make_groups_collapsible,
+    set_group_expanded,
+)
 
 SIDEBAR_SECTIONS_SETTINGS_KEY = "ui/sidebar_sections_solar"
-#: Header-row height of a sidebar card; the QSS reserves this as top padding.
-SIDEBAR_HEADER_HEIGHT = 38
 
 
 # The solar image analysis window is a young, experimental feature; the title
@@ -2239,7 +2241,6 @@ class SolarDataAnalysisWindow(QMainWindow):
             on_expand=self._reapply_gating,
             settings=self._app_settings(),
             settings_key=SIDEBAR_SECTIONS_SETTINGS_KEY,
-            collapsed_height=SIDEBAR_HEADER_HEIGHT,
         )
 
     @staticmethod
@@ -2249,8 +2250,8 @@ class SolarDataAnalysisWindow(QMainWindow):
     def _on_sidebar_group_toggled(self, group: QGroupBox, expanded: bool) -> None:
         set_group_expanded(group, bool(expanded))
         if expanded:
-            # A checkable QGroupBox re-enables every child wholesale when it is
-            # re-checked, so restore the real gating/visibility state.
+            # Opening a card re-shows its children wholesale, so restore the
+            # real gating/visibility state.
             self._reapply_gating()
 
     def _reapply_gating(self) -> None:
@@ -2487,30 +2488,35 @@ class SolarDataAnalysisWindow(QMainWindow):
             QWidget#SolarDetailsPanel {{
                 background: transparent;
             }}
-            QGroupBox {{
+            QWidget#CollapsibleSection {{
                 background: {card_bg};
+                border: 1px solid {border};
+                border-radius: 12px;
+            }}
+            QWidget#SectionBody {{
+                background: transparent;
+            }}
+            /* The header row is the whole control: click anywhere on it. */
+            QToolButton#SectionHeader {{
+                background: transparent;
                 border: none;
                 border-radius: 12px;
-                margin: 0px;
-                padding: 36px 12px 12px 12px;
+                padding: 13px 14px;
+                text-align: left;
+                font-size: 15px;
                 font-weight: 600;
                 color: {text};
             }}
-            /* Collapsing hides the children and flips this property; dropping
-               the bottom padding leaves nothing but the header row. */
-            QGroupBox[collapsed="true"] {{
-                padding-bottom: 0px;
+            QToolButton#SectionHeader:hover {{
+                background: {field_bg};
             }}
-            QGroupBox::title {{
-                subcontrol-origin: border;
-                subcontrol-position: top left;
-                padding: 10px 12px;
-                color: {text};
+            QGroupBox[sectionBody="true"] {{
                 background: transparent;
-            }}
-            QGroupBox::indicator {{
-                width: 0px;
-                height: 0px;
+                border: none;
+                margin: 0px;
+                padding: 0px;
+                font-weight: 400;
+                color: {text};
             }}
             QLabel {{
                 color: {text};
@@ -4398,9 +4404,7 @@ class SolarDataAnalysisWindow(QMainWindow):
     def _on_frame_size_changed(self) -> None:
         is_cutout = self._frame_size_mode() == SIZE_CUTOUT
         # Never re-show the cutout fields inside a collapsed accordion card.
-        source_expanded = (
-            not self.data_source_group.isCheckable() or self.data_source_group.isChecked()
-        )
+        source_expanded = is_group_expanded(self.data_source_group)
         self.cutout_widget.setVisible(is_cutout and source_expanded)
         self._update_size_estimate()
 
@@ -5461,7 +5465,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         # (they are also disabled — see _set_loaded_state — so tests that only
         # check enabled state keep passing). Never re-show a widget inside a
         # collapsed accordion group.
-        mode_expanded = not self.mode_group.isCheckable() or self.mode_group.isChecked()
+        mode_expanded = is_group_expanded(self.mode_group)
         disk_visible = cls in (DISK_EUV, MAGNETOGRAPH, UNKNOWN) and mode_expanded
         for widget in (
             self.composite_btn,
@@ -5472,9 +5476,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         ):
             widget.setVisible(disk_visible)
         # Helioviewer quicklook only exists for SOHO/LASCO.
-        source_expanded = (
-            not self.data_source_group.isCheckable() or self.data_source_group.isChecked()
-        )
+        source_expanded = is_group_expanded(self.data_source_group)
         is_lasco_observable = self._current_observable()[0] == "LASCO"
         self.live_preview_btn.setVisible(is_lasco_observable and source_expanded)
 

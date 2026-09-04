@@ -25,6 +25,7 @@ from src.Backend.solar_data_analysis import AiaFrameSet, AiaMetadataRegion, fram
 from src.Backend.sunpy_archive import DATA_KIND_MAP, SunPyQuerySpec, SunPySearchResult, SunPySearchRow
 from src.UI import solar_data_analysis_window as solar_mod
 from src.UI.solar_data_analysis_window import SolarDataAnalysisWindow
+from src.UI.widgets.collapsible_sections import section_for
 
 
 def _app():
@@ -633,16 +634,44 @@ def test_sidebar_master_collapse_and_restore():
 def test_sidebar_group_accordion_collapses_and_regates():
     _app()
     win = SolarDataAnalysisWindow()
-    assert win.mode_group.isCheckable()
+    section = section_for(win.mode_group)
+    assert section is not None
+    # The header row is the control; the group box itself is no longer checkable.
+    assert win.mode_group.isCheckable() is False
+    assert section.isExpanded() is True
 
-    win.mode_group.setChecked(False)  # collapse Analysis Modes
+    section.header().click()  # collapse Analysis Modes
+    assert section.isExpanded() is False
     assert win.plot_mode_btn.isHidden()
-    win.mode_group.setChecked(True)  # expand again
+
+    section.header().click()  # expand again
+    assert section.isExpanded() is True
     assert not win.plot_mode_btn.isHidden()
-    # Expanding a checkable group re-enables children wholesale; the re-gate
-    # must restore the unloaded state (nothing loaded -> tools disabled).
+    # Re-opening a card re-shows its children wholesale; the re-gate must
+    # restore the unloaded state (nothing loaded -> tools disabled).
     assert not win.difference_mode_btn.isEnabled()
     assert not win.lightcurve_btn.isEnabled()
+    win.close()
+
+
+def test_collapsed_sidebar_card_does_not_re_show_its_conditional_widgets():
+    """Gating runs while a card is shut; it must not re-show what is inside.
+
+    _apply_instrument_visibility and _on_frame_size_changed set widgets visible
+    based on the selected instrument. Both ask whether the owning card is open
+    first, and that question used to be answered by the group box's check state.
+    """
+    _app()
+    win = SolarDataAnalysisWindow()
+    section = section_for(win.mode_group)
+    section.header().click()
+    assert section.isExpanded() is False
+
+    win._apply_instrument_visibility()
+    win._on_frame_size_changed()
+
+    assert win.plot_mode_btn.isHidden()
+    assert win.composite_btn.isHidden()
     win.close()
 
 
