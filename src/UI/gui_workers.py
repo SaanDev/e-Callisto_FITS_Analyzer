@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 
 import numpy as np
 import requests
-from PySide6.QtCore import QCoreApplication, QObject, QStandardPaths, Signal, Slot
+from PySide6.QtCore import QCoreApplication, QObject, QRunnable, QStandardPaths, Signal, Slot
 
 from src.Backend.batch_processing import (
     BACKGROUND_METHOD_PLOTUTIL,
@@ -736,5 +736,149 @@ class BatchProcessWorker(QObject):
                 "results": results,
                 "errors": errors,
                 "warnings": warnings,
+            }
+        )
+
+
+class TimelineProbeWorker(QObject, QRunnable):
+    """Report whether adjacent observations exist, optionally prefetching them.
+
+    Runs on the global QThreadPool rather than a QThread: probing is an
+    unattended background nicety, and a QThread destroyed while its blocking
+    HTTP call is still in flight aborts the process.
+    """
+
+    finished = Signal(object)
+
+    def __init__(self, state, *, prefetch: bool = False):
+        QObject.__init__(self)
+        QRunnable.__init__(self)
+        self.state = state
+        self.prefetch = bool(prefetch)
+        self._cancelled = False
+        self.setAutoDelete(True)
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    @Slot()
+    def run(self):
+        from src.Backend import callisto_timeline
+        from src.Backend.callisto_archive import build_archive_session
+
+        payload = {}
+        session = None
+        try:
+            session = build_archive_session()
+            for direction in ("next", "previous"):
+                if self._cancelled:
+                    return
+                available, reason = callisto_timeline.probe_segment(
+                    self.state, direction, session=session
+                )
+                payload[direction] = (available, reason)
+                if available and self.prefetch and not self._cancelled:
+                    try:
+                        callisto_timeline.resolve_segment(
+                            self.state, direction, session=session
+                        )
+                    except Exception:
+                        # Prefetch is best-effort; the real fetch will report.
+                        pass
+        except Exception:
+            payload = {}
+        finally:
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+
+        if not self._cancelled:
+            self.finished.emit(payload)
+
+
+class TimelineExtendWorker(QObject):
+    """Fetch adjacent observations and re-combine the dataset off the GUI thread."""
+
+    progress_text = Signal(str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, state, direction: str, *, steps: int = 1, combine_options=None):
+        super().__init__()
+        self.state = state
+        self.direction = str(direction)
+        self.steps = max(1, int(steps or 1))
+        self.combine_options = dict(combine_options or {})
+
+    @Slot()
+    def run(self):
+        from src.Backend import callisto_timeline
+        from src.Backend.burst_processor import combine_compatible
+        from src.Backend.callisto_archive import build_archive_session
+
+        state = self.state
+        added = 0
+        session = None
+        try:
+            session = build_archive_session()
+            for step in range(self.steps):
+                self.progress_text.emit(
+                    f"Fetching observation {step + 1} of {self.steps}..."
+                )
+                try:
+                    paths = callisto_timeline.resolve_segment(
+                        state, self.direction, session=session
+                    )
+                except callisto_timeline.TimelineUnavailable as exc:
+                    if added == 0:
+                        self.failed.emit(str(exc))
+                        return
+                    # Partial success: keep what we already have.
+                    self.progress_text.emit(f"Stopped after {added}: {exc}")
+                    break
+
+                merged = callisto_timeline.extended_paths(state, paths, self.direction)
+                state = callisto_timeline.describe_timeline(merged)
+                added += 1
+        except Exception as exc:
+            self.failed.emit(f"Could not extend the timeline:\n{exc}")
+            return
+        finally:
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+
+        if added == 0:
+            self.failed.emit("No further observations are available.")
+            return
+
+        self.progress_text.emit("Combining...")
+        try:
+            combined = combine_compatible(state.paths, **self.combine_options)
+        except Exception as exc:
+            self.failed.emit(f"The extended selection could not be combined:\n{exc}")
+            return
+
+        try:
+            callisto_cache.enforce_cache_limit()
+        except Exception:
+            pass
+
+        self.finished.emit(
+            {
+                "combined": combined,
+                "direction": self.direction,
+                "added": added,
+                # Prepending moves the existing samples later on the relative
+                # axis; appending leaves them where they were.
+                "align": (
+                    "end"
+                    if self.direction == callisto_timeline.DIRECTION_PREVIOUS
+                    else "start"
+                ),
             }
         )

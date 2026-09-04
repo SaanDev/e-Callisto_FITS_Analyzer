@@ -1366,3 +1366,17 @@ def group_combinable_paths(
 
     output.sort(key=lambda item: item[0])
     return [group for _idx, group in output]
+
+
+def combined_combine_options(combined) -> dict:
+    """Extract the frequency-combine settings a combined payload was built with.
+
+    Re-combining an extended selection has to reuse them, otherwise a gap-filled
+    dataset silently re-renders with the defaults.
+    """
+    payload = combined if isinstance(combined, dict) else {}
+    options = {}
+    for key in ("gap_fill", "overlap_policy", "overlap_connection_mhz"):
+        if payload.get(key, None) is not None:
+            options[key] = payload[key]
+    return options

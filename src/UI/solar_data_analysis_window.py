@@ -163,6 +163,9 @@ from src.UI.font_utils import preferred_monospace_font_family
 from src.UI.gui_shared import fit_window_to_screen, pick_export_path, screen_available_geometry
 from src.UI.sunpy_plot_window import SunPyPlotCanvas, _rgb_to_uint8
 from src.UI.sunpy_solar_viewer import SunPyWorker, _default_cache_dir, _get_theme
+from src.UI.widgets.collapsible_sections import make_groups_collapsible, set_group_expanded
+
+SIDEBAR_SECTIONS_SETTINGS_KEY = "ui/sidebar_sections_solar"
 
 
 # The solar image analysis window is a young, experimental feature; the title
@@ -2228,30 +2231,20 @@ class SolarDataAnalysisWindow(QMainWindow):
         return bar
 
     def _make_sidebar_groups_collapsible(self) -> None:
-        """Accordion behaviour: each sidebar group collapses to its title.
-
-        Qt's checkable QGroupBox provides the click affordance; unchecking hides
-        the group's children so the box shrinks to a single row. An arrow in the
-        title shows the state (the built-in indicator is hidden by the style).
-        """
-        for group in self.controls_panel.findChildren(QGroupBox, options=Qt.FindDirectChildrenOnly):
-            group.setProperty("baseTitle", group.title())
-            group.setCheckable(True)
-            group.setChecked(True)
-            self._set_group_title_arrow(group, True)
-            group.toggled.connect(
-                lambda expanded, g=group: self._on_sidebar_group_toggled(g, expanded)
-            )
+        """Accordion behaviour: each sidebar group collapses to its title."""
+        make_groups_collapsible(
+            self.controls_panel,
+            on_expand=self._reapply_gating,
+            settings=self._app_settings(),
+            settings_key=SIDEBAR_SECTIONS_SETTINGS_KEY,
+        )
 
     @staticmethod
     def _set_group_title_arrow(group: QGroupBox, expanded: bool) -> None:
-        base = str(group.property("baseTitle") or group.title())
-        group.setTitle(("▾  " if expanded else "▸  ") + base)
+        set_group_expanded(group, expanded)
 
     def _on_sidebar_group_toggled(self, group: QGroupBox, expanded: bool) -> None:
-        self._set_group_title_arrow(group, bool(expanded))
-        for child in group.findChildren(QWidget, options=Qt.FindDirectChildrenOnly):
-            child.setVisible(bool(expanded))
+        set_group_expanded(group, bool(expanded))
         if expanded:
             # A checkable QGroupBox re-enables every child wholesale when it is
             # re-checked, so restore the real gating/visibility state.

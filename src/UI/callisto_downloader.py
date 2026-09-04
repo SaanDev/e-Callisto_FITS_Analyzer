@@ -10,10 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import os
-import re
 import shutil
 import tempfile
-from html import unescape
 from urllib.parse import urljoin
 import numpy as np
 import requests
@@ -21,11 +19,14 @@ from astropy.io import fits
 from src.Backend.batch_processing import PLOTUTIL_DISPLAY_LIMITS, subtract_background
 from src.Backend import callisto_cache
 from src.Backend.callisto_archive import (
+    BASE_URL,
     DOWNLOAD_TIMEOUT,
+    day_url,
     REQUEST_TIMEOUT,
     build_archive_session,
+    extract_fits_links,
 )
-from src.Backend.callisto_naming import _FITS_SUFFIXES, parse_callisto_archive_filename
+from src.Backend.callisto_naming import parse_callisto_archive_filename
 from src.Backend.fits_io import load_callisto_fits
 from src.Backend.spectral_overview import (
     SPECTRAL_OVERVIEW_FIGURE_SIZE,
@@ -55,11 +56,6 @@ from PySide6.QtWidgets import (
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
-BASE_URL = "https://soleil.i4ds.ch/solarradio/data/2002-20yy_Callisto/"
-_HREF_RE = re.compile(
-    r"""<a\b[^>]*\bhref\s*=\s*(?P<quote>['"]?)(?P<href>[^"' >]+)(?P=quote)""",
-    re.IGNORECASE,
-)
 _OVERVIEW_EXPORT_FILTERS = "PNG (*.png);;PDF (*.pdf);;EPS (*.eps);;SVG (*.svg);;TIFF (*.tiff)"
 
 CALLISTO_STATIONS = (
@@ -91,25 +87,6 @@ class CallistoEventCandidate:
     filename: str
     url: str
     receiver_id: str
-
-
-def extract_fits_links(html: str) -> list[str]:
-    """Extract FITS file links from a simple directory listing page."""
-    links: list[str] = []
-    seen: set[str] = set()
-
-    for match in _HREF_RE.finditer(str(html or "")):
-        href = unescape(match.group("href")).strip()
-        href = href.split("#", 1)[0].split("?", 1)[0]
-        href_low = href.lower()
-        if not href_low.endswith(_FITS_SUFFIXES):
-            continue
-        if href in seen:
-            continue
-        seen.add(href)
-        links.append(href)
-
-    return links
 
 
 def _station_key(value: str) -> str:
@@ -314,7 +291,7 @@ class FetchWorker(QObject):
         return check_archive_server(client)
 
     def _day_url(self) -> str:
-        return f"{BASE_URL}{self.date.year}/{self.date.month:02}/{self.date.day:02}/"
+        return day_url(self.date)
 
     def run(self):
         results: list[tuple[str, str]] = []
@@ -372,7 +349,7 @@ class EventFetchWorker(QObject):
         self.stations = [str(station or "").strip() for station in stations if str(station or "").strip()]
 
     def _day_url(self, date_py) -> str:
-        return f"{BASE_URL}{date_py.year}/{date_py.month:02}/{date_py.day:02}/"
+        return day_url(date_py)
 
     def run(self):
         try:
@@ -463,7 +440,7 @@ class SpectralOverviewWorker(QObject):
             raise SpectralOverviewCancelled("Spectral overview generation was cancelled.")
 
     def _day_url(self) -> str:
-        return f"{BASE_URL}{self.date.year}/{self.date.month:02}/{self.date.day:02}/"
+        return day_url(self.date)
 
     @Slot()
     def run(self):

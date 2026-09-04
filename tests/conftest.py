@@ -48,7 +48,7 @@ def _isolate_qsettings(tmp_path, monkeypatch):
 
     # Redirect modules that persist settings, but only if already imported, so
     # that pure backend test runs are not forced to import the Qt UI layer.
-    for module_name in ("src.UI.sunpy_solar_viewer",):
+    for module_name in ("src.UI.sunpy_solar_viewer", "src.UI.main_window"):
         module = sys.modules.get(module_name)
         if module is not None and hasattr(module, "_make_settings"):
             monkeypatch.setattr(module, "_make_settings", _temp_settings, raising=False)

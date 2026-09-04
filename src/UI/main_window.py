@@ -27,7 +27,7 @@ from matplotlib.path import Path
 from matplotlib.ticker import FixedLocator, FuncFormatter, LogLocator, NullFormatter, ScalarFormatter
 from matplotlib.widgets import LassoSelector, RectangleSelector
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from PySide6.QtCore import QByteArray, QBuffer, QEasingCurve, QIODevice, QPropertyAnimation, QSettings, QSize, QStandardPaths, Qt, QThread, QTimer, QUrl, Slot
+from PySide6.QtCore import QByteArray, QBuffer, QEasingCurve, QIODevice, QPropertyAnimation, QSettings, QSize, QStandardPaths, Qt, QThread, QThreadPool, QTimer, QUrl, Slot
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -66,6 +66,9 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSlider,
+    QAbstractItemView,
+    QListWidget,
+    QListWidgetItem,
     QSpinBox,
     QSplitter,
     QStackedLayout,
@@ -110,6 +113,8 @@ from src.Backend.goes_overlay import (
     preferred_goes_satellite_numbers_for_time,
 )
 from src.Backend.measurements import MeasurementPoint, MeasurementResult, calculate_two_point_measurement
+from src.Backend.burst_processor import combine_compatible, combined_combine_options
+from src.Backend.callisto_timeline import describe_timeline, trimmed_paths
 from src.Backend.presets import (
     PRESET_SCHEMA_VERSION,
     build_preset,
@@ -195,12 +200,27 @@ from src.UI.gui_workers import (
     DownloaderImportWorker,
     GoesOverlayLoadWorker,
     ProjectReportWorker,
+    TimelineExtendWorker,
+    TimelineProbeWorker,
     UpdateCheckWorker,
     UpdateDownloadWorker,
 )
 from src.UI.mpl_style import style_axes
 from src.UI.utils.cme_helper_client import CMEHelperClient
 from src.version import APP_NAME, APP_ORG, APP_VERSION
+from src.UI.widgets.collapsible_sections import make_groups_collapsible
+
+SIDEBAR_SECTIONS_SETTINGS_KEY = "ui/sidebar_sections_main"
+
+
+def _make_settings() -> QSettings:
+    """Return the persistent settings store.
+
+    Wrapped in a module-level factory so tests can redirect it to an isolated
+    location (the two-arg QSettings(org, app) constructor always uses the
+    native backend, which cannot be redirected).
+    """
+    return QSettings(APP_ORG, APP_NAME)
 
 
 GOES_OVERLAY_CHANNEL_COLORS = {
@@ -256,7 +276,7 @@ class MainWindow(QMainWindow):
             self.theme.themeChanged.connect(self._on_theme_changed)
         if self.theme and hasattr(self.theme, "viewModeChanged"):
             self.theme.viewModeChanged.connect(lambda _mode: self._sync_view_mode_actions())
-        self._ui_settings = QSettings(APP_ORG, APP_NAME)
+        self._ui_settings = _make_settings()
         self._max_auto_clean_isolated = bool(
             self._ui_settings.value("processing/max_auto_clean_isolated", True, type=bool)
         )
@@ -265,6 +285,11 @@ class MainWindow(QMainWindow):
             if (self.theme and hasattr(self.theme, "view_mode"))
             else self._normalize_view_mode(self._ui_settings.value("ui/view_mode", "modern"))
         )
+        self._timeline_thread = None
+        self._timeline_worker = None
+        self._timeline_undo_state = None
+        self._timeline_probe_worker = None
+        self._combined_options = {}
         self._cme_helper_client = CMEHelperClient(theme_manager=self.theme, parent=self)
         self._cme_viewer = None
         self._sunpy_window = None
@@ -783,6 +808,8 @@ class MainWindow(QMainWindow):
         self.analysis_summary_label.setWordWrap(True)
         analysis_summary_layout.addWidget(self.analysis_summary_label)
 
+        self.timeline_group = self._build_timeline_section()
+
         self.measurement_readout = MeasurementReadout("Ruler Measurement", self)
         self.measurement_readout.clearRequested.connect(self.clear_ruler_measurement)
 
@@ -795,6 +822,7 @@ class MainWindow(QMainWindow):
         side_panel_layout.setContentsMargins(10, 10, 10, 10)
         side_panel_layout.setSpacing(12)
 
+        side_panel_layout.addWidget(self.timeline_group)
         side_panel_layout.addWidget(slider_group)
         side_panel_layout.addWidget(self.units_group_box)
         side_panel_layout.addWidget(self.graph_group)
@@ -804,6 +832,7 @@ class MainWindow(QMainWindow):
 
         # Consistent width for all groups (better on Windows DPI scaling)
         SIDEBAR_W = 250
+        self.timeline_group.setMaximumWidth(SIDEBAR_W)
         slider_group.setMaximumWidth(SIDEBAR_W)
         self.units_group_box.setMaximumWidth(SIDEBAR_W)
         self.graph_group.setMaximumWidth(SIDEBAR_W)
@@ -843,10 +872,12 @@ class MainWindow(QMainWindow):
         # -------------------------
         if not (self.theme and hasattr(self.theme, "set_view_mode")):
             sidebar_style = self._classic_sidebar_qss()
+            self.timeline_group.setStyleSheet(sidebar_style)
             slider_group.setStyleSheet(sidebar_style)
             self.units_group_box.setStyleSheet(sidebar_style)
             self.graph_group.setStyleSheet(sidebar_style)
             self.analysis_summary_group.setStyleSheet(sidebar_style)
+            self.measurement_readout.setStyleSheet(sidebar_style)
 
         # -------------------------
         # Main layout: draggable splitter (sidebar | viewer) with the
@@ -883,6 +914,14 @@ class MainWindow(QMainWindow):
         container_layout.addWidget(splitter)
         self.setCentralWidget(container)
         self._set_sidebar_collapsed(False, animate=False)
+
+        make_groups_collapsible(
+            self.side_scroll.widget(),
+            on_expand=self._sync_toolbar_enabled_states,
+            settings=self._ui_settings,
+            settings_key=SIDEBAR_SECTIONS_SETTINGS_KEY,
+        )
+        self._refresh_timeline_panel()
 
         # ----- Menu Bar -----
         menubar = self.menuBar()
@@ -955,6 +994,20 @@ class MainWindow(QMainWindow):
         self.redo_action = QAction("Redo", self)
         self.redo_action.setShortcut("Ctrl+Shift+Z")
         edit_menu.addAction(self.redo_action)
+
+        edit_menu.addSeparator()
+
+        self.timeline_prev_action = QAction("Add Previous Observation", self)
+        self.timeline_prev_action.setShortcut("Ctrl+Shift+Left")
+        self.timeline_prev_action.setEnabled(False)
+        self.timeline_prev_action.triggered.connect(lambda: self.extend_timeline("previous"))
+        edit_menu.addAction(self.timeline_prev_action)
+
+        self.timeline_next_action = QAction("Add Next Observation", self)
+        self.timeline_next_action.setShortcut("Ctrl+Shift+Right")
+        self.timeline_next_action.setEnabled(False)
+        self.timeline_next_action.triggered.connect(lambda: self.extend_timeline("next"))
+        edit_menu.addAction(self.timeline_next_action)
 
         edit_menu.addSeparator()
 
@@ -1431,10 +1484,12 @@ class MainWindow(QMainWindow):
 
         self.setStyleSheet(main_qss)
         for widget in (
+            getattr(self, "timeline_group", None),
             getattr(self, "slider_group", None),
             getattr(self, "units_group_box", None),
             getattr(self, "graph_group", None),
             getattr(self, "analysis_summary_group", None),
+            getattr(self, "measurement_readout", None),
         ):
             if widget is not None:
                 widget.setStyleSheet(sidebar_qss)
@@ -1462,6 +1517,16 @@ class MainWindow(QMainWindow):
         return """
         QGroupBox {
             font-weight: bold;
+        }
+        /* The accordion arrow in the title is the affordance; Qt's own
+           checkbox indicator would read as a second, conflicting control. */
+        QGroupBox::indicator {
+            width: 0px;
+            height: 0px;
+        }
+        QSpinBox#TimelineStepSpin {
+            min-width: 34px;
+            max-width: 56px;
         }
         QFrame#NoiseThresholdValueCard {
             border: 1px solid #c8d0db;
@@ -1712,6 +1777,13 @@ class MainWindow(QMainWindow):
             padding: 0 4px;
             color: {text};
         }}
+
+        /* The accordion arrow in the title is the affordance; Qt's own
+           checkbox indicator would read as a second, conflicting control. */
+        QGroupBox::indicator {{
+            width: 0px;
+            height: 0px;
+        }}
         QLabel {{
             font-size: 12px;
             color: {text};
@@ -1765,6 +1837,13 @@ class MainWindow(QMainWindow):
         }}
         QSpinBox {{
             min-width: 90px;
+        }}
+        /* The step counter sits between two buttons on one 250 px row, so it
+           must opt out of the wide default the font-size spinners rely on. */
+        QSpinBox#TimelineStepSpin {{
+            min-width: 34px;
+            max-width: 56px;
+            padding: 4px 2px;
         }}
         QCheckBox, QRadioButton {{
             spacing: 6px;
@@ -1995,6 +2074,13 @@ class MainWindow(QMainWindow):
     def _sync_toolbar_enabled_states(self):
         has_file = getattr(self, "raw_data", None) is not None
         has_noise = getattr(self, "noise_reduced_data", None) is not None
+
+        # Expanding a collapsed QGroupBox re-enables its children wholesale, so
+        # the sidebar gating has to be re-derived here rather than set once.
+        if getattr(self, "graph_group", None) is not None:
+            self.graph_group.setEnabled(has_file)
+        if getattr(self, "timeline_group", None) is not None:
+            self.timeline_group.setEnabled(self._timeline_state() is not None)
         has_undo = len(getattr(self, "_undo_stack", [])) > 0
         has_redo = len(getattr(self, "_redo_stack", [])) > 0
         filename = getattr(self, "filename", "")
@@ -3306,30 +3392,26 @@ class MainWindow(QMainWindow):
         ut_start_sec: float | None = None,
         combined_mode: str | None = None,
         combined_sources: list[str] | None = None,
+        combined_options: dict | None = None,
         gap_row_mask=None,
         frequency_step_mhz: float | None = None,
         plot_title: str = "Raw",
         log_message: str | None = None,
     ):
-        self.raw_data = data
-        self._invalidate_noise_cache()
-        self.freqs = freqs
-        self.time = time
-        self.filename = str(filename or "")
-
-        self._fits_header0 = header0.copy() if header0 is not None else None
-        self._fits_source_path = source_path
-
-        self._is_combined = bool(combined_mode)
-        self._combined_mode = combined_mode
-        self._combined_sources = list(combined_sources or [])
-        self._gap_row_mask = None if gap_row_mask is None else np.asarray(gap_row_mask, dtype=bool).ravel()
-        self._frequency_step_mhz = None if frequency_step_mhz is None else float(frequency_step_mhz)
-        self._update_frequency_axis_state()
-
-        if ut_start_sec is None and header0 is not None:
-            ut_start_sec = extract_ut_start_sec(header0)
-        self.ut_start_sec = ut_start_sec
+        self._assign_dataset_arrays(
+            data=data,
+            freqs=freqs,
+            time=time,
+            filename=filename,
+            header0=header0,
+            source_path=source_path,
+            ut_start_sec=ut_start_sec,
+            combined_mode=combined_mode,
+            combined_sources=combined_sources,
+            combined_options=combined_options,
+            gap_row_mask=gap_row_mask,
+            frequency_step_mhz=frequency_step_mhz,
+        )
 
         self._reset_runtime_state_for_loaded_data()
         self._reset_noise_controls_to_defaults()
@@ -3345,8 +3427,197 @@ class MainWindow(QMainWindow):
 
         self._project_path = None
         self._mark_project_dirty()
+        self._refresh_timeline_panel()
         if log_message:
             self._log_operation(str(log_message))
+
+    def _assign_dataset_arrays(
+        self,
+        *,
+        data,
+        freqs,
+        time,
+        filename: str,
+        header0=None,
+        source_path: str | None = None,
+        ut_start_sec: float | None = None,
+        combined_mode: str | None = None,
+        combined_sources: list[str] | None = None,
+        combined_options: dict | None = None,
+        gap_row_mask=None,
+        frequency_step_mhz: float | None = None,
+    ) -> None:
+        """Point the window at a new dataset without touching feature state.
+
+        Shared by the full load path and by in-place timeline extension so the
+        two can never disagree about what describes "the current dataset".
+        """
+        self.raw_data = data
+        self._invalidate_noise_cache()
+        self.freqs = freqs
+        self.time = time
+        self.filename = str(filename or "")
+
+        self._fits_header0 = header0.copy() if header0 is not None else None
+        self._fits_source_path = source_path
+
+        self._is_combined = bool(combined_mode)
+        self._combined_mode = combined_mode
+        self._combined_sources = list(combined_sources or [])
+        self._combined_options = dict(combined_options or {})
+        self._gap_row_mask = None if gap_row_mask is None else np.asarray(gap_row_mask, dtype=bool).ravel()
+        self._frequency_step_mhz = None if frequency_step_mhz is None else float(frequency_step_mhz)
+        self._update_frequency_axis_state()
+
+        if ut_start_sec is None and header0 is not None:
+            ut_start_sec = extract_ut_start_sec(header0)
+        self.ut_start_sec = ut_start_sec
+
+    def _time_shift_for_new_axis(self, new_time, *, align: str) -> float:
+        """How far the retained samples move on the relative time axis.
+
+        Appending (or trimming the end) leaves the existing samples where they
+        were.  Prepending (or trimming the start) re-bases the axis at the new
+        first observation, so everything the user already marked moves by the
+        difference between the two axes at the point where they overlap.
+        """
+        old_time = getattr(self, "time", None)
+        if align != "end" or old_time is None or new_time is None:
+            return 0.0
+        old_len = int(np.asarray(old_time).size)
+        new_len = int(np.asarray(new_time).size)
+        overlap = min(old_len, new_len)
+        if overlap <= 0:
+            return 0.0
+        return float(np.asarray(new_time)[new_len - overlap]) - float(
+            np.asarray(old_time)[old_len - overlap]
+        )
+
+    def _apply_extended_dataset(self, combined, *, align: str = "start") -> None:
+        """Swap in a re-combined dataset, keeping the user's work in place.
+
+        Unlike :meth:`_apply_loaded_dataset` this preserves annotations, the
+        ruler measurement and drift picks.  Adding an earlier observation moves
+        every existing sample later on the relative time axis, so those
+        coordinates are shifted by the same amount to stay on their features.
+        """
+        shift = self._time_shift_for_new_axis(combined.get("time", None), align=align)
+        view = self._capture_view()
+
+        self._assign_dataset_arrays(
+            data=combined["data"],
+            freqs=combined["freqs"],
+            time=combined["time"],
+            filename=combined.get("filename", self.filename),
+            header0=combined.get("header0", None),
+            source_path=combined.get("source_path", None),
+            ut_start_sec=combined.get("ut_start_sec", None),
+            combined_mode=combined.get("combine_type", None),
+            combined_sources=combined.get("sources", []),
+            combined_options=combined_combine_options(combined),
+            gap_row_mask=combined.get("gap_row_mask", None),
+            frequency_step_mhz=combined.get("frequency_step_mhz", None),
+        )
+
+        if shift:
+            self._shift_feature_time_coordinates(shift)
+
+        # The array shape changed, so anything derived from it must be redone.
+        self.noise_reduced_data = None
+        self.noise_reduced_original = None
+        self.current_display_data = None
+        self._current_plot_source_data = None
+        self.lasso_mask = None
+
+        plot_source = self.raw_data
+        title = "Raw"
+        if self._apply_noise_clip_to_current_data():
+            plot_source = self.noise_reduced_data
+            title = "Background Subtracted"
+
+        restore_view = self._shifted_view(view, shift)
+        self.plot_data(plot_source, title=title, restore_view=restore_view)
+        self._render_annotations()
+        self._mark_project_dirty()
+        self._refresh_timeline_panel()
+        self._sync_toolbar_enabled_states()
+
+    @staticmethod
+    def _shifted_view(view, shift: float):
+        """Offset a captured view's x-limits so it frames the same real time."""
+        if not view or not shift:
+            return view
+        xlim = view.get("xlim", None)
+        if not xlim or len(xlim) != 2:
+            return view
+        moved = dict(view)
+        moved["xlim"] = (float(xlim[0]) + shift, float(xlim[1]) + shift)
+        return moved
+
+    def _shift_feature_time_coordinates(self, shift: float) -> None:
+        """Move every time-based user marking by ``shift`` seconds."""
+        shift = float(shift)
+
+        shifted_annotations = []
+        for ann in list(getattr(self, "_annotations", []) or []):
+            item = dict(ann or {})
+            points = item.get("points") or []
+            item["points"] = [[float(p[0]) + shift, float(p[1])] for p in points if len(p) >= 2]
+            shifted_annotations.append(item)
+        self._annotations = normalize_annotations(shifted_annotations)
+
+        result = getattr(self, "_measurement_result", None)
+        if result is not None:
+            try:
+                self._measurement_result = calculate_two_point_measurement(
+                    (result.point1.time_s + shift, result.point1.frequency_mhz),
+                    (result.point2.time_s + shift, result.point2.frequency_mhz),
+                )
+            except Exception:
+                self._measurement_result = None
+
+        capture = list(getattr(self, "_measurement_capture_points", []) or [])
+        if capture:
+            self._measurement_capture_points = [
+                (float(p[0]) + shift, float(p[1])) for p in capture if len(p) >= 2
+            ]
+
+        drift = list(getattr(self, "drift_points", []) or [])
+        if drift:
+            self.drift_points = [
+                (float(p[0]) + shift, float(p[1])) for p in drift if len(p) >= 2
+            ]
+
+    # ---- undo integration for dataset-level edits
+    def _capture_dataset_state(self) -> dict:
+        """A normal undo state plus everything a timeline edit changes."""
+        state = self._capture_state()
+        state.update(
+            {
+                "is_combined": bool(getattr(self, "_is_combined", False)),
+                "combined_mode": getattr(self, "_combined_mode", None),
+                "combined_sources": list(getattr(self, "_combined_sources", []) or []),
+                "combined_options": dict(getattr(self, "_combined_options", {}) or {}),
+                "fits_header0": (
+                    None if getattr(self, "_fits_header0", None) is None
+                    else self._fits_header0.copy()
+                ),
+                "fits_source_path": getattr(self, "_fits_source_path", None),
+                "ut_start_sec": getattr(self, "ut_start_sec", None),
+                "annotations": normalize_annotations(getattr(self, "_annotations", [])),
+                "measurement_result": getattr(self, "_measurement_result", None),
+                "drift_points": list(getattr(self, "drift_points", []) or []),
+            }
+        )
+        return state
+
+    def _push_undo_entry(self, state) -> None:
+        if state is None:
+            return
+        self._undo_stack.append(state)
+        self._redo_stack.clear()
+        self._trim_history()
+        self._sync_toolbar_enabled_states()
 
     def load_file(self):
         if not self._maybe_prompt_save_dirty():
@@ -4589,11 +4860,314 @@ class MainWindow(QMainWindow):
             ut_start_sec=combined.get("ut_start_sec", None),
             combined_mode=combine_type,
             combined_sources=sources,
+            combined_options=combined_combine_options(combined),
             gap_row_mask=combined.get("gap_row_mask", None),
             frequency_step_mhz=combined.get("frequency_step_mhz", None),
             plot_title="Raw",
             log_message="Loaded combined dataset into main window.",
         )
+
+    # =========================
+    # Timeline: walking the dataset through the archive
+    # =========================
+    def _build_timeline_section(self) -> QGroupBox:
+        """Sidebar controls for extending and trimming the loaded observation."""
+        group = QGroupBox("Timeline")
+        group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(6)
+
+        step_row = QHBoxLayout()
+        step_row.setSpacing(4)
+        self.timeline_prev_btn = QPushButton("◀ Prev")
+        self.timeline_prev_btn.setToolTip("Add the preceding observation (Ctrl+Shift+Left)")
+        self.timeline_prev_btn.clicked.connect(lambda: self.extend_timeline("previous"))
+        self.timeline_step_spin = QSpinBox()
+        self.timeline_step_spin.setRange(1, 16)
+        self.timeline_step_spin.setValue(1)
+        self.timeline_step_spin.setObjectName("TimelineStepSpin")
+        self.timeline_step_spin.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.timeline_step_spin.setToolTip("How many observations to add per click")
+        self.timeline_next_btn = QPushButton("Next ▶")
+        self.timeline_next_btn.setToolTip("Add the following observation (Ctrl+Shift+Right)")
+        self.timeline_next_btn.clicked.connect(lambda: self.extend_timeline("next"))
+        step_row.addWidget(self.timeline_prev_btn, 1)
+        step_row.addWidget(self.timeline_step_spin, 0)
+        step_row.addWidget(self.timeline_next_btn, 1)
+        layout.addLayout(step_row)
+
+        self.timeline_list = QListWidget()
+        self.timeline_list.setObjectName("TimelineSegmentList")
+        self.timeline_list.setSelectionMode(QAbstractItemView.NoSelection)
+        self.timeline_list.setMaximumHeight(120)
+        layout.addWidget(self.timeline_list)
+
+        trim_row = QHBoxLayout()
+        trim_row.setSpacing(4)
+        self.timeline_trim_start_btn = QPushButton("Trim Start")
+        self.timeline_trim_start_btn.setToolTip("Remove the earliest observation")
+        self.timeline_trim_start_btn.clicked.connect(lambda: self.trim_timeline("start"))
+        self.timeline_trim_end_btn = QPushButton("Trim End")
+        self.timeline_trim_end_btn.setToolTip("Remove the latest observation")
+        self.timeline_trim_end_btn.clicked.connect(lambda: self.trim_timeline("end"))
+        trim_row.addWidget(self.timeline_trim_start_btn)
+        trim_row.addWidget(self.timeline_trim_end_btn)
+        layout.addLayout(trim_row)
+
+        self.timeline_prefetch_chk = QCheckBox("Prefetch adjacent files")
+        self.timeline_prefetch_chk.setChecked(True)
+        self.timeline_prefetch_chk.setToolTip(
+            "Download the neighbouring observations in the background so the next\n"
+            "step is instant. Turn off to avoid unrequested archive traffic."
+        )
+        layout.addWidget(self.timeline_prefetch_chk)
+
+        self.timeline_status_label = QLabel("No dataset loaded.")
+        self.timeline_status_label.setObjectName("TimelineStatusLabel")
+        self.timeline_status_label.setWordWrap(True)
+        layout.addWidget(self.timeline_status_label)
+
+        return group
+
+    def _timeline_source_paths(self) -> list[str]:
+        """The on-disk files backing the current dataset, if they still exist."""
+        if getattr(self, "raw_data", None) is None:
+            return []
+        sources = list(getattr(self, "_combined_sources", []) or [])
+        if not sources:
+            single = getattr(self, "_fits_source_path", None)
+            sources = [single] if single else []
+        return [path for path in sources if path and os.path.exists(path)]
+
+    def _timeline_state(self):
+        """Return the dataset's segment structure, or None when it has none."""
+        paths = self._timeline_source_paths()
+        if not paths:
+            return None
+        try:
+            return describe_timeline(paths)
+        except ValueError:
+            return None
+
+    def _refresh_timeline_panel(self) -> None:
+        if not hasattr(self, "timeline_list"):
+            return
+
+        state = self._timeline_state()
+        self.timeline_list.clear()
+
+        if state is None:
+            self.timeline_group.setEnabled(False)
+            self.timeline_status_label.setText(
+                "Load a CALLISTO file to step through the archive."
+                if getattr(self, "raw_data", None) is None
+                else "This dataset's source files are not available for stepping."
+            )
+            self._set_timeline_controls_enabled(False)
+            return
+
+        self.timeline_group.setEnabled(True)
+        for segment in state.segments:
+            label = f"{segment.observed_at:%H:%M}   " + " + ".join(segment.focus_codes)
+            self.timeline_list.addItem(QListWidgetItem(label))
+
+        count = len(state.segments)
+        noun = "observation" if count == 1 else "observations"
+        self.timeline_status_label.setText(
+            f"{state.station} · {state.start:%H:%M}–{state.stop:%H:%M} · {count} {noun}"
+        )
+        self._set_timeline_controls_enabled(True)
+        self.timeline_trim_start_btn.setEnabled(count > 1)
+        self.timeline_trim_end_btn.setEnabled(count > 1)
+        self._start_timeline_probe(state)
+
+    def _set_timeline_controls_enabled(self, enabled: bool) -> None:
+        busy = self._timeline_busy()
+        value = bool(enabled) and not busy
+        for widget in (
+            getattr(self, "timeline_prev_btn", None),
+            getattr(self, "timeline_next_btn", None),
+            getattr(self, "timeline_step_spin", None),
+            getattr(self, "timeline_trim_start_btn", None),
+            getattr(self, "timeline_trim_end_btn", None),
+        ):
+            if widget is not None:
+                widget.setEnabled(value)
+        for action in (
+            getattr(self, "timeline_prev_action", None),
+            getattr(self, "timeline_next_action", None),
+        ):
+            if action is not None:
+                action.setEnabled(value)
+
+    def _timeline_busy(self) -> bool:
+        thread = getattr(self, "_timeline_thread", None)
+        return thread is not None and thread.isRunning()
+
+    def _shutdown_timeline_threads(self, timeout_ms: int = 5000) -> None:
+        """Stop timeline background work before the window goes away."""
+        worker = getattr(self, "_timeline_probe_worker", None)
+        if worker is not None:
+            worker.cancel()
+            self._timeline_probe_worker = None
+
+        thread = getattr(self, "_timeline_thread", None)
+        if thread is not None:
+            try:
+                if thread.isRunning():
+                    thread.quit()
+                    thread.wait(timeout_ms)
+            except RuntimeError:
+                pass
+            self._timeline_thread = None
+
+    # ---- availability probing / prefetch
+    def _start_timeline_probe(self, state) -> None:
+        """Ask the archive (in the background) whether stepping is possible."""
+        previous = getattr(self, "_timeline_probe_worker", None)
+        if previous is not None:
+            previous.cancel()
+
+        prefetch = bool(
+            getattr(self, "timeline_prefetch_chk", None) is not None
+            and self.timeline_prefetch_chk.isChecked()
+        )
+        worker = TimelineProbeWorker(state, prefetch=prefetch)
+        worker.finished.connect(self._on_timeline_probe_finished)
+        self._timeline_probe_worker = worker
+        QThreadPool.globalInstance().start(worker)
+
+    @Slot(object)
+    def _on_timeline_probe_finished(self, payload):
+        if not hasattr(self, "timeline_next_btn") or self._timeline_busy():
+            return
+        payload = payload or {}
+        for direction, button, action_name in (
+            ("next", self.timeline_next_btn, "timeline_next_action"),
+            ("previous", self.timeline_prev_btn, "timeline_prev_action"),
+        ):
+            available, reason = payload.get(direction, (True, ""))
+            button.setEnabled(bool(available))
+            button.setToolTip(reason if not available else button.toolTip().split("\n")[0])
+            action = getattr(self, action_name, None)
+            if action is not None:
+                action.setEnabled(bool(available))
+
+    # ---- extend / trim
+    def extend_timeline(self, direction: str) -> None:
+        """Add the adjacent observation(s) and re-combine in place."""
+        state = self._timeline_state()
+        if state is None:
+            QMessageBox.information(
+                self, "Timeline",
+                "This dataset has no CALLISTO source files to step from.",
+            )
+            return
+        if self._timeline_busy():
+            return
+
+        steps = int(self.timeline_step_spin.value()) if hasattr(self, "timeline_step_spin") else 1
+        self._run_timeline_worker(
+            TimelineExtendWorker(
+                state,
+                direction,
+                steps=steps,
+                combine_options=dict(getattr(self, "_combined_options", {}) or {}),
+            ),
+            busy_text=f"Fetching {steps} observation(s)...",
+        )
+
+    def trim_timeline(self, edge: str) -> None:
+        """Drop the earliest or latest observation and re-combine in place."""
+        state = self._timeline_state()
+        if state is None or self._timeline_busy():
+            return
+        try:
+            remaining, _nominal_shift = trimmed_paths(state, edge)
+        except ValueError as exc:
+            QMessageBox.information(self, "Timeline", str(exc))
+            return
+
+        undo_state = self._capture_dataset_state()
+        try:
+            if len(remaining) == 1 and len(describe_timeline(remaining).segments) == 1 and \
+                    len(describe_timeline(remaining).focus_codes) == 1:
+                res = load_callisto_fits(remaining[0], memmap=False)
+                combined = {
+                    "data": res.data,
+                    "freqs": res.freqs,
+                    "time": res.time,
+                    "filename": os.path.basename(remaining[0]),
+                    "header0": res.header0,
+                    "ut_start_sec": extract_ut_start_sec(res.header0),
+                    "sources": remaining,
+                    "combine_type": None,
+                    "source_path": remaining[0],
+                }
+            else:
+                combined = combine_compatible(
+                    remaining, **(dict(getattr(self, "_combined_options", {}) or {}))
+                )
+        except Exception as exc:
+            QMessageBox.critical(self, "Timeline", f"Could not trim the dataset:\n{exc}")
+            return
+
+        self._push_undo_entry(undo_state)
+        self._apply_extended_dataset(combined, align="end" if edge == "start" else "start")
+        self._log_operation(f"Trimmed the {edge} of the timeline.")
+
+    def _run_timeline_worker(self, worker, *, busy_text: str) -> None:
+        self._timeline_thread = QThread(self)
+        self._timeline_worker = worker
+        self._timeline_undo_state = self._capture_dataset_state()
+        worker.moveToThread(self._timeline_thread)
+
+        self.timeline_status_label.setText(busy_text)
+        self._set_timeline_controls_enabled(False)
+
+        worker.progress_text.connect(self.timeline_status_label.setText)
+        worker.finished.connect(self._on_timeline_extend_finished)
+        worker.failed.connect(self._on_timeline_extend_failed)
+        worker.finished.connect(self._timeline_thread.quit)
+        worker.failed.connect(self._timeline_thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+
+        def _cleanup():
+            if self._timeline_thread is not None:
+                self._timeline_thread.deleteLater()
+            self._timeline_thread = None
+            self._timeline_worker = None
+
+        self._timeline_thread.finished.connect(_cleanup)
+        self._timeline_thread.started.connect(worker.run)
+        self._timeline_thread.start()
+
+    @Slot(object)
+    def _on_timeline_extend_finished(self, payload):
+        payload = payload or {}
+        combined = payload.get("combined", None)
+        if combined is None:
+            self._refresh_timeline_panel()
+            return
+
+        undo_state = getattr(self, "_timeline_undo_state", None)
+        if undo_state is not None:
+            self._push_undo_entry(undo_state)
+            self._timeline_undo_state = None
+
+        self._apply_extended_dataset(combined, align=str(payload.get("align", "start")))
+        added = int(payload.get("added", 0))
+        self._log_operation(
+            f"Extended the timeline {payload.get('direction', '')} by {added} observation(s)."
+        )
+
+    @Slot(str)
+    def _on_timeline_extend_failed(self, message: str):
+        self._timeline_undo_state = None
+        self._refresh_timeline_panel()
+        self.timeline_status_label.setText(str(message))
 
     def schedule_noise_update(self):
         if self.raw_data is None:
@@ -9047,10 +9621,35 @@ class MainWindow(QMainWindow):
         )
         self._set_noise_clip_state(low, high, scale=scale, sync_widgets=True)
         self._update_noise_clip_value_labels()
+        self._restore_dataset_state_extras(state)
 
         if self.raw_data is not None:
             data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
             self.plot_data(data, title=self.current_plot_type, restore_view=state.get("view"))
+
+    def _restore_dataset_state_extras(self, state) -> None:
+        """Restore the keys only a timeline edit records.
+
+        Entries pushed by ordinary operations do not carry them, so undo
+        behaviour everywhere else is unchanged.
+        """
+        if "combined_sources" not in state:
+            return
+
+        self._is_combined = bool(state.get("is_combined", False))
+        self._combined_mode = state.get("combined_mode", None)
+        self._combined_sources = list(state.get("combined_sources", []) or [])
+        self._combined_options = dict(state.get("combined_options", {}) or {})
+        header0 = state.get("fits_header0", None)
+        self._fits_header0 = None if header0 is None else header0.copy()
+        self._fits_source_path = state.get("fits_source_path", None)
+        self.ut_start_sec = state.get("ut_start_sec", None)
+        self._annotations = normalize_annotations(state.get("annotations", []))
+        self._measurement_result = state.get("measurement_result", None)
+        self._measurement_capture_points = []
+        self.drift_points = list(state.get("drift_points", []) or [])
+        self._render_annotations()
+        self._refresh_timeline_panel()
 
     def undo(self):
         if not self._undo_stack:
@@ -12291,6 +12890,7 @@ class MainWindow(QMainWindow):
             "is_combined": bool(getattr(self, "_is_combined", False)),
             "combined_mode": getattr(self, "_combined_mode", None),
             "combined_sources": list(getattr(self, "_combined_sources", []) or []),
+            "combined_options": dict(getattr(self, "_combined_options", {}) or {}),
             "graph": graph,
             "rfi": dict(getattr(self, "_rfi_config", {}) or {}),
             "annotations": normalize_annotations(getattr(self, "_annotations", [])),
@@ -12439,6 +13039,7 @@ class MainWindow(QMainWindow):
             self._is_combined = bool(meta.get("is_combined", False))
             self._combined_mode = meta.get("combined_mode", None)
             self._combined_sources = list(meta.get("combined_sources", []) or [])
+            self._combined_options = dict(meta.get("combined_options", {}) or {})
             self._update_frequency_axis_state()
             self._rfi_config = dict(meta.get("rfi") or self._rfi_config)
             self._annotations = normalize_annotations(meta.get("annotations", []))
@@ -12749,6 +13350,9 @@ class MainWindow(QMainWindow):
         if not self._maybe_prompt_save_dirty():
             event.ignore()
             return
+        # Qt aborts the process if a QThread is destroyed while still running,
+        # and the timeline probe runs unattended in the background.
+        self._shutdown_timeline_threads()
         try:
             if self._sunpy_window is not None and hasattr(self._sunpy_window, "is_operation_running"):
                 if bool(self._sunpy_window.is_operation_running()):

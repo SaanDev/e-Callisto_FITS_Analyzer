@@ -19,6 +19,7 @@ from PySide6.QtWidgets import QApplication, QGroupBox, QScrollArea, QToolBar
 
 from src.Backend.presets import build_preset
 from src.UI.main_window import MainWindow
+from src.UI.widgets.collapsible_sections import group_base_title
 
 
 def _app():
@@ -50,10 +51,13 @@ def test_main_window_restores_sidebar_and_analysis_summary():
 
     assert isinstance(win.side_scroll, QScrollArea)
     assert win.sidebar_toggle_btn is not None
-    assert win.slider_group.title() == "Noise Clipping Thresholds"
-    assert win.units_group_box.title() == "Units"
-    assert win.graph_group.title() == "Graph Properties"
-    assert win.analysis_summary_group.title() == "Analysis Summary"
+    # Sidebar sections are accordion cards, so the visible title carries an
+    # arrow; the section's identity is its base title.
+    assert group_base_title(win.slider_group) == "Noise Clipping Thresholds"
+    assert group_base_title(win.units_group_box) == "Units"
+    assert group_base_title(win.graph_group) == "Graph Properties"
+    assert group_base_title(win.analysis_summary_group) == "Analysis Summary"
+    assert group_base_title(win.timeline_group) == "Timeline"
     assert hasattr(win, "display_toolbar_widget") is False
     assert hasattr(win, "_settings_dialog") is False
 
@@ -83,8 +87,12 @@ def test_sidebar_toggle_and_controls_still_work():
     assert toolbars[0].iconSize().width() == 36
     assert toolbars[0].iconSize().height() == 36
 
-    section_titles = {group.title() for group in win.side_scroll.findChildren(QGroupBox) if group.title()}
-    assert {"Noise Clipping Thresholds", "Units", "Graph Properties", "Analysis Summary"}.issubset(section_titles)
+    section_titles = {
+        group_base_title(group) for group in win.side_scroll.findChildren(QGroupBox) if group.title()
+    }
+    assert {
+        "Timeline", "Noise Clipping Thresholds", "Units", "Graph Properties", "Analysis Summary"
+    }.issubset(section_titles)
 
     # The sidebar collapses by animating its width to 0 inside a splitter
     # (same method as the Solar Image Analysis window); the scroll area stays
@@ -343,3 +351,73 @@ def test_reset_all_restores_sidebar_controls_to_defaults():
     assert win.graph_group.isEnabled() is False
 
     win.close()
+
+
+def test_sidebar_sections_are_collapsible_accordion_cards():
+    _app()
+    win = MainWindow(theme=None)
+    win.show()
+    QApplication.processEvents()
+    try:
+        groups = win.side_scroll.widget().findChildren(
+            QGroupBox, options=Qt.FindDirectChildrenOnly
+        )
+        assert [group_base_title(g) for g in groups] == [
+            "Timeline",
+            "Noise Clipping Thresholds",
+            "Units",
+            "Graph Properties",
+            "Analysis Summary",
+            "Ruler Measurement",
+        ]
+        assert all(group.isCheckable() for group in groups)
+        assert win.units_group_box.title().startswith("▾")
+
+        expanded_height = win.units_group_box.maximumHeight()
+        win.units_group_box.setChecked(False)
+        QApplication.processEvents()
+
+        assert win.units_digits_radio.isHidden()
+        assert win.units_group_box.title().startswith("▸")
+        # Hiding the children is not enough on its own; the card itself must
+        # stop reserving a body or the "collapse" saves no space.
+        assert win.units_group_box.maximumHeight() < expanded_height
+
+        win.units_group_box.setChecked(True)
+        QApplication.processEvents()
+        assert not win.units_digits_radio.isHidden()
+    finally:
+        win.close()
+
+
+def test_expanding_a_section_does_not_defeat_its_gating():
+    _app()
+    win = MainWindow(theme=None)
+    try:
+        # Nothing loaded, so Graph Properties must stay disabled even though a
+        # checkable QGroupBox re-enables all its children when re-checked.
+        assert win.graph_group.isEnabled() is False
+        win.graph_group.setChecked(False)
+        win.graph_group.setChecked(True)
+        QApplication.processEvents()
+        assert win.graph_group.isEnabled() is False
+    finally:
+        win.close()
+
+
+def test_section_expanded_state_survives_a_restart():
+    _app()
+    first = MainWindow(theme=None)
+    try:
+        first.units_group_box.setChecked(False)
+        QApplication.processEvents()
+    finally:
+        first.close()
+
+    second = MainWindow(theme=None)
+    try:
+        assert second.units_group_box.isChecked() is False
+        assert second.units_digits_radio.isHidden()
+        assert second.slider_group.isChecked() is True
+    finally:
+        second.close()
