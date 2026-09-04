@@ -33,6 +33,7 @@ from src.Backend.batch_processing import (
     save_background_subtracted_png,
     subtract_background,
 )
+from src.Backend import callisto_cache
 from src.Backend.fits_io import extract_ut_start_sec, load_callisto_fits
 from src.Backend.goes_overlay import goes_overlay_payload_from_dict
 from src.Backend.project_report import ReportGenerationCancelled, generate_project_report_pdf
@@ -77,19 +78,15 @@ class DownloaderImportWorker(QObject):
         self.progress_range.emit(0, len(self.urls))
         self.progress_value.emit(0)
 
+        cached_count = 0
         try:
-            temp_dir = tempfile.mkdtemp(prefix="callisto_import_")
-
             for i, source in enumerate(self.urls, start=1):
                 if _is_remote_source(source):
-                    r = requests.get(source, timeout=25)
-                    r.raise_for_status()
-
-                    original_name = str(source).split("/")[-1] or f"import_{i}.fit"
-                    local_path = os.path.join(temp_dir, original_name)
-
-                    with open(local_path, "wb") as f:
-                        f.write(r.content)
+                    cached_path, was_cached = callisto_cache.fetch_cached(source)
+                    local_path = str(cached_path)
+                    if was_cached:
+                        cached_count += 1
+                        self.progress_text.emit(f"Using cached {os.path.basename(local_path)}...")
                 else:
                     local_path = os.path.abspath(os.fspath(source))
                     if not os.path.isfile(local_path):
@@ -100,6 +97,13 @@ class DownloaderImportWorker(QObject):
         except Exception as e:
             self.failed.emit(f"Failed to prepare one or more FITS files:\n{e}")
             return
+
+        if cached_count:
+            self.progress_text.emit(f"Prepared {len(local_files)} file(s), {cached_count} from cache.")
+        try:
+            callisto_cache.enforce_cache_limit()
+        except Exception:
+            pass
 
         if len(local_files) == 1:
             try:
@@ -176,19 +180,15 @@ class DownloaderComparisonWorker(QObject):
         self.progress_value.emit(0)
 
         local_files = []
+        cached_count = 0
         try:
-            temp_dir = tempfile.mkdtemp(prefix="callisto_compare_")
-
             for i, source in enumerate(self.sources, start=1):
                 if _is_remote_source(source):
-                    r = requests.get(source, timeout=25)
-                    r.raise_for_status()
-
-                    original_name = str(source).split("/")[-1] or f"compare_{i}.fit"
-                    local_path = os.path.join(temp_dir, original_name)
-
-                    with open(local_path, "wb") as f:
-                        f.write(r.content)
+                    cached_path, was_cached = callisto_cache.fetch_cached(source)
+                    local_path = str(cached_path)
+                    if was_cached:
+                        cached_count += 1
+                        self.progress_text.emit(f"Using cached {os.path.basename(local_path)}...")
                 else:
                     local_path = os.path.abspath(os.fspath(source))
                     if not os.path.isfile(local_path):
@@ -199,6 +199,13 @@ class DownloaderComparisonWorker(QObject):
         except Exception as e:
             self.failed.emit(f"Failed to prepare selected FITS files for comparison:\n{e}")
             return
+
+        if cached_count:
+            self.progress_text.emit(f"Prepared {len(local_files)} file(s), {cached_count} from cache.")
+        try:
+            callisto_cache.enforce_cache_limit()
+        except Exception:
+            pass
 
         self.finished.emit(local_files)
 

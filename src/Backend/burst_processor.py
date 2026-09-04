@@ -1176,3 +1176,193 @@ def combine_compatible(
             overlap_connection_mhz=overlap_connection_mhz,
         )
     raise ValueError(f"Unsupported combine type: {combine_type}")
+
+
+def _time_frequency_candidate_runs(paths) -> list[list[str]]:
+    """Maximal runs of consecutive timestamps that share one complete focus-code set.
+
+    Selecting a whole day and one stray file must still find the grid inside it,
+    so the search is per run rather than per station: requiring the entire
+    station group to be valid would never fire for a single-station selection.
+    """
+    by_station: dict[str, dict] = {}
+    rejected: set[str] = set()
+    for path in paths:
+        try:
+            station, obs_date, obs_time, focus_code = parse_filename(path)
+            observed_at = datetime.strptime(f"{obs_date}{obs_time}", "%Y%m%d%H%M%S")
+        except Exception:
+            continue
+        cells = by_station.setdefault(station, {}).setdefault(observed_at, {})
+        focus_key = _normalize_focus_code(focus_code)
+        if focus_key in cells:
+            # Duplicate focus code at one timestamp; leave this station to the
+            # time-only and frequency-only passes.
+            rejected.add(station)
+            continue
+        cells[focus_key] = path
+
+    runs: list[list[str]] = []
+    for station in sorted(by_station):
+        if station in rejected:
+            continue
+        grouped = by_station[station]
+
+        def _flush(stamps):
+            if len(stamps) < 2:
+                return
+            runs.append(
+                [grouped[stamp][focus] for stamp in stamps for focus in sorted(grouped[stamp])]
+            )
+
+        current: list[datetime] = []
+        for stamp in sorted(grouped):
+            focus_set = set(grouped[stamp])
+            if len(focus_set) < 2:
+                _flush(current)
+                current = []
+                continue
+            if current:
+                delta = float((stamp - current[-1]).total_seconds())
+                consecutive = MIN_CONSECUTIVE_SECONDS <= delta <= MAX_CONSECUTIVE_SECONDS
+                if not consecutive or set(grouped[current[-1]]) != focus_set:
+                    _flush(current)
+                    current = []
+            current.append(stamp)
+        _flush(current)
+
+    return runs
+
+
+def group_combinable_paths(
+    file_paths,
+    *,
+    combine: bool = True,
+    gap_fill: str = GAP_FILL_BACKGROUND,
+    overlap_policy: str = OVERLAP_SPLIT,
+    overlap_connection_mhz: float | None = None,
+) -> list[dict]:
+    """Split a selection into the largest valid combinations, leftovers as singles.
+
+    Returns one entry per resulting dataset::
+
+        {"paths": [...], "combine_type": "time_frequency"|"time"|"frequency"|None,
+         "combined": dict|None, "error": str}
+
+    ``combine=True`` carries the merged payload so callers never redo the work.
+    Groups keep the order of their earliest member in ``file_paths``.
+    """
+    options = {
+        "gap_fill": gap_fill,
+        "overlap_policy": overlap_policy,
+        "overlap_connection_mhz": overlap_connection_mhz,
+    }
+
+    paths: list[str] = []
+    seen: set[str] = set()
+    for path in file_paths or []:
+        text = str(path or "").strip()
+        if not text or text in seen:
+            continue
+        paths.append(text)
+        seen.add(text)
+    if not paths:
+        return []
+
+    if len(paths) > 1:
+        try:
+            inspection = inspect_combination(paths)
+            if inspection.get("valid", False):
+                combine_type = str(inspection.get("combine_type") or "")
+                return [
+                    {
+                        "paths": list(paths),
+                        "combine_type": combine_type,
+                        "combined": combine_compatible(paths, **options) if combine else None,
+                        "error": "",
+                    }
+                ]
+        except Exception:
+            pass
+
+    path_index = {path: idx for idx, path in enumerate(paths)}
+    consumed: set[str] = set()
+    output: list[tuple[int, dict]] = []
+
+    def _group_by(key_func):
+        groups: dict[tuple, list[str]] = {}
+        for path in paths:
+            if path in consumed:
+                continue
+            try:
+                key = key_func(path)
+            except Exception:
+                continue
+            groups.setdefault(tuple(key), []).append(path)
+        return sorted(groups.values(), key=lambda group: min(path_index[path] for path in group))
+
+    def _append(group: list[str], combine_type: str, payload) -> None:
+        for path in group:
+            consumed.add(path)
+        output.append(
+            (
+                min(path_index[path] for path in group),
+                {
+                    "paths": list(group),
+                    "combine_type": combine_type,
+                    "combined": payload,
+                    "error": "",
+                },
+            )
+        )
+
+    # A complete time x focus-code grid must be handled before the legacy
+    # time-only grouping consumes each focus code as a separate panel.
+    for group in _time_frequency_candidate_runs(paths):
+        if len(group) < 4 or any(path in consumed for path in group):
+            continue
+        try:
+            inspection = inspect_combination(group)
+            if inspection.get("valid", False) and inspection.get("combine_type") == COMBINE_TIME_FREQUENCY:
+                _append(
+                    group,
+                    COMBINE_TIME_FREQUENCY,
+                    combine_compatible(group, **options) if combine else None,
+                )
+        except Exception:
+            continue
+
+    for group in _group_by(lambda path: (parse_filename(path)[0], parse_filename(path)[3])):
+        if len(group) < 2:
+            continue
+        try:
+            if are_time_combinable(group):
+                _append(group, COMBINE_TIME, combine_time(group) if combine else None)
+        except Exception:
+            continue
+
+    for group in _group_by(lambda path: (parse_filename(path)[0], parse_filename(path)[1], parse_filename(path)[2])):
+        if len(group) < 2:
+            continue
+        try:
+            if are_frequency_combinable(group, **options):
+                _append(
+                    group,
+                    COMBINE_FREQUENCY,
+                    combine_frequency(group, **options) if combine else None,
+                )
+        except Exception:
+            continue
+
+    for path in paths:
+        if path in consumed:
+            continue
+        output.append(
+            (
+                path_index[path],
+                {"paths": [path], "combine_type": None, "combined": None, "error": ""},
+            )
+        )
+
+    output.sort(key=lambda item: item[0])
+    return [group for _idx, group in output]

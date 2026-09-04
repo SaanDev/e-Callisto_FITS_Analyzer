@@ -11,14 +11,21 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import os
 import re
+import shutil
 import tempfile
 from html import unescape
 from urllib.parse import urljoin
 import numpy as np
 import requests
-from requests.adapters import HTTPAdapter
 from astropy.io import fits
 from src.Backend.batch_processing import PLOTUTIL_DISPLAY_LIMITS, subtract_background
+from src.Backend import callisto_cache
+from src.Backend.callisto_archive import (
+    DOWNLOAD_TIMEOUT,
+    REQUEST_TIMEOUT,
+    build_archive_session,
+)
+from src.Backend.callisto_naming import _FITS_SUFFIXES, parse_callisto_archive_filename
 from src.Backend.fits_io import load_callisto_fits
 from src.Backend.spectral_overview import (
     SPECTRAL_OVERVIEW_FIGURE_SIZE,
@@ -29,35 +36,30 @@ from src.Backend.spectral_overview import (
     render_spectral_overview_figure,
 )
 from src.UI.gui_shared import fit_window_to_screen, pick_export_path
-from urllib3.util.retry import Retry
 
 from PySide6.QtCore import (
-    Qt, QDate, QDateTime, QThread, Signal, QObject, QRunnable, Slot,
+    Qt, QDate, QDateTime, QThread, QUrl, Signal, QObject, QRunnable, Slot,
     QThreadPool, QMetaObject, Q_ARG
 )
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QLabel, QPushButton, QComboBox, QVBoxLayout,
     QHBoxLayout, QDateEdit, QListWidget, QFileDialog, QMessageBox,
     QListWidgetItem, QProgressBar, QGroupBox, QDialog, QApplication,
     QCalendarWidget, QSpinBox, QTabWidget, QWidget, QDateTimeEdit,
     QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox,
-    QAbstractItemView, QGridLayout, QSizePolicy, QScrollArea
+    QAbstractItemView, QGridLayout, QSizePolicy, QScrollArea,
+    QTreeWidget, QTreeWidgetItem
 )
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
 BASE_URL = "https://soleil.i4ds.ch/solarradio/data/2002-20yy_Callisto/"
-REQUEST_TIMEOUT = 15
-DOWNLOAD_TIMEOUT = 30
-_REQUEST_RETRY_STATUS_CODES = (429, 500, 502, 503, 504)
 _HREF_RE = re.compile(
     r"""<a\b[^>]*\bhref\s*=\s*(?P<quote>['"]?)(?P<href>[^"' >]+)(?P=quote)""",
     re.IGNORECASE,
 )
-_FITS_SUFFIXES = (".fit.gz", ".fits.gz", ".fit", ".fits")
-_DATE_RE = re.compile(r"^\d{8}$")
-_TIME_RE = re.compile(r"^\d{6}$")
 _OVERVIEW_EXPORT_FILTERS = "PNG (*.png);;PDF (*.pdf);;EPS (*.eps);;SVG (*.svg);;TIFF (*.tiff)"
 
 CALLISTO_STATIONS = (
@@ -108,37 +110,6 @@ def extract_fits_links(html: str) -> list[str]:
         links.append(href)
 
     return links
-
-
-def _strip_fits_suffix(filename: str) -> str:
-    stem = os.path.basename(str(filename or "")).strip()
-    for suffix in _FITS_SUFFIXES:
-        if stem.lower().endswith(suffix):
-            return stem[: -len(suffix)]
-    return stem
-
-
-def parse_callisto_archive_filename(filename: str) -> tuple[str, datetime, str]:
-    """Return station, UTC timestamp, receiver id parsed from a CALLISTO archive filename."""
-    base = os.path.basename(str(filename or "")).strip()
-    stem = _strip_fits_suffix(base)
-    parts = stem.split("_")
-
-    for idx in range(1, len(parts) - 2):
-        if _DATE_RE.match(parts[idx]) and idx + 1 < len(parts) and _TIME_RE.match(parts[idx + 1]):
-            station = "_".join(parts[:idx]).strip()
-            if not station:
-                break
-            try:
-                observed = datetime.strptime(parts[idx] + parts[idx + 1], "%Y%m%d%H%M%S")
-            except ValueError as exc:
-                raise ValueError(f"Invalid CALLISTO timestamp in filename: {base}") from exc
-            receiver_id = parts[-1].strip()
-            if not receiver_id:
-                raise ValueError(f"Missing receiver id in CALLISTO filename: {base}")
-            return station, observed, receiver_id
-
-    raise ValueError(f"Invalid CALLISTO filename format: {base}")
 
 
 def _station_key(value: str) -> str:
@@ -324,24 +295,6 @@ def check_archive_server(client=None) -> tuple[bool, str]:
     finally:
         if close_session:
             session.close()
-
-
-def build_archive_session() -> requests.Session:
-    retry = Retry(
-        total=3,
-        connect=3,
-        read=3,
-        backoff_factor=0.5,
-        status_forcelist=_REQUEST_RETRY_STATUS_CODES,
-        allowed_methods=frozenset({"HEAD", "GET"}),
-        raise_on_status=False,
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session = requests.Session()
-    session.headers.update({"User-Agent": "e-CALLISTO FITS Analyzer/2.6.0"})
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    return session
 
 
 # -----------------------------
@@ -637,29 +590,35 @@ class SpectralOverviewWorker(QObject):
 # -----------------------------
 # Download runnable
 # -----------------------------
-class DownloadTask(QObject, QRunnable):
-    done = Signal(bool)
+def deliver_archive_file(url: str, out_path: str, filename: str = "") -> bool:
+    """Resolve an archive URL through the shared cache and place it at ``out_path``.
 
-    def __init__(self, url: str, out_path: str):
+    Returns True when the bytes came from the cache instead of the network.
+    """
+    cached_path, was_cached = callisto_cache.fetch_cached(url, filename)
+    if os.path.abspath(str(cached_path)) != os.path.abspath(str(out_path)):
+        shutil.copy2(str(cached_path), str(out_path))
+    return was_cached
+
+
+class DownloadTask(QObject, QRunnable):
+    done = Signal(bool, bool, str)
+
+    def __init__(self, url: str, out_path: str, filename: str = ""):
         QObject.__init__(self)
         QRunnable.__init__(self)
         self.url = url
         self.out_path = out_path
+        self.filename = filename or os.path.basename(out_path)
         self.setAutoDelete(True)
 
     @Slot()
     def run(self):
         try:
-            with build_archive_session() as session:
-                with session.get(self.url, stream=True, timeout=DOWNLOAD_TIMEOUT) as r:
-                    r.raise_for_status()
-                    with open(self.out_path, "wb") as f:
-                        for chunk in r.iter_content(chunk_size=1024 * 128):
-                            if chunk:
-                                f.write(chunk)
-            self.done.emit(True)
-        except Exception:
-            self.done.emit(False)
+            was_cached = deliver_archive_file(self.url, self.out_path, self.filename)
+            self.done.emit(True, was_cached, "")
+        except Exception as exc:
+            self.done.emit(False, False, str(exc))
 
 
 class EventDownloadTask(QObject, QRunnable):
@@ -675,13 +634,7 @@ class EventDownloadTask(QObject, QRunnable):
     @Slot()
     def run(self):
         try:
-            with build_archive_session() as session:
-                with session.get(self.candidate.url, stream=True, timeout=DOWNLOAD_TIMEOUT) as r:
-                    r.raise_for_status()
-                    with open(self.out_path, "wb") as f:
-                        for chunk in r.iter_content(chunk_size=1024 * 128):
-                            if chunk:
-                                f.write(chunk)
+            deliver_archive_file(self.candidate.url, self.out_path, self.candidate.filename)
             self.done.emit(self.candidate.filename, self.out_path, True, "")
         except Exception as exc:
             self.done.emit(self.candidate.filename, self.out_path, False, str(exc))
@@ -741,22 +694,206 @@ def _build_plotutil_preview_figure(data, freqs, times):
     return fig, ax, cbar
 
 
+_COMBINE_TAB_LABELS = {
+    "time": "Combined (time)",
+    "frequency": "Combined (frequency)",
+    "time_frequency": "Combined (time + frequency)",
+}
+
+
+def build_preview_panels(local_files: list[tuple[str, str]]) -> tuple[list[dict], list[str]]:
+    """Group downloaded files into the largest valid combinations for preview.
+
+    ``local_files`` is a list of ``(local_path, display_name)``.  Returns the
+    panel payloads plus any per-panel error messages.  Frequency merging uses
+    the backend defaults; Import is the path that offers gap/overlap options.
+    """
+    from src.Backend.burst_processor import group_combinable_paths
+
+    names = {str(path): name for path, name in local_files}
+    paths = [str(path) for path, _name in local_files]
+
+    panels: list[dict] = []
+    errors: list[str] = []
+
+    try:
+        groups = group_combinable_paths(paths)
+    except Exception as exc:
+        errors.append(f"Could not inspect the selection for combining: {exc}")
+        groups = [{"paths": [path], "combine_type": None, "combined": None} for path in paths]
+
+    for group in groups:
+        group_paths = list(group.get("paths", []))
+        combined = group.get("combined", None)
+        combine_type = str(group.get("combine_type") or "")
+
+        if combined is not None:
+            sources = [names.get(path, os.path.basename(path)) for path in group_paths]
+            notes = []
+            gap_fill = str(combined.get("gap_fill") or "")
+            overlap_policy = str(combined.get("overlap_policy") or "")
+            gap_mask = combined.get("gap_row_mask", None)
+            if gap_fill and gap_mask is not None and bool(np.any(np.asarray(gap_mask))):
+                notes.append(f"frequency gap filled ({gap_fill})")
+            if overlap_policy and combined.get("overlap_connection_mhz", None) is not None:
+                notes.append(f"overlap resolved ({overlap_policy})")
+            subtitle = f"{len(sources)} files: " + ", ".join(sources)
+            if notes:
+                subtitle += "  \u2014  " + "; ".join(notes) + " (use Import for full control)"
+            panels.append(
+                {
+                    "title": _COMBINE_TAB_LABELS.get(combine_type, "Combined"),
+                    "subtitle": subtitle,
+                    "data": combined.get("data"),
+                    "freqs": combined.get("freqs"),
+                    "time": combined.get("time"),
+                    "combine_type": combine_type,
+                }
+            )
+            continue
+
+        for path in group_paths:
+            name = names.get(path, os.path.basename(path))
+            try:
+                res = load_callisto_fits(path, memmap=False)
+            except Exception as exc:
+                errors.append(f"{name}: {exc}")
+                continue
+            try:
+                _station, observed_at, focus_code = parse_callisto_archive_filename(name)
+                title = f"Focus {focus_code} \u00b7 {observed_at.strftime('%H:%M:%S')}"
+            except ValueError:
+                title = name
+            panels.append(
+                {
+                    "title": title,
+                    "subtitle": name,
+                    "data": res.data,
+                    "freqs": res.freqs,
+                    "time": res.time,
+                    "combine_type": None,
+                }
+            )
+
+    return panels, errors
+
+
+class PreviewPrepareWorker(QObject):
+    """Download (or reuse cached) files and build preview panels off the GUI thread."""
+
+    progressMax = Signal(int)
+    progressStep = Signal(int)
+    progressText = Signal(str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, candidates: list[CallistoEventCandidate]):
+        super().__init__()
+        self.candidates = list(candidates or [])
+
+    @Slot()
+    def run(self):
+        if not self.candidates:
+            self.failed.emit("No files were selected for preview.")
+            return
+
+        local_files: list[tuple[str, str]] = []
+        errors: list[str] = []
+        cached_count = 0
+
+        self.progressMax.emit(len(self.candidates))
+        try:
+            with build_archive_session() as session:
+                for index, candidate in enumerate(self.candidates, start=1):
+                    self.progressText.emit(
+                        f"Preparing {candidate.filename} ({index}/{len(self.candidates)})..."
+                    )
+                    try:
+                        path, was_cached = callisto_cache.fetch_cached(
+                            candidate.url, candidate.filename, session=session
+                        )
+                    except Exception as exc:
+                        errors.append(f"{candidate.filename}: {exc}")
+                        continue
+                    cached_count += int(bool(was_cached))
+                    local_files.append((str(path), candidate.filename))
+                    self.progressStep.emit(index)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+
+        if not local_files:
+            self.failed.emit(
+                "None of the selected files could be prepared.\n\n" + "\n".join(errors[:8])
+            )
+            return
+
+        self.progressText.emit("Building preview...")
+        try:
+            panels, panel_errors = build_preview_panels(local_files)
+        except Exception as exc:
+            self.failed.emit(f"Could not build the preview:\n{exc}")
+            return
+
+        errors.extend(panel_errors)
+        if not panels:
+            self.failed.emit("No preview could be produced.\n\n" + "\n".join(errors[:8]))
+            return
+
+        try:
+            callisto_cache.enforce_cache_limit()
+        except Exception:
+            pass
+
+        self.finished.emit(
+            {
+                "panels": panels,
+                "errors": errors,
+                "cached_count": cached_count,
+                "total": len(self.candidates),
+            }
+        )
+
+
 class PreviewWindow(QDialog):
-    def __init__(self, file_path: str, title: str, parent=None):
+    """Preview one or more spectrograms; the tab bar is hidden for a single panel."""
+
+    def __init__(self, panels: list[dict], title: str = "", parent=None):
         super().__init__(parent)
-        self.setWindowTitle(f"FITS Preview: {title}")
+        self.setWindowTitle(f"FITS Preview: {title}" if title else "FITS Preview")
         fit_window_to_screen(self, 900, 600, min_width=640, min_height=480)
 
-        res = load_callisto_fits(file_path, memmap=False)
-        fig, ax, cbar = _build_plotutil_preview_figure(res.data, res.freqs, res.time)
-        canvas = FigureCanvas(fig)
-
+        self._figures: list[Figure] = []
         theme = QApplication.instance().property("theme_manager")
-        if theme:
-            theme.apply_mpl(fig, ax, cbar)
+
+        self.preview_tabs = QTabWidget(self)
+        for panel in panels:
+            page = QWidget(self)
+            page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(0, 0, 0, 0)
+            page_layout.setSpacing(4)
+
+            subtitle = str(panel.get("subtitle") or "")
+            if subtitle:
+                caption = QLabel(subtitle, page)
+                caption.setObjectName("DownloaderStatusLabel")
+                caption.setWordWrap(True)
+                page_layout.addWidget(caption)
+
+            fig, ax, cbar = _build_plotutil_preview_figure(
+                panel.get("data"), panel.get("freqs"), panel.get("time")
+            )
+            if theme:
+                theme.apply_mpl(fig, ax, cbar)
+            self._figures.append(fig)
+            page_layout.addWidget(FigureCanvas(fig))
+
+            self.preview_tabs.addTab(page, str(panel.get("title") or "Preview"))
+
+        self.preview_tabs.tabBar().setVisible(self.preview_tabs.count() > 1)
 
         layout = QVBoxLayout()
-        layout.addWidget(canvas)
+        layout.addWidget(self.preview_tabs)
         self.setLayout(layout)
 
         self.setWindowFlags(Qt.Dialog | Qt.WindowStaysOnTopHint | Qt.WindowCloseButtonHint)
@@ -828,6 +965,13 @@ class CallistoDownloaderApp(QDialog):
 
         self._download_total = 0
         self._download_done = 0
+        self._download_cached = 0
+        self._download_failures: list[str] = []
+
+        self._file_tree_updating = False
+        self._preview_thread: QThread | None = None
+        self._preview_worker: PreviewPrepareWorker | None = None
+        self._preview_windows: list[PreviewWindow] = []
 
         self._event_fetch_thread: QThread | None = None
         self._event_fetch_worker: EventFetchWorker | None = None
@@ -903,8 +1047,33 @@ class CallistoDownloaderApp(QDialog):
         self.tabs.addTab(self._build_event_tab(), "Multi-Station Event")
         self.tabs.addTab(self._build_spectral_overview_tab(), "Spectral Overview")
         layout.addWidget(self.tabs)
+        layout.addLayout(self._build_cache_footer())
         self.setLayout(layout)
         self._apply_downloader_style()
+
+    def _build_cache_footer(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(8)
+
+        self.cache_size_label = QLabel("Cache: 0 B", self)
+        self.cache_size_label.setObjectName("DownloaderStatusLabel")
+        self.cache_size_label.setToolTip(
+            "Downloaded FITS files are kept here and reused by Preview, Import, "
+            "Compare and Download."
+        )
+
+        self.open_cache_btn = QPushButton("Open Cache Folder", self)
+        self.open_cache_btn.clicked.connect(self.open_cache_folder)
+        self.clear_cache_btn = QPushButton("Clear Cache", self)
+        self.clear_cache_btn.clicked.connect(self.clear_cache)
+
+        row.addWidget(self.cache_size_label)
+        row.addStretch(1)
+        row.addWidget(self.open_cache_btn)
+        row.addWidget(self.clear_cache_btn)
+
+        self._update_cache_size_label()
+        return row
 
     def _fit_to_available_screen(self) -> None:
         screen = self.screen() or QApplication.primaryScreen()
@@ -1035,7 +1204,7 @@ class CallistoDownloaderApp(QDialog):
                 color: {muted};
             }}
             QListWidget#EventStationList,
-            QListWidget#DownloaderFileList,
+            QTreeWidget#DownloaderFileTree,
             QTableWidget#EventResultsTable {{
                 background: {input_bg};
                 border: 1px solid {border};
@@ -1105,13 +1274,20 @@ class CallistoDownloaderApp(QDialog):
         param_layout.addWidget(self.show_button)
         param_group.setLayout(param_layout)
 
-        # ---- File list
-        file_group = QGroupBox("Available FITS Files (Whole Day)")
+        # ---- File list, grouped by focus code
+        file_group = QGroupBox("Available FITS Files (Whole Day, grouped by focus code)")
         file_group.setObjectName("DownloaderSection")
         file_layout = QVBoxLayout()
-        self.file_list = QListWidget()
-        self.file_list.setObjectName("DownloaderFileList")
-        file_layout.addWidget(self.file_list)
+        self.file_tree = QTreeWidget()
+        self.file_tree.setObjectName("DownloaderFileTree")
+        self.file_tree.setColumnCount(2)
+        self.file_tree.setHeaderLabels(["File", "UTC Time"])
+        self.file_tree.setRootIsDecorated(True)
+        self.file_tree.setUniformRowHeights(True)
+        self.file_tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.file_tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.file_tree.itemChanged.connect(self._on_file_tree_item_changed)
+        file_layout.addWidget(self.file_tree)
         file_group.setLayout(file_layout)
 
         # ---- Actions
@@ -1142,10 +1318,15 @@ class CallistoDownloaderApp(QDialog):
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
 
+        self.status_label = QLabel("", page)
+        self.status_label.setObjectName("DownloaderStatusLabel")
+        self.status_label.setWordWrap(True)
+
         layout.addWidget(param_group)
         layout.addWidget(file_group)
         layout.addWidget(action_group)
         layout.addWidget(self.progress_bar)
+        layout.addWidget(self.status_label)
         return page
 
     def _build_event_tab(self) -> QWidget:
@@ -1904,7 +2085,7 @@ class CallistoDownloaderApp(QDialog):
         )
 
     def show_available_fits(self):
-        self.file_list.clear()
+        self.file_tree.clear()
         self.file_url_map.clear()
 
         date_py = self.date_edit.date().toPython()
@@ -1946,8 +2127,35 @@ class CallistoDownloaderApp(QDialog):
         self._fetch_thread.started.connect(self._fetch_worker.run)
         self._fetch_thread.start()
 
+    @staticmethod
+    def _focus_group_label(focus_code: str, candidates: list[CallistoEventCandidate]) -> str:
+        count = len(candidates)
+        suffix = "file" if count == 1 else "files"
+        first = candidates[0].observed_at_utc.strftime("%H:%M")
+        last = candidates[-1].observed_at_utc.strftime("%H:%M")
+        span = first if first == last else f"{first}\u2013{last}"
+        return f"Focus {focus_code} \u2014 {count} {suffix} ({span})"
+
+    def _add_file_group(self, label: str, entries: list[CallistoEventCandidate]) -> None:
+        group = QTreeWidgetItem(self.file_tree, [label, ""])
+        group.setFlags((group.flags() | Qt.ItemIsUserCheckable) & ~Qt.ItemIsSelectable)
+        group.setCheckState(0, Qt.Unchecked)
+        group.setFirstColumnSpanned(False)
+
+        for candidate in entries:
+            observed = candidate.observed_at_utc
+            time_text = observed.strftime("%H:%M:%S") if observed is not None else "\u2014"
+            child = QTreeWidgetItem(group, [candidate.filename, time_text])
+            child.setFlags(child.flags() | Qt.ItemIsUserCheckable)
+            child.setCheckState(0, Qt.Unchecked)
+            child.setData(0, Qt.UserRole, candidate)
+            self.file_url_map[candidate.filename] = candidate.url
+
+        group.setExpanded(True)
+
     def display_fetched_files(self, files: list):
-        self.file_list.clear()
+        self.file_tree.clear()
+        self.file_url_map.clear()
         self.progress_bar.setVisible(False)
 
         if files and files[0][0] == "__SERVER_UNREACHABLE__":
@@ -1966,45 +2174,110 @@ class CallistoDownloaderApp(QDialog):
                                     "No FITS files were found for the selected station on that date.")
             return
 
-        # Sort by filename (usually sorts by time)
-        valid_files.sort(key=lambda x: x[0].lower())
-
+        parsed: list[CallistoEventCandidate] = []
+        unparsed: list[CallistoEventCandidate] = []
         for name, url in valid_files:
-            item = QListWidgetItem(name)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Unchecked)
-            self.file_list.addItem(item)
-            self.file_url_map[name] = url
+            try:
+                station, observed_at, focus_code = parse_callisto_archive_filename(name)
+            except ValueError:
+                # Keep unrecognised names visible rather than dropping them silently.
+                unparsed.append(
+                    CallistoEventCandidate(
+                        station="", observed_at_utc=None, filename=name, url=url, receiver_id=""
+                    )
+                )
+                continue
+            parsed.append(
+                CallistoEventCandidate(
+                    station=station,
+                    observed_at_utc=observed_at,
+                    filename=name,
+                    url=url,
+                    receiver_id=focus_code,
+                )
+            )
+
+        self._file_tree_updating = True
+        try:
+            for focus_code, candidates in group_spectral_overview_candidates(parsed).items():
+                self._add_file_group(self._focus_group_label(focus_code, candidates), candidates)
+
+            if unparsed:
+                unparsed.sort(key=lambda candidate: candidate.filename.lower())
+                count = len(unparsed)
+                suffix = "file" if count == 1 else "files"
+                self._add_file_group(f"Unparsed ({count} {suffix})", unparsed)
+        finally:
+            self._file_tree_updating = False
 
     # -----------------------------
     # Selection helpers
     # -----------------------------
+    def _on_file_tree_item_changed(self, item: QTreeWidgetItem, column: int):
+        if column != 0 or self._file_tree_updating:
+            return
+
+        self._file_tree_updating = True
+        try:
+            if item.childCount() > 0:
+                state = item.checkState(0)
+                if state != Qt.PartiallyChecked:
+                    for row in range(item.childCount()):
+                        item.child(row).setCheckState(0, state)
+            else:
+                parent = item.parent()
+                if parent is not None:
+                    self._sync_group_check_state(parent)
+        finally:
+            self._file_tree_updating = False
+
+    @staticmethod
+    def _sync_group_check_state(group: QTreeWidgetItem) -> None:
+        total = group.childCount()
+        checked = sum(
+            1 for row in range(total) if group.child(row).checkState(0) == Qt.Checked
+        )
+        if checked == 0:
+            group.setCheckState(0, Qt.Unchecked)
+        elif checked == total:
+            group.setCheckState(0, Qt.Checked)
+        else:
+            group.setCheckState(0, Qt.PartiallyChecked)
+
+    def _set_all_files_checked(self, state) -> None:
+        for index in range(self.file_tree.topLevelItemCount()):
+            self.file_tree.topLevelItem(index).setCheckState(0, state)
+
     def select_all_files(self):
-        for i in range(self.file_list.count()):
-            self.file_list.item(i).setCheckState(Qt.Checked)
+        self._set_all_files_checked(Qt.Checked)
 
     def deselect_all_files(self):
-        for i in range(self.file_list.count()):
-            self.file_list.item(i).setCheckState(Qt.Unchecked)
+        self._set_all_files_checked(Qt.Unchecked)
 
-    def _checked_items(self) -> list[QListWidgetItem]:
-        return [
-            self.file_list.item(i)
-            for i in range(self.file_list.count())
-            if self.file_list.item(i).checkState() == Qt.Checked
-        ]
+    def _checked_candidates(self) -> list[CallistoEventCandidate]:
+        selected: list[CallistoEventCandidate] = []
+        for index in range(self.file_tree.topLevelItemCount()):
+            group = self.file_tree.topLevelItem(index)
+            for row in range(group.childCount()):
+                child = group.child(row)
+                if child.checkState(0) != Qt.Checked:
+                    continue
+                candidate = child.data(0, Qt.UserRole)
+                if candidate is not None:
+                    selected.append(candidate)
+        return selected
 
     # -----------------------------
     # Download
     # -----------------------------
     def download_selected_files(self):
-        output_dir = QFileDialog.getExistingDirectory(self, "Select Download Folder")
-        if not output_dir:
-            return
-
-        selected = self._checked_items()
+        selected = self._checked_candidates()
         if not selected:
             QMessageBox.warning(self, "No Selection", "Please select files to download.")
+            return
+
+        output_dir = QFileDialog.getExistingDirectory(self, "Select Download Folder")
+        if not output_dir:
             return
 
         self.progress_bar.setVisible(True)
@@ -2012,23 +2285,22 @@ class CallistoDownloaderApp(QDialog):
         self.progress_bar.setValue(0)
         self._download_total = len(selected)
         self._download_done = 0
+        self._download_cached = 0
+        self._download_failures = []
 
-        for item in selected:
-            name = item.text()
-            url = self.file_url_map.get(name)
-            if not url:
-                self._on_download_done(False)
-                continue
-
-            out_path = os.path.join(output_dir, name)
-
-            task = DownloadTask(url, out_path)
+        for candidate in selected:
+            out_path = os.path.join(output_dir, candidate.filename)
+            task = DownloadTask(candidate.url, out_path, candidate.filename)
             task.done.connect(self._on_download_done)
             self.threadpool.start(task)
 
-    @Slot(bool)
-    def _on_download_done(self, success: bool):
+    @Slot(bool, bool, str)
+    def _on_download_done(self, success: bool, was_cached: bool, error: str):
         self._download_done += 1
+        if success:
+            self._download_cached += int(bool(was_cached))
+        else:
+            self._download_failures.append(str(error or "Unknown error"))
 
         QMetaObject.invokeMethod(
             self.progress_bar, "setValue",
@@ -2047,20 +2319,34 @@ class CallistoDownloaderApp(QDialog):
 
     @Slot()
     def show_download_complete_message(self):
-        QMessageBox.information(self, "Download Complete", "All selected files downloaded.")
+        try:
+            callisto_cache.enforce_cache_limit()
+        except Exception:
+            pass
+        self._update_cache_size_label()
+
+        failed = len(self._download_failures)
+        succeeded = max(0, self._download_total - failed)
+        details = [
+            f"Files requested: {self._download_total}",
+            f"Saved: {succeeded} ({self._download_cached} reused from cache)",
+            f"Failed: {failed}",
+        ]
+        if self._download_failures:
+            details.append("")
+            details.append("Failures:")
+            details.extend(self._download_failures[:8])
+            if failed > 8:
+                details.append("...")
+            QMessageBox.warning(self, "Download Finished", "\n".join(details))
+            return
+        QMessageBox.information(self, "Download Complete", "\n".join(details))
 
     # -----------------------------
     # Import
     # -----------------------------
     def handle_import(self):
-        selected = self._checked_items()
-        urls = []
-
-        for item in selected:
-            name = item.text()
-            url = self.file_url_map.get(name)
-            if url:
-                urls.append(url)
+        urls = [candidate.url for candidate in self._checked_candidates() if candidate.url]
 
         if not urls:
             QMessageBox.warning(self, "No Selection", "Please select at least one FITS file.")
@@ -2069,14 +2355,7 @@ class CallistoDownloaderApp(QDialog):
         self.import_request.emit(urls)
 
     def handle_compare(self):
-        selected = self._checked_items()
-        urls = []
-
-        for item in selected:
-            name = item.text()
-            url = self.file_url_map.get(name)
-            if url:
-                urls.append(url)
+        urls = [candidate.url for candidate in self._checked_candidates() if candidate.url]
 
         if not urls:
             QMessageBox.warning(self, "No Selection", "Please select at least one FITS file.")
@@ -2089,35 +2368,148 @@ class CallistoDownloaderApp(QDialog):
     # Preview
     # -----------------------------
     def preview_selected_files(self):
-        selected = self._checked_items()
+        selected = [
+            candidate for candidate in self._checked_candidates() if candidate.url
+        ]
         if not selected:
             QMessageBox.warning(self, "No Selection", "Please select files to preview.")
             return
 
-        for item in selected:
-            name = item.text()
-            url = self.file_url_map.get(name)
-            if not url:
-                continue
+        if self._preview_thread is not None and self._preview_thread.isRunning():
+            QMessageBox.information(
+                self, "Preview In Progress", "Another preview is already being prepared."
+            )
+            return
 
-            try:
-                # Download to temp file, then open with astropy
-                with build_archive_session() as session:
-                    with session.get(url, timeout=DOWNLOAD_TIMEOUT) as r:
-                        r.raise_for_status()
+        self.preview_btn.setEnabled(False)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setMaximum(len(selected))
+        self.progress_bar.setValue(0)
 
-                        suffix = ".fit.gz" if name.lower().endswith(".fit.gz") else ".fit"
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                            tmp.write(r.content)
-                            tmp_path = tmp.name
+        self._preview_thread = QThread(self)
+        self._preview_worker = PreviewPrepareWorker(selected)
+        self._preview_worker.moveToThread(self._preview_thread)
 
-                win = PreviewWindow(tmp_path, name, parent=self)
-                win.show()
+        self._preview_worker.progressMax.connect(
+            lambda m: QMetaObject.invokeMethod(
+                self.progress_bar, "setMaximum", Qt.QueuedConnection, Q_ARG(int, m)
+            )
+        )
+        self._preview_worker.progressStep.connect(self.update_fetch_progress)
+        self._preview_worker.progressText.connect(self._on_preview_progress_text)
+        self._preview_worker.finished.connect(self._on_preview_ready)
+        self._preview_worker.failed.connect(self._on_preview_failed)
 
-            except Exception as e:
-                QMessageBox.critical(self, "Preview Error", f"{name}\n\n{e}")
+        self._preview_worker.finished.connect(self._preview_thread.quit)
+        self._preview_worker.failed.connect(self._preview_thread.quit)
+        self._preview_worker.finished.connect(self._preview_worker.deleteLater)
+        self._preview_worker.failed.connect(self._preview_worker.deleteLater)
+
+        def _cleanup_thread():
+            if self._preview_thread is not None:
+                self._preview_thread.deleteLater()
+            self._preview_thread = None
+            self._preview_worker = None
+
+        self._preview_thread.finished.connect(_cleanup_thread)
+        self._preview_thread.started.connect(self._preview_worker.run)
+        self._preview_thread.start()
+
+    @Slot(str)
+    def _on_preview_progress_text(self, text: str):
+        self.status_label.setText(str(text or ""))
+
+    def _finish_preview_run(self):
+        self.progress_bar.setVisible(False)
+        self.preview_btn.setEnabled(True)
+        self.status_label.setText("")
+        self._update_cache_size_label()
+
+    @Slot(object)
+    def _on_preview_ready(self, payload):
+        self._finish_preview_run()
+
+        panels = list((payload or {}).get("panels", []))
+        errors = list((payload or {}).get("errors", []))
+        if not panels:
+            QMessageBox.critical(self, "Preview Error", "\n".join(errors[:8]) or "No preview available.")
+            return
+
+        title = panels[0].get("title", "") if len(panels) == 1 else f"{len(panels)} panels"
+        window = PreviewWindow(panels, title, parent=self)
+        window.show()
+        self._preview_windows.append(window)
+        window.destroyed.connect(lambda *_args, ref=window: self._forget_preview_window(ref))
+
+        if errors:
+            QMessageBox.warning(
+                self,
+                "Preview Warnings",
+                "Some files could not be previewed:\n\n" + "\n".join(errors[:8]),
+            )
+
+    def _forget_preview_window(self, window) -> None:
+        if window in self._preview_windows:
+            self._preview_windows.remove(window)
+
+    @Slot(str)
+    def _on_preview_failed(self, message: str):
+        self._finish_preview_run()
+        QMessageBox.critical(self, "Preview Error", str(message))
+
+    # -----------------------------
+    # Cache
+    # -----------------------------
+    def _update_cache_size_label(self):
+        if not hasattr(self, "cache_size_label"):
+            return
+        try:
+            size_text = callisto_cache.format_size(callisto_cache.cache_size_bytes())
+        except Exception:
+            size_text = "unavailable"
+        self.cache_size_label.setText(f"Cache: {size_text}")
+
+    def _cache_is_busy(self) -> bool:
+        for thread in (self._fetch_thread, self._preview_thread, self._event_fetch_thread, self._overview_thread):
+            if thread is not None and thread.isRunning():
+                return True
+        return self._download_total > self._download_done or bool(
+            self._event_download_total > self._event_download_done
+        )
+
+    def open_cache_folder(self):
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(callisto_cache.cache_root())))
+
+    def clear_cache(self):
+        if self._cache_is_busy():
+            QMessageBox.information(
+                self, "Cache Busy", "Cannot clear the cache while a download or preview is running."
+            )
+            return
+
+        cache_dir = callisto_cache.cache_root()
+        size_text = callisto_cache.format_size(callisto_cache.cache_size_bytes())
+        reply = QMessageBox.question(
+            self,
+            "Clear Cache",
+            f"Delete all cached e-CALLISTO FITS files?\n\n{cache_dir}\n({size_text})",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        skipped = callisto_cache.clear_cache()
+        self._update_cache_size_label()
+        if skipped:
+            QMessageBox.warning(
+                self, "Cache Cleared", f"Cache cleared with {skipped} item(s) skipped (in use)."
+            )
 
     def closeEvent(self, event):
+        if self._preview_thread is not None and self._preview_thread.isRunning():
+            self._preview_thread.quit()
+            self._preview_thread.wait(3000)
         if self._overview_thread is not None and self._overview_thread.isRunning():
             self._overview_close_after_finish = True
             if self._overview_worker is not None:

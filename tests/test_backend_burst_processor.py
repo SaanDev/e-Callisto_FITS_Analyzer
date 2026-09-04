@@ -814,3 +814,96 @@ def test_inspect_time_frequency_rejects_non_consecutive_or_mixed_station_grid():
     assert "Non-consecutive observation timestamps" in non_consecutive["error"]
     assert mixed_station["valid"] is False
     assert "same station" in mixed_station["error"]
+
+
+def _grid_payload(data_value, freqs, header):
+    return {
+        "data": np.full((len(freqs), 3), float(data_value)),
+        "freqs": np.asarray(freqs, dtype=float),
+        "time": np.array([0.0, 1.0, 2.0]),
+        "header0": header,
+    }
+
+
+def test_group_combinable_paths_splits_grid_from_orphans(monkeypatch):
+    low = [100.0, 110.0]
+    high = [120.0, 130.0]
+    grid = {
+        "STAT_20240101_120000_01.fit": _grid_payload(1, high, _header(120.0, 130.0, focus="01")),
+        "STAT_20240101_121500_01.fit": _grid_payload(2, high, _header(120.0, 130.0, focus="01")),
+        "STAT_20240101_120000_02.fit": _grid_payload(3, low, _header(100.0, 110.0, focus="02")),
+        "STAT_20240101_121500_02.fit": _grid_payload(4, low, _header(100.0, 110.0, focus="02")),
+    }
+    orphans = {
+        "STAT_20240101_030000_59.fit": _grid_payload(5, low, _header(100.0, 110.0, focus="59")),
+        "OTHER_20240101_210000_62.fit": _grid_payload(6, low, _header(100.0, 110.0, focus="62")),
+    }
+    _install_preview_and_load(monkeypatch, {**grid, **orphans})
+
+    groups = burst_processor.group_combinable_paths(list(grid) + list(orphans))
+
+    assert len(groups) == 3
+    assert groups[0]["combine_type"] == burst_processor.COMBINE_TIME_FREQUENCY
+    assert sorted(groups[0]["paths"]) == sorted(grid)
+    assert groups[0]["combined"] is not None
+    assert [group["paths"] for group in groups[1:]] == [
+        ["STAT_20240101_030000_59.fit"],
+        ["OTHER_20240101_210000_62.fit"],
+    ]
+    assert all(group["combine_type"] is None for group in groups[1:])
+    assert all(group["combined"] is None for group in groups[1:])
+
+
+def test_group_combinable_paths_returns_singles_when_nothing_combines(monkeypatch):
+    payloads = {
+        "STAT_20240101_030000_01.fit": _grid_payload(1, [100.0, 110.0], _header(100.0, 110.0, focus="01")),
+        "OTHER_20240102_210000_02.fit": _grid_payload(2, [100.0, 110.0], _header(100.0, 110.0, focus="02")),
+    }
+    _install_preview_and_load(monkeypatch, payloads)
+
+    groups = burst_processor.group_combinable_paths(list(payloads))
+
+    assert [group["paths"] for group in groups] == [[path] for path in payloads]
+    assert all(group["combine_type"] is None for group in groups)
+
+
+def test_group_combinable_paths_combines_a_whole_valid_selection(monkeypatch):
+    freqs = np.array([100.0, 110.0])
+    hdr = fits.Header()
+    hdr["TIME-OBS"] = "00:00:10"
+    payloads = {
+        "STAT_20240101_120000_A.fit": {
+            "data": np.ones((2, 3)), "freqs": freqs, "time": np.array([0.0, 1.0, 2.0]), "header0": hdr,
+        },
+        "STAT_20240101_121500_A.fit": {
+            "data": np.zeros((2, 3)), "freqs": freqs, "time": np.array([0.0, 1.0, 2.0]), "header0": hdr,
+        },
+    }
+    _install_preview_and_load(monkeypatch, payloads)
+
+    groups = burst_processor.group_combinable_paths(list(payloads))
+
+    assert len(groups) == 1
+    assert groups[0]["combine_type"] == burst_processor.COMBINE_TIME
+    assert groups[0]["combined"]["data"].shape == (2, 6)
+
+
+def test_group_combinable_paths_skips_the_merge_when_combine_is_false(monkeypatch):
+    freqs = np.array([100.0, 110.0])
+    hdr = fits.Header()
+    hdr["TIME-OBS"] = "00:00:10"
+    payloads = {
+        "STAT_20240101_120000_A.fit": {
+            "data": np.ones((2, 3)), "freqs": freqs, "time": np.array([0.0, 1.0, 2.0]), "header0": hdr,
+        },
+        "STAT_20240101_121500_A.fit": {
+            "data": np.zeros((2, 3)), "freqs": freqs, "time": np.array([0.0, 1.0, 2.0]), "header0": hdr,
+        },
+    }
+    _install_preview_and_load(monkeypatch, payloads)
+
+    groups = burst_processor.group_combinable_paths(list(payloads), combine=False)
+
+    assert len(groups) == 1
+    assert groups[0]["combine_type"] == burst_processor.COMBINE_TIME
+    assert groups[0]["combined"] is None

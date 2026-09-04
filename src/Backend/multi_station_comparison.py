@@ -365,89 +365,17 @@ def combined_comparison_dataset_from_paths(file_paths: Iterable[str]) -> Compari
 
 
 def combined_comparison_datasets_from_paths(file_paths: Iterable[str]) -> list[ComparisonDataset]:
-    paths: list[str] = []
-    seen: set[str] = set()
-    for path in file_paths:
-        text = str(path or "").strip()
-        if not text or text in seen:
+    from src.Backend.burst_processor import group_combinable_paths
+
+    datasets: list[ComparisonDataset] = []
+    for group in group_combinable_paths(file_paths):
+        combined = group.get("combined", None)
+        if combined is not None:
+            datasets.append(comparison_dataset_from_combined(combined))
             continue
-        paths.append(text)
-        seen.add(text)
-    if not paths:
-        return []
-
-    combined_all = combined_comparison_dataset_from_paths(paths)
-    if combined_all is not None:
-        return [combined_all]
-
-    from src.Backend.burst_processor import (
-        are_frequency_combinable,
-        are_time_combinable,
-        combine_compatible,
-        combine_frequency,
-        combine_time,
-        inspect_combination,
-        parse_filename,
-    )
-
-    path_index = {path: idx for idx, path in enumerate(paths)}
-    consumed: set[str] = set()
-    output: list[tuple[int, ComparisonDataset]] = []
-
-    def _group_by(key_func):
-        groups: dict[tuple[str, ...], list[str]] = {}
-        for path in paths:
-            if path in consumed:
-                continue
-            try:
-                key = key_func(path)
-            except Exception:
-                continue
-            groups.setdefault(tuple(key), []).append(path)
-        return sorted(groups.values(), key=lambda group: min(path_index[path] for path in group))
-
-    def _append_combined(group: list[str], dataset: ComparisonDataset) -> None:
-        for path in group:
-            consumed.add(path)
-        output.append((min(path_index[path] for path in group), dataset))
-
-    # A complete time x focus-code grid must be handled before the legacy
-    # time-only grouping consumes each focus code as a separate panel.
-    for group in _group_by(lambda path: (parse_filename(path)[0],)):
-        if len(group) < 4:
-            continue
-        try:
-            inspection = inspect_combination(group)
-            if inspection.get("valid", False) and inspection.get("combine_type") == "time_frequency":
-                _append_combined(group, comparison_dataset_from_combined(combine_compatible(group)))
-        except Exception:
-            continue
-
-    for group in _group_by(lambda path: (parse_filename(path)[0], parse_filename(path)[3])):
-        if len(group) < 2:
-            continue
-        try:
-            if are_time_combinable(group):
-                _append_combined(group, comparison_dataset_from_combined(combine_time(group)))
-        except Exception:
-            continue
-
-    for group in _group_by(lambda path: (parse_filename(path)[0], parse_filename(path)[1], parse_filename(path)[2])):
-        if len(group) < 2:
-            continue
-        try:
-            if are_frequency_combinable(group):
-                _append_combined(group, comparison_dataset_from_combined(combine_frequency(group)))
-        except Exception:
-            continue
-
-    for path in paths:
-        if path in consumed:
-            continue
-        output.append((path_index[path], load_comparison_dataset(path, memmap=False)))
-
-    output.sort(key=lambda item: item[0])
-    return [dataset for _idx, dataset in output]
+        for path in group.get("paths", []):
+            datasets.append(load_comparison_dataset(path, memmap=False))
+    return datasets
 
 
 def _normalize_alignment_mode(value: str) -> str:

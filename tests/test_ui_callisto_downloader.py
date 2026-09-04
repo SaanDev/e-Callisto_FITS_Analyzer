@@ -29,8 +29,10 @@ from src.UI.callisto_downloader import (
     CallistoDownloaderApp,
     EventFetchWorker,
     FetchWorker,
+    PreviewWindow,
     SpectralOverviewWorker,
     _build_plotutil_preview_figure,
+    build_preview_panels,
     extract_fits_links,
     filter_event_candidates,
     filter_spectral_overview_candidates,
@@ -705,8 +707,7 @@ def test_single_station_compare_emits_selected_urls_and_closes():
         ("BIR_20240102_000000_01.fit.gz", "https://example.test/bir.fit.gz"),
         ("GREENLAND_20240102_000000_01.fit.gz", "https://example.test/greenland.fit.gz"),
     ])
-    for row in range(dlg.file_list.count()):
-        dlg.file_list.item(row).setCheckState(Qt.Checked)
+    dlg.select_all_files()
 
     dlg.handle_compare()
 
@@ -838,3 +839,193 @@ def test_downloader_date_edit_shows_full_year():
     assert year_edit.minimumHeight() == 34
 
     dlg.close()
+
+
+def _fetched(*names):
+    return [(name, f"https://example.test/{name}") for name in names]
+
+
+def _group_labels(dlg):
+    tree = dlg.file_tree
+    return [tree.topLevelItem(i).text(0) for i in range(tree.topLevelItemCount())]
+
+
+def _group(dlg, index):
+    return dlg.file_tree.topLevelItem(index)
+
+
+def test_single_station_files_are_grouped_by_focus_code():
+    _app()
+    dlg = CallistoDownloaderApp()
+
+    dlg.display_fetched_files(_fetched(
+        "BIR_20240102_000000_01.fit.gz",
+        "BIR_20240102_001500_01.fit.gz",
+        "BIR_20240102_000000_02.fit.gz",
+        "BIR_20240102_234500_59.fit.gz",
+    ))
+
+    assert _group_labels(dlg) == [
+        "Focus 01 — 2 files (00:00–00:15)",
+        "Focus 02 — 1 file (00:00)",
+        "Focus 59 — 1 file (23:45)",
+    ]
+    assert [_group(dlg, i).childCount() for i in range(3)] == [2, 1, 1]
+    assert _group(dlg, 0).child(0).text(1) == "00:00:00"
+    assert _group(dlg, 0).child(1).text(1) == "00:15:00"
+
+
+def test_unparsable_filenames_stay_visible_in_their_own_group():
+    _app()
+    dlg = CallistoDownloaderApp()
+
+    dlg.display_fetched_files(_fetched(
+        "BIR_20240102_000000_01.fit.gz",
+        "BIR_20240102_000000.fit.gz",
+    ))
+
+    assert _group_labels(dlg) == ["Focus 01 — 1 file (00:00)", "Unparsed (1 file)"]
+    unparsed = _group(dlg, 1).child(0)
+    assert unparsed.text(0) == "BIR_20240102_000000.fit.gz"
+    assert unparsed.text(1) == "—"
+
+
+def test_checking_a_focus_group_checks_every_file_in_it():
+    _app()
+    dlg = CallistoDownloaderApp()
+    dlg.display_fetched_files(_fetched(
+        "BIR_20240102_000000_01.fit.gz",
+        "BIR_20240102_001500_01.fit.gz",
+        "BIR_20240102_000000_02.fit.gz",
+    ))
+
+    _group(dlg, 0).setCheckState(0, Qt.Checked)
+
+    assert [candidate.filename for candidate in dlg._checked_candidates()] == [
+        "BIR_20240102_000000_01.fit.gz",
+        "BIR_20240102_001500_01.fit.gz",
+    ]
+
+
+def test_unchecking_one_file_makes_its_group_partially_checked():
+    _app()
+    dlg = CallistoDownloaderApp()
+    dlg.display_fetched_files(_fetched(
+        "BIR_20240102_000000_01.fit.gz",
+        "BIR_20240102_001500_01.fit.gz",
+    ))
+    group = _group(dlg, 0)
+    group.setCheckState(0, Qt.Checked)
+
+    group.child(1).setCheckState(0, Qt.Unchecked)
+
+    assert group.checkState(0) == Qt.PartiallyChecked
+    assert [candidate.filename for candidate in dlg._checked_candidates()] == [
+        "BIR_20240102_000000_01.fit.gz"
+    ]
+
+    group.child(1).setCheckState(0, Qt.Checked)
+    assert group.checkState(0) == Qt.Checked
+
+
+def test_select_all_and_deselect_all_span_every_group():
+    _app()
+    dlg = CallistoDownloaderApp()
+    dlg.display_fetched_files(_fetched(
+        "BIR_20240102_000000_01.fit.gz",
+        "BIR_20240102_000000_02.fit.gz",
+    ))
+
+    dlg.select_all_files()
+    assert len(dlg._checked_candidates()) == 2
+
+    dlg.deselect_all_files()
+    assert dlg._checked_candidates() == []
+
+
+def test_preview_panels_combine_what_can_combine_and_keep_the_rest_separate(monkeypatch):
+    combined = {
+        "data": np.ones((2, 4)),
+        "freqs": np.array([120.0, 110.0]),
+        "time": np.array([0.0, 1.0, 2.0, 3.0]),
+        "gap_row_mask": None,
+        "gap_fill": "background",
+        "overlap_policy": "split",
+        "overlap_connection_mhz": None,
+    }
+    grid = [
+        "/cache/BIR_20240102_000000_01.fit.gz",
+        "/cache/BIR_20240102_001500_01.fit.gz",
+        "/cache/BIR_20240102_000000_02.fit.gz",
+        "/cache/BIR_20240102_001500_02.fit.gz",
+    ]
+    orphan = "/cache/BIR_20240102_120000_59.fit.gz"
+
+    monkeypatch.setattr(
+        "src.Backend.burst_processor.group_combinable_paths",
+        lambda paths, **_kwargs: [
+            {"paths": grid, "combine_type": "time_frequency", "combined": combined, "error": ""},
+            {"paths": [orphan], "combine_type": None, "combined": None, "error": ""},
+        ],
+    )
+
+    class FakeLoad:
+        data = np.zeros((2, 3))
+        freqs = np.array([120.0, 110.0])
+        time = np.array([0.0, 1.0, 2.0])
+
+    monkeypatch.setattr(
+        "src.UI.callisto_downloader.load_callisto_fits", lambda *_a, **_k: FakeLoad()
+    )
+
+    panels, errors = build_preview_panels(
+        [(path, os.path.basename(path)) for path in grid + [orphan]]
+    )
+
+    assert errors == []
+    assert [panel["title"] for panel in panels] == [
+        "Combined (time + frequency)",
+        "Focus 59 · 12:00:00",
+    ]
+    assert panels[0]["subtitle"].startswith("4 files: BIR_20240102_000000_01.fit.gz")
+    assert np.array_equal(panels[0]["data"], combined["data"])
+
+
+def test_preview_panels_report_a_file_that_will_not_load(monkeypatch):
+    path = "/cache/BIR_20240102_120000_59.fit.gz"
+    monkeypatch.setattr(
+        "src.Backend.burst_processor.group_combinable_paths",
+        lambda paths, **_kwargs: [
+            {"paths": [path], "combine_type": None, "combined": None, "error": ""}
+        ],
+    )
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("truncated file")
+
+    monkeypatch.setattr("src.UI.callisto_downloader.load_callisto_fits", _boom)
+
+    panels, errors = build_preview_panels([(path, os.path.basename(path))])
+
+    assert panels == []
+    assert errors == ["BIR_20240102_120000_59.fit.gz: truncated file"]
+
+
+def test_preview_window_hides_the_tab_bar_for_a_single_panel():
+    _app()
+    panel = {
+        "title": "Focus 01 · 00:00:00",
+        "subtitle": "BIR_20240102_000000_01.fit.gz",
+        "data": np.array([[10.0, 12.0, 30.0], [20.0, 25.0, 35.0]]),
+        "freqs": np.array([90.0, 80.0]),
+        "time": np.array([0.0, 1.0, 2.0]),
+    }
+
+    single = PreviewWindow([panel])
+    assert single.preview_tabs.count() == 1
+    assert single.preview_tabs.tabBar().isHidden() is True
+
+    multi = PreviewWindow([panel, dict(panel, title="Focus 02 · 00:00:00")])
+    assert multi.preview_tabs.count() == 2
+    assert multi.preview_tabs.tabBar().isHidden() is False
+    assert multi.preview_tabs.tabText(1) == "Focus 02 · 00:00:00"
