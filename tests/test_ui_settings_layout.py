@@ -382,6 +382,7 @@ def test_sidebar_sections_are_collapsible_accordion_cards():
         # Hiding the children is not enough on its own; the card itself must
         # stop reserving a body or the "collapse" saves no space.
         assert win.units_group_box.maximumHeight() < expanded_height
+        assert win.units_group_box.maximumHeight() == MainWindow.SIDEBAR_HEADER_HEIGHT
 
         win.units_group_box.setChecked(True)
         QApplication.processEvents()
@@ -421,3 +422,38 @@ def test_section_expanded_state_survives_a_restart():
         assert second.slider_group.isChecked() is True
     finally:
         second.close()
+
+
+def test_every_collapsed_card_is_the_same_header_height():
+    _app()
+    win = MainWindow(theme=None)
+    win.show()
+    QApplication.processEvents()
+    try:
+        groups = win.side_scroll.widget().findChildren(
+            QGroupBox, options=Qt.FindDirectChildrenOnly
+        )
+        for group in groups:
+            group.setChecked(False)
+        QApplication.processEvents()
+
+        heights = {group.height() for group in groups}
+        # A ragged accordion reads as broken; every collapsed card is one row.
+        assert heights == {MainWindow.SIDEBAR_HEADER_HEIGHT}
+    finally:
+        win.close()
+
+
+def test_collapsed_cards_carry_the_style_property_the_sidebar_qss_keys_on():
+    _app()
+    win = MainWindow(theme=None)
+    try:
+        assert win.units_group_box.property("collapsed") is False
+        win.units_group_box.setChecked(False)
+        QApplication.processEvents()
+        assert win.units_group_box.property("collapsed") is True
+        win.units_group_box.setChecked(True)
+        QApplication.processEvents()
+        assert win.units_group_box.property("collapsed") is False
+    finally:
+        win.close()

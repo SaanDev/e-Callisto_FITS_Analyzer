@@ -230,6 +230,13 @@ GOES_OVERLAY_CHANNEL_COLORS = {
 GOES_OVERLAY_LINE_WIDTH = 3.0
 
 class MainWindow(QMainWindow):
+    #: Segment rows shown before the timeline list starts scrolling.
+    TIMELINE_VISIBLE_ROWS = 5
+
+    #: Height of a sidebar card's header row. The section QSS reserves this
+    #: much top padding, and a collapsed card is exactly this tall.
+    SIDEBAR_HEADER_HEIGHT = 40
+
     # Convert digit differences (e.g., Ihot - Icold) to dB.
     DB_SCALE = 2500.0 / 256.0 / 25.4
     NOISE_CLIP_MIN = -100.0
@@ -554,11 +561,10 @@ class MainWindow(QMainWindow):
         slider_layout.setContentsMargins(12, 12, 12, 12)
         slider_layout.setSpacing(8)
 
-        low_row = QVBoxLayout()
-        low_row.setSpacing(4)
+        low_row = QHBoxLayout()
+        low_row.setSpacing(8)
         lbl_low = QLabel("Lower Threshold")
-        lbl_low.setAlignment(Qt.AlignLeft)
-        lbl_low.setWordWrap(True)
+        lbl_low.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         lbl_low.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
         low_value_card = QFrame()
         low_value_card.setObjectName("NoiseThresholdValueCard")
@@ -573,7 +579,7 @@ class MainWindow(QMainWindow):
         self.lower_value_sub_label.setAlignment(Qt.AlignRight | Qt.AlignTop)
         low_value_layout.addWidget(self.lower_value_label)
         low_value_layout.addWidget(self.lower_value_sub_label)
-        low_value_card.setMinimumWidth(120)
+        low_value_card.setMinimumWidth(104)
         low_value_row = QHBoxLayout()
         low_value_row.setContentsMargins(0, 0, 0, 0)
         low_value_row.addStretch(1)
@@ -583,11 +589,10 @@ class MainWindow(QMainWindow):
         slider_layout.addLayout(low_row)
         slider_layout.addWidget(self.lower_slider)
 
-        high_row = QVBoxLayout()
-        high_row.setSpacing(4)
+        high_row = QHBoxLayout()
+        high_row.setSpacing(8)
         lbl_high = QLabel("Upper Threshold")
-        lbl_high.setAlignment(Qt.AlignLeft)
-        lbl_high.setWordWrap(True)
+        lbl_high.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         lbl_high.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
         high_value_card = QFrame()
         high_value_card.setObjectName("NoiseThresholdValueCard")
@@ -602,7 +607,7 @@ class MainWindow(QMainWindow):
         self.upper_value_sub_label.setAlignment(Qt.AlignRight | Qt.AlignTop)
         high_value_layout.addWidget(self.upper_value_label)
         high_value_layout.addWidget(self.upper_value_sub_label)
-        high_value_card.setMinimumWidth(120)
+        high_value_card.setMinimumWidth(104)
         high_value_row = QHBoxLayout()
         high_value_row.setContentsMargins(0, 0, 0, 0)
         high_value_row.addStretch(1)
@@ -820,7 +825,7 @@ class MainWindow(QMainWindow):
         side_panel_widget = QWidget()
         side_panel_layout = QVBoxLayout(side_panel_widget)
         side_panel_layout.setContentsMargins(10, 10, 10, 10)
-        side_panel_layout.setSpacing(12)
+        side_panel_layout.setSpacing(10)
 
         side_panel_layout.addWidget(self.timeline_group)
         side_panel_layout.addWidget(slider_group)
@@ -831,7 +836,7 @@ class MainWindow(QMainWindow):
         side_panel_layout.addStretch(1)
 
         # Consistent width for all groups (better on Windows DPI scaling)
-        SIDEBAR_W = 250
+        SIDEBAR_W = 268
         self.timeline_group.setMaximumWidth(SIDEBAR_W)
         slider_group.setMaximumWidth(SIDEBAR_W)
         self.units_group_box.setMaximumWidth(SIDEBAR_W)
@@ -848,6 +853,7 @@ class MainWindow(QMainWindow):
         self._sidebar_collapsed = False
 
         self.side_scroll = QScrollArea()
+        self.side_scroll.setObjectName("SidebarScroll")
         self.side_scroll.setWidgetResizable(True)
         self.side_scroll.setFrameShape(QFrame.NoFrame)
         self.side_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -871,7 +877,7 @@ class MainWindow(QMainWindow):
         # Style (safe sizes, no tiny max-heights)
         # -------------------------
         if not (self.theme and hasattr(self.theme, "set_view_mode")):
-            sidebar_style = self._classic_sidebar_qss()
+            sidebar_style = self._classic_sidebar_qss(self._is_dark_ui())
             self.timeline_group.setStyleSheet(sidebar_style)
             slider_group.setStyleSheet(sidebar_style)
             self.units_group_box.setStyleSheet(sidebar_style)
@@ -915,11 +921,13 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(container)
         self._set_sidebar_collapsed(False, animate=False)
 
+        self._normalize_sidebar_section_layouts()
         make_groups_collapsible(
             self.side_scroll.widget(),
             on_expand=self._sync_toolbar_enabled_states,
             settings=self._ui_settings,
             settings_key=SIDEBAR_SECTIONS_SETTINGS_KEY,
+            collapsed_height=self.SIDEBAR_HEADER_HEIGHT,
         )
         self._refresh_timeline_panel()
 
@@ -1477,12 +1485,15 @@ class MainWindow(QMainWindow):
         dark = self._is_dark_ui()
         if mode == "classic":
             main_qss = self._classic_main_qss()
-            sidebar_qss = self._classic_sidebar_qss()
+            sidebar_qss = self._classic_sidebar_qss(dark)
         else:
             main_qss = self._modern_main_qss(dark)
             sidebar_qss = self._modern_sidebar_qss(dark)
 
         self.setStyleSheet(main_qss)
+        side_scroll = getattr(self, "side_scroll", None)
+        if side_scroll is not None:
+            side_scroll.setStyleSheet(self._sidebar_panel_qss(dark))
         for widget in (
             getattr(self, "timeline_group", None),
             getattr(self, "slider_group", None),
@@ -1513,70 +1524,222 @@ class MainWindow(QMainWindow):
         }
         """
 
-    def _classic_sidebar_qss(self) -> str:
-        return """
-        QGroupBox {
+    def _sidebar_panel_qss(self, dark: bool) -> str:
+        """The surface the section cards sit on, plus its scrollbar."""
+        if dark:
+            panel, track, handle, handle_hover = "#151b24", "transparent", "#39465a", "#4a5a72"
+        else:
+            panel, track, handle, handle_hover = "#eef2f7", "transparent", "#c6d0dd", "#adbaca"
+
+        return f"""
+        QScrollArea#SidebarScroll {{
+            background-color: {panel};
+            border: none;
+        }}
+        QScrollArea#SidebarScroll > QWidget > QWidget {{
+            background-color: {panel};
+        }}
+        QScrollArea#SidebarScroll QScrollBar:vertical {{
+            background: {track};
+            width: 8px;
+            margin: 4px 2px 4px 0px;
+        }}
+        QScrollArea#SidebarScroll QScrollBar::handle:vertical {{
+            background: {handle};
+            border-radius: 4px;
+            min-height: 32px;
+        }}
+        QScrollArea#SidebarScroll QScrollBar::handle:vertical:hover {{
+            background: {handle_hover};
+        }}
+        QScrollArea#SidebarScroll QScrollBar::add-line:vertical,
+        QScrollArea#SidebarScroll QScrollBar::sub-line:vertical,
+        QScrollArea#SidebarScroll QScrollBar::add-page:vertical,
+        QScrollArea#SidebarScroll QScrollBar::sub-page:vertical {{
+            height: 0px;
+            background: none;
+        }}
+        """
+
+    def _classic_sidebar_qss(self, dark: bool = False) -> str:
+        """Flatter, lower-chrome variant of the sidebar cards.
+
+        Takes the theme explicitly: the cards paint their own surface, so a
+        hard-coded light palette would render white-on-white under a dark
+        desktop theme.
+        """
+        if dark:
+            card = "#232c38"
+            card_collapsed = "#1e2632"
+            card_hover = "#2a3442"
+            hairline = "#37445a"
+            field = "#171e28"
+            field_alt = "#1f2833"
+            text = "#e6ecf5"
+            muted = "#94a3b8"
+            accent = "#4d9fff"
+            accent_soft = "#22344b"
+            accent_text = "#bcd9ff"
+            control = "#2a3442"
+        else:
+            card = "#ffffff"
+            card_collapsed = "#fafbfd"
+            card_hover = "#f0f4fa"
+            hairline = "#d7dfea"
+            field = "#fbfdff"
+            field_alt = "#f1f5fa"
+            text = "#1f2937"
+            muted = "#5a6b82"
+            accent = "#0b74d4"
+            accent_soft = "#e8f1fd"
+            accent_text = "#0b5aa6"
+            control = "#f4f7fb"
+
+        return f"""
+        QGroupBox {{
+            background-color: {card};
+            border: none;
+            border-radius: 10px;
+            margin: 0px;
+            padding: 36px 12px 12px 12px;
+            font-size: 12px;
             font-weight: bold;
-        }
-        /* The accordion arrow in the title is the affordance; Qt's own
-           checkbox indicator would read as a second, conflicting control. */
-        QGroupBox::indicator {
+            color: {text};
+        }}
+        QGroupBox[collapsed="true"] {{
+            background-color: {card_collapsed};
+            padding-bottom: 0px;
+        }}
+        QGroupBox[collapsed="true"]:hover {{
+            background-color: {card_hover};
+        }}
+        QGroupBox::title {{
+            subcontrol-origin: border;
+            subcontrol-position: top left;
+            padding: 10px 12px;
+            color: {text};
+        }}
+        QGroupBox::indicator {{
             width: 0px;
             height: 0px;
-        }
-        QSpinBox#TimelineStepSpin {
-            min-width: 34px;
-            max-width: 56px;
-        }
-        QFrame#NoiseThresholdValueCard {
-            border: 1px solid #c8d0db;
-            border-radius: 8px;
-            background: #f5f8fc;
-        }
-        QLabel {
+        }}
+        QLabel {{
             font-size: 12px;
-        }
-        QLabel#NoiseThresholdPrimary {
-            font-size: 12px;
-            font-weight: bold;
-            color: #223047;
-        }
-        QLabel#NoiseThresholdSecondary {
+            font-weight: normal;
+            color: {text};
+            background: transparent;
+        }}
+        QLabel[section="true"], QLabel#SectionLabel {{
             font-size: 10px;
-            color: #607089;
-        }
-        QLabel[section="true"] {
             font-weight: bold;
-            color: #444;
-            margin-top: 6px;
-        }
-        QLabel#SectionLabel {
-            font-weight: bold;
-            color: #555;
+            color: {muted};
             margin-top: 8px;
-            margin-bottom: 4px;
-        }
-
-        QLineEdit, QComboBox {
-            min-height: 24px;
-            padding: 4px 6px;
+        }}
+        QLabel#TimelineStatusLabel {{
+            font-size: 11px;
+            color: {muted};
+        }}
+        QLabel#NoiseThresholdPrimary {{
+            font-size: 13px;
+            font-weight: bold;
+            color: {text};
+        }}
+        QLabel#NoiseThresholdSecondary {{
+            font-size: 10px;
+            color: {muted};
+        }}
+        QFrame#NoiseThresholdValueCard {{
+            border: 1px solid {hairline};
+            border-radius: 8px;
+            background: {field};
+        }}
+        QPushButton {{
+            min-height: 22px;
+            padding: 4px 10px;
+            border: 1px solid {hairline};
+            border-radius: 8px;
+            background-color: {control};
+            color: {text};
+            font-weight: normal;
+        }}
+        QPushButton:hover {{
+            border-color: {accent};
+        }}
+        QPushButton:disabled {{
+            background-color: transparent;
+            color: {muted};
+        }}
+        QPushButton#TimelineStepButton {{
+            background-color: {accent_soft};
+            border-color: {accent_soft};
+            color: {accent_text};
+            font-weight: bold;
+        }}
+        QPushButton#TimelineStepButton:disabled {{
+            background-color: transparent;
+            border-color: {hairline};
+            color: {muted};
+        }}
+        QLineEdit, QComboBox, QSpinBox {{
+            min-height: 22px;
+            border: 1px solid {hairline};
+            border-radius: 8px;
+            padding: 4px 8px;
             font-size: 12px;
-        }
-
-        QSpinBox {
-            min-height: 32px;
+            font-weight: normal;
+            background: {field};
+            color: {text};
+        }}
+        QSpinBox {{
             min-width: 90px;
-            padding-left: 6px;
+        }}
+        QSpinBox#TimelineStepSpin {{
+            min-width: 30px;
+            max-width: 52px;
+            padding: 4px 2px;
+        }}
+        QListWidget {{
+            border: 1px solid {hairline};
+            border-radius: 8px;
+            background: {field};
+            padding: 3px;
+            font-weight: normal;
+            color: {text};
+            outline: none;
+        }}
+        QListWidget::item {{
+            padding: 5px 8px;
+            border-radius: 6px;
+        }}
+        QListWidget::item:alternate {{
+            background-color: {field_alt};
+        }}
+        QCheckBox, QRadioButton {{
+            spacing: 7px;
             font-size: 12px;
-        }
-
-        QCheckBox {
-            spacing: 6px;
-            font-size: 12px;
-            margin-top: 10px;
-            margin-bottom: 10px;
-            margin-right: 10px;
-        }
+            font-weight: normal;
+            color: {text};
+            margin-top: 3px;
+            margin-bottom: 3px;
+        }}
+        QSlider::groove:horizontal {{
+            height: 5px;
+            border-radius: 3px;
+            background: {field_alt};
+        }}
+        QSlider::sub-page:horizontal {{
+            height: 5px;
+            border-radius: 3px;
+            background: {accent};
+        }}
+        QSlider::handle:horizontal {{
+            width: 15px;
+            height: 15px;
+            margin: -6px 0;
+            border-radius: 8px;
+            border: 2px solid {accent};
+            background: {card};
+        }}
         """
 
     def _modern_main_qss(self, dark: bool) -> str:
@@ -1745,56 +1908,101 @@ class MainWindow(QMainWindow):
         """
 
     def _modern_sidebar_qss(self, dark: bool) -> str:
+        """Sidebar styling: stacked cards with a clickable header row.
+
+        Each section is a QGroupBox whose title is drawn *inside* the card
+        (``subcontrol-origin: border``) rather than straddling its top edge, so
+        it reads as a header rather than a notch in a frame.  The reserved
+        header height comes from the card's top padding; collapsing flips the
+        ``collapsed`` property, which drops the bottom padding so nothing is
+        left but that header.
+        """
         if dark:
-            panel_bg = "#1d2631"
-            field_bg = "#141b24"
-            border = "#3a485d"
-            text = "#e8edf5"
-            muted = "#a7b3c5"
-            accent = "#58a6ff"
+            card = "#1e2733"
+            card_collapsed = "#1a222c"
+            hairline = "#2c3849"
+            field = "#141b24"
+            field_alt = "#1a222c"
+            text = "#e6ecf5"
+            heading = "#f2f6fb"
+            muted = "#93a2b8"
+            accent = "#4d9fff"
+            accent_soft = "#22344b"
+            accent_text = "#bcd9ff"
+            control = "#26313f"
+            control_hover = "#2f3c4d"
         else:
-            panel_bg = "#ffffff"
-            field_bg = "#f7faff"
-            border = "#d4dde9"
-            text = "#1f2937"
-            muted = "#6b7c93"
-            accent = "#0f7ae5"
+            card = "#ffffff"
+            card_collapsed = "#fbfcfe"
+            hairline = "#e3e9f1"
+            field = "#f7f9fc"
+            field_alt = "#eef2f8"
+            text = "#1b2532"
+            heading = "#0f1722"
+            muted = "#64748b"
+            accent = "#0b74d4"
+            accent_soft = "#e8f1fd"
+            accent_text = "#0b5aa6"
+            control = "#f2f5f9"
+            control_hover = "#e6ecf4"
 
         return f"""
+        /* ---------- Section card ---------- */
         QGroupBox {{
+            background-color: {card};
+            border: none;
+            border-radius: 12px;
+            margin: 0px;
+            padding: 38px 14px 14px 14px;
+            font-size: 12px;
             font-weight: 600;
-            font-size: 13px;
-            border: 1px solid {border};
-            border-radius: 10px;
-            margin-top: 12px;
-            padding: 10px;
-            background-color: {panel_bg};
             color: {text};
+        }}
+        QGroupBox[collapsed="true"] {{
+            background-color: {card_collapsed};
+            padding-bottom: 0px;
+        }}
+        /* A collapsed card is one big click target, so it lights up on hover.
+           Expanded cards do not: there the pointer is usually over content. */
+        QGroupBox[collapsed="true"]:hover {{
+            background-color: {control};
         }}
         QGroupBox::title {{
-            subcontrol-origin: margin;
-            left: 10px;
-            padding: 0 4px;
-            color: {text};
+            subcontrol-origin: border;
+            subcontrol-position: top left;
+            padding: 11px 14px;
+            color: {heading};
+            font-size: 12px;
+            font-weight: 600;
         }}
-
-        /* The accordion arrow in the title is the affordance; Qt's own
-           checkbox indicator would read as a second, conflicting control. */
+        /* The arrow in the title is the affordance; Qt's own checkbox
+           indicator would read as a second, conflicting control. */
         QGroupBox::indicator {{
             width: 0px;
             height: 0px;
         }}
+
+        /* ---------- Type ---------- */
         QLabel {{
             font-size: 12px;
+            font-weight: 400;
             color: {text};
+            background: transparent;
         }}
-        QFrame#NoiseThresholdValueCard {{
-            border: 1px solid {border};
-            border-radius: 8px;
-            background-color: {field_bg};
+        QLabel[section="true"], QLabel#SectionLabel {{
+            font-size: 10px;
+            font-weight: 700;
+            color: {muted};
+            margin-top: 10px;
+            margin-bottom: 2px;
+        }}
+        QLabel#TimelineStatusLabel {{
+            font-size: 11px;
+            color: {muted};
+            padding-top: 2px;
         }}
         QLabel#NoiseThresholdPrimary {{
-            font-size: 12px;
+            font-size: 13px;
             font-weight: 700;
             color: {text};
         }}
@@ -1802,67 +2010,154 @@ class MainWindow(QMainWindow):
             font-size: 10px;
             color: {muted};
         }}
-        QLabel[section="true"] {{
-            font-weight: 600;
-            color: {muted};
-            margin-top: 8px;
+        QFrame#NoiseThresholdValueCard {{
+            border: 1px solid {hairline};
+            border-radius: 8px;
+            background-color: {field};
         }}
-        QLabel#SectionLabel {{
-            font-weight: 600;
-            color: {muted};
-            margin-top: 10px;
-            margin-bottom: 4px;
+
+        /* ---------- Buttons ---------- */
+        QPushButton {{
+            min-height: 22px;
+            padding: 4px 10px;
+            border: 1px solid {hairline};
+            border-radius: 8px;
+            background-color: {control};
+            color: {text};
+            font-size: 12px;
+            font-weight: 500;
         }}
+        QPushButton:hover {{
+            background-color: {control_hover};
+            border-color: {accent};
+        }}
+        QPushButton:pressed {{
+            background-color: {accent_soft};
+        }}
+        QPushButton:disabled {{
+            background-color: transparent;
+            border-color: {hairline};
+            color: {muted};
+        }}
+        /* Stepping through the archive is this panel's primary action. */
+        QPushButton#TimelineStepButton {{
+            background-color: {accent_soft};
+            border-color: {accent_soft};
+            color: {accent_text};
+            font-weight: 600;
+        }}
+        QPushButton#TimelineStepButton:hover {{
+            border-color: {accent};
+        }}
+        QPushButton#TimelineStepButton:disabled {{
+            background-color: transparent;
+            border-color: {hairline};
+            color: {muted};
+        }}
+
+        /* ---------- Fields ---------- */
         QLineEdit, QComboBox, QSpinBox {{
-            min-height: 30px;
-            border: 1px solid {border};
+            min-height: 22px;
+            border: 1px solid {hairline};
             border-radius: 8px;
             padding: 4px 8px;
             font-size: 12px;
-            background-color: {field_bg};
+            font-weight: 400;
+            background-color: {field};
             color: {text};
             selection-background-color: {accent};
+        }}
+        QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{
+            border-color: {accent};
         }}
         QComboBox::drop-down {{
             border: none;
             width: 20px;
         }}
         QComboBox QAbstractItemView {{
-            border: 1px solid {border};
-            border-radius: 6px;
+            border: 1px solid {hairline};
+            border-radius: 8px;
             padding: 4px;
-            background-color: {panel_bg};
+            background-color: {card};
             color: {text};
             selection-background-color: {accent};
         }}
         QSpinBox {{
             min-width: 90px;
         }}
-        /* The step counter sits between two buttons on one 250 px row, so it
-           must opt out of the wide default the font-size spinners rely on. */
+        /* The step counter shares one 250 px row with two buttons, so it opts
+           out of the wide default the font-size spinners rely on. */
         QSpinBox#TimelineStepSpin {{
-            min-width: 34px;
-            max-width: 56px;
+            min-width: 30px;
+            max-width: 52px;
             padding: 4px 2px;
         }}
-        QCheckBox, QRadioButton {{
-            spacing: 6px;
+
+        /* ---------- Segment list ---------- */
+        QListWidget {{
+            border: 1px solid {hairline};
+            border-radius: 8px;
+            background-color: {field};
+            padding: 3px;
             font-size: 12px;
+            font-weight: 400;
             color: {text};
-            margin-top: 6px;
-            margin-bottom: 6px;
-            margin-right: 8px;
+            outline: none;
         }}
+        QListWidget::item {{
+            padding: 5px 8px;
+            border-radius: 6px;
+            color: {text};
+        }}
+        QListWidget::item:alternate {{
+            background-color: {field_alt};
+        }}
+        QListWidget::item:hover {{
+            background-color: {accent_soft};
+        }}
+
+        /* ---------- Toggles ---------- */
+        QCheckBox, QRadioButton {{
+            spacing: 7px;
+            font-size: 12px;
+            font-weight: 400;
+            color: {text};
+            margin-top: 3px;
+            margin-bottom: 3px;
+        }}
+        QCheckBox::indicator {{
+            width: 15px;
+            height: 15px;
+            border: 1px solid {hairline};
+            border-radius: 4px;
+            background-color: {field};
+        }}
+        QCheckBox::indicator:checked {{
+            background-color: {accent};
+            border-color: {accent};
+        }}
+
+        /* ---------- Sliders ---------- */
         QSlider::groove:horizontal {{
-            height: 6px;
+            height: 5px;
             border-radius: 3px;
-            background: {border};
+            background: {field_alt};
+        }}
+        QSlider::sub-page:horizontal {{
+            height: 5px;
+            border-radius: 3px;
+            background: {accent};
         }}
         QSlider::handle:horizontal {{
-            width: 14px;
-            margin: -5px 0;
-            border-radius: 7px;
-            background: {accent};
+            width: 15px;
+            height: 15px;
+            margin: -6px 0;
+            border-radius: 8px;
+            border: 2px solid {accent};
+            background: {card};
+        }}
+        QSlider::handle:horizontal:hover {{
+            background: {accent_soft};
         }}
         """
 
@@ -4870,6 +5165,22 @@ class MainWindow(QMainWindow):
     # =========================
     # Timeline: walking the dataset through the archive
     # =========================
+    def _normalize_sidebar_section_layouts(self) -> None:
+        """Give every sidebar card the same inner rhythm.
+
+        The card's own QSS padding already insets the content, so each section's
+        layout margins would otherwise double it — and each section was built
+        with its own ad-hoc values. One 8 px rhythm, set in one place.
+        """
+        from src.UI.widgets.collapsible_sections import collapsible_groups
+
+        for group in collapsible_groups(self.side_scroll.widget()):
+            layout = group.layout()
+            if layout is None:
+                continue
+            layout.setContentsMargins(0, 2, 0, 0)
+            layout.setSpacing(8)
+
     def _build_timeline_section(self) -> QGroupBox:
         """Sidebar controls for extending and trimming the loaded observation."""
         group = QGroupBox("Timeline")
@@ -4881,6 +5192,7 @@ class MainWindow(QMainWindow):
         step_row = QHBoxLayout()
         step_row.setSpacing(4)
         self.timeline_prev_btn = QPushButton("◀ Prev")
+        self.timeline_prev_btn.setObjectName("TimelineStepButton")
         self.timeline_prev_btn.setToolTip("Add the preceding observation (Ctrl+Shift+Left)")
         self.timeline_prev_btn.clicked.connect(lambda: self.extend_timeline("previous"))
         self.timeline_step_spin = QSpinBox()
@@ -4890,6 +5202,7 @@ class MainWindow(QMainWindow):
         self.timeline_step_spin.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.timeline_step_spin.setToolTip("How many observations to add per click")
         self.timeline_next_btn = QPushButton("Next ▶")
+        self.timeline_next_btn.setObjectName("TimelineStepButton")
         self.timeline_next_btn.setToolTip("Add the following observation (Ctrl+Shift+Right)")
         self.timeline_next_btn.clicked.connect(lambda: self.extend_timeline("next"))
         step_row.addWidget(self.timeline_prev_btn, 1)
@@ -4900,7 +5213,9 @@ class MainWindow(QMainWindow):
         self.timeline_list = QListWidget()
         self.timeline_list.setObjectName("TimelineSegmentList")
         self.timeline_list.setSelectionMode(QAbstractItemView.NoSelection)
-        self.timeline_list.setMaximumHeight(120)
+        self.timeline_list.setAlternatingRowColors(True)
+        self.timeline_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.timeline_list.setUniformItemSizes(True)
         layout.addWidget(self.timeline_list)
 
         trim_row = QHBoxLayout()
@@ -4956,6 +5271,7 @@ class MainWindow(QMainWindow):
 
         state = self._timeline_state()
         self.timeline_list.clear()
+        self._fit_timeline_list_height()
 
         if state is None:
             self.timeline_group.setEnabled(False)
@@ -4972,6 +5288,8 @@ class MainWindow(QMainWindow):
             label = f"{segment.observed_at:%H:%M}   " + " + ".join(segment.focus_codes)
             self.timeline_list.addItem(QListWidgetItem(label))
 
+        self._fit_timeline_list_height()
+
         count = len(state.segments)
         noun = "observation" if count == 1 else "observations"
         self.timeline_status_label.setText(
@@ -4981,6 +5299,18 @@ class MainWindow(QMainWindow):
         self.timeline_trim_start_btn.setEnabled(count > 1)
         self.timeline_trim_end_btn.setEnabled(count > 1)
         self._start_timeline_probe(state)
+
+    def _fit_timeline_list_height(self) -> None:
+        """Size the segment list to its rows, up to a scrollable ceiling."""
+        rows = self.timeline_list.count()
+        if rows <= 0:
+            self.timeline_list.setFixedHeight(0)
+            return
+        row_height = self.timeline_list.sizeHintForRow(0)
+        if row_height <= 0:
+            row_height = self.timeline_list.fontMetrics().height() + 10
+        visible = min(rows, self.TIMELINE_VISIBLE_ROWS)
+        self.timeline_list.setFixedHeight(visible * row_height + 8)
 
     def _set_timeline_controls_enabled(self, enabled: bool) -> None:
         busy = self._timeline_busy()

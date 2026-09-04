@@ -166,6 +166,8 @@ from src.UI.sunpy_solar_viewer import SunPyWorker, _default_cache_dir, _get_them
 from src.UI.widgets.collapsible_sections import make_groups_collapsible, set_group_expanded
 
 SIDEBAR_SECTIONS_SETTINGS_KEY = "ui/sidebar_sections_solar"
+#: Header-row height of a sidebar card; the QSS reserves this as top padding.
+SIDEBAR_HEADER_HEIGHT = 38
 
 
 # The solar image analysis window is a young, experimental feature; the title
@@ -2237,6 +2239,7 @@ class SolarDataAnalysisWindow(QMainWindow):
             on_expand=self._reapply_gating,
             settings=self._app_settings(),
             settings_key=SIDEBAR_SECTIONS_SETTINGS_KEY,
+            collapsed_height=SIDEBAR_HEADER_HEIGHT,
         )
 
     @staticmethod
@@ -2486,19 +2489,22 @@ class SolarDataAnalysisWindow(QMainWindow):
             }}
             QGroupBox {{
                 background: {card_bg};
-                border: 1px solid {border};
-                border-radius: 10px;
-                margin-top: 22px;
-                padding: 14px 12px 12px 12px;
+                border: none;
+                border-radius: 12px;
+                margin: 0px;
+                padding: 36px 12px 12px 12px;
                 font-weight: 600;
                 color: {text};
             }}
+            /* Collapsing hides the children and flips this property; dropping
+               the bottom padding leaves nothing but the header row. */
+            QGroupBox[collapsed="true"] {{
+                padding-bottom: 0px;
+            }}
             QGroupBox::title {{
-                subcontrol-origin: margin;
+                subcontrol-origin: border;
                 subcontrol-position: top left;
-                left: 8px;
-                top: 2px;
-                padding: 2px 6px;
+                padding: 10px 12px;
                 color: {text};
                 background: transparent;
             }}

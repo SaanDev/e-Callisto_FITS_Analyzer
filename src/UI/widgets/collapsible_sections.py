@@ -23,6 +23,7 @@ from PySide6.QtWidgets import QGroupBox, QWidget
 
 _BASE_TITLE_PROPERTY = "baseTitle"
 _BASE_MARGINS_PROPERTY = "baseLayoutMargins"
+_COLLAPSED_PROPERTY = "collapsed"
 _UNCONSTRAINED_HEIGHT = 16777215  # QWIDGETSIZE_MAX
 _EXPANDED_ARROW = "▾  "
 _COLLAPSED_ARROW = "▸  "
@@ -45,13 +46,15 @@ def _set_title_arrow(group: QGroupBox, expanded: bool) -> None:
     group.setTitle(arrow + group_base_title(group))
 
 
-def set_group_expanded(group: QGroupBox, expanded: bool) -> None:
+def set_group_expanded(group: QGroupBox, expanded: bool, *, collapsed_height: int = 0) -> None:
     """Expand or collapse one group, updating its arrow and children.
 
     Hiding the children is not enough on its own: the group's layout margins and
-    the style's padding keep reserving a body, so a "collapsed" card still eats
-    vertical space. Zeroing the layout margins and capping the height collapses
-    it to the title row the user expects.
+    the style's reserved body keep the card at full height, so a "collapsed"
+    section saves no space.  Collapsing therefore does three things — hide the
+    children, zero the layout margins, and flip a ``collapsed`` style property
+    the sidebar QSS uses to drop the card's bottom padding.  What is left is
+    exactly the header row.
     """
     expanded = bool(expanded)
     group.setChecked(expanded)
@@ -74,15 +77,29 @@ def set_group_expanded(group: QGroupBox, expanded: bool) -> None:
                 )
             layout.setContentsMargins(0, 0, 0, 0)
 
-    if expanded:
-        group.setMaximumHeight(_UNCONSTRAINED_HEIGHT)
-    else:
-        group.setMaximumHeight(_collapsed_height(group))
+    group.setProperty(_COLLAPSED_PROPERTY, not expanded)
+    _repolish(group)
+
+    # A QGroupBox reserves room for its frame even with every child hidden, so
+    # the card sits taller than the style asks for and has to be capped. Prefer
+    # an explicit height from the caller's design system: the size hint depends
+    # on when the stylesheet was applied, which makes cards collapse to
+    # different heights depending on construction order.
+    group.setMaximumHeight(_UNCONSTRAINED_HEIGHT)
+    if not expanded:
+        height = int(collapsed_height) or max(1, group.sizeHint().height())
+        group.setMaximumHeight(height)
+    group.updateGeometry()
 
 
-def _collapsed_height(group: QGroupBox) -> int:
-    """Height of a collapsed card: the title row plus the frame's own trim."""
-    return int(group.fontMetrics().height() * 2)
+def _repolish(widget: QWidget) -> None:
+    """Re-evaluate the stylesheet after a dynamic property changed."""
+    style = widget.style()
+    if style is None:
+        return
+    style.unpolish(widget)
+    style.polish(widget)
+    widget.update()
 
 
 def collapsible_groups(container: QWidget) -> list[QGroupBox]:
@@ -96,6 +113,7 @@ def make_groups_collapsible(
     on_expand=None,
     settings=None,
     settings_key: str = "",
+    collapsed_height: int = 0,
 ) -> list[QGroupBox]:
     """Turn every direct-child group box of ``container`` into an accordion card.
 
@@ -104,7 +122,9 @@ def make_groups_collapsible(
     gates controls on application state must re-derive that gating here.
 
     When ``settings`` and ``settings_key`` are given, each group's expanded state
-    is restored on setup and saved on every toggle.
+    is restored on setup and saved on every toggle.  ``collapsed_height`` pins
+    every collapsed card to the same header height; without it each card falls
+    back to its own size hint.
     """
     stored = _load_states(settings, settings_key)
     groups = collapsible_groups(container)
@@ -116,19 +136,19 @@ def make_groups_collapsible(
         group.setProperty(_BASE_TITLE_PROPERTY, base)
         group.setCheckable(True)
         expanded = bool(stored.get(base, True))
-        set_group_expanded(group, expanded)
+        set_group_expanded(group, expanded, collapsed_height=collapsed_height)
         group.toggled.connect(
             lambda checked, g=group: _on_toggled(
                 g, checked, on_expand=on_expand, settings=settings, settings_key=settings_key,
-                container=container,
+                container=container, collapsed_height=collapsed_height,
             )
         )
 
     return groups
 
 
-def _on_toggled(group, expanded, *, on_expand, settings, settings_key, container) -> None:
-    set_group_expanded(group, expanded)
+def _on_toggled(group, expanded, *, on_expand, settings, settings_key, container, collapsed_height=0) -> None:
+    set_group_expanded(group, expanded, collapsed_height=collapsed_height)
     if expanded and callable(on_expand):
         on_expand()
     _save_states(container, settings, settings_key)
