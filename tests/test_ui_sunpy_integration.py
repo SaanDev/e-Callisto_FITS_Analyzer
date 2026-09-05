@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.8.0
+Version 3.0.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -45,7 +45,7 @@ def test_main_window_exposes_solar_data_analysis_action_and_opens_window():
     _app()
     win = MainWindow(theme=None)
     assert hasattr(win, "open_solar_data_analysis_action")
-    assert win.open_solar_data_analysis_action.text() == "Solar Image Analysis (Experimental) — SDO · SOHO/LASCO · STEREO · GOES/SUVI"
+    assert win.open_solar_data_analysis_action.text() == "Solar Image Analysis"
 
     win.open_solar_data_analysis_action.trigger()
     QApplication.processEvents()

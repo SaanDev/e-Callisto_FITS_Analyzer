@@ -144,3 +144,97 @@ def test_solar_center_from_meta_falls_back_to_shape():
     assert (cx, cy) == pytest.approx((100.0, 50.0))
     with pytest.raises(ValueError):
         solar_center_from_meta({})
+
+
+# --------------------------------------------------------------------------- #
+# Higher-order height-time fits and their uncertainties
+# --------------------------------------------------------------------------- #
+def test_fit_height_time_quadratic_recovers_speed_and_acceleration():
+    times = np.arange(0.0, 1800.0, 300.0)  # 6 samples, 5 min apart
+    v0, accel = 300.0, 20.0
+    heights = 1.0e5 + v0 * times + 0.5 * accel * times**2
+    fit = fit_height_time(times, heights, order=2)
+
+    assert fit.order == 2
+    assert fit.speed_km_s == pytest.approx(v0, rel=1e-6)
+    assert fit.acceleration_km_s2 == pytest.approx(accel, rel=1e-6)
+    # v(t_end) = v0 + a * t_end
+    assert fit.speed_final_km_s == pytest.approx(v0 + accel * times[-1], rel=1e-6)
+    # Constant acceleration: both ends agree.
+    assert fit.acceleration_final_km_s2 == pytest.approx(accel, rel=1e-6)
+    assert np.isnan(fit.jerk_km_s3)
+
+
+def test_fit_height_time_cubic_recovers_jerk():
+    times = np.arange(0.0, 2400.0, 300.0)  # 8 samples
+    v0, accel, jerk = 250.0, 15.0, 0.004
+    heights = 1.0e5 + v0 * times + 0.5 * accel * times**2 + jerk * times**3 / 6.0
+    fit = fit_height_time(times, heights, order=3)
+
+    assert fit.order == 3
+    assert fit.speed_km_s == pytest.approx(v0, rel=1e-5)
+    assert fit.acceleration_km_s2 == pytest.approx(accel, rel=1e-5)
+    assert fit.jerk_km_s3 == pytest.approx(jerk, rel=1e-5)
+    assert fit.acceleration_final_km_s2 == pytest.approx(accel + jerk * times[-1], rel=1e-5)
+
+
+def test_fit_height_time_coefficients_reproduce_the_curve():
+    times = np.arange(0.0, 1800.0, 300.0)
+    heights = 1.0e5 + 300.0 * times + 0.5 * 20.0 * times**2
+    fit = fit_height_time(times, heights, order=2)
+    # coeffs_km follows the numpy convention, so the panel can polyval them.
+    assert np.allclose(np.polyval(fit.coeffs_km, fit.times_s), heights, rtol=1e-9)
+    assert fit.rms_residual_km == pytest.approx(0.0, abs=1e-3)
+
+
+def test_fit_height_time_errors_grow_with_scatter():
+    rng = np.random.default_rng(11)
+    times = np.arange(0.0, 3000.0, 300.0)
+    clean = 1.0e5 + 400.0 * times
+    tight = fit_height_time(times, clean + rng.normal(0.0, 1.0e3, times.size))
+    loose = fit_height_time(times, clean + rng.normal(0.0, 5.0e4, times.size))
+
+    assert np.isfinite(tight.speed_err_km_s) and tight.speed_err_km_s > 0.0
+    assert loose.speed_err_km_s > 5.0 * tight.speed_err_km_s
+    # The true speed sits within a few sigma of the fitted one.
+    assert abs(tight.speed_km_s - 400.0) < 5.0 * tight.speed_err_km_s
+
+
+def test_fit_height_time_errors_are_nan_without_spare_degrees_of_freedom():
+    times = np.asarray([0.0, 300.0, 600.0])
+    heights = 1.0e5 + 400.0 * times + 0.5 * 20.0 * times**2
+    exact = fit_height_time(times, heights, order=2)  # 3 points, 3 coefficients
+    assert exact.acceleration_km_s2 == pytest.approx(20.0, rel=1e-6)
+    assert np.isnan(exact.speed_err_km_s)
+    assert np.isnan(exact.acceleration_err_km_s2)
+
+
+def test_fit_height_time_rejects_orders_outside_one_to_three():
+    times = np.arange(0.0, 1800.0, 300.0)
+    heights = 1.0e5 + 300.0 * times
+    for order in (0, 4, -1):
+        with pytest.raises(ValueError, match="order must be"):
+            fit_height_time(times, heights, order=order)
+
+
+def test_fit_height_time_needs_enough_points_for_the_order():
+    times = np.asarray([0.0, 300.0, 600.0])
+    heights = np.asarray([1.0, 2.0, 3.0]) * 1.0e5
+    with pytest.raises(ValueError, match="degree-3"):
+        fit_height_time(times, heights, order=3)
+
+
+def test_fit_height_time_rejects_a_zero_time_baseline():
+    with pytest.raises(ValueError, match="no baseline"):
+        fit_height_time([100.0, 100.0, 100.0], [1.0, 2.0, 3.0])
+
+
+def test_fit_height_time_linear_default_is_unchanged():
+    """order=1 keeps the historical pairing: line for speed, quadratic for a."""
+    times = np.arange(0.0, 1800.0, 300.0)
+    heights = 1.0e5 + 400.0 * times + 0.5 * 12.0 * times**2
+    fit = fit_height_time(times, heights)
+    assert fit.order == 1
+    assert fit.coeffs_km.size == 2  # the plotted curve is a straight line...
+    assert fit.acceleration_km_s2 == pytest.approx(12.0, rel=1e-6)  # ...but a is real
+    assert fit.speed_km_s == pytest.approx(fit.speed_final_km_s)  # constant slope

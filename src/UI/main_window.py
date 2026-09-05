@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.8.0
+Version 3.0.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -1202,7 +1202,7 @@ class MainWindow(QMainWindow):
             mode_menu.addAction(a)
 
         analysis_menu = menubar.addMenu("Analysis")
-        self.open_solar_data_analysis_action = QAction("Solar Image Analysis (Experimental) — SDO · SOHO/LASCO · STEREO · GOES/SUVI", self)
+        self.open_solar_data_analysis_action = QAction("Solar Image Analysis", self)
         self.open_solar_data_analysis_action.triggered.connect(self.open_solar_data_analysis_window)
         analysis_menu.addAction(self.open_solar_data_analysis_action)
         analysis_menu.addSeparator()

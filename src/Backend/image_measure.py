@@ -1,10 +1,11 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.8.0
+Version 3.0.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
-Plane-of-sky measurements on solar images (ruler, line profile, region stats).
+Plane-of-sky measurements on solar images (ruler, circle fit, line profile,
+region stats).
 
 These are the pure-math backends for the Solar Image Analysis measurement
 tools. Everything is plain numpy over helioprojective-arcsec / pixel inputs so
@@ -81,6 +82,116 @@ def ruler_measurement(
         distance_km=distance_km,
         position_angle_deg=pa,
     )
+
+
+@dataclass(frozen=True)
+class CircleFit:
+    """Least-squares circle through points sampled along an arc.
+
+    Units follow the inputs: feed arcsec, get arcsec back. ``rms_residual`` is
+    the geometric residual ``sqrt(mean((d_i - R)^2))`` rather than the algebraic
+    one, so it reads directly as "how far the clicked points sit off the fitted
+    front". ``arc_span_deg`` is how much of the circle those points actually
+    cover: a short arc pins the radius very weakly, and callers should say so
+    rather than quietly reporting a confident-looking number.
+    """
+
+    center_x: float
+    center_y: float
+    radius: float
+    rms_residual: float
+    n_points: int
+    arc_span_deg: float
+    center_fixed: bool
+
+
+def fit_circle(
+    points: Sequence[Sequence[float]] | np.ndarray,
+    *,
+    center: tuple[float, float] | None = None,
+) -> CircleFit:
+    """Fit a circle to points sampled along an arc (e.g. a CME dome front).
+
+    ``center=None`` runs the full three-parameter fit and needs at least three
+    points; passing ``center`` freezes it and only the radius is solved, which
+    needs a single point.
+
+    The three-parameter fit is Taubin's, not the naive Kasa/algebraic one: a CME
+    front is usually a *partial* arc, often well under 90 deg, where Kasa is
+    strongly biased toward small radii while Taubin is essentially unbiased. It
+    is one SVD — no iteration, no initial guess.
+
+    Fit in helioprojective arcsec rather than pixels: the sky is isotropic in
+    angle, so a spherical bubble projects to a circle in ``(Tx, Ty)`` even when
+    ``CDELT1 != CDELT2``, where the same front would be an ellipse in pixels.
+
+    Raises ``ValueError`` when the points are too few, coincident, or so nearly
+    collinear that no circle is determined.
+    """
+    pts = np.asarray(points, dtype=float).reshape(-1, 2)
+    # Drop non-finite rows rather than letting one bad click poison the fit.
+    pts = pts[np.isfinite(pts).all(axis=1)]
+    n = int(pts.shape[0])
+    x = pts[:, 0]
+    y = pts[:, 1]
+
+    if center is not None:
+        if n < 1:
+            raise ValueError("A fixed-centre circle fit needs at least one point.")
+        cx = float(center[0])
+        cy = float(center[1])
+        distances = np.hypot(x - cx, y - cy)
+        # The mean distance is the exact least-squares minimiser of sum((d - R)^2).
+        radius = float(distances.mean())
+        rms = float(np.sqrt(np.mean((distances - radius) ** 2)))
+        return CircleFit(cx, cy, radius, rms, n, _arc_span_deg(x, y, cx, cy), True)
+
+    if n < 3:
+        raise ValueError("A circle fit needs at least three points.")
+
+    # Centring the data is what keeps the normal equations well conditioned.
+    mx = float(x.mean())
+    my = float(y.mean())
+    xc = x - mx
+    yc = y - my
+    z = xc * xc + yc * yc
+    z_mean = float(z.mean())
+    if z_mean <= 0.0:
+        raise ValueError("Circle fit is degenerate: all points coincide.")
+    z0 = (z - z_mean) / (2.0 * math.sqrt(z_mean))
+
+    _, _, vt = np.linalg.svd(np.column_stack((z0, xc, yc)), full_matrices=False)
+    coeffs = vt[-1]  # right singular vector of the smallest singular value
+    a0 = float(coeffs[0]) / (2.0 * math.sqrt(z_mean))
+    a1 = float(coeffs[1])
+    a2 = float(coeffs[2])
+    a3 = -z_mean * a0
+
+    collinear = "Circle fit is degenerate: the points are (nearly) collinear."
+    discriminant = a1 * a1 + a2 * a2 - 4.0 * a0 * a3
+    if not math.isfinite(discriminant) or discriminant <= 0.0 or abs(a0) < 1e-300:
+        raise ValueError(collinear)
+
+    cx = -a1 / (2.0 * a0) + mx
+    cy = -a2 / (2.0 * a0) + my
+    radius = math.sqrt(discriminant) / (2.0 * abs(a0))
+    # a0 -> 0 is the collinear limit, where the radius runs away from the data.
+    span = float(np.hypot(xc, yc).max())
+    if not math.isfinite(radius) or radius > 1e6 * max(span, 1e-12):
+        raise ValueError(collinear)
+
+    distances = np.hypot(x - cx, y - cy)
+    rms = float(np.sqrt(np.mean((distances - radius) ** 2)))
+    return CircleFit(cx, cy, radius, rms, n, _arc_span_deg(x, y, cx, cy), False)
+
+
+def _arc_span_deg(x: np.ndarray, y: np.ndarray, cx: float, cy: float) -> float:
+    """Angular extent the points cover about ``(cx, cy)``: 360 minus the largest gap."""
+    if x.size < 2:
+        return 0.0
+    angles = np.sort(np.arctan2(y - cy, x - cx))
+    gaps = np.diff(np.concatenate([angles, [angles[0] + 2.0 * np.pi]]))
+    return float(360.0 - np.degrees(float(gaps.max())))
 
 
 def line_profile(

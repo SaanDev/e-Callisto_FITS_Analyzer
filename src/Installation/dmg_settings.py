@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.8.0
+Version 3.0.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -11,7 +11,7 @@ dmgbuild settings for the macOS disk image.
 Invoked by build_macos_dmg.sh as:
     dmgbuild -s src/Installation/dmg_settings.py \
              -D app=dist/"e-Callisto FITS Analyzer.app" \
-             "e-CALLISTO FITS Analyzer 2.8.0" out.dmg
+             "e-CALLISTO FITS Analyzer 3.0.0" out.dmg
 
 `defines` is supplied by dmgbuild from the -D flags.
 """

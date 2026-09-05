@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.8.0
+Version 3.0.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
@@ -266,9 +266,23 @@ def pixel_radius_to_rsun(pixel_radius: float, cdelt_arcsec: float, rsun_arcsec: 
     return float(pixel_radius) * float(cdelt_arcsec) / float(rsun_arcsec)
 
 
+MAX_HEIGHT_TIME_ORDER = 3
+
+
 @dataclass(frozen=True)
 class HeightTimeFit:
-    """Result of a CME height-time fit (plane-of-sky)."""
+    """Result of a CME height-time fit (plane-of-sky).
+
+    ``speed_km_s`` / ``acceleration_km_s2`` are the values at the *first* sample
+    (t=0). For a straight line both are constant, so those fields keep the plain
+    reading they have always had; for a curved fit they are the initial values
+    and ``*_final_*`` give the same quantities at the last sample.
+
+    Every ``*_err_*`` is a 1-sigma uncertainty propagated from the coefficient
+    covariance, so correlations between the polynomial terms are included. They
+    are NaN when the fit has no spare degree of freedom (n <= order + 1), where
+    the scatter cannot be estimated at all.
+    """
 
     times_s: np.ndarray
     heights_km: np.ndarray
@@ -278,41 +292,166 @@ class HeightTimeFit:
     # Instantaneous speed between successive picked points (len = n-1).
     segment_speeds_km_s: np.ndarray
     segment_times_s: np.ndarray
+    # Polynomial detail. coeffs_km follows the numpy convention (highest power
+    # first), so np.polyval(coeffs_km, t) gives the fitted height in km.
+    order: int = 1
+    coeffs_km: np.ndarray | None = None
+    coeff_errors_km: np.ndarray | None = None
+    covariance_km: np.ndarray | None = None
+    speed_err_km_s: float = float("nan")
+    acceleration_err_km_s2: float = float("nan")
+    speed_final_km_s: float = float("nan")
+    speed_final_err_km_s: float = float("nan")
+    acceleration_final_km_s2: float = float("nan")
+    acceleration_final_err_km_s2: float = float("nan")
+    jerk_km_s3: float = float("nan")
+    jerk_err_km_s3: float = float("nan")
+    rms_residual_km: float = float("nan")
+
+
+def _polyfit_with_covariance(
+    x: np.ndarray, y: np.ndarray, degree: int
+) -> tuple[np.ndarray, np.ndarray | None, float]:
+    """Least-squares polynomial fit with the coefficient covariance matrix.
+
+    Returns ``(coeffs, covariance, rms_residual)`` with ``coeffs`` in the numpy
+    convention (highest power first). The covariance is the textbook
+    ``sigma^2 (X'X)^-1`` with ``sigma^2 = RSS / (n - degree - 1)``, i.e. the
+    scatter of the points is what sets the error bars; it is ``None`` when there
+    is no spare degree of freedom to estimate that scatter from.
+
+    Time is rescaled before fitting because a cubic in raw seconds spans nine
+    orders of magnitude between the constant and ``t^3`` columns; the
+    coefficients and their covariance are transformed back afterwards.
+    """
+    scale = float(np.max(np.abs(x)))
+    if not np.isfinite(scale) or scale <= 0.0:
+        scale = 1.0
+    design = np.vander(x / scale, degree + 1)
+    coeffs_scaled, *_ = np.linalg.lstsq(design, y, rcond=None)
+    residuals = y - design @ coeffs_scaled
+
+    dof = int(x.size) - (degree + 1)
+    covariance_scaled: np.ndarray | None = None
+    if dof > 0:
+        variance = float(residuals @ residuals) / dof
+        covariance_scaled = variance * np.linalg.pinv(design.T @ design)
+
+    # Undo the time scaling: the coefficient of t^k carries a 1/scale**k.
+    powers = np.arange(degree, -1, -1, dtype=float)
+    factors = scale ** (-powers)
+    coeffs = coeffs_scaled * factors
+    covariance = (
+        covariance_scaled * np.outer(factors, factors)
+        if covariance_scaled is not None
+        else None
+    )
+    rms = float(np.sqrt(np.mean(residuals**2)))
+    return coeffs, covariance, rms
+
+
+def _derivative_at(
+    coeffs: np.ndarray, covariance: np.ndarray | None, t: float, nth: int
+) -> tuple[float, float]:
+    """The ``nth`` derivative of the polynomial at ``t``, and its 1-sigma error.
+
+    The derivative is linear in the coefficients, so its variance is
+    ``g' C g`` with ``g`` the gradient — which keeps the (strong) correlations
+    between polynomial terms in the error bar instead of adding them in
+    quadrature as if they were independent.
+    """
+    degree = len(coeffs) - 1
+    gradient = np.zeros(degree + 1, dtype=float)
+    for index in range(degree + 1):
+        power = degree - index
+        if power < nth:
+            continue
+        factor = 1.0
+        for step in range(nth):
+            factor *= power - step
+        gradient[index] = factor * (float(t) ** (power - nth))
+    value = float(gradient @ coeffs)
+    if covariance is None:
+        return value, float("nan")
+    variance = float(gradient @ covariance @ gradient)
+    return value, float(np.sqrt(variance)) if variance > 0.0 else 0.0
 
 
 def fit_height_time(
     times: Sequence[float] | Sequence[datetime],
     heights_km: Sequence[float],
+    *,
+    order: int = 1,
 ) -> HeightTimeFit:
     """Fit height(t) for a CME leading edge and derive speed & acceleration.
 
     ``times`` may be seconds (relative to any epoch) or ``datetime`` objects; the
-    first sample defines t=0. A linear fit gives the mean plane-of-sky speed and a
-    quadratic fit ``h = h0 + v t + 0.5 a t^2`` gives the constant acceleration
-    (reported as ``2 * quadratic_coeff``). Needs at least two points for speed and
-    three for acceleration.
+    first sample defines t=0. ``order`` selects the polynomial degree, 1 to 3:
+
+    * **1** — a straight line. The slope is the mean plane-of-sky speed, and the
+      acceleration comes from an auxiliary quadratic fit, since a straight line
+      has none of its own. This is the pairing the CDAW CME catalogue reports,
+      and it is what this function did before ``order`` existed.
+    * **2** — ``h = h0 + v0 t + a t^2 / 2``: constant acceleration, with the
+      speed reported at the first and last sample.
+    * **3** — adds a constant jerk, so the acceleration is reported at the first
+      and last sample too.
+
+    Needs at least two points, and at least ``order + 1`` for the chosen degree.
+    Error bars need one more point than that; below it they come back NaN.
     """
     times_s = _to_seconds(times)
     heights = np.asarray(heights_km, dtype=float)
     if times_s.shape != heights.shape:
         raise ValueError("times and heights_km must have the same length.")
-    order = np.argsort(times_s)
-    times_s = times_s[order]
-    heights = heights[order]
+    degree = int(order)
+    if degree < 1 or degree > MAX_HEIGHT_TIME_ORDER:
+        raise ValueError(f"order must be between 1 and {MAX_HEIGHT_TIME_ORDER}, got {order}.")
+    ordering = np.argsort(times_s)
+    times_s = times_s[ordering]
+    heights = heights[ordering]
     if times_s.size < 2:
         raise ValueError("At least two points are required for a height-time fit.")
+    if times_s.size < degree + 1:
+        raise ValueError(
+            f"A degree-{degree} height-time fit needs at least {degree + 1} points, "
+            f"got {times_s.size}."
+        )
+    if times_s[-1] <= times_s[0]:
+        raise ValueError("All samples share one time — height(t) has no baseline to fit.")
 
-    # Linear fit -> mean speed.
-    lin = np.polyfit(times_s, heights, 1)
-    speed = float(lin[0])
-    intercept = float(lin[1])
+    coeffs, covariance, rms = _polyfit_with_covariance(times_s, heights, degree)
+    coeff_errors = (
+        np.sqrt(np.clip(np.diag(covariance), 0.0, None))
+        if covariance is not None
+        else np.full(degree + 1, np.nan)
+    )
 
-    # Quadratic fit -> acceleration (only if enough points).
-    if times_s.size >= 3:
-        quad = np.polyfit(times_s, heights, 2)
-        acceleration = float(2.0 * quad[0])
+    t_first = float(times_s[0])
+    t_last = float(times_s[-1])
+    speed, speed_err = _derivative_at(coeffs, covariance, t_first, 1)
+    speed_final, speed_final_err = _derivative_at(coeffs, covariance, t_last, 1)
+
+    if degree == 1:
+        # A straight line has no acceleration of its own; take it from a
+        # quadratic fit to the same points, as the catalogues do.
+        if times_s.size >= 3:
+            quad_coeffs, quad_cov, _ = _polyfit_with_covariance(times_s, heights, 2)
+            acceleration, acceleration_err = _derivative_at(quad_coeffs, quad_cov, t_first, 2)
+        else:
+            acceleration = float("nan")
+            acceleration_err = float("nan")
+        acceleration_final, acceleration_final_err = acceleration, acceleration_err
     else:
-        acceleration = float("nan")
+        acceleration, acceleration_err = _derivative_at(coeffs, covariance, t_first, 2)
+        acceleration_final, acceleration_final_err = _derivative_at(
+            coeffs, covariance, t_last, 2
+        )
+
+    if degree >= 3:
+        jerk, jerk_err = _derivative_at(coeffs, covariance, t_first, 3)
+    else:
+        jerk, jerk_err = float("nan"), float("nan")
 
     dt = np.diff(times_s)
     with np.errstate(invalid="ignore", divide="ignore"):
@@ -324,9 +463,22 @@ def fit_height_time(
         heights_km=heights,
         speed_km_s=speed,
         acceleration_km_s2=acceleration,
-        intercept_km=intercept,
+        intercept_km=float(coeffs[-1]),
         segment_speeds_km_s=seg_speeds,
         segment_times_s=seg_times,
+        order=degree,
+        coeffs_km=coeffs,
+        coeff_errors_km=coeff_errors,
+        covariance_km=covariance,
+        speed_err_km_s=speed_err,
+        acceleration_err_km_s2=acceleration_err,
+        speed_final_km_s=speed_final,
+        speed_final_err_km_s=speed_final_err,
+        acceleration_final_km_s2=acceleration_final,
+        acceleration_final_err_km_s2=acceleration_final_err,
+        jerk_km_s3=jerk,
+        jerk_err_km_s3=jerk_err,
+        rms_residual_km=rms,
     )
 
 

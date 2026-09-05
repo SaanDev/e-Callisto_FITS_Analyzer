@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.8.0
+Version 3.0.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -65,7 +65,7 @@ class TypeIIBandSplittingDialog(QDialog):
         frequency_step_mhz=None,
     ):
         super().__init__(parent)
-        self.setWindowTitle("Type II Band-splitting (Experimental)")
+        self.setWindowTitle("Type II Band-splitting")
         fit_window_to_screen(self, 1280, 760)
 
         self.spectrum_data = np.asarray(spectrum_data, dtype=float).copy()

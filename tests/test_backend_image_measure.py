@@ -10,8 +10,10 @@ import pytest
 
 from src.Backend.coronagraph import RSUN_KM
 from src.Backend.image_measure import (
+    CircleFit,
     RegionStats,
     RulerResult,
+    fit_circle,
     line_profile,
     region_stats,
     ruler_measurement,
@@ -103,3 +105,86 @@ def test_region_stats_respects_bounds():
 def test_ruler_result_is_dataclass():
     result = ruler_measurement((0.0, 0.0), (0.0, 1.0))
     assert isinstance(result, RulerResult)
+
+
+# --------------------------------------------------------------------------- #
+# Circle fitting (CME dome fronts)
+# --------------------------------------------------------------------------- #
+def _arc_points(cx, cy, radius, start_deg, end_deg, n):
+    theta = np.linspace(np.deg2rad(start_deg), np.deg2rad(end_deg), n)
+    return np.column_stack((cx + radius * np.cos(theta), cy + radius * np.sin(theta)))
+
+
+def test_fit_circle_recovers_exact_circle():
+    points = _arc_points(100.0, -50.0, 300.0, 0.0, 315.0, 8)
+    fit = fit_circle(points)
+    assert fit.center_x == pytest.approx(100.0)
+    assert fit.center_y == pytest.approx(-50.0)
+    assert fit.radius == pytest.approx(300.0)
+    assert fit.rms_residual == pytest.approx(0.0, abs=1e-9)
+    assert fit.n_points == 8
+    assert fit.center_fixed is False
+
+
+def test_fit_circle_on_partial_arc_with_noise():
+    # A CME front is usually a short arc; the fit must stay unbiased there.
+    rng = np.random.default_rng(0)
+    theta = np.linspace(np.deg2rad(20.0), np.deg2rad(80.0), 12)
+    radii = 300.0 + rng.normal(0.0, 0.5, theta.size)
+    points = np.column_stack((radii * np.cos(theta), radii * np.sin(theta)))
+    fit = fit_circle(points)
+    assert abs(fit.center_x) < 4.0
+    assert abs(fit.center_y) < 4.0
+    assert fit.radius == pytest.approx(300.0, rel=0.01)
+    assert fit.arc_span_deg == pytest.approx(60.0, abs=2.0)
+
+
+def test_fit_circle_rejects_collinear_points():
+    with pytest.raises(ValueError, match="collinear"):
+        fit_circle([(0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (3.0, 3.0), (4.0, 4.0)])
+
+
+def test_fit_circle_rejects_two_points():
+    with pytest.raises(ValueError, match="three points"):
+        fit_circle([(0.0, 0.0), (1.0, 0.0)])
+
+
+def test_fit_circle_rejects_coincident_points():
+    with pytest.raises(ValueError, match="coincide"):
+        fit_circle([(5.0, 5.0)] * 4)
+
+
+def test_fit_circle_fixed_center_averages_radii():
+    fit = fit_circle([(90.0, 0.0), (0.0, 100.0), (-110.0, 0.0)], center=(0.0, 0.0))
+    assert fit.center_x == pytest.approx(0.0)
+    assert fit.center_y == pytest.approx(0.0)
+    assert fit.radius == pytest.approx(100.0)
+    assert fit.rms_residual == pytest.approx(np.sqrt(200.0 / 3.0))
+    assert fit.center_fixed is True
+
+
+def test_fit_circle_fixed_center_accepts_single_point():
+    fit = fit_circle([(3.0, 4.0)], center=(0.0, 0.0))
+    assert fit.radius == pytest.approx(5.0)
+    assert fit.n_points == 1
+    assert fit.arc_span_deg == pytest.approx(0.0)
+
+
+def test_fit_circle_arc_span_full_vs_quarter():
+    full = fit_circle(_arc_points(0.0, 0.0, 10.0, 0.0, 350.0, 36))
+    quarter = fit_circle(_arc_points(0.0, 0.0, 10.0, 0.0, 90.0, 5))
+    assert full.arc_span_deg > 300.0
+    assert quarter.arc_span_deg == pytest.approx(90.0)
+
+
+def test_fit_circle_ignores_non_finite_points():
+    fit = fit_circle([(4.0, 0.0), (0.0, 4.0), (-4.0, 0.0), (np.nan, 1.0)])
+    assert fit.n_points == 3
+    assert fit.radius == pytest.approx(4.0)
+
+
+def test_circle_fit_is_frozen_dataclass():
+    fit = fit_circle([(1.0, 0.0), (0.0, 1.0), (-1.0, 0.0)])
+    assert isinstance(fit, CircleFit)
+    with pytest.raises(Exception):
+        fit.radius = 2.0  # type: ignore[misc]

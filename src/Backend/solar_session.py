@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.8.0
+Version 3.0.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
@@ -12,7 +12,7 @@ reopen an analysis exactly where it was left off:
 * the original FITS frame files (raw bytes, so restore goes back through the
   normal ``Map()`` load path and keeps every header/WCS/colormap detail), and
 * a ``meta.json`` describing the data source, the display/crop/playback state,
-  and the hand-made CME height-time picks.
+  and the hand-made CME measurements (height-time picks and circle fits).
 
 Frames are embedded rather than referenced so a session survives a cleared cache
 or a move to another machine, at the cost of a large file. This module is pure
@@ -124,6 +124,136 @@ def deserialize_picks(raw: Any) -> dict[int, tuple[datetime | None, float, float
             continue
         idx = _safe_int(row.get("frame_index"), 0)
         out[idx] = (_parse_iso(row.get("time")), float(height), float(x_arc), float(y_arc), float(pa))
+    return out
+
+
+# ------------------------------------------------------------------- circle fits
+
+
+def serialize_circle_fits(circles: Mapping[int, Sequence[Any]] | None) -> list[dict[str, Any]]:
+    """Flatten the controller's ``{frame_index: CircleFitEntry}`` circle fits.
+
+    Entries are read positionally, exactly like :func:`serialize_picks` reads a
+    pick tuple, so this module keeps knowing nothing about the UI layer's types.
+
+    These live under a *new* key in ``meta["measurements"]`` rather than behind a
+    schema bump: ``_load_meta`` rejects any version but the current one, so a bump
+    would make today's sessions unreadable by the new build and tomorrow's
+    unreadable by every shipped one. An unknown key is simply ignored on read,
+    which degrades to "the circles are missing" instead of "the file is refused".
+    """
+    out: list[dict[str, Any]] = []
+    if not isinstance(circles, Mapping):
+        return out
+    for idx in sorted(circles.keys(), key=lambda k: _safe_int(k, 0)):
+        entry = circles[idx]
+        if not isinstance(entry, Sequence) or len(entry) < 9:
+            continue
+        when = entry[0]
+        when_iso: str | None
+        if isinstance(when, datetime):
+            when_iso = when.isoformat()
+        else:
+            when_iso = str(when) if when else None
+        out.append(
+            {
+                "frame_index": _safe_int(idx, 0),
+                "time": when_iso,
+                "radius_rsun": _safe_float(entry[1]),
+                "center_x_arc": _safe_float(entry[2]),
+                "center_y_arc": _safe_float(entry[3]),
+                "radius_arcsec": _safe_float(entry[4]),
+                "leading_edge_rsun": _safe_float(entry[5]),
+                "rms_arcsec": _safe_float(entry[6]),
+                "n_points": _safe_int(entry[7], 0),
+                "center_pa_deg": _safe_float(entry[8]),
+            }
+        )
+    return out
+
+
+def deserialize_circle_fits(raw: Any) -> dict[int, tuple]:
+    """Rebuild the circle-fit map from :func:`serialize_circle_fits` output.
+
+    Rows without a radius or a centre are dropped: a bogus 0.0 there would
+    silently corrupt the radius-time fit. The reported extras (leading edge, rms,
+    position angle) are re-derived or defaulted when missing instead.
+    """
+    out: dict[int, tuple] = {}
+    if not isinstance(raw, Iterable):
+        return out
+    for row in raw:
+        if not isinstance(row, Mapping):
+            continue
+        radius_rsun = _safe_float(row.get("radius_rsun"))
+        center_x = _safe_float(row.get("center_x_arc"))
+        center_y = _safe_float(row.get("center_y_arc"))
+        radius_arcsec = _safe_float(row.get("radius_arcsec"))
+        if None in (radius_rsun, center_x, center_y, radius_arcsec):
+            continue
+        lead = _safe_float(row.get("leading_edge_rsun"))
+        if lead is None:
+            lead = radius_rsun
+        rms = _safe_float(row.get("rms_arcsec"))
+        pa = _safe_float(row.get("center_pa_deg"))
+        idx = _safe_int(row.get("frame_index"), 0)
+        out[idx] = (
+            _parse_iso(row.get("time")),
+            float(radius_rsun),
+            float(center_x),
+            float(center_y),
+            float(radius_arcsec),
+            float(lead),
+            float(rms) if rms is not None else 0.0,
+            _safe_int(row.get("n_points"), 0),
+            float(pa) if pa is not None else 0.0,
+        )
+    return out
+
+
+def serialize_circle_points(points: Mapping[int, Sequence[Any]] | None) -> list[dict[str, Any]]:
+    """Flatten the in-progress circle clicks ``{frame_index: [(x, y), ...]}``.
+
+    Saved alongside the fits so reopening a session can redraw the arc a user
+    actually clicked, and let them add a point rather than start the frame over.
+    """
+    out: list[dict[str, Any]] = []
+    if not isinstance(points, Mapping):
+        return out
+    for idx in sorted(points.keys(), key=lambda k: _safe_int(k, 0)):
+        coords: list[list[float]] = []
+        for point in list(points[idx] or []):
+            if not isinstance(point, Sequence) or len(point) < 2:
+                continue
+            x_arc = _safe_float(point[0])
+            y_arc = _safe_float(point[1])
+            if x_arc is None or y_arc is None:
+                continue
+            coords.append([float(x_arc), float(y_arc)])
+        if coords:
+            out.append({"frame_index": _safe_int(idx, 0), "points": coords})
+    return out
+
+
+def deserialize_circle_points(raw: Any) -> dict[int, list[tuple[float, float]]]:
+    """Rebuild the click map from :func:`serialize_circle_points` output."""
+    out: dict[int, list[tuple[float, float]]] = {}
+    if not isinstance(raw, Iterable):
+        return out
+    for row in raw:
+        if not isinstance(row, Mapping):
+            continue
+        coords: list[tuple[float, float]] = []
+        for point in list(row.get("points") or []):
+            if not isinstance(point, Sequence) or len(point) < 2:
+                continue
+            x_arc = _safe_float(point[0])
+            y_arc = _safe_float(point[1])
+            if x_arc is None or y_arc is None:
+                continue
+            coords.append((float(x_arc), float(y_arc)))
+        if coords:
+            out[_safe_int(row.get("frame_index"), 0)] = coords
     return out
 
 
@@ -353,3 +483,13 @@ def session_pick_count(meta: Mapping[str, Any] | None) -> int:
         return 0
     picks = measurements.get("height_time_picks")
     return len(picks) if isinstance(picks, list) else 0
+
+
+def session_circle_count(meta: Mapping[str, Any] | None) -> int:
+    if not isinstance(meta, Mapping):
+        return 0
+    measurements = meta.get("measurements")
+    if not isinstance(measurements, Mapping):
+        return 0
+    circles = measurements.get("circle_fits")
+    return len(circles) if isinstance(circles, list) else 0

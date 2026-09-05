@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.8.0
+Version 3.0.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -110,9 +110,14 @@ from src.Backend.download_manager import format_bytes, format_eta
 from src.Backend.image_measure import ruler_measurement
 from src.Backend.solar_session import (
     SolarSessionError,
+    deserialize_circle_fits,
+    deserialize_circle_points,
     deserialize_picks,
     read_solar_session,
+    serialize_circle_fits,
+    serialize_circle_points,
     serialize_picks,
+    session_circle_count,
     session_frame_count,
     session_pick_count,
     write_solar_session,
@@ -175,7 +180,7 @@ SIDEBAR_SECTIONS_SETTINGS_KEY = "ui/sidebar_sections_solar"
 # The solar image analysis window is a young, experimental feature; the title
 # and About dialog flag it as a beta so users calibrate their expectations and
 # know where to report problems.
-SOLAR_WINDOW_VERSION = "Beta v1.0"
+SOLAR_WINDOW_VERSION = "v1.5 beta"
 SOLAR_WINDOW_TITLE = f"Solar Image Analysis (Experimental) {SOLAR_WINDOW_VERSION}"
 SOLAR_ISSUES_URL = "https://github.com/SaanDev/e-Callisto_FITS_Analyzer/issues"
 
@@ -2045,6 +2050,14 @@ class SolarDataAnalysisWindow(QMainWindow):
             "automatically and each pick lands in the tracking table with a live\n"
             "height–time fit. Works on any imager (EUVI/AIA/SUVI/COR/LASCO/HI)."
         )
+        self.circle_tool_btn = QPushButton("Circle Fit")
+        self.circle_tool_btn.setCheckable(True)
+        self.circle_tool_btn.setToolTip(
+            "CME circle fitting: click three or more points along the circular front\n"
+            "(an on-disk dome, or a coronagraph loop) and the least-squares circle is\n"
+            "drawn live. Commit Circle records its radius as the CME height, so the\n"
+            "sequence builds a radius–time plot with speed and acceleration."
+        )
         self.clear_measure_btn = QPushButton("Clear")
         self.clear_measure_btn.setToolTip("Clear and reset all measurements: picks, table and overlays.")
         for btn in (
@@ -2052,6 +2065,7 @@ class SolarDataAnalysisWindow(QMainWindow):
             self.profile_tool_btn,
             self.stats_tool_btn,
             self.height_time_btn,
+            self.circle_tool_btn,
             self.clear_measure_btn,
         ):
             btn.setEnabled(False)
@@ -2068,6 +2082,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         measure_row.addWidget(self.profile_tool_btn)
         measure_row.addWidget(self.stats_tool_btn)
         measure_row.addWidget(self.height_time_btn)
+        measure_row.addWidget(self.circle_tool_btn)
         measure_row.addWidget(self.clear_measure_btn)
         measure_row.addStretch(1)
         # Interactive pan/zoom of the loaded image; the zoom is kept while the
@@ -3755,10 +3770,16 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.profile_tool_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("profile", on))
         self.stats_tool_btn.clicked.connect(lambda: self._measure.report_region_stats())
         self.height_time_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("height_time", on))
+        self.circle_tool_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("circle_fit", on))
         self.clear_measure_btn.clicked.connect(self.clear_all_measurements)
-        self.ht_fit_btn.clicked.connect(lambda: self._measure.finish_height_time())
+        # Fit/Clear act on whichever tracking store the panel is showing.
+        self.ht_fit_btn.clicked.connect(lambda: self._measure.finish_active_fit())
         self.ht_clear_btn.clicked.connect(
-            lambda: (self._measure.clear_height_time(), self._sync_tracking_panel_visibility())
+            lambda: (self._measure.clear_active(), self._sync_tracking_panel_visibility())
+        )
+        self.tracking_panel.commit_btn.clicked.connect(lambda: self._measure.commit_circle())
+        self.tracking_panel.lock_center_check.toggled.connect(
+            lambda on: self._measure.set_lock_center(on)
         )
         self.nrgf_check.toggled.connect(lambda _checked: self._render_current_frame())
         self.movie_content_combo.currentTextChanged.connect(lambda _t: self._sync_nrgf_enabled())
@@ -3921,6 +3942,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         ):
             widget.setEnabled(measure_on)
         self.height_time_btn.setEnabled(measure_on and len(self._map_frames) >= 2)
+        self.circle_tool_btn.setEnabled(measure_on and many_frames)
         self.hi_jmap_btn.setEnabled(many_frames)
         # Overlay layers can be assembled any time, but building needs frames and
         # a base that still carries the world coordinates reprojection targets.
@@ -3933,13 +3955,19 @@ class SolarDataAnalysisWindow(QMainWindow):
             self.pan_zoom_check.setChecked(False)
         self._sync_nrgf_enabled()
         if not loaded and hasattr(self, "_measure"):
-            for btn in (self.ruler_tool_btn, self.profile_tool_btn, self.height_time_btn):
+            for btn in (
+                self.ruler_tool_btn,
+                self.profile_tool_btn,
+                self.height_time_btn,
+                self.circle_tool_btn,
+            ):
                 if btn.isChecked():
                     btn.blockSignals(True)
                     btn.setChecked(False)
                     btn.blockSignals(False)
             self._measure.set_mode(None)
             self._measure.clear_height_time()
+            self._measure.clear_circle_fits()
             self._sync_tracking_panel_visibility()
         # White-light coronagraph / heliospheric frames have no EUV RGB
         # composite, HMI overlay or disk active-region concept — keep those
@@ -5548,11 +5576,12 @@ class SolarDataAnalysisWindow(QMainWindow):
             "ruler": self.ruler_tool_btn,
             "profile": self.profile_tool_btn,
             "height_time": self.height_time_btn,
+            "circle_fit": self.circle_tool_btn,
         }
         if not on:
             if self._measure.mode == mode:
                 self._measure.set_mode(None)
-            if mode == "height_time":
+            if mode in ("height_time", "circle_fit"):
                 self._sync_tracking_panel_visibility()
             return
         for other_mode, btn in buttons.items():
@@ -5570,6 +5599,10 @@ class SolarDataAnalysisWindow(QMainWindow):
             "height_time": (
                 "Tracking: click the CME leading edge — the frame auto-advances and "
                 "each pick lands in the table."
+            ),
+            "circle_fit": (
+                "Circle fit: click ≥3 points along the CME front, then Commit Circle "
+                "(Ctrl+Return) to record this frame."
             ),
         }
         self.statusBar().showMessage(hints[mode], 8000)
@@ -5589,7 +5622,12 @@ class SolarDataAnalysisWindow(QMainWindow):
         if not checked:
             # Leaving measurement mode: drop any active tool so stray canvas
             # clicks stop landing as picks/overlays.
-            for btn in (self.ruler_tool_btn, self.profile_tool_btn, self.height_time_btn):
+            for btn in (
+                self.ruler_tool_btn,
+                self.profile_tool_btn,
+                self.height_time_btn,
+                self.circle_tool_btn,
+            ):
                 if btn.isChecked():
                     btn.blockSignals(True)
                     btn.setChecked(False)
@@ -5619,12 +5657,21 @@ class SolarDataAnalysisWindow(QMainWindow):
 
     def clear_all_measurements(self) -> None:
         """Clear and reset every measurement (toolbar Clear button)."""
-        for btn in (self.ruler_tool_btn, self.profile_tool_btn, self.height_time_btn):
+        for btn in (
+            self.ruler_tool_btn,
+            self.profile_tool_btn,
+            self.height_time_btn,
+            self.circle_tool_btn,
+        ):
             if btn.isChecked():
                 btn.blockSignals(True)
                 btn.setChecked(False)
                 btn.blockSignals(False)
         self._measure.set_mode(None)
+        if self.tracking_panel.lock_center_check.isChecked():
+            self.tracking_panel.lock_center_check.blockSignals(True)
+            self.tracking_panel.lock_center_check.setChecked(False)
+            self.tracking_panel.lock_center_check.blockSignals(False)
         self._measure.clear_all()
         self._sync_tracking_panel_visibility()
 
@@ -7322,7 +7369,11 @@ class SolarDataAnalysisWindow(QMainWindow):
         The FITS frames themselves are embedded separately by the writer; this
         captures only what cannot be re-derived from the files.
         """
-        picks = getattr(getattr(self, "_measure", None), "picks", {}) or {}
+        measure = getattr(self, "_measure", None)
+        picks = getattr(measure, "picks", {}) or {}
+        circles = getattr(measure, "circles", {}) or {}
+        circle_points = getattr(measure, "_circle_points", {}) or {}
+        locked_center = getattr(measure, "_locked_center", None)
         frame_times: list[str | None] = []
         for frame in self._map_frames:
             when = None
@@ -7363,6 +7414,9 @@ class SolarDataAnalysisWindow(QMainWindow):
             },
             "current_frame_index": int(self._current_frame_index),
             "frame_count": len(self._map_frames),
+            # Reopening a cubic analysis as a straight line would silently
+            # change every speed it reports, so the fit degree travels with it.
+            "fit_order": int(self.tracking_panel.fit_order()),
         }
         source = {
             "instrument_label": self._loaded_instrument_label(),
@@ -7389,7 +7443,16 @@ class SolarDataAnalysisWindow(QMainWindow):
             "source": source,
             "view": view,
             "overlay_layers": overlay,
-            "measurements": {"height_time_picks": serialize_picks(picks)},
+            "measurements": {
+                "height_time_picks": serialize_picks(picks),
+                "circle_fits": serialize_circle_fits(circles),
+                "circle_points": serialize_circle_points(circle_points),
+                "circle_lock_center": (
+                    [float(locked_center[0]), float(locked_center[1])]
+                    if locked_center is not None
+                    else None
+                ),
+            },
         }
 
     def save_session(self) -> bool:
@@ -7430,8 +7493,12 @@ class SolarDataAnalysisWindow(QMainWindow):
             return False
         self._session_path = path
         picks = session_pick_count(meta)
+        circles = session_circle_count(meta)
+        measured = f"{picks} CME pick(s)"
+        if circles:
+            measured += f", {circles} circle fit(s)"
         self.statusBar().showMessage(
-            f"Session saved: {Path(path).name}  ·  {count} frame(s), {picks} CME pick(s) embedded.",
+            f"Session saved: {Path(path).name}  ·  {count} frame(s), {measured} embedded.",
             7000,
         )
         return True
@@ -7506,14 +7573,35 @@ class SolarDataAnalysisWindow(QMainWindow):
         # wonder why the frames look different from when they saved.
         self._restore_processing_widgets(view)
 
-        # Restore height-time picks, dropping any that fall outside the range.
-        picks = deserialize_picks((meta.get("measurements") or {}).get("height_time_picks"))
+        # The fit degree has to land before the measurements, so the fit that
+        # gets recomputed below is the one that was saved.
+        self.tracking_panel.set_fit_order(int(view.get("fit_order", 1) or 1))
+
+        # Restore the measurements, dropping any that fall outside the range.
+        measurements = meta.get("measurements") or {}
+        picks = deserialize_picks(measurements.get("height_time_picks"))
         picks = {idx: entry for idx, entry in picks.items() if 0 <= idx < n}
-        if picks and not self.measurements_check.isChecked():
-            # Restored picks need the tracking panel available to be seen.
+        circles = deserialize_circle_fits(measurements.get("circle_fits"))
+        circles = {idx: entry for idx, entry in circles.items() if 0 <= idx < n}
+        circle_points = deserialize_circle_points(measurements.get("circle_points"))
+        circle_points = {idx: pts for idx, pts in circle_points.items() if 0 <= idx < n}
+        if (picks or circles) and not self.measurements_check.isChecked():
+            # Restored measurements need the tracking panel available to be seen.
             self.measurements_check.setChecked(True)
         if hasattr(self, "_measure"):
+            # Picks first, circles second: the tool checked last owns the panel.
             self._measure.restore_picks(picks)
+            self._measure.restore_circle_fits(
+                circles, circle_points, measurements.get("circle_lock_center")
+            )
+            if circles:
+                self.circle_tool_btn.setChecked(True)
+            # Keep the checkbox honest about the restored lock state.
+            locked = getattr(self._measure, "_locked_center", None) is not None
+            if self.tracking_panel.lock_center_check.isChecked() != locked:
+                self.tracking_panel.lock_center_check.blockSignals(True)
+                self.tracking_panel.lock_center_check.setChecked(locked)
+                self.tracking_panel.lock_center_check.blockSignals(False)
         self._sync_tracking_panel_visibility()
 
         # Land on the saved frame and render with the restored display state.
@@ -7523,12 +7611,16 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._refresh_region_overlays()
 
         # Recompute the fit so the tracking panel shows the CME kinematics again.
-        if len(picks) >= 2 and hasattr(self, "_measure"):
-            self._measure.finish_height_time()
+        if hasattr(self, "_measure"):
+            if len(circles) >= 2:
+                self._measure.finish_circle_fit()
+            elif len(picks) >= 2:
+                self._measure.finish_height_time()
 
-        self.statusBar().showMessage(
-            f"Session restored: {n} frame(s), {len(picks)} CME pick(s).", 7000
-        )
+        restored = f"{len(picks)} CME pick(s)"
+        if circles:
+            restored += f", {len(circles)} circle fit(s)"
+        self.statusBar().showMessage(f"Session restored: {n} frame(s), {restored}.", 7000)
 
     def _restore_source_widgets(self, source: dict[str, Any]) -> None:
         idx = source.get("observable_index")

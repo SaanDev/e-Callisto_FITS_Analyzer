@@ -220,3 +220,134 @@ def test_failed_load_clears_pending_restore():
     win._on_worker_failed("boom\nValueError: bad frame")
     assert win._pending_session_restore is None
     win.close()
+
+
+# --------------------------------------------------------------------------- #
+# Circle fits
+# --------------------------------------------------------------------------- #
+def _add_two_circles(win):
+    """Circle fits on frames 0 and 1 (a front expanding 0.5 -> 1.0 R☉)."""
+    win.measurements_check.setChecked(True)
+    win.circle_tool_btn.setChecked(True)
+    win.tracking_panel.auto_advance_check.setChecked(True)
+    win.frame_slider.setValue(0)
+    QApplication.processEvents()
+    for radius in (4.0, 8.0):
+        for dx, dy in ((radius, 0.0), (0.0, radius), (-radius, 0.0)):
+            win._measure.on_canvas_click(dx, dy, "left")
+        win._measure.commit_circle()
+
+
+def test_collect_session_meta_captures_circle_fits(tmp_path):
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _three_frames(), _write_frame_files(tmp_path, 3))
+    _add_two_circles(win)
+
+    meta = win._collect_session_meta()
+    circles = meta["measurements"]["circle_fits"]
+    assert [row["frame_index"] for row in circles] == [0, 1]
+    assert circles[0]["radius_rsun"] == pytest.approx(0.5, abs=1e-6)
+    assert circles[1]["radius_rsun"] == pytest.approx(1.0, abs=1e-6)
+    assert circles[0]["n_points"] == 3
+    # The clicked arcs ride along so a reopened session can be edited, not redone.
+    assert [row["frame_index"] for row in meta["measurements"]["circle_points"]] == [0, 1]
+    assert meta["measurements"]["circle_lock_center"] is None
+    win.close()
+
+
+def test_restore_hook_replays_circle_fits(tmp_path):
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _three_frames(), _write_frame_files(tmp_path, 3))
+    _add_two_circles(win)
+    meta = win._collect_session_meta()
+    win.close()
+
+    reload_dir = tmp_path / "b"
+    reload_dir.mkdir()
+    win2 = SolarDataAnalysisWindow()
+    win2._pending_session_restore = meta
+    _load(win2, _three_frames(), _write_frame_files(reload_dir, 3))
+
+    assert len(win2._measure.circles) == 2
+    assert win2._measure.circles[1].radius_rsun == pytest.approx(1.0, abs=1e-6)
+    assert win2._measure._circle_points[0]  # the clicked arc came back too
+    # The circle tool owns the panel again and the kinematics were recomputed.
+    assert win2.circle_tool_btn.isChecked() is True
+    assert win2.tracking_panel.table.columnCount() == 6
+    assert "km/s" in win2.tracking_panel.speed_label.text()
+    win2.close()
+
+
+def test_restore_clamps_out_of_range_circles(tmp_path):
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _three_frames(), _write_frame_files(tmp_path, 3))
+    _add_two_circles(win)
+    meta = win._collect_session_meta()
+    meta["measurements"]["circle_fits"].append(
+        {"frame_index": 9, "time": "2012-07-12T16:40:00", "radius_rsun": 2.0,
+         "center_x_arc": 0.0, "center_y_arc": 0.0, "radius_arcsec": 16.0,
+         "leading_edge_rsun": 2.0, "rms_arcsec": 0.0, "n_points": 3, "center_pa_deg": 0.0}
+    )
+    win.close()
+
+    reload_dir = tmp_path / "c"
+    reload_dir.mkdir()
+    win2 = SolarDataAnalysisWindow()
+    win2._pending_session_restore = meta
+    two = [
+        CorWcsMap(np.ones((11, 11)), date="2012-07-12T16:00:00"),
+        CorWcsMap(np.ones((11, 11)), date="2012-07-12T16:10:00"),
+    ]
+    _load(win2, two, _write_frame_files(reload_dir, 2))
+    assert set(win2._measure.circles.keys()) == {0, 1}
+    win2.close()
+
+
+def test_restore_of_a_session_saved_before_circle_fitting(tmp_path):
+    """Old sessions carry no circle keys — they must still restore cleanly."""
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _three_frames(), _write_frame_files(tmp_path, 3))
+    _add_two_picks(win)
+    meta = win._collect_session_meta()
+    for key in ("circle_fits", "circle_points", "circle_lock_center"):
+        meta["measurements"].pop(key)
+    win.close()
+
+    reload_dir = tmp_path / "d"
+    reload_dir.mkdir()
+    win2 = SolarDataAnalysisWindow()
+    win2._pending_session_restore = meta
+    _load(win2, _three_frames(), _write_frame_files(reload_dir, 3))
+
+    assert win2._measure.circles == {}
+    assert len(win2._measure.picks) == 2
+    assert win2.circle_tool_btn.isChecked() is False
+    assert "km/s" in win2.tracking_panel.speed_label.text()
+    win2.close()
+
+
+def test_session_round_trips_the_fit_order(tmp_path):
+    """A cubic analysis must not reopen as a straight line — the speeds differ."""
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _three_frames(), _write_frame_files(tmp_path, 3))
+    _add_two_picks(win)
+    win.tracking_panel.fit_order_combo.setCurrentIndex(1)  # quadratic
+    QApplication.processEvents()
+
+    meta = win._collect_session_meta()
+    assert meta["view"]["fit_order"] == 2
+    win.close()
+
+    reload_dir = tmp_path / "e"
+    reload_dir.mkdir()
+    win2 = SolarDataAnalysisWindow()
+    win2._pending_session_restore = meta
+    _load(win2, _three_frames(), _write_frame_files(reload_dir, 3))
+
+    assert win2.tracking_panel.fit_order() == 2
+    win2.close()

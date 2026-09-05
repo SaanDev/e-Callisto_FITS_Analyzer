@@ -20,6 +20,7 @@ pytest.importorskip("pyqtgraph")
 
 from PySide6.QtWidgets import QApplication
 
+from src.Backend.coronagraph import fit_height_time
 from src.UI.solar_data_analysis_window import SolarDataAnalysisWindow
 
 
@@ -156,7 +157,7 @@ def test_height_time_picks_and_fit():
     # 0.5 Rsun per 600 s = 4 Rsun/h -> ~580 km/s; check the right magnitude.
     import re as _re
 
-    match = _re.search(r"speed ([\d,]+) km/s", text)
+    match = _re.search(r"v = ([\d,]+)", text)
     assert match is not None
     speed = float(match.group(1).replace(",", ""))
     assert 400 < speed < 800
@@ -269,7 +270,7 @@ def test_region_stats_uses_crop_bounds():
 def test_tools_are_mutually_exclusive_and_crop_conflicts():
     _app()
     win = SolarDataAnalysisWindow()
-    _load(win, [WcsMap(np.ones((11, 11))), WcsMap(np.ones((11, 11)))])
+    _load(win, _timed_frames(2))
 
     win.ruler_tool_btn.setChecked(True)
     assert win._measure.mode == "ruler"
@@ -398,3 +399,373 @@ def test_canvas_click_callback_forwarding():
     canvas.set_measurement_overlay([0.0, 10.0], [0.0, 5.0], connect=True)
     assert canvas._measure_points.data is not None
     canvas.clear_measurement_overlay()
+
+
+# --------------------------------------------------------------------------- #
+# Circle Fit (CME): N clicks -> least-squares circle -> radius-time kinematics
+# --------------------------------------------------------------------------- #
+def _timed_frames(count):
+    """Frames one minute apart, so the radius-time fit has a real time axis."""
+    return [
+        WcsMap(np.ones((11, 11)), date=f"2026-02-10T01:{i:02d}:00") for i in range(count)
+    ]
+
+
+def _circle_clicks(win, radius, *, center=(0.0, 0.0)):
+    """Click four points on a circle of ``radius`` arcsec about ``center``."""
+    cx, cy = center
+    for dx, dy in ((radius, 0.0), (0.0, radius), (-radius, 0.0), (0.0, -radius)):
+        win._measure.on_canvas_click(cx + dx, cy + dy, "left")
+
+
+def test_circle_fit_three_clicks_then_commit_records_radius():
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _timed_frames(2))
+
+    win.circle_tool_btn.setChecked(True)
+    assert win._measure.mode == "circle_fit"
+    win._measure.on_canvas_click(4.0, 0.0, "left")
+    win._measure.on_canvas_click(0.0, 4.0, "left")
+    win._measure.on_canvas_click(-4.0, 0.0, "left")
+    win._measure.commit_circle()
+
+    entry = win._measure.circles[0]
+    assert entry.radius_arcsec == pytest.approx(4.0)
+    assert entry.radius_rsun == pytest.approx(0.5)  # 4" / rsun 8"
+    assert entry.leading_edge_rsun == pytest.approx(0.5)  # centred on the disk
+    assert entry.n_points == 3
+    assert entry.rms_arcsec == pytest.approx(0.0, abs=1e-9)
+    win.close()
+
+
+def test_circle_fit_live_preview_before_commit():
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _timed_frames(2))
+
+    win.circle_tool_btn.setChecked(True)
+    win._measure.on_canvas_click(4.0, 0.0, "left")
+    win._measure.on_canvas_click(0.0, 4.0, "left")
+    xs, _ = win.pyqt_canvas._measure_curve.getData()
+    assert xs is None or len(xs) == 0  # no circle from two points
+
+    win._measure.on_canvas_click(-4.0, 0.0, "left")
+    xs, ys = win.pyqt_canvas._measure_curve.getData()
+    assert len(xs) > 2 and len(xs) == len(ys)  # the fitted circle is drawn...
+    assert win._measure.circles == {}  # ...but nothing is recorded yet
+    win.close()
+
+
+def test_circle_fit_commit_auto_advances_frames():
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _timed_frames(3))
+
+    win.circle_tool_btn.setChecked(True)
+    win.tracking_panel.auto_advance_check.setChecked(True)
+    _circle_clicks(win, 4.0)
+    win._measure.commit_circle()
+    assert win._current_frame_index == 1
+
+    win.tracking_panel.auto_advance_check.setChecked(False)
+    _circle_clicks(win, 6.0)
+    win._measure.commit_circle()
+    assert win._current_frame_index == 1  # stays put with auto-advance off
+    assert sorted(win._measure.circles) == [0, 1]
+    win.close()
+
+
+def test_circle_fit_right_click_drops_in_progress_points_only():
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _timed_frames(2))
+
+    win.circle_tool_btn.setChecked(True)
+    win.tracking_panel.auto_advance_check.setChecked(False)
+    _circle_clicks(win, 4.0)
+    win._measure.commit_circle()
+
+    win._measure.on_canvas_click(7.0, 0.0, "left")
+    win._measure.on_canvas_click(0.0, 7.0, "left")
+    win._measure.on_canvas_click(0.0, 0.0, "right")
+    assert not win._measure._circle_points.get(0)
+    assert win._measure.circles[0].radius_arcsec == pytest.approx(4.0)  # commit survives
+    assert win._measure.mode == "circle_fit"  # mode survives too
+    win.close()
+
+
+def test_circle_fit_radius_time_series_and_fit():
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _timed_frames(3))
+
+    win.circle_tool_btn.setChecked(True)
+    win.tracking_panel.auto_advance_check.setChecked(True)
+    for radius in (4.0, 6.0, 8.0):
+        _circle_clicks(win, radius)
+        win._measure.commit_circle()
+
+    assert win.tracking_panel.table.rowCount() == 3
+    assert win.ht_fit_btn.isEnabled()
+    win._measure.finish_active_fit()
+    # 0.5 R☉ in 120 s -> ~2900 km/s of plane-of-sky radial expansion.
+    assert "km/s" in win.tracking_panel.speed_label.text()
+    assert "circle fit (3 frames, linear fit)" in win.analysis_text.toPlainText()
+    x_fit, _ = win.tracking_panel._fit_line.getData()
+    assert len(x_fit) > 0
+    win.close()
+
+
+def test_tracking_panel_swaps_source_without_losing_the_other_store():
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _timed_frames(2))
+
+    win.height_time_btn.setChecked(True)
+    win.tracking_panel.auto_advance_check.setChecked(True)
+    win._measure.on_canvas_click(4.0, 0.0, "left")
+    win._measure.on_canvas_click(8.0, 0.0, "left")
+    assert win.tracking_panel.table.columnCount() == 4
+    assert win.tracking_panel.table.horizontalHeaderItem(2).text() == "Height (R☉)"
+
+    win.circle_tool_btn.setChecked(True)
+    assert win.tracking_panel.table.columnCount() == 6
+    assert win.tracking_panel.table.horizontalHeaderItem(2).text() == "Radius (R☉)"
+    assert win.tracking_panel.table.rowCount() == 0  # no circles yet
+    assert len(win._measure.picks) == 2  # the other tool's work is untouched
+
+    win.height_time_btn.setChecked(True)
+    assert win.tracking_panel.table.columnCount() == 4
+    assert win.tracking_panel.table.rowCount() == 2  # the picks come back
+    win.close()
+
+
+def test_circle_fit_lock_center_freezes_the_centre():
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _timed_frames(2))
+
+    win.circle_tool_btn.setChecked(True)
+    win.tracking_panel.auto_advance_check.setChecked(False)
+    _circle_clicks(win, 4.0)  # centred on the disk
+    win._measure.commit_circle()
+    win.tracking_panel.lock_center_check.setChecked(True)
+    assert win._measure._locked_center == pytest.approx((0.0, 0.0))
+
+    win.frame_slider.setValue(1)
+    QApplication.processEvents()
+    # An arc that a free fit would centre on (2, 0) instead.
+    for point in ((8.0, 0.0), (2.0, 6.0), (-4.0, 0.0)):
+        win._measure.on_canvas_click(point[0], point[1], "left")
+    win._measure.commit_circle()
+
+    entry = win._measure.circles[1]
+    assert entry.center_x_arc == pytest.approx(0.0)
+    assert entry.center_y_arc == pytest.approx(0.0)
+    win.close()
+
+
+def test_circle_fit_collinear_clicks_do_not_crash():
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _timed_frames(2))
+
+    win.circle_tool_btn.setChecked(True)
+    for x in (-4.0, 0.0, 4.0):
+        win._measure.on_canvas_click(x, 0.0, "left")
+    win._measure.commit_circle()
+
+    assert win._measure.circles == {}
+    assert len(win._measure._circle_points[0]) == 3  # points kept, add another
+    win.close()
+
+
+def test_clear_all_measurements_clears_circle_fits():
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _timed_frames(2))
+
+    win.circle_tool_btn.setChecked(True)
+    win.tracking_panel.lock_center_check.setChecked(True)
+    win.tracking_panel.auto_advance_check.setChecked(False)
+    _circle_clicks(win, 4.0)
+    win._measure.commit_circle()
+    assert win._measure.circles
+
+    win.clear_all_measurements()
+    assert win._measure.circles == {}
+    assert win._measure._circle_points == {}
+    assert win._measure._locked_center is None
+    assert win.tracking_panel.lock_center_check.isChecked() is False
+    assert win.tracking_panel.table.rowCount() == 0
+    assert win.circle_tool_btn.isChecked() is False
+    win.close()
+
+
+def test_circle_tool_needs_a_sequence():
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _timed_frames(1))
+    assert win.circle_tool_btn.isEnabled() is False  # a single frame has no time axis
+
+    _load(win, _timed_frames(2))
+    assert win.circle_tool_btn.isEnabled() is True
+    win.close()
+
+
+def test_circle_fit_csv_row_matches_its_header():
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _timed_frames(2))
+
+    win.circle_tool_btn.setChecked(True)
+    _circle_clicks(win, 4.0)
+    win._measure.commit_circle()
+
+    panel = win.tracking_panel
+    header = panel.csv_header()
+    assert header[:3] == ["time_utc", "t_seconds", "radius_rsun"]
+    row = panel.csv_row(panel._entries[0], panel._entries[0][0])
+    assert len(row) == len(header)
+    assert row[2] == "0.5000"
+    win.close()
+
+
+def test_circle_fit_survives_frames_sharing_one_timestamp():
+    """Duplicate DATE-OBS has no time baseline; polyfit must not raise on click."""
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, [WcsMap(np.ones((11, 11))) for _ in range(2)])  # identical dates
+
+    win.circle_tool_btn.setChecked(True)
+    win.tracking_panel.auto_advance_check.setChecked(True)
+    _circle_clicks(win, 4.0)
+    win._measure.commit_circle()
+    _circle_clicks(win, 6.0)
+    win._measure.commit_circle()  # must not raise LinAlgError
+
+    assert len(win._measure.circles) == 2
+    assert "one observation time" in win.tracking_panel.speed_label.text()
+    win._measure.finish_active_fit()
+    assert "km/s" not in win.tracking_panel.speed_label.text()
+    win.close()
+
+
+# --------------------------------------------------------------------------- #
+# Fit-order dropdown
+# --------------------------------------------------------------------------- #
+def _accelerating_picks(win, count=6):
+    """Height-time picks on an accelerating front: h = 4 + 0.5*a*t^2 arcsec."""
+    win.height_time_btn.setChecked(True)
+    win.tracking_panel.auto_advance_check.setChecked(False)
+    for i in range(count):
+        win.frame_slider.setValue(i)
+        QApplication.processEvents()
+        win._measure.on_canvas_click(4.0 + 0.05 * (i * 60.0) ** 2 / 60.0, 0.0, "left")
+
+
+def test_fit_order_combo_offers_linear_through_cubic():
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _timed_frames(2))
+
+    combo = win.tracking_panel.fit_order_combo
+    assert [combo.itemData(i) for i in range(combo.count())] == [1, 2, 3]
+    assert win.tracking_panel.fit_order() == 1  # linear by default
+    win.close()
+
+
+def test_fit_order_changes_the_reported_kinematics():
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _timed_frames(6))
+    _accelerating_picks(win, 6)
+
+    win._measure.finish_active_fit()
+    linear = win.tracking_panel.speed_label.text()
+    assert "linear" in linear and "v = " in linear
+
+    win.tracking_panel.fit_order_combo.setCurrentIndex(1)  # quadratic
+    QApplication.processEvents()
+    quadratic = win.tracking_panel.speed_label.text()
+    assert "quadratic" in quadratic
+    # A curved fit has no single speed, so both ends are reported.
+    assert "v₀ = " in quadratic and "v_end = " in quadratic
+    assert quadratic != linear
+
+    win.tracking_panel.fit_order_combo.setCurrentIndex(2)  # cubic
+    QApplication.processEvents()
+    cubic = win.tracking_panel.speed_label.text()
+    assert "cubic" in cubic and "jerk = " in cubic and "a_end = " in cubic
+    win.close()
+
+
+def test_fit_order_reports_one_sigma_errors():
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _timed_frames(6))
+    _accelerating_picks(win, 6)
+
+    win.tracking_panel.fit_order_combo.setCurrentIndex(1)  # quadratic
+    QApplication.processEvents()
+    assert "±" in win.tracking_panel.speed_label.text()
+
+    fit = fit_height_time(
+        [0.0, 60.0, 120.0, 180.0], [1.0e5, 1.2e5, 1.5e5, 1.9e5], order=2
+    )
+    summary = win.tracking_panel.fit_summary(fit)
+    assert "±" in summary and "km/s" in summary and "m/s²" in summary
+
+
+def test_fit_order_curve_follows_the_polynomial():
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _timed_frames(6))
+    _accelerating_picks(win, 6)
+
+    win.tracking_panel.fit_order_combo.setCurrentIndex(1)  # quadratic
+    QApplication.processEvents()
+    x_fit, y_fit = win.tracking_panel._fit_line.getData()
+    assert len(x_fit) > 2
+    # A straight line through the ends would sag away from a curved fit.
+    chord = np.interp(x_fit, [x_fit[0], x_fit[-1]], [y_fit[0], y_fit[-1]])
+    assert np.max(np.abs(y_fit - chord)) > 1e-3
+    win.close()
+
+
+def test_fit_order_needing_more_points_says_so_instead_of_raising():
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _timed_frames(3))
+    _accelerating_picks(win, 3)
+
+    win.tracking_panel.fit_order_combo.setCurrentIndex(2)  # cubic needs 4
+    QApplication.processEvents()
+    assert "needs 4" in win.tracking_panel.speed_label.text()
+    win._measure.finish_active_fit()  # must not raise
+    # No curve was fitted, and the message still explains why.
+    x_fit, _ = win.tracking_panel._fit_line.getData()
+    assert x_fit is None or len(x_fit) == 0
+    assert "needs 4" in win.tracking_panel.speed_label.text()
+    win.close()
+
+
+def test_fit_order_applies_to_circle_fits_too():
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _timed_frames(5))
+
+    win.circle_tool_btn.setChecked(True)
+    win.tracking_panel.auto_advance_check.setChecked(True)
+    for i in range(5):
+        _circle_clicks(win, 3.0 + 0.15 * (i * 60.0) ** 2 / 60.0)
+        win._measure.commit_circle()
+
+    win.tracking_panel.fit_order_combo.setCurrentIndex(1)  # quadratic
+    QApplication.processEvents()
+    win._measure.finish_active_fit()
+    text = win.analysis_text.toPlainText()
+    assert "quadratic fit" in text
+    assert "±" in text
+    win.close()

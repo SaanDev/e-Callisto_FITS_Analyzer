@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.8.0
+Version 3.0.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
@@ -227,7 +227,7 @@ seconds from file start, with shared, per-station, or manual color scaling, then
 after noise reduction or burst isolation. Inside that window you can lasso-select outliers and remove them.</li>
 <li><b>Type II Band-splitting &#8594; Open Type II Band-splitting</b>: pick points along the upper and lower
 bands, fit both, and derive shock speed, height, bandwidth, compression ratio, Alfven Mach number, Alfven speed,
-and magnetic field. This workflow is <b>experimental</b>; validate results against known events.</li>
+and magnetic field. Validate results against known events.</li>
 <li><b>Plot Light Curves</b>: overlay intensity-versus-time curves. Enter a frequency, or switch on
 <b>Click on a frequency</b> and click the spectrum. Use <b>Settings</b> for color, width, opacity, scale, line
 style, and labels; <b>Clear light curve(s)</b> removes them without resetting the data.</li>
@@ -311,7 +311,12 @@ STEREO/EUVI, GOES/SUVI, SOHO/LASCO, STEREO/COR and HI, and SDO/HMI data.</p>
 <b>3 Analysis</b>, plus Movie Export, Display and Crop, Coronagraph Tools, Heliospheric Imager (J-map),
 Magnetic Vector Field (HMI), and Active Regions.</li>
 <li><b>Canvas</b> (center): the image with a header readout (solar radius, position angle, pixel), a Measure
-toolbar (Ruler, Profile, Region Stats, Track CME, Clear), and a playback bar below it.</li>
+toolbar (Ruler, Profile, Region Stats, Track CME, Circle Fit, Clear), and a playback bar below it.</li>
+<li><b>CME tracking panel</b> (right of the canvas): the per-frame table, a live height–time graph and a
+<b>Fit</b> dropdown for a linear, quadratic or cubic fit. Linear gives one speed (with the acceleration from a
+companion quadratic fit); the curved fits report the speed at both ends of the track, and cubic adds the jerk.
+Every value comes with a 1σ error from the fit covariance — a degree-n fit needs n+1 points, and n+2 before an
+error bar can be estimated.</li>
 <li><b>Playback bar</b>: Rewind, Previous, Play, Pause, Next, a frame scrubber, a frame counter, and a speed (FPS) box.</li>
 <li><b>Common actions</b>: fetch or find archive records, load local FITS, plot frames, running/base difference,
 crop by ROI, detect bright active regions, fetch NOAA/HEK labels, build RGB composites, and export plots,
@@ -419,7 +424,7 @@ data is present.</li>
 <li><b>Restricted save folder on Windows?</b> If the default location (for example inside Program Files) is not
 writable, the app prompts you to choose another folder.</li>
 <li><b>Recovering after a crash?</b> Use <code>File &#8594; Recover Last Session</code> to restore the latest autosave.</li>
-<li><b>Type II magnetic-field results</b> are experimental; confirm them against independently validated events
+<li><b>Type II magnetic-field results</b> should be confirmed against independently validated events
 before drawing scientific conclusions.</li>
 </ul>
 

@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.8.0
+Version 3.0.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -90,7 +90,7 @@ def test_solar_data_window_sidebar_keeps_plot_action_visible():
 def test_solar_data_window_title_flags_experimental_beta():
     _app()
     win = SolarDataAnalysisWindow()
-    assert win.windowTitle() == "Solar Image Analysis (Experimental) Beta v1.0"
+    assert win.windowTitle() == "Solar Image Analysis (Experimental) v1.5 beta"
     win.close()
 
 

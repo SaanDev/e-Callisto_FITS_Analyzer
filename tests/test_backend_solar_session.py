@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.8.0
+Version 3.0.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -15,9 +15,14 @@ from src.Backend.solar_session import (
     SOLAR_SCHEMA_VERSION,
     SOLAR_SESSION_MAGIC,
     SolarSessionError,
+    deserialize_circle_fits,
+    deserialize_circle_points,
     deserialize_picks,
     read_solar_session,
+    serialize_circle_fits,
+    serialize_circle_points,
     serialize_picks,
+    session_circle_count,
     session_frame_count,
     session_pick_count,
     write_solar_session,
@@ -205,3 +210,85 @@ def test_summary_helpers(tmp_path):
     assert session_pick_count(result.meta) == 2
     assert session_frame_count(None) == 0
     assert session_pick_count({}) == 0
+
+
+# --------------------------------------------------------------------------- #
+# Circle fits
+# --------------------------------------------------------------------------- #
+def _sample_circles():
+    # (when, radius_rsun, cx, cy, radius_arcsec, lead_rsun, rms, n_points, pa)
+    return {
+        1: (datetime(2012, 7, 12, 16, 30, 0), 1.5, 40.0, 10.0, 1440.0, 1.54, 3.2, 6, 284.0),
+        0: (datetime(2012, 7, 12, 16, 24, 0), 1.0, 30.0, 5.0, 960.0, 1.03, 2.1, 4, 279.0),
+    }
+
+
+def test_serialize_circle_fits_round_trip():
+    restored = deserialize_circle_fits(serialize_circle_fits(_sample_circles()))
+    assert sorted(restored) == [0, 1]
+    when, radius_rsun, cx, cy, radius_arcsec, lead, rms, n_points, pa = restored[1]
+    assert when == datetime(2012, 7, 12, 16, 30, 0)
+    assert radius_rsun == pytest.approx(1.5)
+    assert (cx, cy) == pytest.approx((40.0, 10.0))
+    assert radius_arcsec == pytest.approx(1440.0)
+    assert lead == pytest.approx(1.54)
+    assert rms == pytest.approx(3.2)
+    assert n_points == 6
+    assert pa == pytest.approx(284.0)
+
+
+def test_serialize_circle_fits_orders_by_frame_index():
+    rows = serialize_circle_fits(_sample_circles())
+    assert [row["frame_index"] for row in rows] == [0, 1]
+
+
+def test_deserialize_circle_fits_drops_rows_without_a_radius():
+    rows = serialize_circle_fits(_sample_circles())
+    rows.append({"frame_index": 5, "time": None, "center_x_arc": 1.0, "center_y_arc": 2.0})
+    rows[0]["radius_rsun"] = None  # a bogus 0.0 here would corrupt the fit
+    restored = deserialize_circle_fits(rows)
+    assert sorted(restored) == [1]
+
+
+def test_deserialize_circle_fits_defaults_missing_extras():
+    rows = serialize_circle_fits(_sample_circles())
+    for row in rows:
+        row.pop("leading_edge_rsun")
+        row.pop("rms_arcsec")
+    restored = deserialize_circle_fits(rows)
+    assert restored[0][5] == pytest.approx(restored[0][1])  # lead falls back to the radius
+    assert restored[0][6] == pytest.approx(0.0)
+
+
+def test_serialize_circle_points_round_trip():
+    points = {2: [(1.0, 2.0), (3.0, 4.0)], 0: [(5.0, 6.0)]}
+    rows = serialize_circle_points(points)
+    assert [row["frame_index"] for row in rows] == [0, 2]
+    assert deserialize_circle_points(rows) == points
+
+
+def test_serialize_circle_points_drops_empty_and_malformed():
+    rows = serialize_circle_points({0: [], 1: [(1.0,)], 2: [(1.0, 2.0)]})
+    assert [row["frame_index"] for row in rows] == [2]
+
+
+def test_session_with_circle_fits_keeps_schema_version_1(tmp_path):
+    """Circles ride along as new keys: bumping the version would break every
+    existing .ecsolar, since _load_meta rejects any other version outright."""
+    meta = _sample_meta()
+    meta["measurements"]["circle_fits"] = serialize_circle_fits(_sample_circles())
+    session_path = tmp_path / "circles.ecsolar"
+    write_solar_session(
+        str(session_path), meta=meta, frame_paths=_make_frame_files(tmp_path, 2)
+    )
+
+    result = read_solar_session(str(session_path), extract_dir=str(tmp_path / "restore"))
+    assert result.meta["schema_version"] == SOLAR_SCHEMA_VERSION == 1
+    assert session_circle_count(result.meta) == 2
+    assert session_pick_count(result.meta) == 2
+
+
+def test_session_circle_count_on_sessions_without_circles():
+    assert session_circle_count(_sample_meta()) == 0
+    assert session_circle_count(None) == 0
+    assert session_circle_count({"measurements": None}) == 0

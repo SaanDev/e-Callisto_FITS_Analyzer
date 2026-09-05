@@ -1,5 +1,44 @@
-# e-CALLISTO FITS Analyzer (v2.8.0)
+# e-CALLISTO FITS Analyzer (v3.0.0)
 A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data.
+
+---
+
+## What's New in v3.0.0
+
+Compared with v2.8.0, this release adds the following capabilities:
+
+### Working a burst across the archive, without leaving the plot
+- **Timeline panel:** a loaded dataset now knows which station, focus codes and observation times it came from, and the sidebar's **Timeline** section lists them. **◀ Previous** / **Next ▶** fetch the adjacent 15-minute observation and time-combine it into the spectrum in place, one to eight steps at a time. Following a type II from its onset no longer means going back to the downloader and re-importing every file.
+- **Kept work, kept processing:** annotations, the ruler measurement and drift picks survive an extension, and their time coordinates shift with the axis when an earlier observation is prepended, so they stay on the feature they were placed on. The background subtraction, noise clip and RFI cleaning that were active are re-derived over the longer array rather than dropping the view back to Raw.
+- **Trim and undo:** **Trim Start** / **Trim End** walk the dataset back, falling through to a plain single-file load at one segment, and both extension and trimming are a single **Ctrl+Z** away — arrays, source list and annotations together.
+- **Local first, then the archive:** the adjacent observation is looked for among the loaded file's siblings on disk before any request is made, so a set already downloaded extends with no network at all. Day listings are cached per session, and adjacent files can be prefetched in the background.
+- **Available-or-not, up front:** the panel says why a direction is unavailable — end of the archive day, or a timestamp that supplies only part of the focus set — instead of failing on the click.
+
+### Linear and logarithmic frequency axis
+- **New Axis section** in the sidebar switches the dynamic spectrum between **Linear** and **Log**. A logarithmic frequency axis spreads the decametric end of the band, where type II and type III bursts spend most of their drift, and makes a harmonic pair sit at a constant separation.
+- Both renderers are supported. The matplotlib canvas warps the image under `set_yscale("log")`, so every coordinate stays in MHz; the hardware canvas re-samples the rows onto a uniform log grid, because its image is placed with a plain rectangle and cannot warp — but its public interface stays in MHz, so annotations, the ruler, light-curve picks and drift points behave identically in both scales.
+- Ticks are anchored to the decades and labelled in MHz — 20, 30, 40, 50, 60, 70, 80 across a 20–80 MHz band; 50, 70, 100, 200, 300, 500, 700 across 45–870 — thinning as the span widens and falling back to round numbers over a band too narrow to hold one decade subdivision.
+- The STEREO/SWAVES panel keeps its own native logarithmic axis in both modes, and the choice is remembered between sessions.
+
+### Downloader organised around what is actually there
+- **Grouped by focus code:** a day's files are listed per focus code rather than as one flat list, so which receivers covered an event is visible at a glance.
+- **Previews that combine:** selecting several files previews them the way they would import — greedily combined where the set is combinable in time, in frequency, or both, and as separate panels where it is not.
+- **A real cache:** previewed and downloaded files are kept in a persistent on-disk cache, so re-previewing, importing or extending never fetches the same file twice.
+
+### Unified merging, and direct import from the multi-station view
+- **Time × frequency in one step:** a complete grid of timestamps and focus codes now merges in a single operation — each timestamp frequency-combined, then the results stitched in time — with the gap-fill and overlap policy carried through, instead of requiring two passes.
+- **Direct import from the multi-station event search:** a compatible selection found across stations can be imported straight into the main window, combining time-only, frequency-only or time + frequency automatically. The comparison workspace now opens only through the explicit **Compare** action, instead of appearing whenever a download finished.
+
+### Solar Image Analysis (v1.5 beta)
+- **Calibration level selection:** SDO/AIA series can be requested at level 1 or level 1.5, and GOES/SUVI at level 1b or level 2, with locally-prepared levels distinguished from archive-served ones.
+- **Differential-rotation compensation:** a selected region can be pinned to the rotating solar surface across a multi-hour sequence in either of two modes — *track*, which moves the cut-out window and leaves the pixel values untouched for photometry and light curves, or *reproject*, which resamples every frame onto the reference-time grid so foreshortening is corrected and differencing is meaningful.
+
+### Interface
+- **Collapsible sidebar sections** in both the main window and Solar Image Analysis. Each section is a card with a clickable header; expanded and collapsed state is remembered between sessions, and section contents were pared back so controls are readable rather than stacked.
+- The **Solar Image Analysis** menu entry is now just that, instead of carrying its instrument list, and **Type II Band-splitting** is no longer marked experimental.
+
+### Performance
+- The compute backend integration was reworked and the deprecated compute kernels removed. Accelerated paths remain opt-in where they were measured to help; on this class of hardware the algorithmic wins — single-sort row quantiles, lookup-table colour mapping, and segment reductions — carry the improvement.
 
 ---
 
@@ -76,6 +115,8 @@ Compared with v2.6.0, this release adds the following capabilities:
 
 ### Dynamic spectrum workflow
 - Load `.fit`, `.fits`, `.fit.gz`, and `.fits.gz` files, including datasets combined across time, frequency, or both dimensions.
+- Extend a loaded dataset in place from the sidebar's **Timeline** section: fetch the previous or next observation from disk or the archive, time-combine it into the spectrum without leaving the plot, trim from either end, and undo any of it. Annotations, the ruler measurement and drift picks keep their place, and the active background subtraction, noise clip and RFI cleaning are re-derived over the longer array.
+- Switch the frequency axis between **Linear** and **Log** from the sidebar's **Axis** section, with decade-anchored ticks labelled in MHz and identical behaviour in the software and hardware-accelerated renderers.
 - Download and analyze e-CALLISTO and Learmonth Station radio data, including Learmonth chunk conversion to FIT format for the main Analyzer.
 - Use hardware-accelerated plotting with live cursor readouts, rectangular zoom, lock/unlock navigation, and **Edit → Reset to Raw** controls.
 - Adjust intensity thresholds live with high-resolution sliders, value readouts, optional signed-log scaling, dB or Digits/ADU display modes, and graph-property controls.
@@ -85,7 +126,7 @@ Compared with v2.6.0, this release adds the following capabilities:
 
 ### Processing and analysis
 - Apply deterministic RFI cleaning with preview/apply/reset controls for median smoothing, hot-channel masking, masked-channel repair, and percentile clipping.
-- Isolate radio bursts with lasso masking aligned to the rendered spectrum path, extract maximum intensities, remove outliers manually or automatically, run best-fit / shock-parameter analysis, and perform experimental Type II band-splitting analysis for magnetic-field estimates from noise-reduced data.
+- Isolate radio bursts with lasso masking aligned to the rendered spectrum path, extract maximum intensities, remove outliers manually or automatically, run best-fit / shock-parameter analysis, and perform Type II band-splitting analysis for magnetic-field estimates from noise-reduced data.
 - Plot one or more light curves on top of the dynamic spectrum by entering a frequency or clicking directly on the plot, with configurable color, width, opacity, labels, and line style.
 - Combine frequency bands with improved gap-filling and overlap-handling options before importing the merged spectrum.
 - Keep polygon, line, and text annotations inside the accelerated view, with editable text styling and project persistence.
@@ -373,7 +414,6 @@ Workflow:
 
 Important validation note:
 
-- The Type II band-splitting magnetic-field workflow is still under development and should be treated as experimental.
 - Derived magnetic-field values may not be accurate for all events or assumptions.
 - Confirm results against already known or independently validated event data before using them for scientific conclusions.
 
@@ -642,7 +682,7 @@ Notes:
 
 Notes:
 
-- JSOC server-side cutout requests are not part of v2.8.0; cropping is performed locally after files are loaded.
+- JSOC server-side cutout requests are not part of v3.0.0; cropping is performed locally after files are loaded.
 - Metadata overlays require network access, but image-based region detection works on local files.
 
 ---
@@ -823,10 +863,10 @@ infinities and all-NaN rows.
     - `gem install --no-document fpm`
     - `PYTHON_BIN=/usr/bin/python3 PIP_INDEX_URL=https://pypi.org/simple bash src/Installation/build_deb_linux.sh`
 - Expected output on `amd64`:
-  - `dist/e-callisto-fits-analyzer_2.8.0_amd64.deb`
+  - `dist/e-callisto-fits-analyzer_3.0.0_amd64.deb`
 - Install the generated local package using a path, not a bare filename:
-  - `sudo apt install -y ./dist/e-callisto-fits-analyzer_2.8.0_amd64.deb`
-  - If you are already inside `dist`, use `sudo apt install -y ./e-callisto-fits-analyzer_2.8.0_amd64.deb`
+  - `sudo apt install -y ./dist/e-callisto-fits-analyzer_3.0.0_amd64.deb`
+  - If you are already inside `dist`, use `sudo apt install -y ./e-callisto-fits-analyzer_3.0.0_amd64.deb`
 - Manual PyInstaller build only creates the Linux app folder, not the `.deb`:
   - `pyinstaller src/Installation/FITS_Analyzer_linux.spec`
 
@@ -836,7 +876,7 @@ infinities and all-NaN rows.
 - Build the `.app` and the disk image in one step:
   - `bash src/Installation/build_macos_dmg.sh`
 - Expected output on Apple silicon:
-  - `dist/e-callisto-fits-analyzer_2.8.0_macOS_arm64.dmg`
+  - `dist/e-callisto-fits-analyzer_3.0.0_macOS_arm64.dmg`
 - Re-wrap an existing `dist/*.app` without rebuilding it:
   - `SKIP_APP=1 bash src/Installation/build_macos_dmg.sh`
 - Build the app bundle only:

@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 2.8.0
+Version 3.0.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -401,11 +401,23 @@ class SunPyPlotCanvas(QWidget):
         except Exception:
             pass
 
-    def set_measurement_overlay(self, xs_arcsec, ys_arcsec, *, connect: bool = True) -> None:
+    def set_measurement_overlay(
+        self,
+        xs_arcsec,
+        ys_arcsec,
+        *,
+        connect: bool = True,
+        curve_x=None,
+        curve_y=None,
+    ) -> None:
         """Draw the measurement pick markers (crosses) and connecting segment.
 
         Coordinates are data-space arcsec (the view coordinates the canvas plots
         in). A single reused curve + scatter pair keeps repeated calls cheap.
+
+        ``curve_x``/``curve_y`` replace the connecting polyline with an explicit
+        curve and make ``connect`` irrelevant: the circle-fit tool passes a
+        sampled circle there while its markers stay on the clicked points.
         """
         xs = np.asarray(list(xs_arcsec), dtype=float)
         ys = np.asarray(list(ys_arcsec), dtype=float)
@@ -420,7 +432,15 @@ class SunPyPlotCanvas(QWidget):
             self.map_plot.addItem(self._measure_curve)
             self.map_plot.addItem(self._measure_points)
         self._measure_points.setData(x=xs, y=ys)
-        if connect and xs.size >= 2:
+        if curve_x is not None and curve_y is not None:
+            cxs = np.asarray(list(curve_x), dtype=float)
+            cys = np.asarray(list(curve_y), dtype=float)
+            if cxs.size >= 2 and cxs.size == cys.size:
+                self._measure_curve.setData(x=cxs, y=cys)
+                self._measure_curve.show()
+            else:
+                self._measure_curve.setData(x=[], y=[])
+        elif connect and xs.size >= 2:
             self._measure_curve.setData(x=xs, y=ys)
             self._measure_curve.show()
         else:
