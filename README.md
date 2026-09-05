@@ -32,6 +32,9 @@ Compared with v2.8.0, this release adds the following capabilities:
 ### Solar Image Analysis (v1.5 beta)
 - **Calibration level selection:** SDO/AIA series can be requested at level 1 or level 1.5, and GOES/SUVI at level 1b or level 2, with locally-prepared levels distinguished from archive-served ones.
 - **Differential-rotation compensation:** a selected region can be pinned to the rotating solar surface across a multi-hour sequence in either of two modes — *track*, which moves the cut-out window and leaves the pixel values untouched for photometry and light curves, or *reproject*, which resamples every frame onto the reference-time grid so foreshortening is corrected and differencing is meaningful.
+- **Circle Fit — CME tracking for on-disk eruptions:** a new measurement tool for events near disk centre, where the front expands as a growing circle instead of marching outward from the limb, and a single leading-edge click has no well-defined origin to measure from. Click three or more points along the front and the least-squares circle is fitted and redrawn live from the third click on; **Commit Circle** (`Ctrl+Return`) records the frame and steps to the next, so a whole sequence is measured with one arc per frame. Under the spherical-bubble assumption the fitted radius *is* the CME height, so the sequence yields a radius–time plot with speed and acceleration — with the leading-edge distance from disk centre kept alongside it for comparison against a conventional height–time track.
+- **A circle fit that survives a short arc:** the fit is Taubin's rather than the usual algebraic one, which is biased toward small radii on exactly the partial arcs a dome front gives, and it works in helioprojective arcsec so the front stays a circle even where the plate scale differs between the two axes. The panel warns when the clicked arc is too shallow to constrain the radius. **Lock centre** freezes the centre once the dome has settled and fits the radius alone. Circles, the clicked arcs and the lock state are all saved in `.ecsolar` sessions.
+- **Higher-order kinematics with error bars:** a **Fit** dropdown under the tracking table fits the height–time or radius–time track as a line, a parabola or a cubic, and re-fits the points already on the plot when it changes. Linear reports one speed, with the acceleration taken from a companion quadratic fit as the CDAW CME catalogue does; the curved fits report the speed at *both ends* of the track, because an accelerating eruption has no single speed, and cubic adds the jerk. Every value carries a 1σ uncertainty propagated from the fit covariance, so the correlations between polynomial terms sit in the error bar instead of being assumed away — and the error is reported as unavailable, rather than as zero, when the fit has no degree of freedom left to estimate the scatter from. The chosen order travels with the session, since reopening a cubic analysis as a straight line would quietly change every speed it reports.
 
 ### Interface
 - **Collapsible sidebar sections** in both the main window and Solar Image Analysis. Each section is a card with a clickable header; expanded and collapsed state is remembered between sessions, and section contents were pared back so controls are readable rather than stacked.
@@ -39,75 +42,6 @@ Compared with v2.8.0, this release adds the following capabilities:
 
 ### Performance
 - The compute backend integration was reworked and the deprecated compute kernels removed. Accelerated paths remain opt-in where they were measured to help; on this class of hardware the algorithmic wins — single-sort row quantiles, lookup-table colour mapping, and segment reductions — carry the improvement.
-
----
-
-## What's New in v2.8.0
-
-Compared with v2.7.0, this release adds the following capabilities:
-
-### Multi-instrument coronagraph composites (SDO and STEREO over SOHO/LASCO)
-- **Overlay Layers:** a new sidebar panel in the Solar Image Analysis coronagraph views stacks SDO/AIA, SDO/HMI, SOHO/LASCO C2/C3, STEREO SECCHI (EUVI, COR1, COR2, HI) and GOES/SUVI on top of the loaded series. Each layer's frames are searched and downloaded automatically, time-matched to the loaded frames within a configurable window (30 minutes by default), reprojected onto the base series' WCS, masked to its own field-of-view annulus in solar radii, and alpha-blended widest field of view first — one continuous image from the disk out to the outer corona, so a CME front can be followed without switching windows.
-- **Per-layer appearance:** colormap, log/linear scale, opacity, midtone gamma, and inner/outer field-of-view edges in R☉ are set per layer, and any layer can be un-ticked without losing its settings. Each layer is colour-mapped to RGB *before* blending, so the EUV disk and the white-light outer corona — orders of magnitude apart in brightness — both stay visible instead of one normalisation flattening the other.
-- **Correct cross-observer geometry:** coronagraph layers reproject under a spherical-screen assumption centred on the target observer instead of the default solar-surface assumption, which otherwise discards most optically-thin structure as the STEREO/SOHO baseline grows. Layers that rely on it are reported as approximate in the build notes — cross-observer coronagraph overlays are morphological context, not photometry.
-- **Background builds:** the composite build reports progress, keeps a partial result when one layer's archive comes up short, and the finished composite works with the measurement tools, PNG save and movie export. **Clear** drops it and restores the originally loaded frames.
-- **Quieter logs:** the sunpy "missing observer metadata" and astropy header-verification warnings that SOHO/LASCO archive files raise on every frame are now shown once per session rather than thousands of times; the Earth-based-observer assumption is stated once in the composite build notes instead.
-
-### STEREO/SWAVES radio spectrograph
-- **New archive:** **Solar Events → Radio Bursts → SWAVES** loads NASA/SPDF STEREO/WAVES level-2 daily CDFs — 2.6 kHz to 16 MHz in one-minute averages, back to 2006-10-27 — for STEREO-A (Ahead) or STEREO-B (Behind), with Behind disabled for dates after contact was lost on 2014-10-01. Windows that cross UTC midnight fetch and stitch both day files, and downloads are cached locally.
-- **Split CALLISTO + SWAVES view:** SWAVES plots below the loaded spectrum on a shared time axis, so panning or zooming either panel moves both, with the CALLISTO interval outlined on the SWAVES panel. SWAVES keeps its own logarithmic frequency axis and dB-above-background colorbar while following the colormap chosen in the sidebar. Loading it with no FITS file open plots it across the full area, and it folds into the split view as soon as one is loaded.
-- **Time-window sync:** **Use CALLISTO Window** copies the loaded spectrum's range widened on both sides by a configurable padding (30 minutes by default), because a type II or III burst takes tens of minutes to hours to drift from the corona down into the SWAVES band and an exact match would cut it off. **Solar Events → Sync Current Time Window** updates an open SWAVES dialog the same way.
-- **Kept with the session:** **Solar Events → SWAVES Panel** hides and restores the panel without discarding the loaded data, and the split view is included in Save Plot exports, stored in and restored from `.efaproj` project files without re-downloading, and added to generated project report PDFs.
-
-### Solar image playback performance
-- **Faster solar image playback:** display clip limits now take a single pass instead of two percentile sorts over a compacted copy, the matplotlib renderer updates the existing image in place instead of rebuilding the figure, axes and colorbar for every frame, and frames are no longer promoted to float64 through the render and movie-export paths. While a sequence plays, and while a clip slider is being dragged, the viewer switches to a subsampled, screen-resolution preview and reverts the instant motion stops. Measurements, statistics, region extraction, FITS export and movie export always read the full-resolution array.
-- **Faster row statistics:** background subtraction and RFI cleaning read every row quantile they need from one sort (`src/Backend/array_stats.py`) instead of running a separate `nanmedian`/`nanpercentile` pass per statistic, and the live preview keeps float32 data in float32 rather than promoting it. See [Solar Image Playback Performance](#-solar-image-playback-performance) for the full description.
-
-### Packaging, dependencies, and citation
-- Pinned `cdflib` in the runtime requirements and packaged the new SWAVES and composite modules across the Windows, Linux and macOS builds.
-- **Cite this Software** now gives the published article — *RAS Techniques and Instruments* **5**, rzag056 (2026), [doi:10.1093/rasti/rzag056](https://doi.org/10.1093/rasti/rzag056) — in place of the earlier arXiv preprint entry. The BibTeX key is unchanged, so manuscripts that already reference it keep resolving.
-
----
-
-## What's New in v2.7.0
-
-Compared with v2.6.0, this release adds the following capabilities:
-
-### Solar Image Analysis workspace
-- **Multi-mission imaging:** the former SDO/AIA workspace has grown into **Analysis → Solar Image Analysis (SDO · SOHO/LASCO · STEREO · GOES/SUVI)**, supporting SDO/AIA and HMI, SOHO/LASCO C2/C3, STEREO-A/B SECCHI (EUVI, COR1, COR2, HI1, HI2), and GOES/SUVI — searched and downloaded through the shared SunPy cache or loaded from local FITS/FITS.GZ files.
-- **Instrument-adaptive interface:** the sidebar shows only the tools relevant to each observable (disk EUV, coronagraph, heliospheric, magnetograph), with a load-summary label, a live solar-coordinate cursor readout (R☉ · position angle), and an optional solar-coordinate graticule overlay.
-- **Measurement tools:** ruler, intensity profile, ROI region statistics, and CME height-time tracking with a live fit panel and one-click-per-frame auto-advance.
-- **Coronagraph, heliospheric, and magnetogram science:** NRGF and radial-graded normalization, radial cuts, HI time-elongation J-maps, and HMI vector-field processing.
-- **Correct differences across mixed frames:** running/base differences partition mixed observing configurations (for example COR2 polarizer vs total-brightness frames) and exposure-normalize to DN/s so cross-configuration differences render accurately.
-- **Compare Viewpoint:** fetch a second viewpoint near the same time and reproject it onto the primary view for blink comparison.
-- **Helioviewer previews** for quick SOHO/LASCO context, plus AIA RGB composites and plot/cropped-FITS/region-CSV/GIF/MP4 exports.
-- **Self-contained sessions:** save and reopen the full workspace as an `.ecsolar` file (Session menu, `Ctrl+S`) that embeds the original FITS bytes and restores frames, view state, crop, and CME height-time picks exactly.
-
-### Multi-station analysis
-- **Multi-Station Comparison workspace:** open multiple FITS files in stacked synchronized panels, align them by UT clock or seconds from file start, and automatically combine compatible time-only, frequency-only, or time + frequency grids per station.
-- **Comparison noise-reduction controls:** apply mean, median, robust, or clipping-based noise reduction to every panel or an individual panel, with live threshold previews and synchronized colormaps.
-- **Flexible comparison exports:** export the visible comparison or a compact publication-style grid with shared display ranges and configurable shared, per-station, or manual color scaling.
-- **Multi-Station Event downloader:** search selected stations across a UTC event window, download matching FITS files, or import a compatible selection with automatic time-only, frequency-only, or time + frequency combination. The comparison workspace opens only through the explicit **Compare** action.
-
-### Spectrum tools and reproducible views
-- **Ruler measurements:** click two points on the main spectrum or a comparison panel to measure duration, frequency change, and drift slope.
-- **Aligned spectrum view workflow:** enter exact time/frequency display ranges, save and reuse range presets, and export/import complete `.efaview.json` view configurations.
-- **Locked batch exports:** apply the current display range or a saved view configuration when batch-exporting spectra so multiple outputs use consistent axes and styling.
-
-### Downloader and median_dB workflows
-- **Full-day Spectral Overview:** generate and export a station's complete UTC-day spectrum as six organized four-hour panels using a day-wide median_dB background baseline.
-- **Focus-code overview tabs:** generate previews for every available receiver/focus code for the selected station and date, or regenerate one selected code.
-- **median_dB processing:** use the median_dB digit-to-dB scale and display range in batch processing, spectral overviews, and downloader previews.
-
-### In-app help and small screens
-- **Help → User Guide** (F1) opens the full feature walkthrough inside the app.
-- Dialogs and the main window now fit-to-screen with clamped minimum sizes so the app remains usable on small or low-resolution displays.
-
-### Reliability and packaging
-- Fixed FITS-load default preset application so configured defaults apply without unintended intermediate replots.
-- Improved multi-station rendering, noise previews, station/date labels, automatic combination, and visible/grid export layouts.
-- Hardened the multi-mission pipeline: STEREO/SECCHI archive routing, GOES/SUVI ingestion of malformed `CONTINUE`-card headers, sensible default GOES satellites, and a Windows fix for solar image panels rendering solid black under hardware OpenGL.
-- Added Windows PySide6 environment repair and validation tooling, packaged the new v2.7.0 modules across platforms, and added an opt-in Linux XCB fallback for affected Wayland setups.
 
 ---
 
@@ -136,6 +70,7 @@ Compared with v2.6.0, this release adds the following capabilities:
 - Open standalone viewers for GOES X-ray flux, GOES SEP proton flux, SOHO/LASCO CME catalog data, Kyoto Dst, and GFZ Kp.
 - Overlay GOES XRS curves directly on the main spectrum with automatic legacy/modern GOES fallback and flare-class guides.
 - Analyze SDO/AIA images from **Analysis -> Solar Data Analysis** with crop, difference, active-region, composite, and movie export tools.
+- Measure a CME frame by frame in the Solar Image Analysis window with a ruler, intensity profiles, region statistics, leading-edge height–time tracking, and circle fitting for on-disk domes — reporting linear, quadratic or cubic kinematics with a 1σ error on every speed and acceleration.
 - Explore external archives with the SunPy Multi-Mission Explorer for SDO, SOHO, STEREO-A, and GOES products.
 - Load STEREO/SWAVES space-based dynamic spectra (2.6 kHz - 16 MHz) below the CALLISTO spectrum on a shared time axis, and follow a burst out of the ground-based band into the interplanetary medium.
 - Blend SDO, STEREO, and SOHO/LASCO frames into one multi-instrument coronagraph composite that runs continuously from the disk out to the outer corona.
@@ -657,6 +592,45 @@ Features:
 - Optionally fetch NOAA/HEK active-region labels and overlay them on detected regions
 - Create simple RGB composites from loaded AIA frames
 - Export the current plot, cropped FITS products, animated GIFs, and MP4 movies
+
+### Measurement Tools
+
+Tick **Measurements** in the toolbar above the image to enable the tools; the CME tracking panel on the right
+becomes available with them. One tool is active at a time, and right-click or `Esc` cancels a pick in progress
+without leaving the tool.
+
+| Tool | What it does |
+|---|---|
+| **Ruler** | Two clicks give the plane-of-sky distance in arcsec, Mm and R☉, plus the position angle (N→E). |
+| **Profile** | Two clicks plot the intensity along the cut — across a loop, a filament or a CME front. |
+| **Region Stats** | Summarises the crop rectangle: pixel count, mean/median/min/max/σ and the intensity-weighted centroid. Enable **Rectangle crop** first to choose the region. |
+| **Track CME** | One click per frame on the leading edge. The height is its distance from disk centre; the frame auto-advances and each pick lands in the table. Best for limb events. |
+| **Circle Fit** | Three or more clicks along a circular front per frame. The fitted radius is the height. Best for eruptions near disk centre. |
+| **Clear** | Resets every measurement: picks, circles, table and overlays. |
+
+**Circle Fit workflow.** Pick the tool, click along the visible front — the fitted circle appears from the third
+click and tightens with each extra point — then press **Commit Circle** (`Ctrl+Return`). The frame advances and
+the row appears in the table with the radius in R☉, the leading-edge distance, the position angle of the centre,
+and the number of points; the fit residual and centre are in the row's tooltip. Repeat across the sequence and
+press **Fit** for the kinematics.
+
+- Click a **wide** arc. A short one is fitted happily but constrains the radius very weakly, and the panel says so
+  below about 30°.
+- **Lock centre** freezes the centre at its current fitted value so later frames fit the radius alone. Useful once
+  the dome has stopped drifting; leave it off while the centre is still moving.
+- Re-committing a frame replaces its entry, so a bad fit is corrected by clicking it again.
+
+**Fit order.** The dropdown under the table chooses the polynomial:
+
+- **Linear** — one speed for the whole track. The acceleration comes from a companion quadratic fit, the pairing
+  the CDAW CME catalogue reports.
+- **Quadratic** — constant acceleration, with the speed given at the first and last frame.
+- **Cubic** — constant jerk, with the acceleration given at both ends as well.
+
+Every value carries a 1σ error from the fit covariance. A degree-*n* fit needs *n*+1 points to exist and *n*+2
+before an error bar can be estimated at all; below that the value is shown without one rather than with a
+misleading zero. **Export CSV** saves the table, and the whole analysis — picks, circles, fit order — is stored
+in and restored from `.ecsolar` session files.
 
 ### Overlay Layers (multi-instrument coronagraph composites)
 
