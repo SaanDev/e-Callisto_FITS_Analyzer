@@ -158,6 +158,39 @@ def test_goes_suvi_shows_level_and_builds_spec():
     win.close()
 
 
+def test_soho_offers_eit_alongside_lasco():
+    """The Explorer builds its selectors from the instrument registry, so the
+    SOHO/EIT entry has to show up here with passbands and no detector."""
+    _app()
+    win = SunPySolarViewer()
+    win.show()
+    QApplication.processEvents()
+
+    win.spacecraft_combo.setCurrentText("SOHO")
+    QApplication.processEvents()
+    instruments = [win.instrument_combo.itemText(i) for i in range(win.instrument_combo.count())]
+    assert instruments == ["EIT", "LASCO"]
+
+    win.instrument_combo.setCurrentText("EIT")
+    QApplication.processEvents()
+    # EIT is a disk imager selected per passband: no detector, no level.
+    assert win.detector_combo.isVisible() is False
+    assert win.wavelength_combo.isVisible() is True
+    assert win.level_combo.isVisible() is False
+    passbands = [win.wavelength_combo.itemText(i) for i in range(win.wavelength_combo.count())]
+    assert passbands == ["171", "195", "284", "304"]
+
+    spec = win._build_query_spec()
+    assert (spec.spacecraft, spec.instrument) == ("SOHO", "EIT")
+    assert spec.detector is None and spec.wavelength_angstrom == 195.0
+
+    # LASCO must keep its detectors, which EIT shares a spacecraft with.
+    win.instrument_combo.setCurrentText("LASCO")
+    QApplication.processEvents()
+    assert win.detector_combo.isVisible() is True
+    win.close()
+
+
 def test_stereo_secchi_detector_switches_wavelength_visibility():
     _app()
     win = SunPySolarViewer()

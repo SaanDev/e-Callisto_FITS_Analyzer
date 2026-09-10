@@ -1457,6 +1457,123 @@ def _lasco_frame(data=None, detector="C2"):
     return frame
 
 
+def _eit_frame(data=None, *, wavelength="195 Angstrom", instrument="EIT", date="2012-03-07T01:11:30"):
+    """SOHO/EIT-like frame.
+
+    ``instrument`` defaults to the level-zero spelling; calibrated L1 files
+    report "Extreme-ultraviolet Imaging Telescope (EIT)" instead.
+    """
+    frame = FakeMap(np.ones((6, 6), dtype=float) if data is None else data)
+    frame.observatory = "SOHO"
+    frame.instrument = instrument
+    frame.detector = "EIT"
+    frame.wavelength = wavelength
+    frame.date = date
+    frame.meta = {"instrume": instrument, "detector": "EIT", "wavelnth": 195}
+    return frame
+
+
+def test_solar_data_window_offers_eit_observables():
+    _app()
+    win = SolarDataAnalysisWindow()
+    labels = [win.wavelength_combo.itemText(i) for i in range(win.wavelength_combo.count())]
+    for wl in (171, 195, 284, 304):
+        assert f"SOHO/EIT {wl} A" in labels
+    idx = win.wavelength_combo.findText("SOHO/EIT 195 A")
+    # Qt hands userData back as a list, so compare on the shape both sides share.
+    assert tuple(win.wavelength_combo.itemData(idx)) == ("EIT", 195.0)
+    assert win.wavelength_combo.setCurrentIndex(idx) is None
+    assert win._current_observable() == ("EIT", 195.0)
+    win.close()
+
+
+def test_solar_data_window_query_spec_eit_observable():
+    _app()
+    win = SolarDataAnalysisWindow()
+    for wl, cmap in ((171, "sohoeit171"), (195, "sohoeit195"), (284, "sohoeit284"), (304, "sohoeit304")):
+        _select_observable(win, f"SOHO/EIT {wl} A")
+        spec = win._build_query_spec()
+        assert spec.spacecraft == "SOHO"
+        assert spec.instrument == "EIT"
+        assert spec.wavelength_angstrom == float(wl)
+        # EIT is VSO-only: no detector, no JSOC resolution, no archive level.
+        assert spec.detector is None
+        assert spec.resolution is None and spec.level is None
+        assert win._default_aia_colormap_name() == cmap
+    win.close()
+
+
+def test_solar_data_window_colormap_for_loaded_eit_frame():
+    _app()
+    win = SolarDataAnalysisWindow()
+    # 171 and 304 are shared with AIA, so without an EIT-aware step in the
+    # colormap chain a loaded EIT frame would silently render as sdoaia171/304.
+    for instrument in ("EIT", "Extreme-ultraviolet Imaging Telescope (EIT)"):
+        frame = _eit_frame(wavelength="171 Angstrom", instrument=instrument)
+        assert win._frame_eit_colormap(frame) == "sohoeit171"
+        assert win._default_aia_colormap_name(frame) == "sohoeit171"
+    # A non-EIT frame must not pick up an EIT colormap from the chain.
+    assert win._frame_eit_colormap(_lasco_frame()) is None
+    assert win._default_aia_colormap_name(_lasco_frame()) == "soholasco2"
+    win.close()
+
+
+def test_solar_data_window_keeps_disk_tools_for_eit():
+    _app()
+    win = SolarDataAnalysisWindow()
+    frames = [
+        _eit_frame(date="2012-03-07T01:11:30"),
+        _eit_frame(date="2012-03-07T01:31:30"),
+    ]
+    win._apply_loaded_frames(frames, paths=["a.fits", "b.fits"], metadata={})
+    # EIT is a disk EUV imager, so it gets the disk toolset, not the
+    # coronagraph one.
+    assert win.detect_regions_btn.isEnabled() is True
+    assert win.composite_btn.isEnabled() is True
+    assert win.coronagraph_group.isVisible() is False
+    assert win._loaded_instrument_label() == "EIT 195"
+    win.close()
+
+
+def test_solar_data_window_live_preview_enabled_for_eit():
+    _app()
+    win = SolarDataAnalysisWindow()
+    _select_observable(win, "AIA 193 A")
+    assert not win.live_preview_btn.isEnabled()
+
+    # Both SOHO instruments have Helioviewer quicklook: LASCO's definitive
+    # archive lags months behind, EIT's calibrated L1 product even longer.
+    _select_observable(win, "SOHO/EIT 195 A")
+    assert win.live_preview_btn.isEnabled()
+    assert win.live_preview_action.isEnabled()
+    win.close()
+
+
+def test_solar_data_window_opens_eit_helioviewer_preview(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    _select_observable(win, "SOHO/EIT 284 A")
+
+    import src.UI.helioviewer_preview_dialog as hvd
+
+    def _boom(detector, **kw):  # no real network call from the dialog worker
+        raise RuntimeError("stubbed")
+
+    monkeypatch.setattr(hvd, "fetch_preview", _boom)
+    win.open_helioviewer_preview()
+    dialog = win._helioviewer_dialog
+    assert dialog is not None
+    # The float passband from the combo has to reach the dialog as "284".
+    assert dialog._instrument == "EIT"
+    assert dialog._current_detector() == "284"
+    for _ in range(100):
+        QApplication.processEvents()
+        if not dialog._is_loading():
+            break
+    dialog.close()
+    win.close()
+
+
 def test_solar_data_window_query_spec_lasco_observable():
     _app()
     win = SolarDataAnalysisWindow()

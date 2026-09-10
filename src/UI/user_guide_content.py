@@ -114,7 +114,8 @@ _TOC = """
 <p><b>Appendix</b><br>
 &#8226; <a href="#shortcuts">A. Keyboard shortcuts</a><br>
 &#8226; <a href="#file-types">B. File types</a><br>
-&#8226; <a href="#tips">C. Tips and troubleshooting</a></p>
+&#8226; <a href="#artemis">C. ARTEMIS-IV files</a><br>
+&#8226; <a href="#tips">D. Tips and troubleshooting</a></p>
 </div>
 """
 
@@ -305,7 +306,14 @@ sizes for tick labels/axis labels/title, and Bold/Italic style toggles.</li>
 <a name="solar-image-analysis"></a>
 <h2>14. Solar Image Analysis</h2>
 <p>Open from <code>Analysis &#8594; Solar Image Analysis</code>. A multi-mission imaging workspace for SDO/AIA,
-STEREO/EUVI, GOES/SUVI, SOHO/LASCO, STEREO/COR and HI, and SDO/HMI data.</p>
+SOHO/EIT, STEREO/EUVI, GOES/SUVI, SOHO/LASCO, STEREO/COR and HI, and SDO/HMI data.</p>
+<p><b>SOHO/EIT products.</b> The archive lists two files per EIT observation - the calibrated Level 1 FITS and
+the raw level-zero file - and ignores a processing-level filter, so the window chooses one per observation:
+Level 1 where it exists, the raw file otherwise. Level 1 processing runs about a year behind the raw archive,
+so recent searches return raw frames and older ones calibrated frames; either way you get one frame per
+observation. Because the two products differ in calibration and data type, a window that straddles the
+boundary loads as two configuration groups. <b>Live Preview</b> opens Helioviewer quicklook imagery for both
+SOHO instruments, which is the only way to see the most recent EIT frames.</p>
 <ul>
 <li><b>Controls column</b> (left): numbered panels for <b>1 Data Source</b>, <b>2 Archive Results</b>, and
 <b>3 Analysis</b>, plus Movie Export, Display and Crop, Coronagraph Tools, Heliospheric Imager (J-map),
@@ -383,7 +391,7 @@ PNG/CSV export.</li>
 
 <a name="sunpy-explorer"></a>
 <h2>17. SunPy Multi-Mission Explorer</h2>
-<p>Open from <code>Solar Events &#8594; Archives</code>. Search external archives (SDO/AIA, SOHO/LASCO C2/C3,
+<p>Open from <code>Solar Events &#8594; Archives</code>. Search external archives (SDO/AIA, SOHO/EIT, SOHO/LASCO C2/C3,
 STEREO-A/EUVI map products, and GOES/XRS time series), download into an app-managed cache, plot with frame
 stepping and running difference, compute ROI statistics, and export plots and summaries. Archive search and
 download need network access; cached files reopen offline.</p>
@@ -408,14 +416,49 @@ download need network access; cached files reopen offline.</p>
 <h2>B. File types</h2>
 <table>
 <tr><th>Extension</th><th>Meaning</th></tr>
-<tr><td><code>.fit .fits .fit.gz .fits.gz</code></td><td>Radio spectra loaded by the analyzer, and solar images in the imaging workspace.</td></tr>
+<tr><td><code>.fit .fits .fit.gz .fits.gz</code></td><td>Radio spectra loaded by the analyzer, and solar images in the imaging workspace. Upper-case suffixes (<code>.FITS</code>, as ARTEMIS-IV publishes them) open the same way.</td></tr>
 <tr><td><code>.efaproj</code></td><td>Full analyzer project (view, processing, data, and analysis session).</td></tr>
 <tr><td><code>.efaview.json</code></td><td>Portable view configuration (range, units, thresholds, colormap, styling).</td></tr>
 <tr><td><code>.ecsolar</code></td><td>Solar Image Analysis session (embeds its FITS frames).</td></tr>
 </table>
 
+<a name="artemis"></a>
+<h2>C. ARTEMIS-IV files</h2>
+<p class="lead">Files from the Greek radiospectrograph open through <code>File &#8594; Open</code> like any other,
+and the analyzer adjusts itself to the instrument.</p>
+<p>ARTEMIS-IV is the solar radiospectrograph of the University of Athens at the Thermopylae Satellite
+Telecommunication Station. Its files are written by <code>ARTLOOK</code> rather than by a CALLISTO receiver, so
+three things are handled differently, automatically:</p>
+<table>
+<tr><th>What differs</th><th>What the analyzer does</th></tr>
+<tr><td>The time axis holds UT in <b>hours</b>, not seconds from the start.</td>
+<td>Converted on load, cross-checked against <code>TIME-OBS</code>. A three-hour observation reads as three
+hours wide, and the <b>UT</b> time mode shows the real clock time.</td></tr>
+<tr><td>Intensities are raw ADC <b>counts</b>, not CALLISTO digits.</td>
+<td>The <b>Units</b> section says <b>Counts</b>, and the <b>dB</b> option uses the receiver's own scale:
+58.51 counts/dB for the ASG, from a 4096-count (12-bit) ADC full scale over the receiver's published
+70 dB dynamic range.</td></tr>
+<tr><td>Channels differ in gain by more than an order of magnitude.</td>
+<td>The file opens <b>background subtracted</b>, because a raw plot shows the receiver's gain profile rather
+than the Sun. <code>Edit &#8594; Reset to Raw</code> shows the stored counts. The threshold sliders are widened
+to the receiver's real range.</td></tr>
+</table>
+<p><b>What the decibels mean.</b> ARTEMIS-IV has no absolute flux calibration &#8212; no per-file hot/cold load
+record is published, and the instrument's own literature shows relative spectra. Values are therefore
+<b>dB above the per-channel background</b>, never sfu. That is the right scale for burst contrast, drift
+rates, band-splitting ratios and light-curve shape; it is not a flux density.</p>
+<p><b>Reading the header.</b> <code>View &#8594; FITS Header</code> puts a short preamble above the raw cards
+naming the receiver, the frequency coverage, the cadence and the active calibration, and flagging the two
+header quirks worth knowing about: the hours-based time axis, and a <code>DATE</code> field whose day and
+month are exchanged (<code>2015-22-06</code> means 22 June 2015). <code>DATE-OBS</code> is well formed and is
+what the analyzer uses for the observation time.</p>
+<p><b>What is not available.</b> The sidebar's <b>Timeline</b> stepping walks the e-CALLISTO archive's
+15-minute files and does not apply &#8212; an ARTEMIS observation already covers its whole time range. Everything
+else &#8212; RFI cleaning, burst isolation, light curves, drift and shock analysis, Type II band splitting,
+annotations, projects and report export &#8212; works unchanged.</p>
+
 <a name="tips"></a>
-<h2>C. Tips and troubleshooting</h2>
+<h2>D. Tips and troubleshooting</h2>
 <ul>
 <li><b>Greyed-out buttons?</b> Load a file first. Analysis controls and the Graph Properties panel activate once
 data is present.</li>
@@ -426,6 +469,8 @@ writable, the app prompts you to choose another folder.</li>
 <li><b>Recovering after a crash?</b> Use <code>File &#8594; Recover Last Session</code> to restore the latest autosave.</li>
 <li><b>Type II magnetic-field results</b> should be confirmed against independently validated events
 before drawing scientific conclusions.</li>
+<li><b>ARTEMIS-IV intensities in dB</b> are relative to the per-channel background, not flux densities;
+see <a href="#artemis">Appendix C</a>.</li>
 </ul>
 
 <hr>

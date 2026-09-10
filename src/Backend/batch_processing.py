@@ -130,6 +130,7 @@ def subtract_background(
     *,
     gap_row_mask: np.ndarray | None = None,
     equalize_noise: bool = False,
+    db_scale: float = PLOTUTIL_DB_SCALE,
 ) -> np.ndarray:
     mode = normalize_background_method(method, strict=True)
     baseline_method = BACKGROUND_METHOD_MEDIAN if mode == BACKGROUND_METHOD_PLOTUTIL else mode
@@ -142,7 +143,10 @@ def subtract_background(
     if mode == BACKGROUND_METHOD_PLOTUTIL:
         # Equivalent to Plotutil's dref -> Digit2Voltage -> dB -> row-median
         # subtraction. The global minimum offset cancels during subtraction.
-        return (centered * np.float32(PLOTUTIL_DB_SCALE)).astype(np.float32, copy=False)
+        # `db_scale` is a parameter because the conversion is a property of the
+        # receiver, not of the recipe: ARTEMIS-IV counts and CALLISTO digits
+        # reach dB through different constants.
+        return (centered * np.float32(db_scale)).astype(np.float32, copy=False)
     return centered
 
 
@@ -228,6 +232,7 @@ def save_background_subtracted_png(
     data_units: str = "digits",
     default_display_limits: tuple[float, float] | None = None,
     view_config: dict | None = None,
+    linear_unit: str = "Digits",
 ) -> None:
     arr = np.asarray(data, dtype=np.float32)
     if arr.ndim != 2:
@@ -296,7 +301,7 @@ def save_background_subtracted_png(
         else:
             im.set_clim(*levels)
         cbar = fig.colorbar(im, ax=ax)
-        cbar.set_label("Intensity [dB]" if use_db else "Intensity [Digits]")
+        cbar.set_label("Intensity [dB]" if use_db else f"Intensity [{linear_unit}]")
 
         graph = dict(visual.get("graph") or {}) if apply_visual else {}
         remove_titles = bool(graph.get("remove_titles", False))

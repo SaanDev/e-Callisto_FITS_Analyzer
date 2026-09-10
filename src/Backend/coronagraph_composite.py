@@ -82,6 +82,8 @@ INSTRUMENT_FOV_RSUN: dict[tuple[str, str | None], tuple[float, float]] = {
     ("SECCHI", "EUVI"): (0.0, 1.7),
     ("SECCHI", "HI1"): (12.0, 90.0),
     ("SECCHI", "HI2"): (66.0, 318.0),
+    # EIT's 45-arcmin field is ~1350" half-width, i.e. ~1.4 solar radii.
+    ("EIT", None): (0.0, 1.4),
     ("AIA", None): (0.0, 1.28),
     ("SUVI", None): (0.0, 1.6),
     ("HMI", None): (0.0, 1.0),

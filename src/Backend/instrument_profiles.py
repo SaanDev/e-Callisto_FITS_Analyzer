@@ -34,7 +34,8 @@ MAGNETOGRAPH = "magnetograph"
 UNKNOWN = "unknown"
 
 _CORONAGRAPH_DETECTORS = ("C2", "C3", "COR1", "COR2")
-_DISK_EUV_INSTRUMENT_TOKENS = ("AIA", "SUVI", "SOLAR ULTRAVIOLET IMAGER", "SWAP")
+_DISK_EUV_INSTRUMENT_TOKENS = ("AIA", "SUVI", "SOLAR ULTRAVIOLET IMAGER", "SWAP", "EIT",
+                               "EXTREME-ULTRAVIOLET IMAGING TELESCOPE")
 
 
 def classify_observable(instrument: str, value: Any) -> str:
@@ -42,10 +43,11 @@ def classify_observable(instrument: str, value: Any) -> str:
 
     ``instrument``/``value`` follow the window's observable userData convention:
     ("AIA", wavelength), ("HMI", product), ("LASCO", detector),
-    ("SECCHI", (spacecraft, detector, wavelength_or_None)), ("SUVI", wavelength).
+    ("SECCHI", (spacecraft, detector, wavelength_or_None)), ("EIT", wavelength),
+    ("SUVI", wavelength).
     """
     inst = str(instrument or "").strip().upper()
-    if inst in ("AIA", "SUVI"):
+    if inst in ("AIA", "SUVI", "EIT"):
         return DISK_EUV
     if inst == "HMI":
         return MAGNETOGRAPH

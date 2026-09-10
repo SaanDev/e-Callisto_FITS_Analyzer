@@ -919,7 +919,8 @@ def test_registry_spacecraft_and_instrument_helpers():
     assert spacecraft.count("GOES") == 1
     # GOES now carries both the XRS timeseries and the SUVI imager.
     assert sa.registry_instruments_for("GOES") == ["XRS", "SUVI"]
-    assert sa.registry_instruments_for("SOHO") == ["LASCO"]
+    # SOHO carries the EIT disk imager alongside the LASCO coronagraphs.
+    assert sa.registry_instruments_for("SOHO") == ["EIT", "LASCO"]
     assert sa.registry_instruments_for("PROBA2") == ["SWAP"]
     # STEREO/SECCHI exposes all five detectors on each spacecraft.
     assert sa.registry_instruments_for("STEREO_A") == ["SECCHI"]
@@ -934,6 +935,123 @@ def test_registry_detectors_and_lookup():
     assert swap.data_kind == sa.DATA_KIND_MAP
     assert not swap.supports_wavelength and not swap.supports_satellite
     assert sa.registry_lookup("NOPE", "NOPE") is None
+
+
+# --- SOHO/EIT ---------------------------------------------------------------
+
+_EIT_L1 = "/archive/soho/private/data/processed/eit/l1/2012/03/07/SOHO_EIT_195_20120307T011351_L1.fits"
+_EIT_LZ = "/archive/soho/private/data/processed/eit/lz/2012/03/efz20120307.011351"
+_EIT_LZ_ONLY = "/archive/soho/private/data/processed/eit/lz/2026/06/efz20260601.005431"
+
+
+def _eit_row(fileid: str, start: datetime) -> sa.SunPySearchRow:
+    return sa.SunPySearchRow(
+        start=start, end=start, source="SOHO", instrument="EIT",
+        provider="SDAC", fileid=fileid, size="4.2 Mibyte",
+    )
+
+
+def test_registry_lookup_resolves_soho_eit():
+    eit = sa.registry_lookup("SOHO", "EIT")
+    assert eit is not None and eit.key == "soho_eit"
+    assert eit.supports_wavelength and not eit.supports_detector
+    assert eit.wavelengths == (171.0, 195.0, 284.0, 304.0)
+    assert eit.default_wavelength == 195.0
+    # The SDAC archive lags real time, so an empty window walks to the frontier.
+    assert eit.nearest_when_empty
+    # EIT must not disturb the LASCO entries, which key on the same spacecraft.
+    assert sa.registry_lookup("SOHO", "LASCO", "C2").key == "soho_lasco_c2"
+
+
+def test_build_spec_and_attrs_for_eit():
+    spec = sa.build_spec_for_observable(
+        "EIT", 195.0, datetime(2012, 3, 7, 0, 0), datetime(2012, 3, 7, 6, 0), max_records=30
+    )
+    assert (spec.spacecraft, spec.instrument) == ("SOHO", "EIT")
+    assert spec.wavelength_angstrom == 195.0
+    assert spec.detector is None and spec.level is None
+
+    attrs = sa.build_attrs(spec, attrs_module=_FakeAttrs, units_module=_FakeUnits)
+    assert ("Source", "SOHO") in attrs
+    assert ("Instrument", "EIT") in attrs
+    assert any(isinstance(x, tuple) and x[0] == "Wavelength" for x in attrs)
+    # EIT has no detector; sending one would exclude every record.
+    assert not any(isinstance(x, tuple) and x[0] == "Detector" for x in attrs)
+
+
+def test_eit_observation_key_pairs_l1_and_level_zero():
+    # The two products carry the same timestamp in their filenames even though
+    # their headers (and so the VSO Start Time column) differ by ~140 s.
+    assert sa._eit_observation_key(_EIT_L1) == "20120307011351"
+    assert sa._eit_observation_key(_EIT_LZ) == "20120307011351"
+    assert sa._eit_observation_key("/some/other/file.fits") is None
+    assert sa._is_eit_level1(_EIT_L1)
+    assert not sa._is_eit_level1(_EIT_LZ)
+
+
+def test_dedupe_eit_prefers_level1_over_level_zero():
+    rows = [
+        _eit_row(_EIT_L1, datetime(2012, 3, 7, 1, 11, 30)),
+        _eit_row(_EIT_LZ, datetime(2012, 3, 7, 1, 13, 51)),
+    ]
+    kept, kept_map = sa._dedupe_eit_products(rows, [(0, 0), (0, 1)])
+    assert [row.fileid for row in kept] == [_EIT_L1]
+    # The raw-response index map has to stay aligned with the surviving rows.
+    assert kept_map == [(0, 0)]
+
+
+def test_dedupe_eit_keeps_level_zero_when_no_level1_exists():
+    # L1 processing lags the raw archive by about a year, so recent windows are
+    # level-zero only; a hard L1 filter would return nothing for them.
+    rows = [
+        _eit_row(_EIT_L1, datetime(2012, 3, 7, 1, 11, 30)),
+        _eit_row(_EIT_LZ, datetime(2012, 3, 7, 1, 13, 51)),
+        _eit_row(_EIT_LZ_ONLY, datetime(2026, 6, 1, 0, 54, 31)),
+    ]
+    kept, _ = sa._dedupe_eit_products(rows, [(0, 0), (0, 1), (0, 2)])
+    assert [row.fileid for row in kept] == [_EIT_L1, _EIT_LZ_ONLY]
+
+
+def test_dedupe_eit_passes_through_unrecognised_fileids():
+    rows = [_eit_row("/archive/soho/eit/odd/name.fits", datetime(2012, 3, 7, 1, 0, 0))]
+    kept, kept_map = sa._dedupe_eit_products(rows, [(0, 0)])
+    assert len(kept) == 1 and kept_map == [(0, 0)]
+
+
+def test_normalize_search_rows_dedupes_eit_before_applying_max_records():
+    # Two observations, each served as an L1/level-zero pair. Capping first
+    # would spend the whole budget on one observation's duplicate pair.
+    block = [
+        {"Start Time": datetime(2012, 3, 7, 1, 11, 30), "Source": "SOHO",
+         "Instrument": "EIT", "Provider": "SDAC", "fileid": _EIT_L1, "Size": "4.2"},
+        {"Start Time": datetime(2012, 3, 7, 1, 13, 51), "Source": "SOHO",
+         "Instrument": "EIT", "Provider": "SDAC", "fileid": _EIT_LZ, "Size": "2.0"},
+        {"Start Time": datetime(2012, 3, 7, 2, 11, 30), "Source": "SOHO",
+         "Instrument": "EIT", "Provider": "SDAC",
+         "fileid": _EIT_L1.replace("20120307T011351", "20120307T021351"), "Size": "4.2"},
+        {"Start Time": datetime(2012, 3, 7, 2, 13, 51), "Source": "SOHO",
+         "Instrument": "EIT", "Provider": "SDAC",
+         "fileid": _EIT_LZ.replace("20120307.011351", "20120307.021351"), "Size": "2.0"},
+    ]
+    spec = _mk_query(spacecraft="SOHO", instrument="EIT", wavelength_angstrom=195.0)
+    rows, index_map = sa._normalize_search_rows([block], spec, max_records=2)
+    assert [row.fileid for row in rows] == [block[0]["fileid"], block[2]["fileid"]]
+    assert index_map == [(0, 0), (0, 2)]
+
+    # The cap still bites once the duplicates are gone.
+    rows_one, _ = sa._normalize_search_rows([block], spec, max_records=1)
+    assert len(rows_one) == 1
+
+
+def test_normalize_search_rows_leaves_other_instruments_untouched():
+    block = [
+        {"Start Time": datetime(2026, 2, 10, 1, 0, 0), "Source": "SOHO",
+         "Instrument": "LASCO", "Provider": "SDAC", "fileid": f"lasco_{i}.fts", "Size": "1"}
+        for i in range(4)
+    ]
+    spec = _mk_query(spacecraft="SOHO", instrument="LASCO", detector="C2")
+    rows, index_map = sa._normalize_search_rows([block], spec, max_records=2)
+    assert len(rows) == 2 and index_map == [(0, 0), (0, 1)]
 
 
 def test_build_attrs_for_new_missions():

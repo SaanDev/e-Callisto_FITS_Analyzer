@@ -312,6 +312,25 @@ INSTRUMENT_REGISTRY: tuple[InstrumentRegistryEntry, ...] = (
         default_product="magnetogram",
     ),
     InstrumentRegistryEntry(
+        key="soho_eit",
+        label="SOHO/EIT",
+        spacecraft="SOHO",
+        instrument="EIT",
+        detector=None,
+        data_kind=DATA_KIND_MAP,
+        supports_wavelength=True,
+        supports_detector=False,
+        supports_satellite=False,
+        default_wavelength=195.0,
+        default_detector=None,
+        default_satellite=None,
+        wavelengths=(171.0, 195.0, 284.0, 304.0),
+        # EIT is still observing (at a much reduced cadence), but the SDAC
+        # archive lags real time the same way LASCO's does, so an empty window
+        # should fall back to the nearest available frames rather than nothing.
+        nearest_when_empty=True,
+    ),
+    InstrumentRegistryEntry(
         key="soho_lasco_c2",
         label="SOHO/LASCO C2",
         spacecraft="SOHO",
@@ -471,9 +490,15 @@ def build_spec_for_observable(
     observable selector in the Solar Image Analysis window:
     ``("AIA", wavelength)``, ``("HMI", product)``, ``("LASCO", detector)``,
     ``("SECCHI", (spacecraft, detector, wavelength_or_None))``,
-    ``("SUVI", wavelength)``. Unrecognised instruments fall back to AIA.
+    ``("EIT", wavelength)``, ``("SUVI", wavelength)``. Unrecognised instruments
+    fall back to AIA.
     """
     key = str(instrument or "").strip().upper()
+    if key == "EIT":
+        return SunPyQuerySpec(
+            start_dt=start_dt, end_dt=end_dt, spacecraft="SOHO", instrument="EIT",
+            wavelength_angstrom=float(value or 195.0), max_records=max_records,
+        )
     if key == "HMI":
         return SunPyQuerySpec(
             start_dt=start_dt, end_dt=end_dt, spacecraft="SDO", instrument="HMI",
@@ -2079,6 +2104,80 @@ def _is_contiguous(values: Sequence[int]) -> bool:
     return all(values[idx] == values[0] + idx for idx in range(len(values)))
 
 
+# SOHO/EIT fileid shapes, e.g.
+#   .../eit/l1/2012/03/07/SOHO_EIT_195_20120307T011351_L1.fits  (calibrated L1)
+#   .../eit/lz/2012/03/efz20120307.011351                       (raw level-zero)
+# Both encode the same observation timestamp, which is what pairs them.
+_EIT_L1_FILEID_RE = re.compile(r"SOHO_EIT_\d+_(\d{8})T(\d{6})_L1", re.IGNORECASE)
+_EIT_LZ_FILEID_RE = re.compile(r"efz(\d{8})\.(\d{6})", re.IGNORECASE)
+
+
+def _eit_observation_key(fileid: str) -> str | None:
+    """``YYYYMMDDHHMMSS`` observation key for an EIT fileid, or None.
+
+    The VSO ``Start Time`` column cannot serve as this key: for one and the same
+    observation the L1 header reads e.g. 01:11:30 while the level-zero header
+    reads 01:13:51, so joining on it would never pair the two products. Both
+    filenames, however, carry the identical timestamp.
+    """
+    text = str(fileid or "")
+    for pattern in (_EIT_L1_FILEID_RE, _EIT_LZ_FILEID_RE):
+        match = pattern.search(text)
+        if match:
+            return f"{match.group(1)}{match.group(2)}"
+    return None
+
+
+def _is_eit_level1(fileid: str) -> bool:
+    """True when an EIT fileid points at the calibrated Level 1 product."""
+    text = str(fileid or "")
+    return "/l1/" in text.lower() or _EIT_L1_FILEID_RE.search(text) is not None
+
+
+def _dedupe_eit_products(
+    rows: list[SunPySearchRow],
+    row_index_map: list[tuple[int, int]],
+) -> tuple[list[SunPySearchRow], list[tuple[int, int]]]:
+    """Collapse SOHO/EIT's duplicate rows down to one row per observation.
+
+    A SOHO/EIT search returns *both* the calibrated Level 1 FITS and the raw
+    level-zero file for every observation, and the SDAC server ignores ``a.Level``
+    (0, 1 and "1" all return the identical pair), so the choice has to be made
+    here. Left alone the duplicates double the frame count and corrupt running
+    difference and playback timing, because the two products' headers sit ~140 s
+    apart.
+
+    Level 1 wins wherever it exists. The raw row is kept only for observations
+    with no L1 counterpart, which is the case for roughly the most recent year:
+    L1 processing lags the raw archive by far more than the raw archive lags real
+    time, so a hard L1-only filter would return nothing for recent dates. Rows
+    whose fileid matches neither product shape pass through untouched.
+    """
+    level1_keys: set[str] = set()
+    for row in rows:
+        key = _eit_observation_key(row.fileid)
+        if key is not None and _is_eit_level1(row.fileid):
+            level1_keys.add(key)
+
+    kept_rows: list[SunPySearchRow] = []
+    kept_map: list[tuple[int, int]] = []
+    seen: set[str] = set()
+    for row, mapping in zip(rows, row_index_map):
+        key = _eit_observation_key(row.fileid)
+        if key is None:
+            kept_rows.append(row)
+            kept_map.append(mapping)
+            continue
+        if key in seen:
+            continue
+        if not _is_eit_level1(row.fileid) and key in level1_keys:
+            continue  # the calibrated product exists for this observation
+        seen.add(key)
+        kept_rows.append(row)
+        kept_map.append(mapping)
+    return kept_rows, kept_map
+
+
 def _normalize_search_rows(
     raw_response: Any,
     spec: SunPyQuerySpec,
@@ -2087,6 +2186,14 @@ def _normalize_search_rows(
 ) -> tuple[list[SunPySearchRow], list[tuple[int, int]]]:
     rows: list[SunPySearchRow] = []
     row_index_map: list[tuple[int, int]] = []
+
+    # SOHO/EIT serves two rows per observation (calibrated L1 + raw level-zero).
+    # They have to be collapsed *before* the max_records cap is applied, or the
+    # cap fills up with duplicate pairs and the user gets half the frames they
+    # asked for, so the early exit below is disabled for EIT and the cap is
+    # applied to the deduplicated rows instead.
+    dedupe_eit = str(getattr(spec, "instrument", "") or "").strip().upper() == "EIT"
+    cap = 0 if dedupe_eit else int(max_records or 0)
 
     for block_index, block in enumerate(raw_response):
         n_rows = _safe_len(block)
@@ -2132,9 +2239,14 @@ def _normalize_search_rows(
             )
             row_index_map.append((block_index, local_index))
 
-            if max_records > 0 and len(rows) >= max_records:
+            if cap > 0 and len(rows) >= cap:
                 return rows, row_index_map
 
+    if dedupe_eit:
+        rows, row_index_map = _dedupe_eit_products(rows, row_index_map)
+    if max_records > 0 and len(rows) > max_records:
+        rows = rows[:max_records]
+        row_index_map = row_index_map[:max_records]
     return rows, row_index_map
 
 

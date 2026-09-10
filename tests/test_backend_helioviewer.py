@@ -71,6 +71,39 @@ def test_unsupported_detector_raises():
         hv.latest_image_info("C4")
 
 
+def test_eit_passbands_resolve_to_their_source_ids():
+    # EIT is keyed by passband where LASCO is keyed by detector, so the table
+    # is keyed on the (instrument, channel) pair.
+    assert hv.channels_for("EIT") == ("171", "195", "284", "304")
+    assert hv.channels_for("LASCO") == ("C2", "C3")
+    assert hv._resolve_channel("EIT", "195") == ("EIT", "195", 1)
+    # A passband arriving as a float from the observable combo still resolves.
+    assert hv._resolve_channel("EIT", 195.0) == ("EIT", "195", 1)
+    assert hv._resolve_channel("lasco", "c2") == ("LASCO", "C2", 4)
+    # The LASCO-only alias still works for callers that never see EIT.
+    assert hv.LASCO_SOURCE_IDS == {"C2": 4, "C3": 5}
+
+
+def test_eit_latest_image_info_uses_eit_source_id():
+    session = _FakeSession(closest_json=_closest_json("EIT 195"), screenshot_resp=_FakeResp(content=_PNG))
+    info = hv.latest_image_info("195", instrument="EIT", session=session)
+    assert info.source_id == 1
+    assert info.detector == "195"
+    assert info.instrument == "EIT"
+
+
+def test_unsupported_instrument_and_channel_raise():
+    with pytest.raises(ValueError, match="channel"):
+        hv._resolve_channel("EIT", "211")
+    with pytest.raises(ValueError, match="instrument"):
+        hv._resolve_channel("MDI", "continuum")
+
+
+def test_display_name_labels_both_instruments():
+    assert hv.display_name("LASCO", "C2") == "SOHO/LASCO C2"
+    assert hv.display_name("EIT", "195") == "SOHO/EIT 195"
+
+
 def test_build_screenshot_url_fits_full_frame():
     info = hv.HelioviewerImageInfo(
         detector="C2", source_id=4, date=datetime(2026, 7, 1, 5, 24, 23),

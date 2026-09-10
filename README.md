@@ -14,6 +14,13 @@ Compared with v2.8.0, this release adds the following capabilities:
 - **Local first, then the archive:** the adjacent observation is looked for among the loaded file's siblings on disk before any request is made, so a set already downloaded extends with no network at all. Day listings are cached per session, and adjacent files can be prefetched in the background.
 - **Available-or-not, up front:** the panel says why a direction is unavailable — end of the archive day, or a timestamp that supplies only part of the focus set — instead of failing on the click.
 
+### ARTEMIS-IV (Thermopylae, Greece) files
+- **Opens like any other file, and reads correctly.** ARTEMIS-IV writes its FITS through `ARTLOOK`, not through a CALLISTO receiver, and the differences are the kind that fail quietly. The time axis holds **UT in hours** rather than seconds from the start, so a three-hour observation would otherwise render three seconds wide with every UT label wrong; it is converted on load and cross-checked against `TIME-OBS`, so the axis carries real clock time. Upper-case `.FITS` suffixes — how the archive publishes them — are in the open dialog's filter.
+- **The receiver's own intensity scale.** The **Units** section reads **Counts** instead of Digits, and **dB** uses **58.51 counts/dB** for the ASG: a 4096-count (12-bit) ADC full scale over the receiver's published 70 dB dynamic range. The CALLISTO constant describes a different receiver chain and would overstate a burst by more than twenty times. ARTEMIS-IV publishes no absolute flux calibration, so the result is stated for what it is — **dB above the per-channel background**, not sfu.
+- **A first view you can read.** ARTEMIS channels differ in gain by more than an order of magnitude, so a raw plot shows the receiver's gain profile rather than the Sun — which is why every published ARTEMIS dynamic spectrum is background subtracted. Files open that way, with the threshold sliders widened to the receiver's real range instead of CALLISTO's ±100; **Edit → Reset to Raw** still shows the stored counts.
+- **Header quirks named, not silently worked around.** `View → FITS Header` puts a preamble above the raw cards giving the receiver, coverage, cadence and active calibration, and flagging the hours-based time axis, the descending frequency axis, the `BLANK` value, and a `DATE` field whose day and month are exchanged (`2015-22-06` is 22 June 2015). `DATE-OBS` is well formed and is what the analyzer uses.
+- Batch processing resolves the counts-to-dB constant per file, so a folder of ARTEMIS files and a folder of CALLISTO files both export with the right scale and the right unit on the colorbar.
+
 ### Linear and logarithmic frequency axis
 - **New Axis section** in the sidebar switches the dynamic spectrum between **Linear** and **Log**. A logarithmic frequency axis spreads the decametric end of the band, where type II and type III bursts spend most of their drift, and makes a harmonic pair sit at a constant separation.
 - Both renderers are supported. The matplotlib canvas warps the image under `set_yscale("log")`, so every coordinate stays in MHz; the hardware canvas re-samples the rows onto a uniform log grid, because its image is placed with a plain rectangle and cannot warp — but its public interface stays in MHz, so annotations, the ruler, light-curve picks and drift points behave identically in both scales.
@@ -49,6 +56,7 @@ Compared with v2.8.0, this release adds the following capabilities:
 
 ### Dynamic spectrum workflow
 - Load `.fit`, `.fits`, `.fit.gz`, and `.fits.gz` files, including datasets combined across time, frequency, or both dimensions.
+- Load ARTEMIS-IV (Thermopylae, Greece) `ARTLOOK` files directly: the hours-based UT time axis is converted on load, intensities are labelled and scaled as ADC counts with the ASG's own 58.51 counts/dB conversion, and the observation opens background subtracted because the receiver's channel gains span more than an order of magnitude.
 - Extend a loaded dataset in place from the sidebar's **Timeline** section: fetch the previous or next observation from disk or the archive, time-combine it into the spectrum without leaving the plot, trim from either end, and undo any of it. Annotations, the ruler measurement and drift picks keep their place, and the active background subtraction, noise clip and RFI cleaning are re-derived over the longer array.
 - Switch the frequency axis between **Linear** and **Log** from the sidebar's **Axis** section, with decade-anchored ticks labelled in MHz and identical behaviour in the software and hardware-accelerated renderers.
 - Download and analyze e-CALLISTO and Learmonth Station radio data, including Learmonth chunk conversion to FIT format for the main Analyzer.
@@ -73,7 +81,7 @@ Compared with v2.8.0, this release adds the following capabilities:
 - Measure a CME frame by frame in the Solar Image Analysis window with a ruler, intensity profiles, region statistics, leading-edge height–time tracking, and circle fitting for on-disk domes — reporting linear, quadratic or cubic kinematics with a 1σ error on every speed and acceleration.
 - Explore external archives with the SunPy Multi-Mission Explorer for SDO, SOHO, STEREO-A, and GOES products.
 - Load STEREO/SWAVES space-based dynamic spectra (2.6 kHz - 16 MHz) below the CALLISTO spectrum on a shared time axis, and follow a burst out of the ground-based band into the interplanetary medium.
-- Blend SDO, STEREO, and SOHO/LASCO frames into one multi-instrument coronagraph composite that runs continuously from the disk out to the outer corona.
+- Blend SDO, STEREO, and SOHO (EIT, LASCO) frames into one multi-instrument coronagraph composite that runs continuously from the disk out to the outer corona.
 - Sync the current analyzer time window across supported solar-event windows for faster cross-comparison.
 
 ### Reproducibility and support
@@ -584,14 +592,26 @@ Path:
 
 Features:
 
-- Search and download SDO/AIA image records using the existing SunPy cache workflow
-- Load local AIA `.fit`, `.fits`, `.fit.gz`, and `.fits.gz` files
+- Search and download image records using the existing SunPy cache workflow, for SDO/AIA, SDO/HMI, SOHO/EIT (171/195/284/304 A), SOHO/LASCO C2/C3, STEREO-A/B SECCHI (EUVI, COR1, COR2, HI1, HI2) and GOES/SUVI
+- Load local `.fit`, `.fits`, `.fit.gz`, and `.fits.gz` files
 - Plot image sequences with frame stepping, playback, running-difference, and base-difference modes
 - Crop image sequences using the plot-window ROI selector
 - Detect bright active-region candidates and export centroid/bounding-box/intensity summaries as CSV
 - Optionally fetch NOAA/HEK active-region labels and overlay them on detected regions
 - Create simple RGB composites from loaded AIA frames
 - Export the current plot, cropped FITS products, animated GIFs, and MP4 movies
+
+**A note on SOHO/EIT products.** The archive serves two files for every EIT
+observation — the calibrated Level 1 FITS and the raw level-zero file — and the
+server ignores a processing-level filter, so the window picks one per observation
+itself: Level 1 wherever it exists, and the raw file otherwise. Level 1
+processing runs about a year behind the raw archive, so recent EIT searches
+return raw frames while older ones return calibrated ones. Either way you get one
+frame per observation, which is what difference imaging and playback need. EIT is
+still observing, at a much lower cadence than in SOHO's early years; as with
+LASCO, a date ahead of the archive frontier falls back to the nearest available
+data and says so. **Live Preview** opens Helioviewer quicklook imagery for both
+SOHO instruments, which is the only way to see the last few months of EIT.
 
 ### Measurement Tools
 
@@ -634,14 +654,14 @@ in and restored from `.ecsolar` session files.
 
 ### Overlay Layers (multi-instrument coronagraph composites)
 
-A CME is never visible in one instrument: the eruption starts on the disk (AIA, EUVI), crosses the low corona
+A CME is never visible in one instrument: the eruption starts on the disk (AIA, EIT, EUVI), crosses the low corona
 (LASCO C2, COR1), and expands into the outer corona (LASCO C3, COR2), each imager blind to the others' domain
 because of its occulter. The **Overlay Layers** panel appears in the sidebar for coronagraph views and blends
 them into one image.
 
 Features:
 
-- Add SDO/AIA, SDO/HMI, SOHO/LASCO C2/C3, STEREO SECCHI (EUVI, COR1, COR2, HI), or GOES/SUVI as a layer over the loaded coronagraph series
+- Add SDO/AIA, SDO/HMI, SOHO/EIT, SOHO/LASCO C2/C3, STEREO SECCHI (EUVI, COR1, COR2, HI), or GOES/SUVI as a layer over the loaded coronagraph series
 - Each layer's frames are searched and downloaded automatically, then time-matched to every loaded frame within the **Time match** window (30 minutes by default; widen it for a slow cadence or a patchy archive)
 - Layers are reprojected onto the loaded series' WCS, masked to their own field-of-view annulus in solar radii, and alpha-blended widest field of view first
 - Set **Colormap**, **Scale** (log/linear), **Opacity**, **Midtones** (gamma), and the **Inner / outer** field-of-view edges in R☉ for each layer independently; un-tick a layer to leave it out without losing its settings
@@ -670,6 +690,7 @@ Path:
 Supported v1 instruments:
 
 - **SDO/AIA** (map products)
+- **SOHO/EIT** 171/195/284/304 A (map products)
 - **SOHO/LASCO C2/C3** (map products)
 - **STEREO-A/EUVI** (map products)
 - **GOES/XRS** (time-series products)

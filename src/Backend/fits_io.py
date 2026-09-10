@@ -14,6 +14,12 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 from astropy.io import fits
 
+from src.Backend.artemis import (
+    artemis_ut_start_sec,
+    is_artemis_header,
+    normalize_artemis_axes,
+)
+
 
 @dataclass(frozen=True)
 class FitsLoadResult:
@@ -234,6 +240,12 @@ def preview_callisto_fits(filepath: str, *, memmap: bool = False) -> FitsPreview
         if nx <= 0:
             nx = int(time_arr.size)
 
+        if is_artemis_header(header0):
+            freq_arr, time_arr, _ = normalize_artemis_axes(
+                header0, freq_arr, time_arr, sample_count=nx
+            )
+            time_source = "artemis"
+
         return FitsPreviewResult(
             freqs=freq_arr,
             time=time_arr,
@@ -317,6 +329,15 @@ def load_callisto_fits(filepath: str, *, memmap: bool = False) -> FitsLoadResult
                 if len(time) != data.shape[1]:
                     time = np.arange(data.shape[1], dtype=float)
 
+        # ARTEMIS-IV stores UT in hours on the time axis itself, where every
+        # consumer here expects seconds since the first sample. Rebase it once,
+        # at the reader, so nothing downstream has to know which instrument
+        # wrote the file.
+        if is_artemis_header(header0):
+            freqs, time, _ = normalize_artemis_axes(
+                header0, freqs, time, sample_count=int(data.shape[1])
+            )
+
         return FitsLoadResult(data=data, freqs=freqs, time=time, header0=header0)
 
 
@@ -331,6 +352,15 @@ def _safe_axis_length(value: Any) -> int:
 def extract_ut_start_sec(hdr: fits.Header | None) -> float | None:
     if hdr is None:
         return None
+    # ARTEMIS carries the start time on the time axis to sample precision, and
+    # some ARTLOOK files omit TIME-OBS entirely, so the axis is the better source.
+    try:
+        if is_artemis_header(hdr):
+            artemis_start = artemis_ut_start_sec(hdr)
+            if artemis_start is not None:
+                return artemis_start
+    except Exception:
+        pass
     try:
         t = hdr.get("TIME-OBS", None)
         if not t:

@@ -85,7 +85,9 @@ from src.UI.gui_shared import MplCanvas, fit_window_to_screen, pick_export_path
 from src.UI.widgets.measurement_readout import MeasurementReadout
 
 
-_FITS_FILTER = "FITS files (*.fit *.fits *.fit.gz *.fits.gz)"
+# ARTEMIS-IV distributes its files with an upper-case suffix, and Qt
+# name filters are case-sensitive on case-sensitive filesystems.
+_FITS_FILTER = "FITS files (*.fit *.fits *.fit.gz *.fits.gz *.FIT *.FITS *.FIT.gz *.FITS.gz)"
 _VIEW_CONFIG_FILTER = "e-CALLISTO View Config (*.efaview.json);;JSON Files (*.json)"
 _EXPORT_FILTERS = "PNG (*.png);;PDF (*.pdf);;EPS (*.eps);;SVG (*.svg);;TIFF (*.tiff)"
 _NOISE_TARGET_ALL = "__all__"

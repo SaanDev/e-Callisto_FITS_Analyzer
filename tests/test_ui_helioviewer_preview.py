@@ -109,8 +109,11 @@ def test_helioviewer_dialog_builds_and_plays_movie(monkeypatch):
     from src.Backend.helioviewer import HelioviewerFrame
 
     monkeypatch.setattr(hvd, "fetch_preview", lambda detector, **kw: _fake_preview(detector))
+    seen_sources: list[tuple[str, str]] = []
 
-    def _fake_seq(detector, start, end, *, step_seconds, size_px, max_frames, progress_cb=None, cancel_cb=None):
+    def _fake_seq(detector, start, end, *, instrument="LASCO", step_seconds, size_px, max_frames,
+                  progress_cb=None, cancel_cb=None):
+        seen_sources.append((instrument, detector))
         base = datetime(2026, 7, 1, 0, 0)
         if progress_cb:
             progress_cb(4, 4, end)
@@ -132,6 +135,8 @@ def test_helioviewer_dialog_builds_and_plays_movie(monkeypatch):
     assert len(dialog._frames) == 4
     assert dialog.frame_slider.maximum() == 3
     assert dialog.play_btn.isEnabled()
+    # The dialog's instrument must reach the fetcher, not just its channel.
+    assert seen_sources == [("LASCO", "C2")]
 
     dialog.frame_slider.setValue(2)
     assert dialog._frame_index == 2

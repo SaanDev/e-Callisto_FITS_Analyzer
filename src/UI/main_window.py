@@ -93,6 +93,7 @@ from src.Backend.annotations import (
     normalize_annotations,
     toggle_all_visibility,
 )
+from src.Backend.artemis import describe_artemis, suggested_display_range
 from src.Backend.frequency_axis import (
     finite_data_limits,
     format_frequency_mhz,
@@ -335,6 +336,9 @@ class MainWindow(QMainWindow):
         self.use_utc = False
         self.ut_start_sec = None
         self.use_db = False  # False = Digits (default), True = dB
+        # Set when the loaded file came from ARTEMIS-IV. It carries the receiver
+        # and its counts-to-dB scale, which differ from CALLISTO's.
+        self._artemis_profile = None
 
         # --- Undo / Redo ---
         self._undo_stack = []
@@ -2777,7 +2781,7 @@ class MainWindow(QMainWindow):
             self.time,
             default_step=self._frequency_step_mhz,
         )
-        cbar_label = "" if self.remove_titles else ("Intensity [Digits]" if not self.use_db else "Intensity [dB]")
+        cbar_label = "" if self.remove_titles else f"Intensity [{self._intensity_unit_label()}]"
         tick_font_px = self.tick_font_px
         axis_label_font_px = self.axis_label_font_px
         title_font_px = self.title_font_px
@@ -3403,7 +3407,7 @@ class MainWindow(QMainWindow):
                 if arr.ndim == 2 and arr.shape[1] > 0:
                     if self.use_db:
                         cold_digits, _ = self._db_hot_cold_digits()
-                        return (arr / float(self.DB_SCALE)) + cold_digits
+                        return (arr / float(self._intensity_db_scale())) + cold_digits
                     return arr
             except Exception:
                 pass
@@ -3739,7 +3743,7 @@ class MainWindow(QMainWindow):
             }
 
         display_data = self._intensity_for_display(self.noise_reduced_data)
-        display_unit = "dB" if self.use_db else "Digits"
+        display_unit = self._intensity_unit_label()
         cmap = self._plot_cmap()
 
         if self._type_ii_dialog is None:
@@ -3933,9 +3937,12 @@ class MainWindow(QMainWindow):
         self._reset_runtime_state_for_loaded_data()
         self._reset_noise_controls_to_defaults()
         default_preset_applied = self._apply_default_preset_for_loaded_data()
+        instrument_defaults_applied = (
+            False if default_preset_applied else self._prepare_artemis_display_defaults()
+        )
         plot_source = self.raw_data
         effective_plot_title = plot_title
-        if default_preset_applied and self._apply_noise_clip_to_current_data():
+        if (default_preset_applied or instrument_defaults_applied) and self._apply_noise_clip_to_current_data():
             plot_source = self.noise_reduced_data
             effective_plot_title = "Background Subtracted"
         self.plot_data(plot_source, title=effective_plot_title)
@@ -3947,6 +3954,9 @@ class MainWindow(QMainWindow):
         self._refresh_timeline_panel()
         if log_message:
             self._log_operation(str(log_message))
+        self._announce_instrument_profile(
+            background_subtracted=(effective_plot_title == "Background Subtracted")
+        )
 
     def _assign_dataset_arrays(
         self,
@@ -3977,6 +3987,10 @@ class MainWindow(QMainWindow):
 
         self._fits_header0 = header0.copy() if header0 is not None else None
         self._fits_source_path = source_path
+
+        # ARTEMIS-IV files are read through the same loader as CALLISTO, but the
+        # receiver behind them has its own intensity scale and unit name.
+        self._refresh_instrument_profile(freqs=freqs)
 
         self._is_combined = bool(combined_mode)
         self._combined_mode = combined_mode
@@ -4178,7 +4192,7 @@ class MainWindow(QMainWindow):
         initial_dir = os.path.dirname(self.filename) if self.filename else ""
         dialog = QFileDialog(self)
         dialog.setFileMode(QFileDialog.ExistingFiles)
-        dialog.setNameFilter("FITS files (*.fit *.fits *.fit.gz *.fits.gz)")
+        dialog.setNameFilter("FITS files (*.fit *.fits *.fit.gz *.fits.gz *.FIT *.FITS *.FIT.gz *.FITS.gz)")
         dialog.setOption(QFileDialog.DontUseNativeDialog, True)
 
         if dialog.exec():
@@ -4353,6 +4367,42 @@ class MainWindow(QMainWindow):
         self._reset_noise_clip_bounds()
         self._set_noise_clip_state(0.0, 0.0, scale=self.NOISE_CLIP_SCALE_LINEAR, sync_widgets=True)
 
+    def _prepare_artemis_display_defaults(self) -> bool:
+        """Give a freshly loaded ARTEMIS file a display it can be read in.
+
+        Two things make the CALLISTO defaults unusable here. The clipping
+        sliders span +/-100, which suits digits but not counts that reach into
+        the thousands; and the raw plot is dominated by the receiver's own gain
+        profile rather than by the Sun, because ARTEMIS channels differ in gain
+        by more than an order of magnitude. Every published ARTEMIS dynamic
+        spectrum is background subtracted for that reason, so that is the view a
+        file opens in. **Edit -> Reset to Raw** still shows the stored counts.
+
+        Returns whether the thresholds were set, so the caller knows the first
+        plot is the subtracted one.
+        """
+        if getattr(self, "_artemis_profile", None) is None:
+            return False
+
+        base = self._ensure_noise_base_data()
+        if base is None:
+            return False
+
+        # Let the sliders reach the receiver's real extremes, not CALLISTO's.
+        data_min, data_max = finite_data_limits(base)
+        self._expand_noise_clip_bounds_for_values(data_min, data_max)
+
+        low, high = suggested_display_range(
+            base,
+            low_percentile=self.RAW_FITS_VMIN_PERCENTILE,
+            high_percentile=self.RAW_FITS_VMAX_PERCENTILE,
+        )
+        if low is None or high is None:
+            return False
+
+        self._set_noise_clip_state(low, high, scale=self.noise_clip_scale, sync_widgets=True)
+        return True
+
     def _set_noise_scale_checkbox(self, scale: str | None = None) -> None:
         act = getattr(self, "noise_log_scale_chk", None)
         if act is None:
@@ -4462,7 +4512,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 (
                     f"Applied {self.RAW_FITS_PRESET_NAME}: "
-                    f"{low:.2f} to {high:.2f} Digits."
+                    f"{low:.2f} to {high:.2f} {self._intensity_linear_unit()}."
                 ),
                 4000,
             )
@@ -4484,15 +4534,16 @@ class MainWindow(QMainWindow):
         low = float(self.noise_clip_low)
         high = float(self.noise_clip_high)
         if not self.use_db:
-            return low, high, "Digits"
+            return low, high, self._intensity_linear_unit()
         cold_digits, _ = self._db_hot_cold_digits()
-        return (low - cold_digits) * self.DB_SCALE, (high - cold_digits) * self.DB_SCALE, "dB"
+        scale = self._intensity_db_scale()
+        return (low - cold_digits) * scale, (high - cold_digits) * scale, "dB"
 
     def _format_noise_clip_value(self, value: float, unit_label: str) -> str:
         return f"{float(value):.2f} {unit_label}"
 
     def _format_noise_clip_threshold_digits(self, value: float) -> str:
-        return f"{float(value):.2f} Digits"
+        return f"{float(value):.2f} {self._intensity_linear_unit()}"
 
     def _update_noise_clip_value_labels(self) -> None:
         low_label = getattr(self, "lower_value_label", None)
@@ -4511,7 +4562,10 @@ class MainWindow(QMainWindow):
             if high_sub_label is not None:
                 high_sub_label.setText(self._format_noise_clip_value(high_disp, unit_label))
                 high_sub_label.setVisible(True)
-            tooltip = "Primary readout shows the clipping threshold in Digits; secondary line shows the display value in dB"
+            tooltip = (
+                f"Primary readout shows the clipping threshold in {self._intensity_linear_unit()}; "
+                f"secondary line shows the display value in dB ({self._intensity_db_reference_text()})"
+            )
             low_label.setToolTip(tooltip)
             high_label.setToolTip(tooltip)
             if low_sub_label is not None:
@@ -4527,7 +4581,7 @@ class MainWindow(QMainWindow):
         if high_sub_label is not None:
             high_sub_label.clear()
             high_sub_label.setVisible(False)
-        tooltip = "Clipping threshold in Digits"
+        tooltip = f"Clipping threshold in {self._intensity_linear_unit()}"
         low_label.setToolTip(tooltip)
         high_label.setToolTip(tooltip)
 
@@ -4563,6 +4617,108 @@ class MainWindow(QMainWindow):
         if cold > hot:
             cold, hot = hot, cold
         return cold, hot
+
+    # =========================
+    # Intensity units: one scale per instrument
+    # =========================
+    def _intensity_linear_unit(self) -> str:
+        """Name of the uncalibrated intensity unit for the loaded instrument.
+
+        CALLISTO reports ADC digits; ARTEMIS-IV's ARTLOOK files declare
+        ``BUNIT = COUNTS`` and are read straight off a 12-bit converter.
+        """
+        return "Counts" if getattr(self, "_artemis_profile", None) is not None else "Digits"
+
+    def _intensity_unit_label(self) -> str:
+        """Unit shown on the colorbar and passed to the analysis dialogs."""
+        return "dB" if self.use_db else self._intensity_linear_unit()
+
+    def _intensity_db_scale(self) -> float:
+        """dB per raw intensity unit, for the receiver that wrote the file.
+
+        The CALLISTO default describes a 2500 mV span over 256 digits against a
+        25.4 mV/dB log detector. ARTEMIS-IV's ASG is a different chain — a 70 dB
+        log detector digitised by a 12-bit ADC — so it gets its own scale rather
+        than being off by a factor of six.
+        """
+        profile = getattr(self, "_artemis_profile", None)
+        if profile is not None:
+            return float(profile.calibration.db_per_count)
+        return float(self.DB_SCALE)
+
+    def _intensity_db_reference_text(self) -> str:
+        """What the dB readout is measured *from*, in one phrase."""
+        if getattr(self, "_artemis_profile", None) is not None:
+            return "dB above the clipping threshold, per-channel background removed"
+        return "Y-factor against the lower clipping threshold"
+
+    def _refresh_instrument_profile(self, *, freqs=None) -> None:
+        """Re-derive the loaded file's instrument from the retained header.
+
+        Called from every path that sets ``_fits_header0`` — a fresh load, an
+        undo, a reopened project — so the unit labels and the dB scale can never
+        drift away from the data they describe.
+        """
+        header = getattr(self, "_fits_header0", None)
+        axis = getattr(self, "freqs", None) if freqs is None else freqs
+        try:
+            self._artemis_profile = None if header is None else describe_artemis(header, freqs=axis)
+        except Exception:
+            self._artemis_profile = None
+        self._sync_intensity_unit_labels()
+
+    def _announce_instrument_profile(self, *, background_subtracted: bool = False) -> None:
+        """Name the instrument and its intensity scale when the file is not CALLISTO.
+
+        Silent for CALLISTO, which is the assumed case everywhere else in the
+        window and needs no announcement.
+        """
+        profile = getattr(self, "_artemis_profile", None)
+        if profile is None:
+            return
+
+        summary = profile.summary()
+        message = f"{summary} — opened background subtracted" if background_subtracted else summary
+        try:
+            self.statusBar().showMessage(message, 8000)
+        except Exception:
+            pass
+
+        cal = profile.calibration
+        self._log_operation(f"Instrument: {summary}")
+        self._log_operation(
+            f"Intensity scale: {cal.counts_per_db:.3f} counts/dB "
+            f"({cal.adc_full_scale_counts:g}-count ADC full scale over {cal.dynamic_range_db:g} dB), "
+            "referenced to the per-channel background — ARTEMIS-IV is not flux calibrated."
+        )
+        for note in profile.notes:
+            self._log_operation(f"Header note: {note}")
+
+    def _sync_intensity_unit_labels(self) -> None:
+        """Relabel the Units section for the loaded instrument."""
+        radio = getattr(self, "units_digits_radio", None)
+        if radio is None:
+            return
+        unit = self._intensity_linear_unit()
+        radio.setText(unit)
+        profile = getattr(self, "_artemis_profile", None)
+        if profile is None:
+            radio.setToolTip("Raw CALLISTO ADC digits, as stored in the file")
+            db_tip = "Y-factor conversion of digits to dB against the lower clipping threshold"
+        else:
+            cal = profile.calibration
+            radio.setToolTip(
+                f"Raw ADC counts from {profile.instrument_label} (12-bit converter, as stored in the file)"
+            )
+            db_tip = (
+                f"{cal.counts_per_db:.2f} counts/dB — {cal.adc_full_scale_counts:g}-count ADC full scale "
+                f"over the receiver's {cal.dynamic_range_db:g} dB dynamic range. "
+                "Relative to the per-channel background; ARTEMIS-IV is not flux calibrated."
+            )
+        db_radio = getattr(self, "units_db_radio", None)
+        if db_radio is not None:
+            db_radio.setToolTip(db_tip)
+        self._update_noise_clip_value_labels()
 
     def _reset_sidebar_controls_to_defaults(self) -> None:
         self._reset_noise_controls_to_defaults()
@@ -4648,7 +4804,7 @@ class MainWindow(QMainWindow):
         # traffic without adding precision — the spectrogram is float32 already.
         dtype = np.float32 if arr.dtype == np.float32 else np.float64
         arr = np.asarray(arr, dtype=dtype)
-        return (arr - dtype(cold_digits)) * dtype(self.DB_SCALE)
+        return (arr - dtype(cold_digits)) * dtype(self._intensity_db_scale())
 
     def _intensity_range_for_display(self, vmin, vmax):
         if vmin is None or vmax is None:
@@ -4656,7 +4812,8 @@ class MainWindow(QMainWindow):
         if not self.use_db:
             return vmin, vmax
         cold_digits, _ = self._db_hot_cold_digits()
-        return ((vmin - cold_digits) * self.DB_SCALE, (vmax - cold_digits) * self.DB_SCALE)
+        scale = self._intensity_db_scale()
+        return ((vmin - cold_digits) * scale, (vmax - cold_digits) * scale)
 
     def _current_gap_row_mask(self) -> np.ndarray | None:
         if self.freqs is None or self._gap_row_mask is None:
@@ -5553,11 +5710,19 @@ class MainWindow(QMainWindow):
 
         if state is None:
             self.timeline_group.setEnabled(True)
-            self.timeline_status_label.setText(
-                "Load a CALLISTO file to step through the archive."
-                if getattr(self, "raw_data", None) is None
-                else "This dataset's source files are not available for stepping."
-            )
+            if getattr(self, "raw_data", None) is None:
+                message = "Load a CALLISTO file to step through the archive."
+            elif getattr(self, "_artemis_profile", None) is not None:
+                # Stepping walks the e-CALLISTO archive's 15-minute files. ARTEMIS
+                # publishes long single observations and has no such layout, so
+                # say that rather than implying something went wrong.
+                message = (
+                    "Archive stepping is e-CALLISTO only — this ARTEMIS-IV observation "
+                    "already covers its full time range."
+                )
+            else:
+                message = "This dataset's source files are not available for stepping."
+            self.timeline_status_label.setText(message)
             self._set_timeline_controls_enabled(False)
             return
 
@@ -6781,7 +6946,7 @@ class MainWindow(QMainWindow):
 
         self.current_colorbar = self.canvas.figure.colorbar(im, cax=cax)
 
-        label = "Intensity [Digits]" if not self.use_db else "Intensity [dB]"
+        label = f"Intensity [{self._intensity_unit_label()}]"
         self.current_colorbar.set_label(label)
 
         # Store label string so apply_graph_properties_live can re-style it
@@ -6925,7 +7090,7 @@ class MainWindow(QMainWindow):
         else:
             time_str = f"{t_val:.2f} s"
 
-        unit_label = "dB" if self.use_db else "Digits"
+        unit_label = self._intensity_unit_label()
         msg = (
             f"t = {time_str}   |   "
             f"f = {f_val:.2f} MHz   |   "
@@ -7707,7 +7872,7 @@ class MainWindow(QMainWindow):
 
         # Create new colorbar
         self.current_colorbar = self.canvas.figure.colorbar(im, cax=cax)
-        self._colorbar_label_text = "Intensity [Digits]" if not self.use_db else "Intensity [dB]"
+        self._colorbar_label_text = f"Intensity [{self._intensity_unit_label()}]"
         self.current_colorbar.set_label(self._colorbar_label_text)
 
         # Labels
@@ -8320,7 +8485,7 @@ class MainWindow(QMainWindow):
         # Mark what this file is
         hdr0["HISTORY"] = "Exported by e-CALLISTO FITS Analyzer"
         hdr0["HISTORY"] = f"Export plot type: {self.current_plot_type}"
-        hdr0["HISTORY"] = f"Units shown: {'dB' if getattr(self, 'use_db', False) else 'Digits'}"
+        hdr0["HISTORY"] = f"Units shown: {self._intensity_unit_label()}"
 
         if self._is_combined:
             hdr0["COMBINED"] = True
@@ -8336,7 +8501,7 @@ class MainWindow(QMainWindow):
                 hdr0["HISTORY"] = f"Source: {os.path.basename(self._fits_source_path)}"
 
         # Save BUNIT if you want the file to be self-describing
-        hdr0["BUNIT"] = "dB" if getattr(self, "use_db", False) else "Digits"
+        hdr0["BUNIT"] = self._intensity_unit_label()
 
         primary = fits.PrimaryHDU(data=export_data, header=hdr0)
         try:
@@ -8457,6 +8622,7 @@ class MainWindow(QMainWindow):
         # FITS metadata / provenance
         self._fits_header0 = None
         self._fits_source_path = None
+        self._refresh_instrument_profile()
         self._is_combined = False
         self._combined_mode = None
         self._combined_sources = []
@@ -10275,6 +10441,7 @@ class MainWindow(QMainWindow):
         self._combined_options = dict(state.get("combined_options", {}) or {})
         header0 = state.get("fits_header0", None)
         self._fits_header0 = None if header0 is None else header0.copy()
+        self._refresh_instrument_profile()
         self._fits_source_path = state.get("fits_source_path", None)
         self.ut_start_sec = state.get("ut_start_sec", None)
         self._annotations = normalize_annotations(state.get("annotations", []))
@@ -12581,7 +12748,7 @@ class MainWindow(QMainWindow):
                 plot_title = self.graph_title_override or self._default_graph_title(normalized_plot_type)
                 x_label = "Time [UT]" if (self.use_utc and self.ut_start_sec is not None) else "Time [s]"
                 y_label = "Frequency [MHz]"
-                cbar_label = "Intensity [Digits]" if not self.use_db else "Intensity [dB]"
+                cbar_label = f"Intensity [{self._intensity_unit_label()}]"
 
             tick_font_px = self.tick_font_px
             axis_label_font_px = self.axis_label_font_px
@@ -12891,7 +13058,7 @@ class MainWindow(QMainWindow):
                     parent=self,
                     session=sess,
                     display_data=self._intensity_for_display(spectrum),
-                    display_unit="dB" if self.use_db else "Digits",
+                    display_unit=self._intensity_unit_label(),
                     cmap=self.get_current_cmap(),
                     frequency_step_mhz=self._frequency_step_mhz,
                 )
@@ -13052,7 +13219,7 @@ class MainWindow(QMainWindow):
                     image,
                     ax=top_ax,
                     pad=0.01,
-                ).set_label("Intensity [dB]" if self.use_db else "Intensity [Digits]", fontsize=8)
+                ).set_label(f"Intensity [{self._intensity_unit_label()}]", fontsize=8)
                 x_lo = float(np.min(self.time))
                 x_hi = float(np.max(self.time))
 
@@ -13703,6 +13870,7 @@ class MainWindow(QMainWindow):
                     self._fits_header0 = fits.Header.fromstring(header_txt, sep="\n")
                 except Exception:
                     self._fits_header0 = None
+            self._refresh_instrument_profile()
 
             # Units radios
             try:

@@ -204,6 +204,12 @@ HMI_PRODUCT_CONTENT = {  # FITS CONTENT keyword -> product, to recolour loaded H
     "dopplergram": "dopplergram",
 }
 
+# SOHO/EIT EUV disk imager. VSO-only (no JSOC fast path), selected per passband,
+# and read best in SunPy's dedicated sohoeit* colormaps. The archive serves two
+# products per observation (calibrated L1 and raw level-zero); the search layer
+# collapses them to one frame each (see sunpy_archive._dedupe_eit_products).
+EIT_WAVELENGTHS = (171, 195, 284, 304)
+
 # SOHO/LASCO white-light coronagraphs. These are VSO-only (no JSOC fast path),
 # have no EUV wavelength or HMI product, and read best in SunPy's dedicated
 # soholasco2/3 colormaps. The detector string doubles as the observable value.
@@ -212,6 +218,11 @@ LASCO_DETECTORS = (
     ("C3", "SOHO/LASCO C3"),
 )
 LASCO_COLORMAPS = {"C2": "soholasco2", "C3": "soholasco3"}
+
+# The SOHO observables Helioviewer serves near-real-time quicklook browse imagery
+# for. Both need it: LASCO's definitive FITS archive lags real time by months and
+# EIT's calibrated Level 1 product by about a year.
+HELIOVIEWER_OBSERVABLES = ("LASCO", "EIT")
 
 # STEREO/SECCHI observables on both spacecraft (A still operating; B is historical,
 # 2007-2014). Like LASCO these are VSO-only (no JSOC fast path). EUVI is an EUV
@@ -245,6 +256,32 @@ def _secchi_colormap_name(detector: str | None, wavelength: Any | None) -> str:
     return f"euvi{rounded}" if rounded in STEREO_EUVI_WAVELENGTHS else "euvi195"
 
 
+def _normalize_observable_data(data: Any) -> Any:
+    """Comparable form of an observable-combo userData value.
+
+    Sessions round-trip through JSON, which turns the userData tuples into lists
+    (and SECCHI's is a *nested* tuple), so a saved selection can only be matched
+    against the live combo once both sides are reduced to the same shape.
+    Numbers are widened to float so 195 and 195.0 compare equal.
+    """
+    if isinstance(data, (tuple, list)):
+        return [_normalize_observable_data(item) for item in data]
+    if isinstance(data, bool) or data is None:
+        return data
+    if isinstance(data, (int, float)):
+        return float(data)
+    return data
+
+
+def _eit_colormap_name(wavelength: Any | None) -> str:
+    """Colormap for a SOHO/EIT passband (sunpy sohoeit*)."""
+    try:
+        rounded = int(round(float(wavelength)))
+    except (TypeError, ValueError):
+        rounded = 195
+    return f"sohoeit{rounded}" if rounded in EIT_WAVELENGTHS else "sohoeit195"
+
+
 def _suvi_colormap_name(wavelength: Any | None) -> str:
     """Colormap for a GOES/SUVI passband (sunpy goes-rsuvi*)."""
     try:
@@ -258,9 +295,13 @@ def populate_observable_combo(combo: Any) -> None:
     """Fill a QComboBox with every supported observable.
 
     userData is a tuple: ("AIA", wavelength_float), ("HMI", product_str),
-    ("LASCO", "C2"/"C3"), ("SECCHI", (spacecraft, detector, wavelength_or_None))
+    ("EIT", wavelength_float), ("LASCO", "C2"/"C3"),
+    ("SECCHI", (spacecraft, detector, wavelength_or_None))
     or ("SUVI", wavelength_float). Shared by the main Data Source selector and
     the Compare Viewpoint dialog so both always offer the same missions.
+
+    Sessions match the selection on this userData rather than on the combo
+    position, so missions can be regrouped here without breaking saved files.
     """
     for value in AIA_WAVELENGTHS:
         combo.addItem(f"AIA {value} A", userData=("AIA", float(value)))
@@ -268,6 +309,9 @@ def populate_observable_combo(combo: Any) -> None:
     for product, label in HMI_OBSERVABLES:
         combo.addItem(label, userData=("HMI", product))
     combo.insertSeparator(combo.count())
+    # SOHO: the EIT disk imager and the LASCO coronagraphs read together.
+    for value in EIT_WAVELENGTHS:
+        combo.addItem(f"SOHO/EIT {value} A", userData=("EIT", float(value)))
     for detector, label in LASCO_DETECTORS:
         combo.addItem(label, userData=("LASCO", detector))
     combo.insertSeparator(combo.count())
@@ -294,6 +338,8 @@ def default_colormap_for_observable(instrument: str, value: Any) -> str:
         return f"sdoaia{rounded}" if rounded in AIA_WAVELENGTHS else "sdoaia193"
     if key == "HMI":
         return HMI_COLORMAPS.get(str(value), "gray")
+    if key == "EIT":
+        return _eit_colormap_name(value)
     if key == "LASCO":
         return LASCO_COLORMAPS.get(str(value).upper(), "soholasco2")
     if key == "SECCHI":
@@ -461,6 +507,7 @@ class CompositeBuildWorker(QObject):
         "HMI": (datetime(2010, 5, 1), None, "SDO launched February 2010"),
         "SUVI": (datetime(2017, 6, 1), None, "GOES-16 SUVI became operational in 2017"),
         "SECCHI": (datetime(2006, 12, 1), None, "STEREO launched October 2006"),
+        "EIT": (datetime(1996, 1, 1), None, "SOHO launched December 1995"),
         "LASCO": (datetime(1996, 1, 1), None, "SOHO launched December 1995"),
     }
 
@@ -2333,7 +2380,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.data_menu = self.menuBar().addMenu("Data")
         self.fetch_action = QAction("Fetch Archive Records", self)
         self.find_latest_action = QAction("Find Latest Available", self)
-        self.live_preview_action = QAction("SOHO/LASCO Live Preview (Helioviewer)", self)
+        self.live_preview_action = QAction("SOHO Live Preview (Helioviewer)", self)
         self.load_selected_action = QAction("Load Selected (to cache)", self)
         self.save_disk_action = QAction("Save Selected to Disk…", self)
         self.upload_action = QAction("Upload FITS Files", self)
@@ -2839,8 +2886,9 @@ class SolarDataAnalysisWindow(QMainWindow):
         )
         self.live_preview_btn = QPushButton("Live Preview (Helioviewer)")
         self.live_preview_btn.setToolTip(
-            "Show the newest SOHO/LASCO C2/C3 quicklook image from Helioviewer (updated within ~an hour).\n"
-            "A near-real-time browse image for situational awareness — not analysis-grade FITS."
+            "Show the newest SOHO/LASCO C2/C3 or SOHO/EIT quicklook image from Helioviewer\n"
+            "(updated within ~an hour). A near-real-time browse image for situational\n"
+            "awareness — not analysis-grade FITS."
         )
         self.load_local_btn = QPushButton("Upload FITS…")
         self.load_local_btn.setToolTip("Load solar FITS files straight from disk — no archive search needed.")
@@ -3280,6 +3328,7 @@ class SolarDataAnalysisWindow(QMainWindow):
             [
                 *AIA_COLORMAPS,
                 "hmimag",
+                *(f"sohoeit{wl}" for wl in EIT_WAVELENGTHS),
                 "soholasco2",
                 "soholasco3",
                 "stereocor1",
@@ -3456,7 +3505,9 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.overlay_colormap_combo = QComboBox()
         self.overlay_colormap_combo.setEditable(True)
         self.overlay_colormap_combo.addItems(
-            sorted({*AIA_COLORMAPS, *LASCO_COLORMAPS.values(), "stereocor1", "stereocor2",
+            sorted({*AIA_COLORMAPS, *LASCO_COLORMAPS.values(),
+                    *(f"sohoeit{wl}" for wl in EIT_WAVELENGTHS),
+                    "stereocor1", "stereocor2",
                     "euvi171", "euvi195", "euvi284", "euvi304", "gray", "inferno"})
         )
         self.overlay_scale_combo = QComboBox()
@@ -4139,6 +4190,20 @@ class SolarDataAnalysisWindow(QMainWindow):
                 sample_seconds=sample_seconds if sample_seconds > 0 else None,
                 max_records=int(self.max_records_spin.value()),
             )
+        if instrument == "EIT":
+            # SOHO/EIT EUV disk imager: VSO-only, selected per passband, no JSOC
+            # resolution/cutout and no selectable archive level (the server
+            # ignores a.Level for EIT, so the L1/level-zero choice is made when
+            # the result rows are normalised).
+            return SunPyQuerySpec(
+                start_dt=start_dt,
+                end_dt=end_dt,
+                spacecraft="SOHO",
+                instrument="EIT",
+                wavelength_angstrom=float(value or 195.0),
+                sample_seconds=sample_seconds if sample_seconds > 0 else None,
+                max_records=int(self.max_records_spin.value()),
+            )
         if instrument == "LASCO":
             # SOHO/LASCO coronagraph: VSO-only, selected by detector (C2/C3),
             # no EUV wavelength, no HMI product, no JSOC resolution/cutout.
@@ -4261,21 +4326,26 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._start_worker(SunPyWorker("find_latest", query_spec=spec))
 
     def open_helioviewer_preview(self):
-        """Open the near-real-time SOHO/LASCO quicklook preview (Helioviewer).
+        """Open the near-real-time SOHO quicklook preview (Helioviewer).
 
         These are browse images updated within ~an hour — the fresh view the
-        calibrated (months-behind) VSO/SDAC FITS archive cannot provide.
+        calibrated VSO/SDAC FITS archive cannot provide. Both SOHO instruments
+        in this window need it: LASCO's definitive archive lags real time by
+        months, and EIT's calibrated Level 1 product lags it by even longer.
         """
         instrument, value = self._current_observable()
-        if instrument != "LASCO":
+        if instrument not in HELIOVIEWER_OBSERVABLES:
             QMessageBox.information(
                 self,
                 "Live Preview",
-                "The near-real-time preview is available for SOHO/LASCO. "
-                "Select the SOHO/LASCO C2 or C3 observable first.",
+                "The near-real-time preview is available for SOHO/LASCO and SOHO/EIT. "
+                "Select a SOHO/LASCO C2 or C3, or SOHO/EIT observable first.",
             )
             return
-        detector = str(value or "C2")
+        if instrument == "EIT":
+            detector = f"{int(round(float(value or 195.0)))}"
+        else:
+            detector = str(value or "C2")
         try:
             from src.UI.helioviewer_preview_dialog import HelioviewerPreviewDialog
         except Exception as exc:  # noqa: BLE001 - surface an import/runtime failure cleanly
@@ -4287,7 +4357,7 @@ class SolarDataAnalysisWindow(QMainWindow):
                 existing.close()
             except Exception:
                 pass
-        dialog = HelioviewerPreviewDialog(self, detector=detector, theme=self.theme)
+        dialog = HelioviewerPreviewDialog(self, detector=detector, instrument=instrument, theme=self.theme)
         dialog.setAttribute(Qt.WA_DeleteOnClose, True)
         self._helioviewer_dialog = dialog
         dialog.show()
@@ -5045,6 +5115,9 @@ class SolarDataAnalysisWindow(QMainWindow):
         obs = str(getattr(frame, "observatory", "") or "").strip().upper()
         if "LASCO" in inst:
             return f"LASCO {det}".strip()
+        if "EIT" in inst or det == "EIT":
+            wl = self._frame_wavelength_value(frame)
+            return f"EIT {int(round(wl))}" if wl else "EIT"
         if "AIA" in inst:
             return "AIA"
         if "HMI" in inst:
@@ -5449,15 +5522,15 @@ class SolarDataAnalysisWindow(QMainWindow):
         instrument = self._current_observable()[0]
         is_sdo = instrument in ("AIA", "HMI")
         is_aia = instrument == "AIA"
-        is_lasco = instrument == "LASCO"
+        has_quicklook = instrument in HELIOVIEWER_OBSERVABLES
         busy = bool(getattr(self, "_busy", False))
         for widget in (self.source_combo, self.jsoc_email_edit, self.frame_size_combo, self.cutout_widget):
             widget.setEnabled(is_sdo and not busy)
-        # Helioviewer near-real-time preview only applies to SOHO/LASCO.
+        # Helioviewer near-real-time preview only exists for the SOHO instruments.
         if hasattr(self, "live_preview_btn"):
-            self.live_preview_btn.setEnabled(is_lasco)
+            self.live_preview_btn.setEnabled(has_quicklook)
         if hasattr(self, "live_preview_action"):
-            self.live_preview_action.setEnabled(is_lasco)
+            self.live_preview_action.setEnabled(has_quicklook)
         # High-resolution VSO is an AIA-only product (HMI/LASCO have none).
         self.high_resolution_check.setEnabled(is_aia and not busy)
         if not is_aia:
@@ -5503,10 +5576,10 @@ class SolarDataAnalysisWindow(QMainWindow):
             self.fetch_labels_btn,
         ):
             widget.setVisible(disk_visible)
-        # Helioviewer quicklook only exists for SOHO/LASCO.
+        # Helioviewer quicklook only exists for the SOHO instruments.
         source_expanded = is_group_expanded(self.data_source_group)
-        is_lasco_observable = self._current_observable()[0] == "LASCO"
-        self.live_preview_btn.setVisible(is_lasco_observable and source_expanded)
+        has_quicklook = self._current_observable()[0] in HELIOVIEWER_OBSERVABLES
+        self.live_preview_btn.setVisible(has_quicklook and source_expanded)
 
     def _on_canvas_hover(self, x_arcsec: float | None, y_arcsec: float | None) -> None:
         """Live solar coordinate readout as the cursor moves over the map.
@@ -5858,7 +5931,7 @@ class SolarDataAnalysisWindow(QMainWindow):
                 value=value,
                 label=label,
                 colormap=default_colormap_for_observable(instrument, value),
-                scale="log" if instrument in ("AIA", "SUVI", "SECCHI") else "linear",
+                scale="log" if instrument in ("AIA", "SUVI", "SECCHI", "EIT") else "linear",
                 gamma=default_gamma_for(instrument, value),
                 inner_rsun=inner,
                 outer_rsun=outer,
@@ -6141,6 +6214,32 @@ class SolarDataAnalysisWindow(QMainWindow):
                 return str(value)
         return None
 
+    def _frame_eit_colormap(self, frame: Any | None = None) -> str | None:
+        """Colormap for a SOHO/EIT frame (or the selected observable).
+
+        EIT shares its 171 and 304 A passbands with AIA, so without this step the
+        wavelength fallback at the end of the chain would hand an EIT frame
+        sdoaia171/sdoaia304 - and sdoaia193 for its 195 and 284 passbands, which
+        AIA does not carry at all.
+        """
+        source = frame
+        if source is None and self._map_frames:
+            source = self._map_frames[max(0, min(self._current_frame_index, len(self._map_frames) - 1))]
+        if source is not None:
+            instrument = str(getattr(source, "instrument", "") or "").upper()
+            detector = str(getattr(source, "detector", "") or "").strip().upper()
+            # Level-zero frames report "EIT"; L1 frames the full instrument name.
+            if "EIT" in instrument or detector == "EIT":
+                return _eit_colormap_name(self._frame_wavelength_value(source))
+            # An explicit non-EIT frame must not fall back to the combo.
+            if frame is not None:
+                return None
+        if frame is None:
+            instrument, value = self._current_observable()
+            if instrument == "EIT":
+                return _eit_colormap_name(value)
+        return None
+
     def _frame_stereo_suvi_colormap(self, frame: Any | None = None) -> str | None:
         """Colormap for a STEREO/SECCHI or GOES/SUVI frame (or selected observable)."""
         source = frame
@@ -6169,6 +6268,9 @@ class SolarDataAnalysisWindow(QMainWindow):
         detector = self._frame_lasco_detector(frame)
         if detector is not None:
             return LASCO_COLORMAPS.get(detector, "soholasco2")
+        eit = self._frame_eit_colormap(frame)
+        if eit is not None:
+            return eit
         stereo_suvi = self._frame_stereo_suvi_colormap(frame)
         if stereo_suvi is not None:
             return stereo_suvi
@@ -7421,6 +7523,10 @@ class SolarDataAnalysisWindow(QMainWindow):
         source = {
             "instrument_label": self._loaded_instrument_label(),
             "observable_index": int(self.wavelength_combo.currentIndex()),
+            # The combo is grouped by mission and its order changes when a
+            # mission is added, so the selection travels as its userData too;
+            # the index is only the fallback for sessions written before this.
+            "observable_data": _normalize_observable_data(self.wavelength_combo.currentData()),
             "observable_text": self.wavelength_combo.currentText(),
             "start": self.start_dt_edit.dateTime().toPython().replace(tzinfo=None).isoformat(),
             "end": self.end_dt_edit.dateTime().toPython().replace(tzinfo=None).isoformat(),
@@ -7622,11 +7728,27 @@ class SolarDataAnalysisWindow(QMainWindow):
             restored += f", {len(circles)} circle fit(s)"
         self.statusBar().showMessage(f"Session restored: {n} frame(s), {restored}.", 7000)
 
+    def _observable_index_for_data(self, data: Any) -> int | None:
+        """Combo index whose userData matches a saved observable, else None."""
+        if data is None:
+            return None
+        target = _normalize_observable_data(data)
+        for index in range(self.wavelength_combo.count()):
+            if _normalize_observable_data(self.wavelength_combo.itemData(index)) == target:
+                return index
+        return None
+
     def _restore_source_widgets(self, source: dict[str, Any]) -> None:
-        idx = source.get("observable_index")
-        if isinstance(idx, int) and 0 <= idx < self.wavelength_combo.count():
+        # Prefer the saved userData: a stored position means something different
+        # as soon as the observable list gains a mission.
+        index = self._observable_index_for_data(source.get("observable_data"))
+        if index is None:
+            idx = source.get("observable_index")
+            if isinstance(idx, int) and 0 <= idx < self.wavelength_combo.count():
+                index = idx
+        if index is not None:
             was = self.wavelength_combo.blockSignals(True)
-            self.wavelength_combo.setCurrentIndex(idx)
+            self.wavelength_combo.setCurrentIndex(index)
             self.wavelength_combo.blockSignals(was)
         for key, edit in (("start", self.start_dt_edit), ("end", self.end_dt_edit)):
             text = source.get(key)

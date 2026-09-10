@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from src.Backend.artemis import artemis_header_report
 from src.UI.gui_shared import fit_window_to_screen
 
 
@@ -36,7 +37,7 @@ class FitsHeaderViewerDialog(QDialog):
         self.text = QPlainTextEdit()
         self.text.setReadOnly(True)
         self.text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        self.text.setPlainText(self._header.tostring(sep="\n", endcard=True, padding=False))
+        self.text.setPlainText(self._header_text())
 
         self.save_btn = QPushButton("Save as .txt")
         self.save_btn.clicked.connect(self.save_as_txt)
@@ -55,6 +56,24 @@ class FitsHeaderViewerDialog(QDialog):
         self.setLayout(layout)
 
         self.setWindowModality(Qt.WindowModality.ApplicationModal)
+
+    def _header_text(self) -> str:
+        """The raw cards, preceded by an instrument preamble where one applies.
+
+        ARTLOOK headers describe ARTEMIS-IV correctly but tersely, and two of
+        their keywords need reading instructions (a time axis in hours, a
+        creation date with day and month exchanged). The preamble says so; the
+        cards below are still verbatim, and both are saved together.
+        """
+        try:
+            cards = self._header.tostring(sep="\n", endcard=True, padding=False)
+        except Exception:
+            cards = ""
+        try:
+            preamble = artemis_header_report(self._header)
+        except Exception:
+            preamble = ""
+        return f"{preamble}{cards}" if preamble else cards
 
     def save_as_txt(self):
         start = self._default_name

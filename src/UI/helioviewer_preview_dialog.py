@@ -4,10 +4,11 @@ Version 3.0.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
-Near-real-time SOHO/LASCO quicklook preview and time-range movie (Helioviewer).
+Near-real-time SOHO quicklook preview and time-range movie (Helioviewer).
 
-These are browse images (PNG, with the standard LASCO colour table) updated
-within ~an hour — the fresh view the calibrated, months-behind VSO/SDAC FITS
+Serves the LASCO coronagraphs (C2/C3) and the EIT EUV disk imager
+(171/195/284/304 A). These are browse images (PNG, with each instrument's
+standard colour table) updated within ~an hour — the fresh view the calibrated, months-behind VSO/SDAC FITS
 archive cannot provide. The dialog opens on the newest still frame; from there
 the user can build a flip-book "movie" over a chosen time range and step and
 play/scrub through it. This is situational-awareness imagery, not analysis-grade
@@ -39,8 +40,11 @@ from PySide6.QtWidgets import (
 )
 
 from src.Backend.helioviewer import (
+    DEFAULT_INSTRUMENT,
     HelioviewerFrame,
     HelioviewerPreview,
+    channels_for,
+    display_name,
     fetch_frame_sequence,
     fetch_preview,
 )
@@ -53,15 +57,18 @@ class _StillWorker(QObject):
     finished = Signal(object)   # HelioviewerPreview
     failed = Signal(str)
 
-    def __init__(self, detector: str, size_px: int = _PREVIEW_PX):
+    def __init__(self, detector: str, size_px: int = _PREVIEW_PX, instrument: str = DEFAULT_INSTRUMENT):
         super().__init__()
         self._detector = str(detector)
         self._size_px = int(size_px)
+        self._instrument = str(instrument)
 
     @Slot()
     def run(self):
         try:
-            self.finished.emit(fetch_preview(self._detector, size_px=self._size_px))
+            self.finished.emit(
+                fetch_preview(self._detector, instrument=self._instrument, size_px=self._size_px)
+            )
         except Exception as exc:  # noqa: BLE001 - surface network/API errors to the UI
             self.failed.emit(str(exc))
 
@@ -71,9 +78,11 @@ class _MovieWorker(QObject):
     finished = Signal(object)       # list[HelioviewerFrame]
     failed = Signal(str)
 
-    def __init__(self, detector, start, end, step_seconds, max_frames, size_px=_PREVIEW_PX):
+    def __init__(self, detector, start, end, step_seconds, max_frames, size_px=_PREVIEW_PX,
+                 instrument=DEFAULT_INSTRUMENT):
         super().__init__()
         self._detector = str(detector)
+        self._instrument = str(instrument)
         self._start = start
         self._end = end
         self._step = float(step_seconds)
@@ -89,6 +98,7 @@ class _MovieWorker(QObject):
         try:
             frames = fetch_frame_sequence(
                 self._detector, self._start, self._end,
+                instrument=self._instrument,
                 step_seconds=self._step, size_px=self._size_px, max_frames=self._max_frames,
                 progress_cb=lambda done, total, _dt: self.progress.emit(int(done), int(total)),
                 cancel_cb=self._cancel.is_set,
@@ -99,12 +109,18 @@ class _MovieWorker(QObject):
 
 
 class HelioviewerPreviewDialog(QDialog):
-    """Newest LASCO C2/C3 quicklook still, plus a time-range flip-book movie."""
+    """Newest SOHO quicklook still, plus a time-range flip-book movie.
 
-    def __init__(self, parent: QWidget | None = None, *, detector: str = "C2", theme: Any | None = None):
+    Serves LASCO (C2/C3 detectors) and EIT (171/195/284/304 passbands); the
+    ``detector`` argument is the channel within the chosen ``instrument``.
+    """
+
+    def __init__(self, parent: QWidget | None = None, *, detector: str = "C2",
+                 instrument: str = DEFAULT_INSTRUMENT, theme: Any | None = None):
         super().__init__(parent)
         self.theme = theme
-        self.setWindowTitle("SOHO/LASCO Near-Real-Time Preview (Helioviewer)")
+        self._instrument = str(instrument or DEFAULT_INSTRUMENT).strip().upper()
+        self.setWindowTitle(f"SOHO/{self._instrument} Near-Real-Time Preview (Helioviewer)")
         fit_window_to_screen(self, 640, 820)
 
         self._preview: HelioviewerPreview | None = None
@@ -121,7 +137,9 @@ class HelioviewerPreviewDialog(QDialog):
         self._play_timer.timeout.connect(self._on_play_tick)
 
         self._build_ui()
-        det = str(detector or "C2").strip().upper()
+        det = str(detector or "").strip().upper()
+        if det.endswith(".0"):  # an EIT passband arriving as a float, e.g. "195.0"
+            det = det[:-2]
         idx = self.detector_combo.findData(det)
         if idx >= 0:
             self.detector_combo.setCurrentIndex(idx)
@@ -133,10 +151,11 @@ class HelioviewerPreviewDialog(QDialog):
         layout = QVBoxLayout(self)
 
         top = QHBoxLayout()
-        top.addWidget(QLabel("Detector:"))
+        # LASCO picks a detector, EIT a passband, so the label follows the source.
+        top.addWidget(QLabel("Passband:" if self._instrument == "EIT" else "Detector:"))
         self.detector_combo = QComboBox()
-        self.detector_combo.addItem("SOHO/LASCO C2", userData="C2")
-        self.detector_combo.addItem("SOHO/LASCO C3", userData="C3")
+        for channel in channels_for(self._instrument):
+            self.detector_combo.addItem(display_name(self._instrument, channel), userData=channel)
         top.addWidget(self.detector_combo)
         top.addStretch(1)
         self.refresh_btn = QPushButton("Latest Frame")
@@ -195,7 +214,9 @@ class HelioviewerPreviewDialog(QDialog):
         self.step_spin.setRange(2, 1440)
         self.step_spin.setValue(30)
         self.step_spin.setSuffix(" min")
-        self.step_spin.setToolTip("Time step between frames. Steps finer than the ~12 min LASCO cadence are de-duplicated.")
+        self.step_spin.setToolTip(
+            "Time step between frames. Steps finer than the instrument's native cadence are de-duplicated."
+        )
 
         self.max_frames_spin = QSpinBox()
         self.max_frames_spin.setRange(2, 120)
@@ -255,7 +276,12 @@ class HelioviewerPreviewDialog(QDialog):
 
     # -- State helpers ----------------------------------------------------
     def _current_detector(self) -> str:
-        return str(self.detector_combo.currentData() or "C2")
+        fallback = channels_for(self._instrument)
+        return str(self.detector_combo.currentData() or (fallback[0] if fallback else "C2"))
+
+    def _current_source_label(self) -> str:
+        """e.g. 'SOHO/LASCO C2' or 'SOHO/EIT 195'."""
+        return display_name(self._instrument, self._current_detector())
 
     def _is_loading(self) -> bool:
         return self._thread is not None and self._thread.isRunning()
@@ -292,9 +318,9 @@ class HelioviewerPreviewDialog(QDialog):
         self._cancel_requested = False
         self._set_inputs_enabled(False)
         self.open_browser_btn.setEnabled(False)
-        self.image_label.setText(f"Loading latest SOHO/LASCO {detector} from Helioviewer...")
+        self.image_label.setText(f"Loading latest {self._current_source_label()} from Helioviewer...")
         self.status_label.setText("Contacting Helioviewer near-real-time service...")
-        worker = _StillWorker(detector)
+        worker = _StillWorker(detector, instrument=self._instrument)
         worker.finished.connect(self._on_still_finished)
         worker.failed.connect(self._on_fetch_failed)
         self._start_thread(worker)
@@ -350,7 +376,8 @@ class HelioviewerPreviewDialog(QDialog):
         self.movie_status_label.setText(
             f"Building {detector} movie {start:%Y-%m-%d %H:%M} → {end:%H:%M} UTC ..."
         )
-        worker = _MovieWorker(detector, start, end, step_seconds, max_frames)
+        worker = _MovieWorker(detector, start, end, step_seconds, max_frames,
+                              instrument=self._instrument)
         worker.progress.connect(self._on_movie_progress)
         worker.finished.connect(self._on_movie_finished)
         worker.failed.connect(self._on_fetch_failed)
@@ -401,9 +428,8 @@ class HelioviewerPreviewDialog(QDialog):
         self._frame_index = index
         frame = self._frames[index]
         self._set_image(frame.png_bytes)
-        detector = self._current_detector()
         self.status_label.setText(
-            f"<b>SOHO/LASCO {detector} movie</b> &mdash; frame {index + 1}/{len(self._frames)}<br>"
+            f"<b>{self._current_source_label()} movie</b> &mdash; frame {index + 1}/{len(self._frames)}<br>"
             f"Observed: {frame.date:%Y-%m-%d %H:%M:%S} UTC<br>"
             f"Source: Helioviewer near-real-time quicklook."
         )

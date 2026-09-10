@@ -134,8 +134,8 @@ class SunPyWorker(QObject):
                 if self.query_spec is None:
                     raise ValueError("Search mode requires a query spec.")
                 self.progress.emit(None, "Searching SunPy archives...")
-                # For lagging archives (SOHO/LASCO) an empty selected window
-                # falls back to the nearest available data instead of nothing.
+                # For lagging archives (the SOHO instruments) an empty selected
+                # window falls back to the nearest available data, not nothing.
                 result = search(
                     self.query_spec,
                     allow_time_fallback=True,

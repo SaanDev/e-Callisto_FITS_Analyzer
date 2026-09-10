@@ -351,3 +351,60 @@ def test_session_round_trips_the_fit_order(tmp_path):
 
     assert win2.tracking_panel.fit_order() == 2
     win2.close()
+
+
+def _select(win, label: str) -> int:
+    index = win.wavelength_combo.findText(label)
+    assert index >= 0, f"observable {label!r} not found"
+    win.wavelength_combo.setCurrentIndex(index)
+    return index
+
+
+def test_session_round_trips_the_observable_by_userdata(tmp_path):
+    """The saved observable must survive a change to the combo's ordering.
+
+    Sessions used to store only the combo position, so adding a mission to the
+    selector silently shifted every later observable in an existing session.
+    """
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _three_frames(), _write_frame_files(tmp_path, 3))
+    _select(win, "SOHO/EIT 284 A")
+
+    meta = win._collect_session_meta()
+    assert meta["source"]["observable_data"] == ["EIT", 284.0]
+    win.close()
+
+    win2 = SolarDataAnalysisWindow()
+    # Restore from a position that points somewhere else entirely: the userData
+    # has to win, not the stale index.
+    restored = dict(meta)
+    restored["source"] = {**meta["source"], "observable_index": 0}
+    win2._restore_source_widgets(restored["source"])
+    assert win2._current_observable() == ("EIT", 284.0)
+    win2.close()
+
+
+def test_session_restore_falls_back_to_index_for_legacy_sessions(tmp_path):
+    """Sessions written before observable_data existed still restore."""
+    _app()
+    win = SolarDataAnalysisWindow()
+    index = _select(win, "SOHO/LASCO C3")
+    expected = win._current_observable()
+
+    _select(win, "AIA 193 A")
+    win._restore_source_widgets({"observable_index": index})
+    assert win._current_observable() == expected
+    win.close()
+
+
+def test_session_restore_ignores_an_observable_that_no_longer_exists():
+    _app()
+    win = SolarDataAnalysisWindow()
+    _select(win, "AIA 193 A")
+    before = win._current_observable()
+    # A mission that was dropped from the selector leaves the combo alone
+    # rather than restoring an arbitrary neighbour.
+    win._restore_source_widgets({"observable_data": ["MDI", "magnetogram"]})
+    assert win._current_observable() == before
+    win.close()

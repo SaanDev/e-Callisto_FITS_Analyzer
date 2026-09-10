@@ -34,6 +34,7 @@ from src.Backend.batch_processing import (
     subtract_background,
 )
 from src.Backend import callisto_cache
+from src.Backend.artemis import db_scale_for_header, linear_unit_for_header
 from src.Backend.fits_io import extract_ut_start_sec, load_callisto_fits
 from src.Backend.goes_overlay import goes_overlay_payload_from_dict
 from src.Backend.project_report import ReportGenerationCancelled, generate_project_report_pdf
@@ -645,18 +646,28 @@ class BatchProcessWorker(QObject):
 
             try:
                 res = load_callisto_fits(file_path, memmap=False)
+                # The counts-to-dB constant belongs to the receiver that wrote
+                # the file, so it is resolved per file rather than per batch —
+                # an ARTEMIS folder and a CALLISTO folder both export correctly.
+                instrument_db_scale = db_scale_for_header(res.header0, DEFAULT_DB_SCALE)
+                plotutil_db_scale = db_scale_for_header(res.header0, PLOTUTIL_DB_SCALE)
+                linear_unit = linear_unit_for_header(res.header0)
                 if self.output_mode == "raw":
                     out_data = np.asarray(res.data, dtype=np.float32)
                     title_suffix = "Raw"
                     output_data_units = "digits"
-                    output_db_scale = DEFAULT_DB_SCALE
+                    output_db_scale = instrument_db_scale
                     default_display_limits = None
                 else:
-                    out_data = subtract_background(res.data, method=self.background_method)
+                    out_data = subtract_background(
+                        res.data,
+                        method=self.background_method,
+                        db_scale=plotutil_db_scale,
+                    )
                     method_label = background_method_label(self.background_method)
                     title_suffix = f"Background Subtracted ({method_label})"
                     output_data_units = "db" if self.background_method == BACKGROUND_METHOD_PLOTUTIL else "digits"
-                    output_db_scale = PLOTUTIL_DB_SCALE if output_data_units == "db" else DEFAULT_DB_SCALE
+                    output_db_scale = plotutil_db_scale if output_data_units == "db" else instrument_db_scale
                     default_display_limits = (
                         PLOTUTIL_DISPLAY_LIMITS if self.background_method == BACKGROUND_METHOD_PLOTUTIL else None
                     )
@@ -704,6 +715,7 @@ class BatchProcessWorker(QObject):
                     data_units=output_data_units,
                     default_display_limits=default_display_limits,
                     view_config=self.view_config,
+                    linear_unit=linear_unit,
                 )
                 results.append({"input_path": file_path, "output_path": out_path})
             except Exception as e:

@@ -117,6 +117,21 @@ def test_blink_alternates_panel_a():
     dialog.close()
 
 
+def test_dialog_offers_every_mission_the_main_window_does():
+    """Compare Viewpoint shares populate_observable_combo with the main window,
+    so a mission added there must show up here too."""
+    _app()
+    dialog = MultiViewpointDialog(
+        None,
+        reference_frames=[FakeFrame()],
+        reference_label="AIA",
+    )
+    labels = [dialog.observable_combo.itemText(i) for i in range(dialog.observable_combo.count())]
+    for expected in ("AIA 193 A", "SOHO/EIT 195 A", "SOHO/LASCO C2", "STEREO-A/COR2", "GOES/SUVI 171 A"):
+        assert expected in labels
+    dialog.close()
+
+
 def test_build_spec_for_observable_variants():
     t0 = datetime(2012, 7, 12, 15, 30)
     t1 = datetime(2012, 7, 12, 16, 30)
@@ -136,6 +151,10 @@ def test_build_spec_for_observable_variants():
 
     lasco = build_spec_for_observable("LASCO", "C3", t0, t1)
     assert (lasco.spacecraft, lasco.detector) == ("SOHO", "C3")
+
+    eit = build_spec_for_observable("EIT", 195.0, t0, t1)
+    assert (eit.spacecraft, eit.instrument, eit.wavelength_angstrom) == ("SOHO", "EIT", 195.0)
+    assert eit.detector is None
 
 
 def test_window_compare_button_gating_and_original_frames(monkeypatch):

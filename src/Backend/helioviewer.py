@@ -4,7 +4,7 @@ Version 3.0.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
-Near-real-time SOHO/LASCO quicklook previews via the Helioviewer API.
+Near-real-time SOHO quicklook previews (LASCO and EIT) via the Helioviewer API.
 
 The calibrated LASCO FITS product on VSO/SDAC lags real time by many months (see
 ``find_latest_search`` in :mod:`src.Backend.sunpy_archive`). Helioviewer, by
@@ -28,8 +28,24 @@ from src.version import APP_VERSION
 
 HELIOVIEWER_API_BASE = "https://api.helioviewer.org/v2/"
 
-# Helioviewer sourceId values for the SOHO/LASCO coronagraph detectors.
-LASCO_SOURCE_IDS: dict[str, int] = {"C2": 4, "C3": 5}
+# Helioviewer sourceId values, keyed by (instrument, channel). LASCO's channel
+# is a detector (C2/C3); EIT's is an EUV passband in angstrom, so the table is
+# keyed on the pair rather than on a bare detector string.
+SOURCE_IDS: dict[tuple[str, str], int] = {
+    ("EIT", "171"): 0,
+    ("EIT", "195"): 1,
+    ("EIT", "284"): 2,
+    ("EIT", "304"): 3,
+    ("LASCO", "C2"): 4,
+    ("LASCO", "C3"): 5,
+}
+
+# Retained for callers that only ever deal with LASCO detectors.
+LASCO_SOURCE_IDS: dict[str, int] = {
+    channel: source_id for (inst, channel), source_id in SOURCE_IDS.items() if inst == "LASCO"
+}
+
+DEFAULT_INSTRUMENT = "LASCO"
 
 _HTTP_TIMEOUT = (6, 60)
 _USER_AGENT = f"e-Callisto-FITS-Analyzer/{APP_VERSION}"
@@ -37,13 +53,14 @@ _USER_AGENT = f"e-Callisto-FITS-Analyzer/{APP_VERSION}"
 
 @dataclass(frozen=True)
 class HelioviewerImageInfo:
-    detector: str
+    detector: str           # channel: LASCO detector (C2/C3) or EIT passband ("195")
     source_id: int
     date: datetime          # observation time of the closest image (UTC, naive)
     name: str
     scale: float            # native arcsec/pixel
     width: int
     height: int
+    instrument: str = DEFAULT_INSTRUMENT
 
 
 @dataclass(frozen=True)
@@ -63,11 +80,41 @@ class HelioviewerFrame:
     image_url: str
 
 
+def channels_for(instrument: str = DEFAULT_INSTRUMENT) -> tuple[str, ...]:
+    """The channels this instrument offers, in table order (C2/C3, or 171..304)."""
+    inst = str(instrument or "").strip().upper()
+    return tuple(channel for (candidate, channel) in SOURCE_IDS if candidate == inst)
+
+
+def display_name(instrument: str, channel: str) -> str:
+    """Human label for a source, e.g. 'SOHO/LASCO C2' or 'SOHO/EIT 195'."""
+    inst = str(instrument or "").strip().upper()
+    return f"SOHO/{inst} {str(channel or '').strip()}".strip()
+
+
+def _resolve_channel(instrument: str, channel: str) -> tuple[str, str, int]:
+    """Normalise an (instrument, channel) pair and return it with its sourceId.
+
+    EIT channels are passbands, so '195', 195 and 195.0 all resolve to '195'.
+    """
+    inst = str(instrument or DEFAULT_INSTRUMENT).strip().upper()
+    chan = str(channel or "").strip().upper()
+    if chan.endswith(".0"):  # a float wavelength arriving as "195.0"
+        chan = chan[:-2]
+    if (inst, chan) not in SOURCE_IDS:
+        available = sorted(channels_for(inst))
+        if not available:
+            raise ValueError(
+                f"Unsupported Helioviewer instrument '{instrument}'. "
+                f"Expected one of {sorted({i for i, _ in SOURCE_IDS})}."
+            )
+        raise ValueError(f"Unsupported {inst} channel '{channel}'. Expected one of {available}.")
+    return inst, chan, SOURCE_IDS[(inst, chan)]
+
+
 def _normalize_detector(detector: str) -> str:
-    det = str(detector or "").strip().upper()
-    if det not in LASCO_SOURCE_IDS:
-        raise ValueError(f"Unsupported LASCO detector '{detector}'. Expected one of {sorted(LASCO_SOURCE_IDS)}.")
-    return det
+    """Backwards-compatible LASCO-only detector check."""
+    return _resolve_channel(DEFAULT_INSTRUMENT, detector)[1]
 
 
 def _parse_hv_date(text: str) -> datetime:
@@ -104,6 +151,7 @@ def _session(session: requests.Session | None) -> requests.Session:
 def latest_image_info(
     detector: str,
     *,
+    instrument: str = DEFAULT_INSTRUMENT,
     date: datetime | None = None,
     api_base: str = HELIOVIEWER_API_BASE,
     timeout: tuple[int, int] | float = _HTTP_TIMEOUT,
@@ -114,8 +162,7 @@ def latest_image_info(
     Uses the ``getClosestImage`` endpoint, which returns the actual observation
     time of the newest available frame — i.e. the near-real-time frontier.
     """
-    det = _normalize_detector(detector)
-    source_id = LASCO_SOURCE_IDS[det]
+    inst, det, source_id = _resolve_channel(instrument, detector)
     when = date or datetime.now(timezone.utc)
     sess = _session(session)
     response = sess.get(
@@ -126,15 +173,16 @@ def latest_image_info(
     response.raise_for_status()
     data = response.json()
     if not isinstance(data, dict) or "date" not in data:
-        raise RuntimeError(f"Helioviewer returned no image for LASCO {det}.")
+        raise RuntimeError(f"Helioviewer returned no image for {display_name(inst, det)}.")
     return HelioviewerImageInfo(
         detector=det,
         source_id=source_id,
         date=_parse_hv_date(data["date"]),
-        name=str(data.get("name") or f"LASCO {det}"),
+        name=str(data.get("name") or f"{inst} {det}"),
         scale=float(data.get("scale") or 0.0),
         width=int(data.get("width") or 1024),
         height=int(data.get("height") or 1024),
+        instrument=inst,
     )
 
 
@@ -167,6 +215,7 @@ def build_screenshot_url(
 def fetch_preview(
     detector: str,
     *,
+    instrument: str = DEFAULT_INSTRUMENT,
     size_px: int = 512,
     date: datetime | None = None,
     info: HelioviewerImageInfo | None = None,
@@ -174,15 +223,17 @@ def fetch_preview(
     timeout: tuple[int, int] | float = _HTTP_TIMEOUT,
     session: requests.Session | None = None,
 ) -> HelioviewerPreview:
-    """Fetch a near-real-time LASCO preview PNG for ``detector`` (C2/C3).
+    """Fetch a near-real-time preview PNG for an ``(instrument, detector)`` source.
 
-    Resolves the newest available frame (unless ``info`` is supplied), then
-    renders the full coronagraph FOV as a PNG through ``takeScreenshot``.
+    ``detector`` is the channel: a LASCO detector (C2/C3) or an EIT passband
+    ("171"/"195"/"284"/"304"). Resolves the newest available frame (unless
+    ``info`` is supplied), then renders the full native FOV as a PNG through
+    ``takeScreenshot``.
     """
-    det = _normalize_detector(detector)
+    inst, det, _source_id = _resolve_channel(instrument, detector)
     sess = _session(session)
     image_info = info or latest_image_info(
-        det, date=date, api_base=api_base, timeout=timeout, session=sess
+        det, instrument=inst, date=date, api_base=api_base, timeout=timeout, session=sess
     )
     url, image_scale = build_screenshot_url(image_info, size_px=size_px, api_base=api_base)
     response = sess.get(url, timeout=timeout)
@@ -242,6 +293,7 @@ def fetch_frame_sequence(
     start: datetime,
     end: datetime,
     *,
+    instrument: str = DEFAULT_INSTRUMENT,
     step_seconds: float,
     size_px: int = 512,
     max_frames: int = 48,
@@ -251,7 +303,7 @@ def fetch_frame_sequence(
     progress_cb: Callable[[int, int, datetime], None] | None = None,
     cancel_cb: Callable[[], bool] | None = None,
 ) -> list[HelioviewerFrame]:
-    """Fetch a de-duplicated LASCO frame sequence over ``[start, end]``.
+    """Fetch a de-duplicated frame sequence over ``[start, end]``.
 
     One Helioviewer frame is fetched per target timestamp (see
     :func:`build_frame_times`). Frames that resolve to the same actual
@@ -259,7 +311,7 @@ def fetch_frame_sequence(
     dropped, and timestamps with no data are skipped, so the result is the set
     of distinct real frames covering the window, ordered in time.
     """
-    det = _normalize_detector(detector)
+    inst, det, _source_id = _resolve_channel(instrument, detector)
     sess = _session(session)
     targets = build_frame_times(start, end, step_seconds, max_frames=max_frames)
     total = len(targets)
@@ -273,7 +325,7 @@ def fetch_frame_sequence(
             progress_cb(index, total, target)
         try:
             preview = fetch_preview(
-                det, date=target, size_px=size_px,
+                det, instrument=inst, date=target, size_px=size_px,
                 api_base=api_base, timeout=timeout, session=sess,
             )
         except Exception:

@@ -261,7 +261,7 @@ class CombineFitsDialog(QDialog):
             self,
             "Select FITS Files to Combine",
             "",
-            "FITS files (*.fit *.fits *.fit.gz *.fits.gz)",
+            "FITS files (*.fit *.fits *.fit.gz *.fits.gz *.FIT *.FITS *.FIT.gz *.FITS.gz)",
         )
         if not files:
             return
@@ -496,7 +496,7 @@ class CombineFrequencyDialog(QDialog):
             self,
             "Select FITS Files to Combine",
             "",
-            "FITS files (*.fit *.fits *.fit.gz *.fits.gz)"
+            "FITS files (*.fit *.fits *.fit.gz *.fits.gz *.FIT *.FITS *.FIT.gz *.FITS.gz)"
         )
         if len(files) != 2:
             QMessageBox.warning(self, "Error", "Please select exactly TWO files.")
@@ -737,7 +737,7 @@ class CombineTimeDialog(QDialog):
             self,
             "Select FITS Files to Combine",
             "",
-            "FITS files (*.fit *.fits *.fit.gz *.fits.gz)"
+            "FITS files (*.fit *.fits *.fit.gz *.fits.gz *.FIT *.FITS *.FIT.gz *.FITS.gz)"
         )
 
         if len(files) < 2:
