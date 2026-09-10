@@ -143,8 +143,11 @@ def fetch_cached(
                         continue
                     handle.write(chunk)
                     written += len(chunk)
-                    if callable(progress_cb) and total > 0:
-                        progress_cb(min(1.0, written / total), f"Downloading {target.name}")
+                    if callable(progress_cb):
+                        # Unknown-length responses still need callbacks so
+                        # callers can update activity and cancel transfers.
+                        fraction = min(1.0, written / total) if total > 0 else 0.0
+                        progress_cb(fraction, f"Downloading {target.name}")
 
         os.replace(part, target)
     except BaseException:

@@ -22,7 +22,7 @@ import numpy as np
 import pyqtgraph as pg
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from PySide6.QtCore import QObject, Qt
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QPushButton,
+    QSlider,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -45,6 +46,21 @@ from src.Backend.coronagraph import (
     fit_height_time,
     pixel_radius_to_rsun,
     solar_center_from_meta,
+)
+from src.Backend.gcs_model import (
+    PARAMETER_NAMES,
+    apex_cross_section_radius_rsun,
+    leg_height_rsun,
+    shell_centre_distance_rsun,
+    GCSParameters,
+    GCSViewpoint,
+    ObserverGeometry,
+    apex_height_rsun,
+    apply_apex_drag,
+    gcs_mesh,
+    handle_positions_arcsec,
+    refine_gcs,
+    wireframe_arcsec,
 )
 from src.Backend.image_measure import (
     CircleFit,
@@ -136,6 +152,10 @@ class TrackingPanel(QWidget):
     _HEADERS = {
         "height_time": ["Time (UT)", "t (s)", "Height (R☉)", "PA (°)"],
         "circle_fit": ["Time (UT)", "t (s)", "Radius (R☉)", "Lead (R☉)", "PA (°)", "N"],
+        # Six visible columns is this panel's practical limit, so tilt, kappa,
+        # the viewpoint count and every error bar ride in the row tooltip —
+        # the same split refresh_circles already uses for rms and centre.
+        "gcs": ["Time (UT)", "t (s)", "Apex (R☉)", "Lon (°)", "Lat (°)", "α (°)"],
     }
 
     def __init__(self, parent: Any = None):
@@ -179,6 +199,13 @@ class TrackingPanel(QWidget):
         layout.addLayout(circle_row)
         for widget in (self.lock_center_check, self.commit_btn):
             widget.setVisible(False)  # circle-fit source only
+
+        # GCS-only controls: the six sliders plus Refine/Commit. Same placement
+        # logic as the circle row above — they pair with auto-advance, and the
+        # measure toolbar has no room left.
+        self.gcs_panel = GCSParameterPanel()
+        self.gcs_panel.setVisible(False)  # gcs source only
+        layout.addWidget(self.gcs_panel)
 
         headers = self._HEADERS[self._source]
         self.table = QTableWidget(0, len(headers))
@@ -336,18 +363,29 @@ class TrackingPanel(QWidget):
         # The resize mode has to be re-applied after the column count changes.
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         circle = source == "circle_fit"
+        gcs = source == "gcs"
         self.lock_center_check.setVisible(circle)
         self.commit_btn.setVisible(circle)
-        self.plot.setLabel("left", "Radius (R☉)" if circle else "Height (R☉)")
-        self.fit_btn.setText("Fit Radius–Time" if circle else "Fit Height–Time")
-        self.clear_btn.setText("Clear Circles" if circle else "Clear Picks")
+        self.gcs_panel.setVisible(gcs)
+        if gcs:
+            # The GCS apex height is de-projected, so say 3-D: reporting it as a
+            # plane-of-sky height would throw away the whole point of the model.
+            self.plot.setLabel("left", "Apex height (R☉, 3-D)")
+            self.fit_btn.setText("Fit Height–Time (3-D)")
+            self.clear_btn.setText("Clear GCS Fits")
+        else:
+            self.plot.setLabel("left", "Radius (R☉)" if circle else "Height (R☉)")
+            self.fit_btn.setText("Fit Radius–Time" if circle else "Fit Height–Time")
+            self.clear_btn.setText("Clear Circles" if circle else "Clear Picks")
         self._entries = []
         self.export_btn.setEnabled(False)
-        self._render_empty(
-            "Click ≥3 points along the CME front, then Commit."
-            if circle
-            else "Click the CME front on each frame."
-        )
+        if gcs:
+            message = "Match the wireframe to the front, then Commit GCS."
+        elif circle:
+            message = "Click ≥3 points along the CME front, then Commit."
+        else:
+            message = "Click the CME front on each frame."
+        self._render_empty(message)
 
     def refresh_circles(self, circles: Mapping[int, Any]) -> None:
         """Rebuild the table and the live plot from the controller's circle fits."""
@@ -392,6 +430,72 @@ class TrackingPanel(QWidget):
             radii,
             noun="frames",
             single_text="1 frame — step to the next frame and fit the front again.",
+        )
+
+    def show_gcs_parameters(self, params: Any) -> None:
+        """Echo parameters into the GCS sliders (no re-emit); see GCSParameterPanel."""
+        self.gcs_panel.show_parameters(params)
+
+    def refresh_gcs(self, fits: Mapping[int, Any]) -> None:
+        """Rebuild the table and the live plot from the controller's GCS fits.
+
+        Field 1 of :class:`GCSFitEntry` is the apex height in R_sun, so this hands
+        ``_render_series`` exactly what it already expects and the height-time fit,
+        its error bars and the order selector all work unchanged — the difference
+        being that this height is de-projected, so the speed is 3-D.
+        """
+        entries = sorted(
+            (entry for entry in fits.values() if entry[0] is not None),
+            key=lambda item: item[0],
+        )
+        self._entries = entries
+        self.table.setRowCount(len(entries))
+        self.export_btn.setEnabled(bool(entries))
+        if not entries:
+            self._render_empty("Match the wireframe to the front, then Commit GCS.")
+            return
+
+        t0 = entries[0][0]
+        seconds = [(entry[0] - t0).total_seconds() for entry in entries]
+        heights = [float(entry[1]) for entry in entries]
+        for row, (entry, t_s) in enumerate(zip(entries, seconds)):
+            cells = (
+                f"{entry[0]:%H:%M:%S}",
+                f"{t_s:.0f}",
+                f"{float(entry[1]):.3f}",
+                f"{float(entry[2]):+.1f}",
+                f"{float(entry[3]):+.1f}",
+                f"{float(entry[5]):.1f}",
+            )
+            rms = float(entry[7])
+            tip_parts = [
+                f"tilt {float(entry[4]):+.1f}°",
+                f"κ {float(entry[6]):.3f}",
+                f"{int(entry[9])} viewpoint(s), {float(entry[10]):.0f}° apart",
+                f"{int(entry[8])} clicked point(s)",
+                ("refined" if bool(entry[14]) else "manual"),
+            ]
+            if np.isfinite(rms):
+                tip_parts.insert(0, f"rms {rms:.1f}″")
+            errors = [
+                self._with_error(float(entry[2]), float(entry[11]), "+.1f") + " lon",
+                self._with_error(float(entry[3]), float(entry[12]), "+.1f") + " lat",
+                self._with_error(float(entry[1]), float(entry[13]), ".2f") + " R☉ apex",
+            ]
+            tip_parts.append("  ·  ".join(errors))
+            tip_parts.append("errors are formal only — α and κ carry model bias")
+            tip = "  ·  ".join(tip_parts)
+            for col, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                item.setTextAlignment(Qt.AlignCenter)
+                item.setToolTip(tip)
+                self.table.setItem(row, col, item)
+
+        self._render_series(
+            seconds,
+            heights,
+            noun="frames",
+            single_text="1 frame — step on and fit the front again for a 3-D speed.",
         )
 
     def _render_empty(self, text: str) -> None:
@@ -549,13 +653,14 @@ class TrackingPanel(QWidget):
             return
         from PySide6.QtWidgets import QFileDialog
 
-        circle = self._source == "circle_fit"
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Export CME Circle Fit CSV" if circle else "Export CME Tracking CSV",
-            "cme_circle_fit.csv" if circle else "cme_tracking.csv",
-            "CSV (*.csv)",
+        titles = {
+            "gcs": ("Export CME GCS Fit CSV", "cme_gcs_fit.csv"),
+            "circle_fit": ("Export CME Circle Fit CSV", "cme_circle_fit.csv"),
+        }
+        title, suggested = titles.get(
+            self._source, ("Export CME Tracking CSV", "cme_tracking.csv")
         )
+        path, _ = QFileDialog.getSaveFileName(self, title, suggested, "CSV (*.csv)")
         if not path:
             return
         import csv
@@ -582,6 +687,28 @@ class TrackingPanel(QWidget):
                 "rms_arcsec",
                 "n_points",
             ]
+        if self._source == "gcs":
+            # Every field at full precision, error bars included: the CSV is the
+            # publication artefact, so it must not lose what the table hid in a
+            # tooltip for want of column width.
+            return [
+                "time_utc",
+                "t_seconds",
+                "apex_height_rsun",
+                "apex_height_err_rsun",
+                "lon_deg",
+                "lon_err_deg",
+                "lat_deg",
+                "lat_err_deg",
+                "tilt_deg",
+                "alpha_deg",
+                "kappa",
+                "rms_arcsec",
+                "n_points",
+                "n_viewpoints",
+                "separation_deg",
+                "refined",
+            ]
         return ["time_utc", "t_seconds", "height_rsun", "position_angle_deg"]
 
     def csv_row(self, entry: Sequence[Any], t0: datetime) -> list[Any]:
@@ -600,6 +727,25 @@ class TrackingPanel(QWidget):
                 f"{float(entry[8]):.2f}",
                 f"{float(entry[6]):.3f}",
                 int(entry[7]),
+            ]
+        if self._source == "gcs":
+            return [
+                when.isoformat(),
+                seconds,
+                f"{float(entry[1]):.4f}",
+                f"{float(entry[13]):.4f}",
+                f"{float(entry[2]):.3f}",
+                f"{float(entry[11]):.3f}",
+                f"{float(entry[3]):.3f}",
+                f"{float(entry[12]):.3f}",
+                f"{float(entry[4]):.3f}",
+                f"{float(entry[5]):.3f}",
+                f"{float(entry[6]):.4f}",
+                f"{float(entry[7]):.3f}",
+                int(entry[8]),
+                int(entry[9]),
+                f"{float(entry[10]):.2f}",
+                int(bool(entry[14])),
             ]
         pa = float(entry[4]) if len(entry) > 4 else float("nan")
         return [when.isoformat(), seconds, f"{float(entry[1]):.4f}", f"{pa:.2f}"]
@@ -626,6 +772,225 @@ class CircleFitEntry(NamedTuple):
     center_pa_deg: float
 
 
+class GCSParameterSlider(QWidget):
+    """One GCS parameter: label, slider and live readout on a single row.
+
+    Like ``PercentSlider`` in the window module, but over an arbitrary physical
+    range and with the unit in the readout. 1000 steps across the range, which is
+    finer than a pixel of travel on any realistic panel width, so the fit can be
+    dialled in by dragging rather than by typing.
+    """
+
+    valueChanged = Signal(float)
+
+    _STEPS = 1000
+
+    def __init__(
+        self,
+        label: str,
+        value: float,
+        *,
+        minimum: float,
+        maximum: float,
+        unit: str = "",
+        decimals: int = 1,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._minimum = float(minimum)
+        self._maximum = float(maximum)
+        self._unit = str(unit)
+        self._decimals = int(decimals)
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        self.name_label = QLabel(label)
+        self.name_label.setMinimumWidth(54)
+        self.slider = QSlider(Qt.Horizontal)
+        self.slider.setRange(0, self._STEPS)
+        self.readout = QLabel("")
+        self.readout.setMinimumWidth(62)
+        self.readout.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        row.addWidget(self.name_label)
+        row.addWidget(self.slider, 1)
+        row.addWidget(self.readout)
+
+        self.setValue(value)
+        # No debounce: a GCS update is ~0.3 ms, so coalescing would only add
+        # latency. See src/Backend/gcs_model for the measurements.
+        self.slider.valueChanged.connect(self._on_slider_moved)
+
+    def _to_value(self, position: int) -> float:
+        span = self._maximum - self._minimum
+        return self._minimum + span * (float(position) / float(self._STEPS))
+
+    def _to_position(self, value: float) -> int:
+        span = self._maximum - self._minimum
+        if span <= 0.0:
+            return 0
+        fraction = (float(value) - self._minimum) / span
+        return int(round(max(0.0, min(1.0, fraction)) * self._STEPS))
+
+    def value(self) -> float:
+        return self._to_value(self.slider.value())
+
+    def setValue(self, value: float) -> None:  # noqa: N802 (Qt naming)
+        """Set without emitting, so echoing a drag back cannot feed back."""
+        self.slider.blockSignals(True)
+        try:
+            self.slider.setValue(self._to_position(value))
+        finally:
+            self.slider.blockSignals(False)
+        self._refresh_readout()
+
+    def _on_slider_moved(self, _position: int) -> None:
+        self._refresh_readout()
+        self.valueChanged.emit(self.value())
+
+    def _refresh_readout(self) -> None:
+        self.readout.setText(f"{self.value():.{self._decimals}f}{self._unit}")
+
+
+class GCSParameterPanel(QWidget):
+    """The six GCS sliders, a derived-geometry readout, and Refine/Commit.
+
+    Emits ``parametersChanged`` on every slider move. There is no debounce on
+    purpose: one full update costs ~0.3 ms, so coalescing would add latency
+    without saving anything (see ``src.Backend.gcs_model``).
+    """
+
+    parametersChanged = Signal(object)
+    refineRequested = Signal()
+    commitRequested = Signal()
+
+    #: ``name -> (label, minimum, maximum, unit, decimals)``.
+    _SPECS: tuple[tuple[str, str, float, float, str, int], ...] = (
+        ("lon_deg", "Lon", -180.0, 180.0, "°", 1),
+        ("lat_deg", "Lat", -89.0, 89.0, "°", 1),
+        ("tilt_deg", "Tilt", -90.0, 90.0, "°", 1),
+        ("height_rsun", "Height", 1.05, 30.0, " R☉", 2),
+        ("alpha_deg", "α", 1.0, 80.0, "°", 1),
+        ("kappa", "κ", 0.05, 0.95, "", 3),
+    )
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._params: GCSParameters | None = None
+        self._syncing = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+
+        self.sliders: dict[str, GCSParameterSlider] = {}
+        for name, label, low, high, unit, decimals in self._SPECS:
+            slider = GCSParameterSlider(
+                label, low, minimum=low, maximum=high, unit=unit, decimals=decimals
+            )
+            slider.valueChanged.connect(
+                lambda value, key=name: self._on_slider_changed(key, value)
+            )
+            self.sliders[name] = slider
+            layout.addWidget(slider)
+
+        self.derived_label = QLabel("—")
+        self.derived_label.setWordWrap(True)
+        layout.addWidget(self.derived_label)
+
+        self.refine_btn = QPushButton("Refine fit")
+        self.refine_btn.setToolTip(
+            "Least-squares polish of the current fit against the points you clicked\n"
+            "along the front. It refines — it cannot find a fit from scratch, because\n"
+            "longitude, α and κ are ill-conditioned in GCS — so get the wireframe\n"
+            "roughly onto the CME first. Reported errors are formal only."
+        )
+        self.commit_gcs_btn = QPushButton("Commit GCS")
+        self.commit_gcs_btn.setToolTip("Record this frame's GCS fit in the table.")
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.refine_btn)
+        buttons.addWidget(self.commit_gcs_btn)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+
+        self.refine_btn.clicked.connect(self.refineRequested.emit)
+        self.commit_gcs_btn.clicked.connect(self.commitRequested.emit)
+
+    def parameters(self) -> GCSParameters:
+        if self._params is None:
+            self._params = GCSParameters.from_array(
+                [self.sliders[name].value() for name in PARAMETER_NAMES]
+            )
+        return self._params
+
+    def show_parameters(self, params: GCSParameters) -> None:
+        """Echo parameters into the sliders without re-emitting.
+
+        Handle drags, a refine and a session restore all come through here, so the
+        sliders can never disagree with the wireframe.
+        """
+        self._params = params
+        self._syncing = True
+        try:
+            for name, slider in self.sliders.items():
+                slider.setValue(float(getattr(params, name)))
+        finally:
+            self._syncing = False
+        self._refresh_derived(params)
+
+    def _on_slider_changed(self, name: str, value: float) -> None:
+        if self._syncing:
+            return
+        self._params = self.parameters().replace_values(**{name: float(value)})
+        self._refresh_derived(self._params)
+        self.parametersChanged.emit(self._params)
+
+    def _refresh_derived(self, params: GCSParameters) -> None:
+        """Show the quantities derived from the six, as PyThea does."""
+        try:
+            leg = leg_height_rsun(params)
+            rapex = apex_cross_section_radius_rsun(params)
+            centre = shell_centre_distance_rsun(params)
+        except Exception:
+            self.derived_label.setText("—")
+            return
+        self.derived_label.setText(
+            f"apex {params.height_rsun:.2f} R☉  ·  leg h {leg:.2f}  ·  "
+            f"r_apex {rapex:.2f}  ·  centre {centre:.2f}  ·  "
+            f"full width {2.0 * params.alpha_deg:.0f}°"
+        )
+
+
+class GCSFitEntry(NamedTuple):
+    """One committed GCS fit, keyed by frame index in ``controller.gcs_fits``.
+
+    Fields 0 and 1 mirror the pick and circle tuples (time first, then the
+    quantity the tracking panel plots and fits), so the panel's shared sort, plot
+    and CSV code works on this store unchanged. Field 1 is the apex height, which
+    for GCS *is* ``height_rsun`` — and unlike a circle fit it is a true
+    de-projected height, so the speed it yields is 3-D rather than
+    plane-of-sky. A ``NamedTuple`` for the same reason as
+    :class:`CircleFitEntry`: ``solar_session`` serialises it positionally without
+    importing UI types.
+    """
+
+    when: datetime | None
+    apex_height_rsun: float  # the height that drives the kinematic fit
+    lon_deg: float
+    lat_deg: float
+    tilt_deg: float
+    alpha_deg: float
+    kappa: float
+    rms_arcsec: float
+    n_points: int
+    n_viewpoints: int
+    separation_deg: float
+    lon_err_deg: float
+    lat_err_deg: float
+    height_err_rsun: float
+    refined: bool
+
+
 class MeasurementController(QObject):
     """Click state machine behind the canvas measurement tools.
 
@@ -635,7 +1000,7 @@ class MeasurementController(QObject):
     re-measuring a frame replaces its entry.
     """
 
-    MODES = ("ruler", "profile", "height_time", "circle_fit")
+    MODES = ("ruler", "profile", "height_time", "circle_fit", "gcs")
 
     def __init__(self, window: Any):
         super().__init__(window)
@@ -649,6 +1014,14 @@ class MeasurementController(QObject):
         self.circles: dict[int, CircleFitEntry] = {}
         self._circle_points: dict[int, list[tuple[float, float]]] = {}
         self._locked_center: tuple[float, float] | None = None
+        # GCS fits: frame_index -> GCSFitEntry (committed), plus the front points
+        # clicked per frame and the live slider parameters. Keyed by frame index
+        # like the circle store, so stepping through frames restores the fit.
+        self.gcs_fits: dict[int, GCSFitEntry] = {}
+        self._gcs_points: dict[int, list[tuple[float, float]]] = {}
+        self._gcs_params: GCSParameters | None = None
+        self._gcs_mesh: Any | None = None
+        self._gcs_mesh_key: tuple[float, float, float] | None = None
         # Which store the shared tracking panel is currently showing.
         self._panel_source = "height_time"
         self._escape = QShortcut(QKeySequence(Qt.Key_Escape), window)
@@ -664,15 +1037,34 @@ class MeasurementController(QObject):
         self.mode = mode
         # The tracking panel follows the last tracking tool picked up; reaching
         # for the ruler leaves the table showing whatever it showed before.
-        if mode in ("height_time", "circle_fit"):
+        if mode in ("height_time", "circle_fit", "gcs"):
             self._panel_source = mode
             panel = getattr(self.window, "tracking_panel", None)
             if panel is not None:
                 panel.set_source(mode)
+                if mode == "gcs":
+                    self._bind_gcs_panel(panel)
+                    panel.gcs_panel.show_parameters(self.gcs_parameters())
             self._refresh_tracking_panel()
             self._sync_ht_buttons()
+        if mode == "gcs":
+            self.set_gcs_parameters(self.gcs_parameters())
         if mode is None:
             self._refresh_overlay()
+        if mode != "gcs":
+            self._refresh_gcs_overlay()
+
+    def _bind_gcs_panel(self, panel: Any) -> None:
+        """Connect the parameter panel once, however often the mode is re-entered."""
+        if getattr(self, "_gcs_panel_bound", False):
+            return
+        gcs_panel = getattr(panel, "gcs_panel", None)
+        if gcs_panel is None:
+            return
+        gcs_panel.parametersChanged.connect(self.set_gcs_parameters)
+        gcs_panel.refineRequested.connect(self.refine_gcs_fit)
+        gcs_panel.commitRequested.connect(self.commit_gcs)
+        self._gcs_panel_bound = True
 
     def cancel(self) -> None:
         """Drop the in-progress pick (Esc / right click)."""
@@ -695,6 +1087,12 @@ class MeasurementController(QObject):
             return
         if getattr(self.window, "_current_map_data", None) is None:
             return
+        # A TargetItem consumes the drag but not the press-release that ends it,
+        # so without this a handle drag would also land a front point here.
+        canvas = getattr(self.window, "pyqt_canvas", None)
+        if canvas is not None and getattr(canvas, "gcs_drag_active", None) is not None:
+            if canvas.gcs_drag_active():
+                return
         if self.mode == "ruler":
             self._click_ruler(x_arc, y_arc)
         elif self.mode == "profile":
@@ -703,6 +1101,8 @@ class MeasurementController(QObject):
             self._click_height_time(x_arc, y_arc)
         elif self.mode == "circle_fit":
             self._click_circle(x_arc, y_arc)
+        elif self.mode == "gcs":
+            self._click_gcs(x_arc, y_arc)
 
     def on_frame_changed(self) -> None:
         """Redraw pick markers for the newly shown frame."""
@@ -850,6 +1250,278 @@ class MeasurementController(QObject):
                 self._status(f"Circle fit: {exc}")
             return None
 
+    # ------------------------------------------------------------------- GCS
+    def gcs_parameters(self) -> GCSParameters:
+        """The live GCS parameters, seeded on first use from the loaded frame.
+
+        The seed is chosen to be *visible*, which is not the obvious choice: a CME
+        aimed along the line of sight projects onto disk centre, so on a
+        coronagraph it lands entirely inside the occulting disk and the user
+        enables the tool and sees nothing. Seeding 90 degrees from the observer
+        puts it on the limb, where it is both fully visible and un-foreshortened,
+        and the height starts mid-field-of-view for the same reason. A visible
+        seed also matters because refining is a polish step that cannot recover
+        from a wild start.
+        """
+        if self._gcs_params is None:
+            observer = self._gcs_observer()
+            lon = (observer.lon_deg + 90.0) if observer is not None else 90.0
+            fov = self._gcs_fov()
+            height = 6.0
+            if fov is not None and fov[1] > fov[0] > 0.0:
+                height = float(fov[0] + 0.45 * (fov[1] - fov[0]))
+            self._gcs_params = GCSParameters(
+                lon_deg=((lon + 180.0) % 360.0) - 180.0,
+                lat_deg=0.0,
+                tilt_deg=0.0,
+                height_rsun=height,
+                alpha_deg=30.0,
+                kappa=0.30,
+            )
+        return self._gcs_params
+
+    def _gcs_observer(self) -> ObserverGeometry | None:
+        """Projection geometry of the displayed frame, or None if it has none."""
+        frame = self._current_frame()
+        if frame is None:
+            return None
+        return ObserverGeometry.from_frame(frame)
+
+    def _gcs_cached_mesh(self, params: GCSParameters) -> Any:
+        """Rebuild the mesh only when a shape parameter changed.
+
+        The mesh depends on (height, alpha, kappa) and not the orientation, so
+        dragging direction or tilt reuses this and costs one 3x3 multiply.
+        """
+        key = (params.height_rsun, params.alpha_deg, params.kappa)
+        if self._gcs_mesh is None or self._gcs_mesh_key != key:
+            self._gcs_mesh = gcs_mesh(params)
+            self._gcs_mesh_key = key
+        return self._gcs_mesh
+
+    def set_gcs_parameters(self, params: GCSParameters) -> None:
+        """Adopt new parameters and redraw. The single write path for the fit.
+
+        Sliders, handle drags and a refine all land here, so the wireframe, the
+        handles and the controls cannot drift out of step. Deliberately does NOT
+        call ``_render_current_frame`` — that would rebuild the display array and
+        recompute percentiles, which is what makes a dragged control feel heavy.
+        """
+        self._gcs_params = params
+        self._refresh_gcs_overlay()
+        panel = getattr(self.window, "tracking_panel", None)
+        if panel is not None and hasattr(panel, "show_gcs_parameters"):
+            panel.show_gcs_parameters(params)
+
+    def _refresh_gcs_overlay(self) -> None:
+        """Redraw the wireframe and handles on whichever canvas is showing."""
+        window = self.window
+        params = self._gcs_params
+        observer = self._gcs_observer()
+        interactive = getattr(window, "pyqt_canvas", None)
+        active = window._active_canvas() if hasattr(window, "_active_canvas") else interactive
+
+        if params is None or observer is None or self.mode != "gcs":
+            committed = self.gcs_fits.get(self._frame_index())
+            if committed is None or observer is None:
+                for canvas in self._gcs_canvases():
+                    canvas.clear_gcs_overlay()
+                return
+            # A committed fit stays visible after the tool is put down, the way a
+            # committed circle does.
+            params = GCSParameters(
+                lon_deg=committed.lon_deg, lat_deg=committed.lat_deg,
+                tilt_deg=committed.tilt_deg, height_rsun=committed.apex_height_rsun,
+                alpha_deg=committed.alpha_deg, kappa=committed.kappa,
+            )
+
+        x, y, _ = wireframe_arcsec(
+            params, observer, mesh=self._gcs_cached_mesh(params), fov_rsun=self._gcs_fov()
+        )
+        for canvas in self._gcs_canvases():
+            canvas.set_gcs_overlay(x, y)
+        # Handles are pyqtgraph-only; the matplotlib canvas has no click plumbing.
+        if interactive is not None and hasattr(interactive, "set_gcs_handles"):
+            if self.mode == "gcs" and active is interactive:
+                interactive.set_gcs_handles(handle_positions_arcsec(params, observer))
+            else:
+                interactive.set_gcs_handles(None)
+
+    def _gcs_canvases(self) -> list[Any]:
+        canvases = []
+        for name in ("pyqt_canvas", "matplotlib_canvas"):
+            canvas = getattr(self.window, name, None)
+            if canvas is not None and hasattr(canvas, "set_gcs_overlay"):
+                canvases.append(canvas)
+        return canvases
+
+    def _gcs_fov(self) -> tuple[float, float] | None:
+        """The detector's field of view, so the shell hides behind the occulter."""
+        frame = self._current_frame()
+        if frame is None:
+            return None
+        try:
+            from src.Backend.coronagraph_composite import default_fov_rsun
+
+            instrument = getattr(frame, "instrument", "") or ""
+            detector = getattr(frame, "detector", "") or None
+            return default_fov_rsun(str(instrument), detector)
+        except Exception:
+            return None
+
+    def on_gcs_handle_dragged(
+        self, name: str, x_arc: float, y_arc: float, finished: bool
+    ) -> None:
+        """Map a handle drag back onto the parameters (see gcs_model inverses)."""
+        observer = self._gcs_observer()
+        if observer is None or self.mode != "gcs":
+            return
+        params = self.gcs_parameters()
+        if name == "apex":
+            from PySide6.QtWidgets import QApplication
+
+            modifiers = QApplication.keyboardModifiers()
+            lock = ""
+            if modifiers & Qt.ShiftModifier:
+                lock = "radial"
+            elif modifiers & (Qt.ControlModifier | Qt.MetaModifier):
+                lock = "tangential"
+            params = apply_apex_drag(params, observer, (x_arc, y_arc), lock=lock)
+        else:
+            # flank/rim steer the shape; a full inverse for those is not worth it
+            # while the sliders are right there, so they are read-only for now.
+            return
+        self.set_gcs_parameters(params)
+        if finished:
+            self._status(
+                f"GCS: lon {params.lon_deg:.1f}°  lat {params.lat_deg:.1f}°  "
+                f"h {params.height_rsun:.2f} R☉"
+            )
+
+    def _click_gcs(self, x_arc: float, y_arc: float) -> None:
+        """Add a front point for the refine step."""
+        idx = self._frame_index()
+        self._gcs_points.setdefault(idx, []).append((float(x_arc), float(y_arc)))
+        self._refresh_overlay()
+        count = len(self._gcs_points[idx])
+        self._status(
+            f"GCS: {count} front point(s) on this frame — "
+            "Refine uses them to polish the current fit."
+        )
+
+    def refine_gcs_fit(self) -> None:
+        """Least-squares polish of the manual fit against the clicked points."""
+        observer = self._gcs_observer()
+        if observer is None:
+            self._status("GCS: this frame has no usable coordinate system.")
+            return
+        points = self._gcs_points.get(self._frame_index()) or []
+        seed = self.gcs_parameters()
+        try:
+            result = refine_gcs(
+                [GCSViewpoint(observer, np.asarray(points, dtype=float), observer.label)], seed
+            )
+        except ValueError as exc:
+            self._status(f"GCS refine: {exc}")
+            return
+        self.set_gcs_parameters(result.parameters)
+        self._gcs_last_refinement = result
+        self._status(result.message)
+        self._append_analysis(self._gcs_refine_text(result))
+
+    def _gcs_refine_text(self, result: Any) -> str:
+        """One analysis-panel line, with the error bars and the caveat."""
+        parts = [
+            f"GCS refine · rms {result.rms_arcsec:.0f}\" (was "
+            f"{result.seed_rms_arcsec:.0f}\") · {result.n_points} point(s)"
+        ]
+        for name in PARAMETER_NAMES:
+            value = getattr(result.parameters, name)
+            sigma = result.sigma.get(name, float("nan"))
+            label = name.removesuffix("_deg").removesuffix("_rsun")
+            parts.append(TrackingPanel._with_error(value, sigma, ".2f") + f" {label}")
+        if result.weakly_constrained:
+            parts.append(
+                "errors are formal only — "
+                + " and ".join(n.removesuffix("_deg") for n in result.weakly_constrained)
+                + " carry model bias beyond them"
+            )
+        return "  ·  ".join(parts)
+
+    def commit_gcs(self) -> None:
+        """Store the current fit for this frame and move the timeline on."""
+        observer = self._gcs_observer()
+        if observer is None:
+            self._status("GCS: this frame has no usable coordinate system.")
+            return
+        idx = self._frame_index()
+        frame = self._current_frame()
+        when = frame_observation_time(frame) if frame is not None else None
+        params = self.gcs_parameters()
+        refinement = getattr(self, "_gcs_last_refinement", None)
+        sigma = refinement.sigma if refinement is not None else {}
+        self.gcs_fits[idx] = GCSFitEntry(
+            when=when,
+            apex_height_rsun=apex_height_rsun(params),
+            lon_deg=params.lon_deg,
+            lat_deg=params.lat_deg,
+            tilt_deg=params.tilt_deg,
+            alpha_deg=params.alpha_deg,
+            kappa=params.kappa,
+            rms_arcsec=float(getattr(refinement, "rms_arcsec", float("nan"))),
+            n_points=len(self._gcs_points.get(idx) or []),
+            n_viewpoints=int(getattr(refinement, "n_viewpoints", 1)),
+            separation_deg=float(getattr(refinement, "separation_deg", 0.0)),
+            lon_err_deg=float(sigma.get("lon_deg", float("nan"))),
+            lat_err_deg=float(sigma.get("lat_deg", float("nan"))),
+            height_err_rsun=float(sigma.get("height_rsun", float("nan"))),
+            refined=refinement is not None,
+        )
+        self._refresh_overlay()
+        self._sync_ht_buttons()
+        self._refresh_tracking_panel()
+        self._status(
+            f"GCS: frame {idx + 1} → apex {apex_height_rsun(params):.2f} R☉, "
+            f"lon {params.lon_deg:.1f}° lat {params.lat_deg:.1f}° "
+            f"({len(self.gcs_fits)} frame(s))."
+        )
+        panel = getattr(self.window, "tracking_panel", None)
+        check = getattr(panel, "auto_advance_check", None)
+        if check is not None and check.isChecked():
+            slider = getattr(self.window, "frame_slider", None)
+            if slider is not None and idx + 1 <= slider.maximum():
+                slider.setValue(idx + 1)
+
+    def clear_gcs_fits(self) -> None:
+        self.gcs_fits.clear()
+        self._gcs_points.clear()
+        self._gcs_last_refinement = None
+        self._refresh_overlay()
+        self._sync_ht_buttons()
+        self._refresh_tracking_panel()
+        self._status("GCS fits cleared.")
+
+    def restore_gcs_fits(
+        self,
+        fits: Mapping[int, Any],
+        points: Mapping[int, Any] | None = None,
+        params: Any | None = None,
+    ) -> None:
+        """Re-adopt saved fits on session load (see solar_session)."""
+        self.gcs_fits = {int(k): GCSFitEntry(*v) for k, v in (fits or {}).items()}
+        self._gcs_points = {
+            int(k): [(float(x), float(y)) for x, y in v] for k, v in (points or {}).items()
+        }
+        if params is not None:
+            self._gcs_params = (
+                params if isinstance(params, GCSParameters) else GCSParameters.from_array(params)
+            )
+            self._gcs_mesh = None
+            self._gcs_mesh_key = None
+        self._refresh_overlay()
+        self._sync_ht_buttons()
+        self._refresh_tracking_panel()
+
     def _click_circle(self, x_arc: float, y_arc: float) -> None:
         """Add a point to this frame's arc and re-fit live."""
         idx = self._frame_index()
@@ -982,6 +1654,42 @@ class MeasurementController(QObject):
         self._status(text)
         self._append_analysis(text)
 
+    def finish_gcs_fit(self) -> None:
+        """Fit apex height(t) over the committed GCS fits — a **3-D** speed.
+
+        The only line here that must not be copied from its circle-fit and
+        height-time siblings is the wording: those say "plane-of-sky", because
+        that is honestly all they measure. A GCS apex height is de-projected, so
+        this speed is the real radial one — which is the entire scientific payoff
+        of the model, and reporting it as plane-of-sky would throw it away.
+        """
+        entries = sorted(
+            (entry for entry in self.gcs_fits.values() if entry[0] is not None),
+            key=lambda item: item[0],
+        )
+        if len(entries) < 2:
+            self._status("Height–time needs committed GCS fits on at least two frames.")
+            return
+        times = [entry[0] for entry in entries]
+        if not self._has_time_baseline(times):
+            self._status("Every GCS fit shares one observation time — there is no speed to fit.")
+            return
+        heights_km = [float(entry[1]) * RSUN_KM for entry in entries]
+        fit = self._fit_kinematics(times, heights_km, noun="frames")
+        if fit is None:
+            return
+        directions = (
+            f"lon {np.mean([e[2] for e in entries]):+.1f}°, "
+            f"lat {np.mean([e[3] for e in entries]):+.1f}°"
+        )
+        text = (
+            f"CME GCS fit ({len(entries)} frames, {self._fit_order_name(fit)} fit): "
+            f"3-D (de-projected) radial speed {self._fit_text(fit, noun='frames')}  ·  "
+            f"mean direction {directions}"
+        )
+        self._status(text)
+        self._append_analysis(text)
+
     def clear_circle_fits(self) -> None:
         self.circles.clear()
         self._circle_points.clear()
@@ -1018,14 +1726,18 @@ class MeasurementController(QObject):
     # --------------------------------------------------- active-source actions
     def finish_active_fit(self) -> None:
         """Fit whichever tracking store the panel is currently showing."""
-        if self._panel_source == "circle_fit":
+        if self._panel_source == "gcs":
+            self.finish_gcs_fit()
+        elif self._panel_source == "circle_fit":
             self.finish_circle_fit()
         else:
             self.finish_height_time()
 
     def clear_active(self) -> None:
         """Clear whichever tracking store the panel is currently showing."""
-        if self._panel_source == "circle_fit":
+        if self._panel_source == "gcs":
+            self.clear_gcs_fits()
+        elif self._panel_source == "circle_fit":
             self.clear_circle_fits()
         else:
             self.clear_height_time()
@@ -1091,7 +1803,9 @@ class MeasurementController(QObject):
         panel = getattr(self.window, "tracking_panel", None)
         if panel is None:
             return
-        if self._panel_source == "circle_fit":
+        if self._panel_source == "gcs":
+            panel.refresh_gcs(self.gcs_fits)
+        elif self._panel_source == "circle_fit":
             panel.refresh_circles(self.circles)
         else:
             panel.refresh(self.picks)
@@ -1154,6 +1868,15 @@ class MeasurementController(QObject):
         canvas = getattr(self.window, "pyqt_canvas", None)
         if canvas is None:
             return
+        # Runs first because the branches below return early, and because a
+        # committed GCS wireframe should stay up while another tool is in use.
+        self._refresh_gcs_overlay()
+        if self.mode == "gcs":
+            points = self._gcs_points.get(self._frame_index()) or []
+            canvas.set_measurement_overlay(
+                [p[0] for p in points], [p[1] for p in points], connect=False
+            )
+            return
         if self.mode == "circle_fit":
             idx = self._frame_index()
             points = self._circle_points.get(idx) or []
@@ -1190,7 +1913,12 @@ class MeasurementController(QObject):
     def _sync_ht_buttons(self) -> None:
         """Gate Fit/Clear on the store the panel is showing, not on both."""
         win = self.window
-        count = len(self.circles) if self._panel_source == "circle_fit" else len(self.picks)
+        if self._panel_source == "gcs":
+            count = len(self.gcs_fits)
+        elif self._panel_source == "circle_fit":
+            count = len(self.circles)
+        else:
+            count = len(self.picks)
         if hasattr(win, "ht_fit_btn"):
             win.ht_fit_btn.setEnabled(count >= 2)
         if hasattr(win, "ht_clear_btn"):

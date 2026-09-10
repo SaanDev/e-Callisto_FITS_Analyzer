@@ -37,6 +37,7 @@ from src.Backend.spectral_overview import (
     render_spectral_overview_figure,
 )
 from src.UI.gui_shared import fit_window_to_screen, pick_export_path
+from src.UI.burst_list_tab import BurstListTab
 
 from PySide6.QtCore import (
     Qt, QDate, QDateTime, QThread, QUrl, Signal, QObject, QRunnable, Slot,
@@ -567,12 +568,19 @@ class SpectralOverviewWorker(QObject):
 # -----------------------------
 # Download runnable
 # -----------------------------
-def deliver_archive_file(url: str, out_path: str, filename: str = "") -> bool:
+def deliver_archive_file(
+    url: str, out_path: str, filename: str = "", *, progress_cb=None
+) -> bool:
     """Resolve an archive URL through the shared cache and place it at ``out_path``.
 
     Returns True when the bytes came from the cache instead of the network.
     """
-    cached_path, was_cached = callisto_cache.fetch_cached(url, filename)
+    if progress_cb is None:
+        cached_path, was_cached = callisto_cache.fetch_cached(url, filename)
+    else:
+        cached_path, was_cached = callisto_cache.fetch_cached(
+            url, filename, progress_cb=progress_cb
+        )
     if os.path.abspath(str(cached_path)) != os.path.abspath(str(out_path)):
         shutil.copy2(str(cached_path), str(out_path))
     return was_cached
@@ -599,6 +607,7 @@ class DownloadTask(QObject, QRunnable):
 
 
 class EventDownloadTask(QObject, QRunnable):
+    progress = Signal(str, float, str)
     done = Signal(str, str, bool, str)
 
     def __init__(self, candidate: CallistoEventCandidate, out_path: str):
@@ -610,11 +619,24 @@ class EventDownloadTask(QObject, QRunnable):
 
     @Slot()
     def run(self):
+        filename = self.candidate.filename
+
+        def report_progress(fraction, message):
+            # Cache resolution precedes copying to the requested destination.
+            # Only report completion after that copy has succeeded.
+            fraction = max(0.0, min(0.99, float(fraction)))
+            self.progress.emit(filename, fraction, str(message))
+
         try:
-            deliver_archive_file(self.candidate.url, self.out_path, self.candidate.filename)
-            self.done.emit(self.candidate.filename, self.out_path, True, "")
+            self.progress.emit(filename, 0.0, f"Preparing {filename}...")
+            deliver_archive_file(
+                self.candidate.url, self.out_path, filename,
+                progress_cb=report_progress,
+            )
+            self.progress.emit(filename, 1.0, f"Ready: {filename}")
+            self.done.emit(filename, self.out_path, True, "")
         except Exception as exc:
-            self.done.emit(self.candidate.filename, self.out_path, False, str(exc))
+            self.done.emit(filename, self.out_path, False, str(exc))
 
 
 # -----------------------------
@@ -966,6 +988,7 @@ class CallistoDownloaderApp(QDialog):
         self._overview_figures: dict[str, Figure] = {}
         self._overview_canvases: dict[str, FigureCanvas] = {}
         self._overview_close_after_finish = False
+        self._burst_pending_result = None
 
         self.setWindowTitle("e-CALLISTO FITS Downloader")
         self.setObjectName("CallistoDownloaderDialog")
@@ -982,12 +1005,14 @@ class CallistoDownloaderApp(QDialog):
             "event_start_utc": self.event_start_dt_edit.dateTime(),
             "event_stop_utc": self.event_stop_dt_edit.dateTime(),
             "overview_date": self.overview_date_edit.date(),
+            **self.burst_list_tab.date_time_state(),
         }
 
     def restore_date_time_state(self, state: dict[str, object] | None) -> None:
         """Restore a state returned by :meth:`date_time_state`."""
         if not isinstance(state, dict):
             return
+        self.burst_list_tab.restore_date_time_state(state)
 
         single_date = state.get("single_station_date")
         if isinstance(single_date, QDate) and single_date.isValid():
@@ -1023,6 +1048,13 @@ class CallistoDownloaderApp(QDialog):
         self.tabs.addTab(self._build_single_station_tab(), "Single Station")
         self.tabs.addTab(self._build_event_tab(), "Multi-Station Event")
         self.tabs.addTab(self._build_spectral_overview_tab(), "Spectral Overview")
+        self.burst_list_tab = BurstListTab(CALLISTO_STATIONS, self)
+        self.burst_list_tab.import_request.connect(self.import_request.emit)
+        self.burst_list_tab.comparison_request.connect(self._compare_burst_files)
+        self.burst_list_tab.cache_changed.connect(self._update_cache_size_label)
+        self.burst_list_tab.busy_changed.connect(self._set_burst_running)
+        self.burst_list_tab.idle.connect(self._burst_work_finished)
+        self.tabs.addTab(self.burst_list_tab, "Burst List")
         layout.addWidget(self.tabs)
         layout.addLayout(self._build_cache_footer())
         self.setLayout(layout)
@@ -1571,6 +1603,7 @@ class CallistoDownloaderApp(QDialog):
     def _set_overview_running(self, running: bool) -> None:
         self.tabs.setTabEnabled(0, not running)
         self.tabs.setTabEnabled(1, not running)
+        self.tabs.setTabEnabled(self.tabs.indexOf(self.burst_list_tab), not running)
         self.overview_date_edit.setEnabled(not running)
         self.overview_station_dropdown.setEnabled(not running)
         self.overview_focus_combo.setEnabled(not running)
@@ -1580,6 +1613,8 @@ class CallistoDownloaderApp(QDialog):
         self.overview_progress_bar.setVisible(running)
 
     def generate_spectral_overview(self):
+        if self.burst_list_tab.is_busy():
+            return
         if self._overview_thread is not None and self._overview_thread.isRunning():
             QMessageBox.information(self, "Overview In Progress", "A spectral overview is already being generated.")
             return
@@ -2447,6 +2482,8 @@ class CallistoDownloaderApp(QDialog):
         self.cache_size_label.setText(f"Cache: {size_text}")
 
     def _cache_is_busy(self) -> bool:
+        if self.burst_list_tab.is_busy():
+            return True
         for thread in (self._fetch_thread, self._preview_thread, self._event_fetch_thread, self._overview_thread):
             if thread is not None and thread.isRunning():
                 return True
@@ -2483,7 +2520,36 @@ class CallistoDownloaderApp(QDialog):
                 self, "Cache Cleared", f"Cache cleared with {skipped} item(s) skipped (in use)."
             )
 
+    def _set_burst_running(self, running: bool):
+        for index in range(self.tabs.count()):
+            if self.tabs.widget(index) is not self.burst_list_tab:
+                self.tabs.setTabEnabled(index, not running)
+
+    def _compare_burst_files(self, urls):
+        self.comparison_request.emit(urls)
+        self.accept()
+
+    def _burst_work_finished(self):
+        if self._burst_pending_result is not None:
+            result = self._burst_pending_result
+            self._burst_pending_result = None
+            self.done(result)
+
+    def done(self, result):
+        # A dialog can also close through Escape or a successful import. Keep
+        # its workers alive until pending requests/downloads have finished.
+        if hasattr(self, "burst_list_tab") and self.burst_list_tab.is_busy():
+            self._burst_pending_result = result
+            self.burst_list_tab.request_cancel()
+            return
+        super().done(result)
+
     def closeEvent(self, event):
+        if self.burst_list_tab.is_busy():
+            self._burst_pending_result = QDialog.Rejected
+            self.burst_list_tab.request_cancel()
+            event.ignore()
+            return
         if self._preview_thread is not None and self._preview_thread.isRunning():
             self._preview_thread.quit()
             self._preview_thread.wait(3000)

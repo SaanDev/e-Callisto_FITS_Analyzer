@@ -268,6 +268,22 @@ class SunPyPlotCanvas(QWidget):
         self._aia_limb_curve.setZValue(20)
         self._aia_limb_curve.hide()
         self.map_plot.addItem(self._aia_limb_curve)
+        # GCS CME wireframe. One curve item for the whole mesh, re-fed through
+        # setData(..., connect="finite"): fitting GCS means riding six sliders, so
+        # creating or destroying graphics items per update (as the graticule does)
+        # is what would make it feel sluggish. Z between the graticule (18-20) and
+        # the measurement overlay (40-41).
+        self._gcs_curve = pg.PlotCurveItem(
+            pen=pg.mkPen((255, 130, 60), width=1.4),
+            antialias=True,
+        )
+        self._gcs_curve.setZValue(30)
+        self._gcs_curve.hide()
+        self.map_plot.addItem(self._gcs_curve)
+        self._gcs_handles: dict[str, Any] = {}
+        self._gcs_handle_callback = None
+        self._gcs_drag_active = False
+        self._gcs_syncing = False
 
         # HMI vector magnetic field overlay: |B| magnitude layer under the
         # line work, streamlines, and quiver arrows split by Bz polarity
@@ -451,6 +467,122 @@ class SunPyPlotCanvas(QWidget):
         if hasattr(self, "_measure_curve"):
             self._measure_curve.setData(x=[], y=[])
             self._measure_points.setData(x=[], y=[])
+
+    # ------------------------------------------------------------- GCS overlay
+    def set_gcs_overlay(self, x_arcsec, y_arcsec, *, visible: bool = True) -> None:
+        """Draw the GCS CME wireframe (arcsec view coordinates).
+
+        ``x_arcsec``/``y_arcsec`` are one NaN-separated pair of arrays covering
+        every polyline of the mesh, so the whole wireframe is a single
+        ``setData`` and Qt repaints only the dirty scene rect. Build them with
+        ``src.Backend.gcs_model.wireframe_arcsec``.
+        """
+        x_arr = np.asarray(x_arcsec, dtype=float)
+        y_arr = np.asarray(y_arcsec, dtype=float)
+        if not visible or x_arr.size < 2 or x_arr.size != y_arr.size:
+            self._gcs_curve.setData([], [])
+            self._gcs_curve.hide()
+            return
+        if not np.any(np.isfinite(x_arr) & np.isfinite(y_arr)):
+            self._gcs_curve.setData([], [])
+            self._gcs_curve.hide()
+            return
+        self._gcs_curve.setData(x_arr, y_arr, connect="finite")
+        self._gcs_curve.show()
+
+    def set_gcs_handles(self, positions, *, visible: bool = True, movable: bool = True) -> None:
+        """Place the draggable GCS handles, creating them on first use.
+
+        ``positions`` maps handle name to ``(x_arcsec, y_arcsec)``. Uses
+        ``pg.TargetItem``, which hit-tests itself in *pixel* space (so the grab
+        radius is zoom-invariant) and accepts the left-drag before it reaches the
+        ViewBox — which is why pan/zoom can stay enabled alongside it.
+        """
+        if not positions:
+            for item in self._gcs_handles.values():
+                item.hide()
+            return
+        # setPos re-emits sigPositionChanged, so snapping handles back onto the
+        # model from inside the handler would recurse.
+        self._gcs_syncing = True
+        try:
+            for name, position in dict(positions).items():
+                try:
+                    x_value = float(position[0])
+                    y_value = float(position[1])
+                except Exception:
+                    continue
+                if not (np.isfinite(x_value) and np.isfinite(y_value)):
+                    if name in self._gcs_handles:
+                        self._gcs_handles[name].hide()
+                    continue
+                item = self._gcs_handles.get(name)
+                if item is None:
+                    item = pg.TargetItem(
+                        pos=(x_value, y_value),
+                        size=11,
+                        symbol="crosshair",
+                        pen=pg.mkPen((255, 210, 60), width=1.6),
+                        hoverPen=pg.mkPen((255, 255, 255), width=2.0),
+                        movable=bool(movable),
+                    )
+                    item.setZValue(31)
+                    item.sigPositionChanged.connect(
+                        lambda handle, key=name: self._on_gcs_handle_moved(key, handle, False)
+                    )
+                    item.sigPositionChangeFinished.connect(
+                        lambda handle, key=name: self._on_gcs_handle_moved(key, handle, True)
+                    )
+                    self.map_plot.addItem(item)
+                    self._gcs_handles[name] = item
+                else:
+                    item.blockSignals(True)
+                    try:
+                        item.setPos(x_value, y_value)
+                    finally:
+                        item.blockSignals(False)
+                item.setVisible(bool(visible))
+        finally:
+            self._gcs_syncing = False
+
+    def set_gcs_handle_callback(self, callback) -> None:
+        """Report handle drags as ``callback(name, x_arcsec, y_arcsec, finished)``."""
+        self._gcs_handle_callback = callback
+
+    def _on_gcs_handle_moved(self, name: str, item: Any, finished: bool) -> None:
+        if self._gcs_syncing:
+            return
+        self._gcs_drag_active = True
+        callback = self._gcs_handle_callback
+        if callback is not None:
+            try:
+                position = item.pos()
+                callback(name, float(position.x()), float(position.y()), bool(finished))
+            except Exception:
+                pass
+        if finished:
+            # The press-release that ends a drag also reaches the scene's click
+            # handler, which would append a spurious measurement pick; clear the
+            # flag only once that click has been delivered.
+            QTimer.singleShot(0, self._clear_gcs_drag_active)
+
+    def _clear_gcs_drag_active(self) -> None:
+        self._gcs_drag_active = False
+
+    def gcs_drag_active(self) -> bool:
+        """True while a GCS handle drag is in flight (see ``_on_gcs_handle_moved``)."""
+        return bool(getattr(self, "_gcs_drag_active", False))
+
+    def has_gcs_overlay(self) -> bool:
+        x_data, _ = self._gcs_curve.getData()
+        return bool(self._gcs_curve.isVisible() and x_data is not None and len(x_data) > 0)
+
+    def clear_gcs_overlay(self) -> None:
+        self._gcs_curve.setData([], [])
+        self._gcs_curve.hide()
+        for item in self._gcs_handles.values():
+            item.hide()
+        self._gcs_drag_active = False
 
     def set_colormap_name(self, name: str) -> None:
         text = str(name or "").strip() or "inferno"

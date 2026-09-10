@@ -211,6 +211,142 @@ def deserialize_circle_fits(raw: Any) -> dict[int, tuple]:
     return out
 
 
+# --- GCS fits ---------------------------------------------------------------
+
+
+def serialize_gcs_fits(fits: Mapping[int, Sequence[Any]] | None) -> list[dict[str, Any]]:
+    """Flatten the controller's ``{frame_index: GCSFitEntry}`` GCS fits.
+
+    Read positionally, like :func:`serialize_circle_fits`, so this module keeps
+    knowing nothing about the UI layer's types. Stored under a new key in
+    ``meta["measurements"]`` for the reason spelled out there: an unknown key is
+    ignored on read, whereas a schema bump would refuse the whole file.
+    """
+    out: list[dict[str, Any]] = []
+    if not isinstance(fits, Mapping):
+        return out
+    for idx in sorted(fits.keys(), key=lambda k: _safe_int(k, 0)):
+        entry = fits[idx]
+        if not isinstance(entry, Sequence) or len(entry) < 15:
+            continue
+        when = entry[0]
+        if isinstance(when, datetime):
+            when_iso: str | None = when.isoformat()
+        else:
+            when_iso = str(when) if when else None
+        out.append(
+            {
+                "frame_index": _safe_int(idx, 0),
+                "time": when_iso,
+                "apex_height_rsun": _safe_float(entry[1]),
+                "lon_deg": _safe_float(entry[2]),
+                "lat_deg": _safe_float(entry[3]),
+                "tilt_deg": _safe_float(entry[4]),
+                "alpha_deg": _safe_float(entry[5]),
+                "kappa": _safe_float(entry[6]),
+                "rms_arcsec": _safe_float(entry[7]),
+                "n_points": _safe_int(entry[8], 0),
+                "n_viewpoints": _safe_int(entry[9], 1),
+                "separation_deg": _safe_float(entry[10]),
+                "lon_err_deg": _safe_float(entry[11]),
+                "lat_err_deg": _safe_float(entry[12]),
+                "height_err_rsun": _safe_float(entry[13]),
+                "refined": bool(entry[14]),
+            }
+        )
+    return out
+
+
+def deserialize_gcs_fits(raw: Any) -> dict[int, tuple]:
+    """Rebuild the GCS-fit map from :func:`serialize_gcs_fits` output.
+
+    A row without the six model parameters is dropped rather than defaulted: a
+    zeroed longitude or height would silently restore a *different* CME and feed
+    the 3-D kinematics a wrong number. The error bars and fit-quality extras are
+    allowed to be missing — they degrade to NaN, which the panel already renders
+    as "no error quoted".
+    """
+    out: dict[int, tuple] = {}
+    if not isinstance(raw, Iterable):
+        return out
+    for row in raw:
+        if not isinstance(row, Mapping):
+            continue
+        required = [
+            _safe_float(row.get(key))
+            for key in ("apex_height_rsun", "lon_deg", "lat_deg", "tilt_deg", "alpha_deg", "kappa")
+        ]
+        if any(value is None for value in required):
+            continue
+        height, lon, lat, tilt, alpha, kappa = (float(value) for value in required)
+
+        def optional(key: str) -> float:
+            value = _safe_float(row.get(key))
+            return float(value) if value is not None else float("nan")
+
+        out[_safe_int(row.get("frame_index"), 0)] = (
+            _parse_iso(row.get("time")),
+            height,
+            lon,
+            lat,
+            tilt,
+            alpha,
+            kappa,
+            optional("rms_arcsec"),
+            _safe_int(row.get("n_points"), 0),
+            _safe_int(row.get("n_viewpoints"), 1),
+            optional("separation_deg"),
+            optional("lon_err_deg"),
+            optional("lat_err_deg"),
+            optional("height_err_rsun"),
+            bool(row.get("refined", False)),
+        )
+    return out
+
+
+def serialize_gcs_points(points: Mapping[int, Sequence[Any]] | None) -> list[dict[str, Any]]:
+    """Flatten the front points clicked per frame for the GCS refine step."""
+    return serialize_circle_points(points)
+
+
+def deserialize_gcs_points(raw: Any) -> dict[int, list[tuple[float, float]]]:
+    """Rebuild the clicked GCS front points."""
+    return deserialize_circle_points(raw)
+
+
+def serialize_gcs_parameters(params: Any) -> list[float] | None:
+    """The live (uncommitted) slider parameters, so reopening shows the same shell."""
+    if params is None:
+        return None
+    values = params.as_array() if hasattr(params, "as_array") else params
+    try:
+        out = [float(value) for value in values]
+    except Exception:
+        return None
+    return out if len(out) == 6 else None
+
+
+def deserialize_gcs_parameters(raw: Any) -> list[float] | None:
+    """Rebuild the live GCS parameters; ``None`` when absent or malformed."""
+    if not isinstance(raw, Iterable) or isinstance(raw, (str, bytes, Mapping)):
+        return None
+    values = [_safe_float(value) for value in raw]
+    if len(values) != 6 or any(value is None for value in values):
+        return None
+    return [float(value) for value in values]
+
+
+def session_gcs_count(meta: Mapping[str, Any] | None) -> int:
+    """How many GCS fits a saved session holds (for the restore summary)."""
+    if not isinstance(meta, Mapping):
+        return 0
+    measurements = meta.get("measurements")
+    if not isinstance(measurements, Mapping):
+        return 0
+    raw = measurements.get("gcs_fits")
+    return len(raw) if isinstance(raw, list) else 0
+
+
 def serialize_circle_points(points: Mapping[int, Sequence[Any]] | None) -> list[dict[str, Any]]:
     """Flatten the in-progress circle clicks ``{frame_index: [(x, y), ...]}``.
 

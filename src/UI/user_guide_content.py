@@ -319,7 +319,7 @@ SOHO instruments, which is the only way to see the most recent EIT frames.</p>
 <b>3 Analysis</b>, plus Movie Export, Display and Crop, Coronagraph Tools, Heliospheric Imager (J-map),
 Magnetic Vector Field (HMI), and Active Regions.</li>
 <li><b>Canvas</b> (center): the image with a header readout (solar radius, position angle, pixel), a Measure
-toolbar (Ruler, Profile, Region Stats, Track CME, Circle Fit, Clear), and a playback bar below it.</li>
+toolbar (Ruler, Profile, Region Stats, Track CME, Circle Fit, GCS Fit, Clear), and a playback bar below it.</li>
 <li><b>CME tracking panel</b> (right of the canvas): the per-frame table, a live height–time graph and a
 <b>Fit</b> dropdown for a linear, quadratic or cubic fit. Linear gives one speed (with the acceleration from a
 companion quadratic fit); the curved fits report the speed at both ends of the track, and cubic adds the jerk.
