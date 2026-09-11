@@ -273,8 +273,11 @@ class SunPyPlotCanvas(QWidget):
         # creating or destroying graphics items per update (as the graticule does)
         # is what would make it feel sluggish. Z between the graticule (18-20) and
         # the measurement overlay (40-41).
+        # Default deliberately heavy: the wireframe has to read over a bright
+        # corona in a running-difference image, where a hairline disappears.
+        self._gcs_style = {"width": 2.6, "color": (255, 140, 40), "opacity": 1.0}
         self._gcs_curve = pg.PlotCurveItem(
-            pen=pg.mkPen((255, 130, 60), width=1.4),
+            pen=self._gcs_pen(),
             antialias=True,
         )
         self._gcs_curve.setZValue(30)
@@ -469,6 +472,50 @@ class SunPyPlotCanvas(QWidget):
             self._measure_points.setData(x=[], y=[])
 
     # ------------------------------------------------------------- GCS overlay
+    def _gcs_pen(self) -> Any:
+        """Pen for the GCS wireframe from the current style."""
+        style = getattr(self, "_gcs_style", None) or {
+            "width": 2.6,
+            "color": (255, 140, 40),
+            "opacity": 1.0,
+        }
+        red, green, blue = style["color"]
+        alpha = int(round(max(0.0, min(1.0, float(style["opacity"]))) * 255))
+        return pg.mkPen((int(red), int(green), int(blue), alpha), width=float(style["width"]))
+
+    def set_gcs_style(
+        self,
+        *,
+        width: float | None = None,
+        color: tuple[int, int, int] | None = None,
+        opacity: float | None = None,
+    ) -> None:
+        """Restyle the wireframe in place.
+
+        Only the pen changes, so this is as cheap as a parameter update and can
+        be driven from a live slider. Handles follow the colour so the two never
+        read as separate objects.
+        """
+        style = dict(getattr(self, "_gcs_style", {}) or {})
+        if width is not None:
+            style["width"] = max(0.2, float(width))
+        if color is not None:
+            style["color"] = (int(color[0]), int(color[1]), int(color[2]))
+        if opacity is not None:
+            style["opacity"] = max(0.05, min(1.0, float(opacity)))
+        self._gcs_style = style
+        self._gcs_curve.setPen(self._gcs_pen())
+        handle_pen = pg.mkPen(style["color"], width=max(1.2, float(style["width"]) * 0.7))
+        for item in getattr(self, "_gcs_handles", {}).values():
+            try:
+                item.setPen(handle_pen)
+            except Exception:
+                pass
+
+    def gcs_style(self) -> dict[str, Any]:
+        """The current wireframe style, for persisting it with a session."""
+        return dict(getattr(self, "_gcs_style", {}) or {})
+
     def set_gcs_overlay(self, x_arcsec, y_arcsec, *, visible: bool = True) -> None:
         """Draw the GCS CME wireframe (arcsec view coordinates).
 
@@ -522,8 +569,11 @@ class SunPyPlotCanvas(QWidget):
                         pos=(x_value, y_value),
                         size=11,
                         symbol="crosshair",
-                        pen=pg.mkPen((255, 210, 60), width=1.6),
-                        hoverPen=pg.mkPen((255, 255, 255), width=2.0),
+                        pen=pg.mkPen(
+                            (getattr(self, "_gcs_style", {}) or {}).get("color", (255, 210, 60)),
+                            width=1.8,
+                        ),
+                        hoverPen=pg.mkPen((255, 255, 255), width=2.4),
                         movable=bool(movable),
                     )
                     item.setZValue(31)
@@ -651,9 +701,29 @@ class SunPyPlotCanvas(QWidget):
             pass
         self._refresh_effective_colormap()
 
+    def set_map_axis_titles_visible(self, visible: bool) -> None:
+        """Show or hide the "Solar X/Y (arcsec)" axis titles.
+
+        The tick numbers always stay — they are what is actually read. The titles
+        cost roughly 60 px of width and 30 px of height, which is worth reclaiming
+        in a multi-panel window where the image is width-limited, and not worth it
+        in a single-map window where it is just a missing label.
+        """
+        self._map_axis_titles_visible = bool(visible)
+        self._set_map_axis_labels()
+
     def _set_map_axis_labels(self) -> None:
-        self.map_plot.setLabel("bottom", "Solar X (arcsec)")
-        self.map_plot.setLabel("left", "Solar Y (arcsec)")
+        if getattr(self, "_map_axis_titles_visible", True):
+            self.map_plot.setLabel("bottom", "Solar X (arcsec)")
+            self.map_plot.setLabel("left", "Solar Y (arcsec)")
+            return
+        # setLabel("") still reserves the row/column; showLabel(False) removes it.
+        for axis in ("bottom", "left"):
+            self.map_plot.setLabel(axis, "")
+            try:
+                self.map_plot.getPlotItem().showLabel(axis, False)
+            except Exception:
+                pass
 
     def _is_dark_ui(self) -> bool:
         theme = getattr(self, "theme", None)
@@ -677,6 +747,28 @@ class SunPyPlotCanvas(QWidget):
         # budget of follow-up reflow passes.
         self._square_reflow_passes = 0
         self._enforce_square_map_plot()
+
+    def set_map_square_enabled(self, enabled: bool) -> None:
+        """Square the map plot, or let it fill whatever rectangle it is given.
+
+        Squaring works by ``setFixedSize``, which caps the plot at the smaller of
+        the available width and height. That is right for a single full-disk view,
+        and wrong in a multi-panel window where each panel is much taller than it
+        is wide: the map would sit at panel-width square with dead space below it.
+        Turning it off releases the fixed size; the ViewBox keeps its own
+        ``setAspectLocked``, so the *data* stays undistorted either way.
+        """
+        enabled = bool(enabled)
+        if enabled == getattr(self, "_map_square_enabled", True):
+            return
+        self._map_square_enabled = enabled
+        if enabled:
+            self._square_reflow_passes = 0
+            self._enforce_square_map_plot()
+            return
+        # Release the cap a previous squaring pass may already have applied.
+        self.map_plot.setMinimumSize(0, 0)
+        self.map_plot.setMaximumSize(16777215, 16777215)
 
     def _enforce_square_map_plot(self) -> None:
         if not self._map_square_enabled or not self.is_map_visible():

@@ -309,6 +309,7 @@ class MainWindow(QMainWindow):
         self._cme_helper_client = CMEHelperClient(theme_manager=self.theme, parent=self)
         self._cme_viewer = None
         self._sunpy_window = None
+        self._gcs_window = None
         self._solar_data_analysis_window = None
         self._goes_window = None
         self._sep_window = None
@@ -1209,6 +1210,12 @@ class MainWindow(QMainWindow):
         self.open_solar_data_analysis_action = QAction("Solar Image Analysis", self)
         self.open_solar_data_analysis_action.triggered.connect(self.open_solar_data_analysis_window)
         analysis_menu.addAction(self.open_solar_data_analysis_action)
+        # GCS fitting is fully standalone — it fetches its own three viewpoints —
+        # so it is reachable straight from here without first opening the Solar
+        # Image Analysis window or loading anything into it.
+        self.open_gcs_fitting_action = QAction("GCS CME Fitting…", self)
+        self.open_gcs_fitting_action.triggered.connect(self.open_gcs_fitting_window)
+        analysis_menu.addAction(self.open_gcs_fitting_action)
         analysis_menu.addSeparator()
         self.maximum_intensities_menu = analysis_menu.addMenu("Maximum Intensities")
         self.open_maximum_intensities_action = QAction("Open Maximum Intensities", self)
@@ -10220,6 +10227,22 @@ class MainWindow(QMainWindow):
                 self._sunpy_window.set_time_window(window[0], window[1], auto_query=False)
             except Exception:
                 pass
+
+    def open_gcs_fitting_window(self):
+        """Open the standalone three-viewpoint GCS CME fitting window."""
+        from src.UI.gcs_fitting_window import GCSFittingWindow  # import here, not at top
+
+        try:
+            alive = self._gcs_window is not None
+            if alive:
+                _ = self._gcs_window.windowTitle()
+        except Exception:
+            alive = False
+        if not alive:
+            self._gcs_window = GCSFittingWindow(self)
+        self._gcs_window.show()
+        self._gcs_window.raise_()
+        self._gcs_window.activateWindow()
 
     def open_solar_data_analysis_window(self):
         try:

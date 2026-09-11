@@ -112,16 +112,10 @@ from src.Backend.solar_session import (
     SolarSessionError,
     deserialize_circle_fits,
     deserialize_circle_points,
-    deserialize_gcs_fits,
-    deserialize_gcs_parameters,
-    deserialize_gcs_points,
     deserialize_picks,
     read_solar_session,
     serialize_circle_fits,
     serialize_circle_points,
-    serialize_gcs_fits,
-    serialize_gcs_parameters,
-    serialize_gcs_points,
     serialize_picks,
     session_circle_count,
     session_frame_count,
@@ -1964,13 +1958,11 @@ class SolarDataAnalysisWindow(QMainWindow):
 
         self._build_ui()
         self._build_menu_bar()
-        # Click-driven measurement tools (ruler / profile / height-time / stats)
-        # plus the drag-driven GCS handles.
+        # Click-driven measurement tools (ruler / profile / height-time / stats).
         from src.UI.solar_measure_tools import MeasurementController
 
         self._measure = MeasurementController(self)
         self.pyqt_canvas.set_click_callback(self._measure.on_canvas_click)
-        self.pyqt_canvas.set_gcs_handle_callback(self._measure.on_gcs_handle_dragged)
         self._connect_signals()
         self._restore_jsoc_settings()
         self.jsoc_email_edit.editingFinished.connect(self._save_jsoc_settings)
@@ -2145,16 +2137,6 @@ class SolarDataAnalysisWindow(QMainWindow):
             "drawn live. Commit Circle records its radius as the CME height, so the\n"
             "sequence builds a radius–time plot with speed and acceleration."
         )
-        self.gcs_tool_btn = QPushButton("GCS Fit")
-        self.gcs_tool_btn.setCheckable(True)
-        self.gcs_tool_btn.setToolTip(
-            "3-D CME reconstruction with the Graduated Cylindrical Shell model\n"
-            "(Thernisien 2006/2011), as in PyThea. Drag the apex handle or the six\n"
-            "sliders until the wireframe matches the front; unlike Track CME and\n"
-            "Circle Fit this gives a true de-projected height, so the speed is 3-D\n"
-            "rather than plane-of-sky. Best with two viewpoints — a single view\n"
-            "cannot constrain the propagation longitude."
-        )
         self.clear_measure_btn = QPushButton("Clear")
         self.clear_measure_btn.setToolTip("Clear and reset all measurements: picks, table and overlays.")
         for btn in (
@@ -2163,7 +2145,6 @@ class SolarDataAnalysisWindow(QMainWindow):
             self.stats_tool_btn,
             self.height_time_btn,
             self.circle_tool_btn,
-            self.gcs_tool_btn,
             self.clear_measure_btn,
         ):
             btn.setEnabled(False)
@@ -2181,7 +2162,6 @@ class SolarDataAnalysisWindow(QMainWindow):
         measure_row.addWidget(self.stats_tool_btn)
         measure_row.addWidget(self.height_time_btn)
         measure_row.addWidget(self.circle_tool_btn)
-        measure_row.addWidget(self.gcs_tool_btn)
         measure_row.addWidget(self.clear_measure_btn)
         measure_row.addStretch(1)
         # Interactive pan/zoom of the loaded image; the zoom is kept while the
@@ -3876,7 +3856,6 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.stats_tool_btn.clicked.connect(lambda: self._measure.report_region_stats())
         self.height_time_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("height_time", on))
         self.circle_tool_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("circle_fit", on))
-        self.gcs_tool_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("gcs", on))
         self.clear_measure_btn.clicked.connect(self.clear_all_measurements)
         # Fit/Clear act on whichever tracking store the panel is showing.
         self.ht_fit_btn.clicked.connect(lambda: self._measure.finish_active_fit())
@@ -3925,7 +3904,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.detect_regions_action.triggered.connect(self.detect_active_regions)
         self.labels_action.triggered.connect(self.fetch_active_region_labels)
         self.compare_viewpoint_action.triggered.connect(self.open_multiview_dialog)
-        self.gcs_fitting_action.triggered.connect(self.open_gcs_fitting_dialog)
+        self.gcs_fitting_action.triggered.connect(self.open_gcs_fitting_window)
         self.reset_frames_action.triggered.connect(self.reset_loaded_frames)
         self.rewind_action.triggered.connect(self.rewind_frames)
         self.previous_action.triggered.connect(self.previous_frame)
@@ -4050,10 +4029,6 @@ class SolarDataAnalysisWindow(QMainWindow):
             widget.setEnabled(measure_on)
         self.height_time_btn.setEnabled(measure_on and len(self._map_frames) >= 2)
         self.circle_tool_btn.setEnabled(measure_on and many_frames)
-        # One frame is enough for a GCS fit — it is a per-frame 3-D reconstruction,
-        # not a height-time series — but it needs a usable coordinate system, which
-        # cropped/composited AiaArrayMap frames may have lost.
-        self.gcs_tool_btn.setEnabled(measure_on and bool(self._map_frames) and self._gcs_supported())
         self.hi_jmap_btn.setEnabled(many_frames)
         # Overlay layers can be assembled any time, but building needs frames and
         # a base that still carries the world coordinates reprojection targets.
@@ -4071,8 +4046,7 @@ class SolarDataAnalysisWindow(QMainWindow):
                 self.profile_tool_btn,
                 self.height_time_btn,
                 self.circle_tool_btn,
-                self.gcs_tool_btn,
-            ):
+                ):
                 if btn.isChecked():
                     btn.blockSignals(True)
                     btn.setChecked(False)
@@ -4160,7 +4134,6 @@ class SolarDataAnalysisWindow(QMainWindow):
             self.detect_regions_action,
             self.labels_action,
             self.compare_viewpoint_action,
-            self.gcs_fitting_action,
             self.reset_frames_action,
             self.rewind_action,
             self.previous_action,
@@ -4173,6 +4146,11 @@ class SolarDataAnalysisWindow(QMainWindow):
             self.quick_mp4_action,
         ):
             action.setEnabled((not busy) and bool(loaded))
+        # GCS fitting is deliberately never gated: it is a standalone window that
+        # fetches all three viewpoints itself, on its own threads, so it needs
+        # neither loaded frames here nor an idle analyzer. Frames loaded here are
+        # only ever an optional seed for its first panel.
+        self.gcs_fitting_action.setEnabled(True)
         # Disk-only analysis actions stay disabled for white-light coronagraph
         # and heliospheric frames (LASCO, STEREO COR1/COR2, HI1/HI2).
         if loaded and self._loaded_instrument_class() in (CORONAGRAPH, HELIOSPHERIC):
@@ -5712,12 +5690,11 @@ class SolarDataAnalysisWindow(QMainWindow):
             "profile": self.profile_tool_btn,
             "height_time": self.height_time_btn,
             "circle_fit": self.circle_tool_btn,
-            "gcs": self.gcs_tool_btn,
         }
         if not on:
             if self._measure.mode == mode:
                 self._measure.set_mode(None)
-            if mode in ("height_time", "circle_fit", "gcs"):
+            if mode in ("height_time", "circle_fit"):
                 self._sync_tracking_panel_visibility()
             return
         for other_mode, btn in buttons.items():
@@ -5740,29 +5717,8 @@ class SolarDataAnalysisWindow(QMainWindow):
                 "Circle fit: click ≥3 points along the CME front, then Commit Circle "
                 "(Ctrl+Return) to record this frame."
             ),
-            "gcs": (
-                "GCS fit: drag the apex handle or the sliders to match the wireframe "
-                "to the front, then Commit to record this frame."
-            ),
         }
         self.statusBar().showMessage(hints[mode], 8000)
-
-    def _gcs_supported(self) -> bool:
-        """True when the displayed frame carries the geometry a GCS fit needs.
-
-        Deliberately checks only ``coordinate_frame`` (via ObserverGeometry), not
-        ``.wcs``: that is the one attribute derived AiaArrayMap frames keep, so a
-        cropped frame can still be fitted.
-        """
-        if not self._map_frames:
-            return False
-        try:
-            from src.Backend.gcs_model import ObserverGeometry
-
-            index = max(0, min(self._current_frame_index, len(self._map_frames) - 1))
-            return ObserverGeometry.from_frame(self._map_frames[index]) is not None
-        except Exception:
-            return False
 
     def _sync_tracking_panel_visibility(self) -> None:
         """The tracking panel is a permanent part of the layout now; its
@@ -5784,8 +5740,7 @@ class SolarDataAnalysisWindow(QMainWindow):
                 self.profile_tool_btn,
                 self.height_time_btn,
                 self.circle_tool_btn,
-                self.gcs_tool_btn,
-            ):
+                ):
                 if btn.isChecked():
                     btn.blockSignals(True)
                     btn.setChecked(False)
@@ -5820,7 +5775,6 @@ class SolarDataAnalysisWindow(QMainWindow):
             self.profile_tool_btn,
             self.height_time_btn,
             self.circle_tool_btn,
-            self.gcs_tool_btn,
         ):
             if btn.isChecked():
                 btn.blockSignals(True)
@@ -6236,37 +6190,38 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._multiview_dialog = dialog
         dialog.show()
 
-    def open_gcs_fitting_dialog(self) -> None:
-        """Fit one GCS shell against two viewpoints at once."""
-        if not self._map_frames:
-            QMessageBox.information(self, "GCS CME Fitting", "Load frames first.")
-            return
-        # Lazy import, as every heavy dialog here is: it keeps the analysis window's
-        # own import cheap. No packaging entry is needed — the specs bundle
-        # 'src.UI' as a whole package (FITS_Analyzer.spec:112), which is why
-        # multiview_dialog is not listed either.
-        from src.UI.gcs_fitting_dialog import GCSFittingDialog
+    def open_gcs_fitting_window(self) -> None:
+        """Open the standalone three-viewpoint GCS fitting window."""
+        # Lazy import, as every heavy window here is: it keeps this window's own
+        # import cheap. No packaging entry is needed — the specs bundle 'src.UI'
+        # as a whole package (FITS_Analyzer.spec:112).
+        from src.UI.gcs_fitting_window import GCSFittingWindow
 
-        # The original loader outputs, for the same reason Compare Viewpoint uses
-        # them: crop/composite replace _map_frames with wrappers that cannot be
-        # reprojected.
-        reference = self._original_frames or self._map_frames
-        index = max(0, min(self._current_frame_index, len(reference) - 1))
-        measure = getattr(self, "_measure", None)
-        dialog = GCSFittingDialog(
-            self,
-            reference_frames=reference,
-            reference_index=index,
-            reference_label=self._frames_word(),
-            cache_dir=self.cache_dir,
-            jsoc_email=str(self.jsoc_email_edit.text() or "").strip(),
-            theme=self.theme,
-            # Carry the single-view fit across, so the dialog opens where the user
-            # left off rather than on a fresh seed.
-            initial=getattr(measure, "_gcs_params", None),
-        )
-        self._gcs_dialog = dialog
-        dialog.show()
+        existing = getattr(self, "_gcs_window", None)
+        try:
+            alive = existing is not None and bool(existing.windowTitle())
+        except Exception:
+            alive = False
+        if not alive:
+            # Seed panel A with the frames already loaded here, when they carry a
+            # usable coordinate system — a crop or composite does not, and the
+            # window would rather start empty than with a panel it cannot fit.
+            from src.Backend.gcs_model import ObserverGeometry
+
+            seed = self._original_frames or self._map_frames
+            if seed and ObserverGeometry.from_frame(seed[0]) is None:
+                seed = []
+            self._gcs_window = GCSFittingWindow(
+                self,
+                seed_frames=list(seed),
+                seed_label=self._frames_word() or "A",
+                cache_dir=self.cache_dir,
+                jsoc_email=str(self.jsoc_email_edit.text() or "").strip(),
+                theme=self.theme,
+            )
+        self._gcs_window.show()
+        self._gcs_window.raise_()
+        self._gcs_window.activateWindow()
 
     def _on_query_wavelength_changed(self, _index: int) -> None:
         # High-resolution VSO / JSOC / composite only apply to SDO; gate the
@@ -7593,9 +7548,6 @@ class SolarDataAnalysisWindow(QMainWindow):
         picks = getattr(measure, "picks", {}) or {}
         circles = getattr(measure, "circles", {}) or {}
         circle_points = getattr(measure, "_circle_points", {}) or {}
-        gcs_fits = getattr(measure, "gcs_fits", {}) or {}
-        gcs_points = getattr(measure, "_gcs_points", {}) or {}
-        gcs_params = getattr(measure, "_gcs_params", None)
         locked_center = getattr(measure, "_locked_center", None)
         frame_times: list[str | None] = []
         for frame in self._map_frames:
@@ -7674,11 +7626,6 @@ class SolarDataAnalysisWindow(QMainWindow):
                 "height_time_picks": serialize_picks(picks),
                 "circle_fits": serialize_circle_fits(circles),
                 "circle_points": serialize_circle_points(circle_points),
-                "gcs_fits": serialize_gcs_fits(gcs_fits),
-                "gcs_points": serialize_gcs_points(gcs_points),
-                # The live slider values too, so reopening shows the same shell
-                # rather than snapping back to a fresh seed.
-                "gcs_parameters": serialize_gcs_parameters(gcs_params),
                 "circle_lock_center": (
                     [float(locked_center[0]), float(locked_center[1])]
                     if locked_center is not None
@@ -7817,12 +7764,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         circles = {idx: entry for idx, entry in circles.items() if 0 <= idx < n}
         circle_points = deserialize_circle_points(measurements.get("circle_points"))
         circle_points = {idx: pts for idx, pts in circle_points.items() if 0 <= idx < n}
-        gcs_fits = deserialize_gcs_fits(measurements.get("gcs_fits"))
-        gcs_fits = {idx: entry for idx, entry in gcs_fits.items() if 0 <= idx < n}
-        gcs_points = deserialize_gcs_points(measurements.get("gcs_points"))
-        gcs_points = {idx: pts for idx, pts in gcs_points.items() if 0 <= idx < n}
-        gcs_params = deserialize_gcs_parameters(measurements.get("gcs_parameters"))
-        if (picks or circles or gcs_fits) and not self.measurements_check.isChecked():
+        if (picks or circles) and not self.measurements_check.isChecked():
             # Restored measurements need the tracking panel available to be seen.
             self.measurements_check.setChecked(True)
         if hasattr(self, "_measure"):
@@ -7831,12 +7773,8 @@ class SolarDataAnalysisWindow(QMainWindow):
             self._measure.restore_circle_fits(
                 circles, circle_points, measurements.get("circle_lock_center")
             )
-            self._measure.restore_gcs_fits(gcs_fits, gcs_points, gcs_params)
-            # Last one checked owns the panel, so the most specific tool wins.
             if circles:
                 self.circle_tool_btn.setChecked(True)
-            if gcs_fits:
-                self.gcs_tool_btn.setChecked(True)
             # Keep the checkbox honest about the restored lock state.
             locked = getattr(self._measure, "_locked_center", None) is not None
             if self.tracking_panel.lock_center_check.isChecked() != locked:
@@ -7853,9 +7791,7 @@ class SolarDataAnalysisWindow(QMainWindow):
 
         # Recompute the fit so the tracking panel shows the CME kinematics again.
         if hasattr(self, "_measure"):
-            if len(gcs_fits) >= 2:
-                self._measure.finish_gcs_fit()
-            elif len(circles) >= 2:
+            if len(circles) >= 2:
                 self._measure.finish_circle_fit()
             elif len(picks) >= 2:
                 self._measure.finish_height_time()
