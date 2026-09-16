@@ -877,7 +877,6 @@ class GCSParameterPanel(QWidget):
             layout.addWidget(slider)
 
         self.derived_label = QLabel("—")
-        self.derived_label.setWordWrap(True)
         layout.addWidget(self.derived_label)
 
         self.refine_btn = QPushButton("Refine fit")
@@ -941,10 +940,12 @@ class GCSParameterPanel(QWidget):
         except Exception:
             self.derived_label.setText("—")
             return
+        # Two fixed lines rather than word wrap: a wrapping label makes every
+        # layout above it height-for-width, and a scroll area then sizes the whole
+        # control row for the narrowest wrap it can imagine.
         self.derived_label.setText(
-            f"apex {params.height_rsun:.2f} R☉  ·  leg h {leg:.2f}  ·  "
-            f"r_apex {rapex:.2f}  ·  centre {centre:.2f}  ·  "
-            f"full width {2.0 * params.alpha_deg:.0f}°"
+            f"apex {params.height_rsun:.2f} R☉  ·  leg h {leg:.2f}  ·  r_apex {rapex:.2f}\n"
+            f"centre {centre:.2f} R☉  ·  full width {2.0 * params.alpha_deg:.0f}°"
         )
 
 

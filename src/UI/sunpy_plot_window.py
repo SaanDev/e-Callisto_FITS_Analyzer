@@ -701,6 +701,40 @@ class SunPyPlotCanvas(QWidget):
             pass
         self._refresh_effective_colormap()
 
+    def set_map_chrome_visible(self, visible: bool) -> None:
+        """Show or hide everything around the image: both axes and the title row.
+
+        Hidden, the image takes the whole canvas — worth ~12% of the width and
+        ~15% of the height in a multi-panel view. Hiding the axes alone frees
+        nothing: both are fixed-size (72 px wide, 42 px high) and a hidden item in
+        a ``QGraphicsGridLayout`` keeps its slot, so their sizes are zeroed too,
+        and the title row is collapsed with ``setTitle(None)`` because an empty
+        string still reserves 30 px.
+        """
+        visible = bool(visible)
+        self._map_chrome_visible = visible
+        plot_item = self.map_plot.getPlotItem()
+        left_axis = self.map_plot.getAxis("left")
+        bottom_axis = self.map_plot.getAxis("bottom")
+        if visible:
+            plot_item.showAxis("left")
+            plot_item.showAxis("bottom")
+            left_axis.setWidth(72)
+            bottom_axis.setHeight(42)
+            self.map_plot.setTitle("")
+        else:
+            plot_item.hideAxis("left")
+            plot_item.hideAxis("bottom")
+            left_axis.setWidth(0)
+            bottom_axis.setHeight(0)
+            self.map_plot.setTitle(None)
+        self._set_map_axis_labels()
+        self._square_reflow_passes = 0
+        self._enforce_square_map_plot()
+
+    def map_chrome_visible(self) -> bool:
+        return bool(getattr(self, "_map_chrome_visible", True))
+
     def set_map_axis_titles_visible(self, visible: bool) -> None:
         """Show or hide the "Solar X/Y (arcsec)" axis titles.
 
@@ -1388,7 +1422,9 @@ class SunPyPlotCanvas(QWidget):
         # shrink it into a corner.
         self.map_image.setRect(QRectF(x0, y0, width, height))
 
-        self.map_plot.setTitle(title)
+        # With the chrome hidden the title row must stay collapsed: setTitle("")
+        # would bring back an empty 30 px row above the image.
+        self.map_plot.setTitle(title if getattr(self, "_map_chrome_visible", True) else None)
         self._unclamp_title_min_width()
         self._set_map_axis_labels()
         self._update_colorbar_visibility(is_rgb=is_rgb)

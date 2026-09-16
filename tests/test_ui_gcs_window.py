@@ -20,7 +20,7 @@ pytest.importorskip("PySide6")
 pytest.importorskip("pyqtgraph")
 pytest.importorskip("sunpy.map")
 
-from PySide6.QtCore import QDateTime
+from PySide6.QtCore import QDateTime, QObject, Qt, Signal, Slot
 from PySide6.QtWidgets import QApplication
 
 from src.Backend.gcs_model import GCSParameters, apex_arcsec
@@ -59,7 +59,14 @@ def _sequence(observer_lon_deg: float, *, n=4, cadence_min=12, start_min=0, dete
             frame=frames.HeliographicStonyhurst,
             obstime=stamp,
         )
-        data = rng.random((48, 48)) + index
+        # A ring that moves outward frame to frame (the "CME front"), on a
+        # background that brightens uniformly by 1 per frame (the kind of global
+        # offset two JP2s of the same corona really show), plus noise. Every
+        # pixel stays positive, as inside a JP2's field.
+        yy, xx = np.mgrid[0:48, 0:48]
+        radius = np.hypot(xx - 23.5, yy - 23.5)
+        front = 6.0 * np.exp(-((radius - (8.0 + 3.0 * index)) ** 2) / 2.0)
+        data = 10.0 + index + front + rng.random((48, 48))
         ref = SkyCoord(
             0 * u.arcsec, 0 * u.arcsec, obstime=stamp, observer=observer, frame="helioprojective"
         )
@@ -113,7 +120,7 @@ def test_the_inline_tool_is_gone_from_the_analysis_window():
 
 def test_each_panel_has_its_own_source_colormap_and_contrast(window):
     for panel in window.panels:
-        assert panel.observable_combo.count() > 0
+        assert panel.source_combo.count() > 0
         assert panel.colormap_combo.count() > 0
         assert panel.low_slider.value() < panel.high_slider.value()
         assert panel.fetch_btn.isEnabled()
@@ -208,19 +215,24 @@ def test_every_difference_mode_renders(window, mode):
     _flush()
     panel = window.panels[0]
     assert panel._difference_mode == mode
-    assert len(panel._display) == len(panel.frames)
+    for index, frame in enumerate(panel.frames):
+        assert panel.display_array(index).shape == frame.data.shape
     assert panel.canvas.has_plot_content()
 
 
 def test_running_difference_actually_differences(window):
     panel = window.panels[0]
     panel.set_frames(_sequence(0.0, n=3))
-    raw_first = np.asarray(panel._display[1], dtype=float).copy()
+    panel.set_difference_mode("raw")
+    raw = np.asarray(panel.display_array(1), dtype=float).copy()
     panel.set_difference_mode("running")
-    differenced = np.asarray(panel._display[1], dtype=float)
-    assert not np.allclose(raw_first, differenced)
-    # Frame N minus N-1 of a +1-per-frame ramp is ~1 everywhere.
-    assert float(np.nanmedian(differenced)) == pytest.approx(1.0, abs=0.6)
+    differenced = np.asarray(panel.display_array(1), dtype=float)
+    assert not np.allclose(raw, differenced)
+    inside = differenced != 0
+    # The uniform +1 brightening is removed, so "no change" sits at zero…
+    assert abs(float(np.median(differenced[inside]))) < 0.2
+    # …while the moving front survives as real signal.
+    assert float(np.percentile(np.abs(differenced[inside]), 99)) > 1.0
 
 
 def test_contrast_sliders_change_the_display_levels(window):
@@ -252,12 +264,12 @@ def test_the_colormap_is_per_panel(window):
 def test_a_panel_is_named_after_the_frame_it_holds(window):
     """The combo says what will be fetched next; the title must say what is shown."""
     panel = window.panels[0]
-    panel.observable_combo.setCurrentIndex(0)  # an AIA entry
+    panel.select_source("COR2-A")  # what would be fetched next
     panel.set_frames(_sequence(0.0, detector="C3"))
     _flush()
     title = panel.title_label.text()
     assert "C3" in title
-    assert "AIA" not in title
+    assert "COR2" not in title
 
 
 def test_setting_the_difference_mode_in_code_keeps_the_radios_honest(window):
@@ -270,7 +282,7 @@ def test_setting_the_difference_mode_in_code_keeps_the_radios_honest(window):
         for index, _ in enumerate(DIFFERENCE_MODES)
         if window._difference_group.button(index).isChecked()
     ]
-    assert checked == ["Running difference"]
+    assert checked == ["Running diff"]
 
 
 def test_the_default_wireframe_is_heavy_enough_to_see(window):
@@ -449,14 +461,13 @@ def test_the_analyzer_opens_and_reuses_one_window(monkeypatch):
         win.close()
 
 
-def test_the_colormap_defaults_from_the_frame_not_the_combo(window):
-    """An AIA palette on a LASCO frame makes a faint front nearly invisible."""
+def test_every_load_resets_the_colormap_to_gray(window):
     panel = window.panels[0]
-    panel.observable_combo.setCurrentIndex(0)  # an AIA entry
     panel.set_frames(_sequence(0.0, detector="C2"))
-    _flush()
-    assert "aia" not in panel.colormap_combo.currentText().lower()
-    assert "lasco" in panel.colormap_combo.currentText().lower()
+    assert panel.colormap_combo.currentText() == "gray"
+    panel.colormap_combo.setCurrentText("viridis")
+    panel.set_frames(_sequence(0.0, detector="C2"))
+    assert panel.colormap_combo.currentText() == "gray"
 
 
 # --- Reachable and usable with nothing loaded ------------------------------
@@ -548,73 +559,79 @@ def test_it_opens_and_is_usable_with_no_frames_loaded():
         win.close()
 
 
-def test_a_target_time_can_be_set_before_anything_is_fetched(window):
-    """Without this, an unseeded fetch would search around 'now', where the
-    archives have nothing."""
-    target = datetime(2012, 7, 12, 16, 30, 0)
-    window.target_edit.setDateTime(QDateTime(target))
-    _flush()
-    assert window.target_time() == target
+def test_the_event_range_sets_every_channel_before_anything_is_loaded(window):
+    start, end = datetime(2012, 7, 12, 15, 30), datetime(2012, 7, 12, 18, 45)
+    window.event_start_edit.setDateTime(QDateTime(start))
+    window.event_end_edit.setDateTime(QDateTime(end))
+    assert window.event_range() == (start, end)
+    assert all(panel.date_range() == (start, end) for panel in window.panels)
 
 
-def test_each_panel_fetches_at_the_windows_target(window, monkeypatch):
-    target = datetime(2012, 7, 12, 16, 30, 0)
-    window.target_edit.setDateTime(QDateTime(target))
-    _flush()
+def test_load_all_loads_each_channel_with_its_own_range(window, monkeypatch):
+    window.event_start_edit.setDateTime(QDateTime(datetime(2012, 7, 12, 16, 0)))
+    window.event_end_edit.setDateTime(QDateTime(datetime(2012, 7, 12, 18, 0)))
+    # One channel narrowed on its own after the event range was set.
+    window.panels[1].set_date_range(datetime(2012, 7, 12, 16, 30), datetime(2012, 7, 12, 17, 30))
 
     seen: list = []
     for panel in window.panels:
-        monkeypatch.setattr(panel, "start_fetch", lambda when=None, p=panel: seen.append((p.label, when)))
+        monkeypatch.setattr(panel, "start_fetch", lambda p=panel: seen.append((p.label, p.date_range())) or True)
     window._fetch_all()
-    assert seen == [("A", target), ("B", target), ("C", target)]
+    assert seen == [
+        ("A", (datetime(2012, 7, 12, 16, 0), datetime(2012, 7, 12, 18, 0))),
+        ("B", (datetime(2012, 7, 12, 16, 30), datetime(2012, 7, 12, 17, 30))),
+        ("C", (datetime(2012, 7, 12, 16, 0), datetime(2012, 7, 12, 18, 0))),
+    ]
 
-    # A panel's own Fetch button asks the window too, so fetching one at a time
-    # still centres all three on the same moment.
-    assert window.panels[1].target_provider() == target
 
-
-def test_once_frames_exist_the_slider_owns_the_time(window):
+def test_the_time_slider_steps_every_loaded_frame(window):
     window.panels[0].set_frames(_sequence(0.0, n=3, cadence_min=10))
     _flush()
     window.time_slider.setValue(window.time_slider.maximum())
     _flush()
-    stepped = window._shared_time
-    assert stepped is not None
-    # The target box follows the slider rather than fighting it.
-    assert window.target_edit.dateTime().toPython().replace(tzinfo=None) == stepped
-    assert window.target_time() == stepped
+    assert window._shared_time == window._time_axis[-1]
+    assert window.time_label.text() == f"{window._time_axis[-1]:%Y-%m-%d %H:%M:%S}"
 
 
 # --- Layout: images first --------------------------------------------------
 
 
-def test_panel_settings_start_collapsed_so_the_image_gets_the_space(window):
+def test_a_panel_is_only_its_image(window):
+    """Every control a panel owns is mounted in the deck, not around the image."""
     for panel in window.panels:
-        assert not panel.settings_section.isExpanded()
-        panel.settings_section.setExpanded(True)
-        assert panel.settings_section.isExpanded()
-        assert panel.observable_combo.isVisibleTo(panel.settings_section)
+        for widget in (panel.source_combo, panel.start_edit, panel.end_edit, panel.fetch_btn,
+                       panel.colormap_combo, panel.low_slider, panel.high_slider):
+            assert widget.parent() is not panel
+            assert window.deck.isAncestorOf(widget)
+        assert not panel.canvas.map_chrome_visible()
 
 
-def test_the_fit_controls_can_be_collapsed_away(window):
-    assert window.controls_section.isExpanded()
-    window.controls_section.setExpanded(False)
-    assert not window.controls_section.isExpanded()
-    # The sliders still exist and still drive the fit while hidden.
-    slider = window.gcs_panel.sliders["height_rsun"]
-    before = window.parameters().height_rsun
-    slider.slider.setValue(slider.slider.value() + 40)
-    _flush()
-    assert window.parameters().height_rsun != pytest.approx(before)
+def test_the_splitter_hands_the_images_exactly_the_space_they_can_use(window):
+    window.resize(1470, 900)
+    window.show()
+    _flush(20)
+    try:
+        ideal = window.stage.ideal_height(window.splitter.width())
+        assert abs(window.stage.height() - ideal) <= 2
+        # …and the cards get the rest without the deck growing a scrollbar.
+        assert not window.deck.verticalScrollBar().isVisible()
+    finally:
+        window.hide()
 
 
-def test_the_canvas_is_the_stretching_widget_in_a_panel(window):
-    from PySide6.QtWidgets import QSizePolicy
-
-    panel = window.panels[0]
-    assert panel.canvas.sizePolicy().verticalPolicy() == QSizePolicy.Expanding
-    # The settings card must not fight the canvas for vertical space.
-    assert panel.settings_section.sizePolicy().verticalPolicy() == QSizePolicy.Maximum
+def test_each_image_is_a_square_the_data_fills_edge_to_edge(window):
+    for panel, lon in zip(window.panels, (0.0, 62.0, -70.0)):
+        panel.set_frames(_sequence(lon, n=2))
+    window.resize(1470, 900)
+    window.show()
+    _flush(20)
+    try:
+        for panel in window.panels:
+            assert panel.width() == panel.height()
+            viewbox = panel.canvas.map_plot.getViewBox().screenGeometry()
+            assert abs(viewbox.width() - panel.width()) <= 2
+    finally:
+        window.hide()
 
 
 # --- Running difference applies to every panel -----------------------------
@@ -626,12 +643,13 @@ def test_running_difference_reaches_all_three_panels(window):
     _flush()
     window._on_difference_mode("running")
     _flush()
+    assert window._difference_mode() == "running"
     for panel in window.panels:
         assert panel.can_difference()
         assert panel.difference_mode() == "running"
-        assert "Running difference" in panel.title_label.text()
-        # A +1-per-frame ramp differences to ~1, so this really is differenced.
-        assert float(np.nanmedian(np.asarray(panel._display[1]))) == pytest.approx(1.0, abs=0.6)
+        # The moving front shows up in every panel, so this really is differenced.
+        differenced = np.asarray(panel.display_array(1))
+        assert float(np.percentile(np.abs(differenced[differenced != 0]), 99)) > 1.0
 
 
 def test_a_one_frame_panel_says_so_instead_of_showing_raw_under_a_false_label(window):
@@ -767,21 +785,23 @@ def test_the_sun_is_never_drawn_stretched(window):
         window.hide()
 
 
-def test_collapsing_the_controls_makes_the_images_bigger(window):
-    """The point of the collapsible cards — measured, not assumed."""
-    for panel, lon in zip(window.panels, (0.0, 62.0, -70.0)):
-        panel.set_frames(_sequence(lon, n=3))
-    window.resize(1780, 1020)
+def test_focus_enlarges_the_chosen_image_and_equal_leaves_no_space_unused(window):
+    window.resize(1470, 900)
     window.show()
-    _flush(8)
+    _flush(20)
     try:
-        window.controls_section.setExpanded(True)
-        _flush(8)
-        opened = window.panels[0].canvas.height()
-        window.controls_section.setExpanded(False)
-        _flush(8)
-        collapsed = window.panels[0].canvas.height()
-        assert collapsed > opened
+        rects = [panel.geometry() for panel in window.panels]
+        equal_side = rects[0].width()
+        used = max(r.right() for r in rects) - min(r.left() for r in rects) + 1
+        assert window.stage.width() - used <= 2  # the row spans the stage
+
+        window.set_layout_mode("focus", 1)
+        _flush(20)
+        sizes = [panel.width() for panel in window.panels]
+        assert sizes[1] > max(sizes[0], sizes[2])
+        assert sizes[1] >= 1.4 * equal_side
+        assert window.splitter.orientation() == Qt.Horizontal
+        assert window.deck.orientation() == "column"
     finally:
         window.hide()
 
@@ -817,3 +837,594 @@ def test_axis_titles_are_hidden_to_widen_the_image(window):
     assert not label.toPlainText().strip()
     # The tick numbers, which are what is actually read, stay.
     assert panel.canvas.map_plot.getPlotItem().getAxis("left").isVisible()
+
+
+# --- Thread lifecycle: the crash on close ----------------------------------
+
+
+class _SlowWorker(QObject):
+    """Stands in for SunPyWorker: long-running, cancellable, same signals."""
+
+    finished = Signal()
+    failed = Signal(str)
+    cancelled = Signal()
+    search_finished = Signal(object)
+    load_finished = Signal(object, object)
+
+    def __init__(self):
+        super().__init__()
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    @Slot()
+    def run(self):
+        import time
+
+        for _ in range(200):  # 20 s if nothing cancels it
+            if self._cancelled:
+                break
+            time.sleep(0.1)
+        self.finished.emit()
+
+
+def test_closing_mid_download_cancels_instead_of_aborting(window):
+    """Qt calls qFatal if a QThread is destroyed while running, and a real
+    download outlasts any wait() worth having — so close must cancel, and must
+    never delete a thread that has not returned."""
+    import time
+
+    import src.UI.gcs_viewpoint_panel as panel_module
+
+    for panel in window.panels:
+        panel._launch(_SlowWorker())
+    _flush()
+    assert sum(1 for p in window.panels if p._thread and p._thread.isRunning()) == 3
+    assert len(panel_module._LIVE_THREADS) >= 3
+
+    started = time.perf_counter()
+    window.close()
+    _flush(6)
+    elapsed = time.perf_counter() - started
+    # Cancelled, not waited out: 3 x 20 s of downloads would be 60 s.
+    assert elapsed < 5.0
+    for panel in window.panels:
+        assert panel._thread is None
+
+
+def test_finished_threads_are_released_from_the_registry(window):
+    import time
+
+    import src.UI.gcs_viewpoint_panel as panel_module
+
+    before = len(panel_module._LIVE_THREADS)
+    panel = window.panels[0]
+    worker = _SlowWorker()
+    panel._launch(worker)
+    _flush()
+    assert len(panel_module._LIVE_THREADS) == before + 1
+
+    worker.cancel()
+    deadline = time.time() + 5.0
+    while time.time() < deadline and len(panel_module._LIVE_THREADS) > before:
+        _flush(2)
+        time.sleep(0.05)
+    assert len(panel_module._LIVE_THREADS) == before
+
+
+def test_a_worker_thread_is_not_parented_to_the_widget(window):
+    """A QThread parented to a widget is destroyed with it — while still running."""
+    panel = window.panels[0]
+    panel._launch(_SlowWorker())
+    _flush()
+    try:
+        assert panel._thread.parent() is None
+    finally:
+        panel.shutdown()
+
+
+# --- Running difference: the failures that showed raw pixels ---------------
+
+
+def test_a_frame_that_cannot_share_the_grid_is_dropped_so_differencing_works(window):
+    """A frame smaller than the rest cannot be honestly resampled up; it is
+    dropped, and said so, rather than breaking every difference."""
+    panel = window.panels[0]
+    messages: list[str] = []
+    panel.statusChanged.connect(messages.append)
+
+    class Odd:
+        data = np.zeros((16, 16))
+        meta: dict = {}
+        date = "2012-07-12T16:05:00"
+        detector = "C3"
+        instrument = "LASCO"
+        observatory = "SOHO"
+        wavelength = None
+        coordinate_frame = None
+
+    panel.set_frames(_sequence(0.0, n=4) + [Odd()])
+    _flush()
+    assert len(panel.frames) == 4
+    assert any("could not share" in message for message in messages)
+
+    panel.set_difference_mode("running")
+    assert panel.difference_mode() == "running"
+    assert "failed" not in panel.title_label.text()
+
+
+def test_a_differencing_failure_is_reported_not_swallowed(window, monkeypatch):
+    panel = window.panels[0]
+    messages: list[str] = []
+    panel.statusChanged.connect(messages.append)
+    monkeypatch.setattr(
+        "src.Backend.helioviewer_jp2.difference_image",
+        lambda *a, **k: (_ for _ in ()).throw(ValueError("boom")),
+    )
+    panel.set_frames(_sequence(0.0, n=4))  # loads straight into running difference
+    _flush()
+    assert any("differencing failed" in message for message in messages)
+    assert "failed" in panel.title_label.text()
+    # Raw is a fine fallback; a false label is not.
+    assert np.array_equal(panel.display_array(1), np.asarray(panel.frames[1].data, dtype=np.float32))
+
+
+def test_a_difference_image_is_stretched_symmetrically_about_zero(window):
+    """Mid-scale has to mean "no change", or a brightening and a dimming look
+    identical and the whole frame takes a colour cast."""
+    panel = window.panels[0]
+    panel.set_frames(_sequence(0.0, n=4))
+    panel.set_difference_mode("raw")
+    _flush()
+    raw_low, _raw_high = panel.canvas._last_map_levels
+    assert raw_low >= 0  # the raw ramp is positive
+
+    panel.set_difference_mode("running")
+    _flush()
+    low, high = panel.canvas._last_map_levels
+    assert low == pytest.approx(-high)
+    assert low < 0 < high
+
+
+def test_an_explicit_colormap_survives_switching_view_modes(window):
+    panel = window.panels[0]
+    panel.set_frames(_sequence(0.0, n=4))
+    panel.colormap_combo.setCurrentText("viridis")
+    panel.set_difference_mode("raw")
+    panel.set_difference_mode("base")
+    assert panel.colormap_combo.currentText() == "viridis"
+
+
+def test_loading_shows_a_busy_state_rather_than_looking_broken(window):
+    assert window.load_all_btn.isEnabled() and window.load_all_btn.text() == "Load all"
+
+    window.panels[0]._launch(_SlowWorker())
+    window._sync_busy()
+    assert not window.load_all_btn.isEnabled()
+    assert window.load_all_btn.text() == "Loading…"
+    assert window.panels[0].is_fetching()
+
+    window.panels[0].shutdown()
+    window._sync_busy()
+    assert window.load_all_btn.isEnabled() and window.load_all_btn.text() == "Load all"
+
+
+def test_the_view_modes_explain_themselves(window):
+    tips = {str(b.property("segment_key")): b.toolTip() for b in window._difference_group.buttons()}
+    assert set(tips) == {"raw", "running", "base"}
+    assert all(tip.strip() for tip in tips.values())
+    assert "default" in tips["running"].lower()
+
+
+# --- JP2 loading ---------------------------------------------------------------
+
+
+def test_only_jp2_coronagraph_sources_are_offered(window):
+    from src.Backend.helioviewer_jp2 import GCS_JP2_SOURCES
+
+    keys = [window.panels[0].source_combo.itemData(i) for i in range(window.panels[0].source_combo.count())]
+    assert keys == [source.key for source in GCS_JP2_SOURCES]
+
+
+def test_the_default_triad_follows_the_target_date():
+    _app()
+    early = GCSFittingWindow(target_time=datetime(2012, 7, 12, 17))
+    late = GCSFittingWindow(target_time=datetime(2021, 10, 28, 15))
+    try:
+        assert [p.source().key for p in early.panels] == ["COR2-A", "LASCO C2", "COR2-B"]
+        # STEREO-B was lost in 2014, so the third panel cannot stay on it.
+        assert [p.source().key for p in late.panels] == ["COR2-A", "LASCO C2", "LASCO C3"]
+    finally:
+        early.close()
+        late.close()
+
+
+def test_moving_the_event_past_2014_takes_panel_c_off_stereo_b(window):
+    """A still-valid choice is left alone; one the spacecraft could not have made
+    is replaced and greyed out."""
+    window.event_start_edit.setDateTime(QDateTime(datetime(2012, 7, 12, 16)))
+    window.event_end_edit.setDateTime(QDateTime(datetime(2012, 7, 12, 18)))
+    window.panels[2].select_source("COR2-B")  # a valid choice in 2012
+    assert window.panels[2].source().key == "COR2-B"
+    window.event_start_edit.setDateTime(QDateTime(datetime(2021, 10, 28, 14)))
+    window.event_end_edit.setDateTime(QDateTime(datetime(2021, 10, 28, 16)))
+    assert window.panels[2].source().key != "COR2-B"
+    index = window.panels[2].source_combo.findData("COR2-B")
+    item = window.panels[2].source_combo.model().item(index)
+    assert not (item.flags() & Qt.ItemIsEnabled)
+
+
+def test_changing_the_event_after_loading_retargets_every_channel(window, monkeypatch):
+    """Typing a new event must never quietly re-load the previous one."""
+    window.panels[0].set_frames(_sequence(0.0, n=3))
+    _flush()
+    window.time_slider.setValue(1)
+    _flush()
+
+    new_start, new_end = datetime(2013, 4, 11, 6, 30), datetime(2013, 4, 11, 8, 30)
+    window.event_start_edit.setDateTime(QDateTime(new_start))
+    window.event_end_edit.setDateTime(QDateTime(new_end))
+    seen: list = []
+    for panel in window.panels:
+        monkeypatch.setattr(panel, "start_fetch", lambda p=panel: seen.append(p.date_range()) or True)
+    window._fetch_all()
+    assert seen == [(new_start, new_end)] * 3
+
+
+def test_a_source_that_did_not_exist_then_is_refused_with_a_reason(window):
+    panel = window.panels[2]
+    messages: list[str] = []
+    panel.statusChanged.connect(messages.append)
+    panel.select_source("COR2-B")
+    panel.set_date_range(datetime(2021, 1, 1, 0), datetime(2021, 1, 1, 2))
+    assert panel.start_fetch() is False
+    assert not panel.is_fetching()
+    assert any("no data for 2021-01-01" in message for message in messages)
+
+
+def test_the_fetch_worker_hands_back_the_sequence(monkeypatch):
+    from src.Backend import helioviewer_jp2 as hvjp2
+    from src.UI.gcs_viewpoint_panel import JP2FetchWorker
+
+    _app()
+    calls: dict = {}
+
+    def fake_fetch(source, start, end, **kwargs):
+        calls.update(kwargs, source=source, start=start, end=end)
+        kwargs["progress_cb"]("Listing…")
+        return hvjp2.JP2Sequence(source=source, frames=(), listed=5, from_cache=2)
+
+    monkeypatch.setattr(hvjp2, "fetch_range", fake_fetch)
+    source = hvjp2.source_by_key("LASCO C2")
+    start, end = datetime(2012, 7, 12, 16), datetime(2012, 7, 12, 18)
+    worker = JP2FetchWorker(source, start, end, max_frames=25, cache_dir=None)
+    progress, finished = [], []
+    worker.progress.connect(progress.append)
+    worker.finished.connect(finished.append)
+    worker.run()
+    assert progress == ["Listing…"]
+    assert finished and finished[0].listed == 5
+    assert (calls["start"], calls["end"], calls["max_frames"], calls["source"]) == (start, end, 25, source)
+
+
+def test_a_cancelled_fetch_worker_says_so(monkeypatch):
+    from src.Backend import helioviewer_jp2 as hvjp2
+    from src.UI.gcs_viewpoint_panel import JP2FetchWorker
+
+    _app()
+
+    def fake_fetch(*args, **kwargs):
+        raise hvjp2.HelioviewerJP2Cancelled("Cancelled.")
+
+    monkeypatch.setattr(hvjp2, "fetch_range", fake_fetch)
+    worker = JP2FetchWorker(
+        hvjp2.source_by_key("COR2-A"), datetime(2012, 7, 12, 16), datetime(2012, 7, 12, 18), max_frames=10, cache_dir=None
+    )
+    cancelled, failed = [], []
+    worker.cancelled.connect(lambda: cancelled.append(True))
+    worker.failed.connect(failed.append)
+    worker.run()
+    assert cancelled == [True] and failed == []
+
+
+def test_a_fetch_failure_is_reported(monkeypatch):
+    from src.Backend import helioviewer_jp2 as hvjp2
+    from src.UI.gcs_viewpoint_panel import JP2FetchWorker
+
+    _app()
+    monkeypatch.setattr(
+        hvjp2, "fetch_range", lambda *a, **k: (_ for _ in ()).throw(hvjp2.HelioviewerJP2Error("no frames"))
+    )
+    worker = JP2FetchWorker(
+        hvjp2.source_by_key("COR2-A"), datetime(2012, 7, 12, 16), datetime(2012, 7, 12, 18), max_frames=10, cache_dir=None
+    )
+    failed: list[str] = []
+    worker.failed.connect(failed.append)
+    worker.run()
+    assert failed == ["no frames"]
+
+
+def test_a_loaded_sequence_reports_cache_hits_and_drops(window):
+    from src.Backend import helioviewer_jp2 as hvjp2
+
+    panel = window.panels[1]
+    messages: list[str] = []
+    panel.statusChanged.connect(messages.append)
+    sequence = hvjp2.JP2Sequence(
+        source=hvjp2.source_by_key("LASCO C2"),
+        frames=tuple(_sequence(0.0, n=4, detector="C2")),
+        listed=9,
+        from_cache=3,
+        skipped=("17:24:00: timeout",),
+        dropped=1,
+    )
+    panel._on_fetch_finished(sequence)
+    _flush()
+    assert panel.frame_count() == 4
+    summary = messages[-1]
+    assert "4 frame(s)" in summary and "3 from cache" in summary
+    assert "1 failed to download" in summary and "1 dropped" in summary
+
+
+def test_difference_frames_are_built_once_and_cached(window, monkeypatch):
+    """Built on first display (~25 ms each) and reused, so playback pays once."""
+    from src.Backend import helioviewer_jp2 as hvjp2
+
+    panel = window.panels[0]
+    calls = {"n": 0}
+    real = hvjp2.difference_image
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(hvjp2, "difference_image", counting)
+    panel.set_frames(_sequence(0.0, n=4))  # loads into running difference
+    for _ in range(3):
+        for index in range(panel.frame_count()):
+            panel.display_array(index)
+    assert calls["n"] == panel.frame_count()
+
+
+def test_switching_modes_never_serves_a_stale_image(window):
+    panel = window.panels[0]
+    panel.set_frames(_sequence(0.0, n=4))
+    panel.set_difference_mode("raw")
+    raw = panel.display_array(2).copy()
+    panel.set_difference_mode("running")
+    running = panel.display_array(2).copy()
+    panel.set_difference_mode("base")
+    base = panel.display_array(2).copy()
+    panel.set_difference_mode("raw")
+    assert np.array_equal(panel.display_array(2), raw)
+    assert not np.allclose(running, raw) and not np.allclose(base, running)
+
+
+def test_the_analyzer_hands_over_its_current_time_not_its_pixels():
+    """The GCS window loads JP2 only; what carries across is the moment."""
+    from src.UI.solar_data_analysis_window import SolarDataAnalysisWindow
+
+    _app()
+    win = SolarDataAnalysisWindow()
+    try:
+        frames = _sequence(0.0, n=3, cadence_min=10)
+        win._map_frames = frames
+        win._current_frame_index = 2
+        win.open_gcs_fitting_window()
+        gcs = win._gcs_window
+        moment = datetime(2012, 7, 12, 16, 20, 0)
+        assert gcs.event_range() == (moment - timedelta(hours=1), moment + timedelta(hours=1))
+        assert all(panel.frame_count() == 0 for panel in gcs.panels)
+        gcs.close()
+    finally:
+        win._map_frames = []
+        win.close()
+
+
+
+
+# --- Event and channel date ranges ------------------------------------------------
+
+
+def test_each_channel_range_can_be_narrowed_without_touching_the_others(window):
+    window.event_start_edit.setDateTime(QDateTime(datetime(2012, 7, 12, 16)))
+    window.event_end_edit.setDateTime(QDateTime(datetime(2012, 7, 12, 18)))
+    window.panels[0].set_date_range(datetime(2012, 7, 12, 16, 30), datetime(2012, 7, 12, 17))
+    assert window.panels[1].date_range() == (datetime(2012, 7, 12, 16), datetime(2012, 7, 12, 18))
+    assert window.panels[2].date_range() == (datetime(2012, 7, 12, 16), datetime(2012, 7, 12, 18))
+
+
+@pytest.mark.parametrize(
+    "start, end, reason",
+    [
+        (datetime(2012, 7, 12, 18), datetime(2012, 7, 12, 16), "after its start"),
+        (datetime(2012, 7, 1, 0), datetime(2012, 7, 12, 0), "narrow it"),
+    ],
+)
+def test_a_channel_refuses_an_unusable_range_and_says_why(window, start, end, reason):
+    panel = window.panels[0]
+    messages: list[str] = []
+    panel.statusChanged.connect(messages.append)
+    panel.set_date_range(start, end)
+    assert panel.start_fetch() is False
+    assert not panel.is_fetching()
+    assert any(reason in message for message in messages)
+
+
+def test_load_all_refuses_a_backwards_event_range(window, monkeypatch):
+    window.event_start_edit.setDateTime(QDateTime(datetime(2012, 7, 12, 18)))
+    window.event_end_edit.setDateTime(QDateTime(datetime(2012, 7, 12, 16)))
+    started: list = []
+    for panel in window.panels:
+        monkeypatch.setattr(panel, "start_fetch", lambda p=panel: started.append(p) or True)
+    window._fetch_all()
+    assert started == []
+    assert "after its start" in window.status_label.text()
+
+
+def test_the_frame_cap_reaches_every_channel(window):
+    window.max_frames_spin.setValue(17)
+    assert all(panel.max_frames_provider() == 17 for panel in window.panels)
+
+
+# --- Defaults on load -------------------------------------------------------------
+
+
+def test_loading_opens_in_gray_running_difference_whatever_the_view_was_left_on(window):
+    window.panels[0].set_frames(_sequence(0.0, n=4))
+    window._on_difference_mode("raw")
+    window.panels[0].colormap_combo.setCurrentText("viridis")
+    assert window._difference_mode() == "raw"
+
+    window.panels[1].set_frames(_sequence(62.0, n=4))
+    _flush()
+    assert window._difference_mode() == "running"
+    for panel in window.panels[:2]:
+        assert panel.difference_mode() == "running"
+    assert window.panels[1].colormap_combo.currentText() == "gray"
+
+
+def test_a_fresh_window_starts_in_running_difference(window):
+    assert window._difference_mode() == "running"
+    assert all(panel._difference_mode == "running" for panel in window.panels)
+
+
+# --- Solar limb and axes ------------------------------------------------------------
+
+
+def test_the_solar_limb_is_drawn_at_the_observers_apparent_radius(window):
+    panel = window.panels[0]
+    panel.set_frames(_sequence(0.0, n=2))
+    assert window.limb_check.isChecked()
+    assert panel.canvas.has_aia_limb_overlay()
+    x, y = panel.canvas._aia_limb_curve.getData()
+    radii = np.hypot(x, y)
+    assert radii == pytest.approx(panel.observer.rsun_arcsec, rel=1e-6)
+
+
+def test_the_limb_can_be_hidden_and_stays_hidden_through_a_load(window):
+    panel = window.panels[0]
+    panel.set_frames(_sequence(0.0, n=2))
+    window.limb_check.setChecked(False)
+    assert not panel.canvas.has_aia_limb_overlay()
+    panel.set_frames(_sequence(0.0, n=2))
+    assert not panel.canvas.has_aia_limb_overlay()
+    window.limb_check.setChecked(True)
+    assert panel.canvas.has_aia_limb_overlay()
+
+
+def test_axes_are_off_by_default_and_cost_image_space_when_on(window):
+    panel = window.panels[0]
+    panel.set_frames(_sequence(0.0, n=2))
+    window.resize(1470, 900)
+    window.show()
+    _flush(20)
+    try:
+        assert not window.axes_check.isChecked()
+        bare = panel.canvas.map_plot.getViewBox().screenGeometry().width()
+        window.axes_check.setChecked(True)
+        _flush(20)
+        framed = panel.canvas.map_plot.getViewBox().screenGeometry().width()
+        assert framed < bare
+    finally:
+        window.hide()
+
+
+# --- Stage geometry and layouts -----------------------------------------------------
+
+
+@pytest.mark.parametrize("width, height", [(1458, 482), (1458, 700), (900, 900), (2400, 500)])
+def test_equal_layout_places_three_equal_squares_inside_the_stage(window, width, height):
+    rects = window.stage.geometry_for(width, height)
+    sides = {(r.width(), r.height()) for r in rects}
+    assert len(sides) == 1 and all(r.width() == r.height() for r in rects)
+    assert all(r.left() >= 0 and r.top() >= 0 and r.right() < width and r.bottom() < height for r in rects)
+    assert not any(a.intersects(b) for i, a in enumerate(rects) for b in rects[i + 1 :])
+
+
+@pytest.mark.parametrize("focus", [0, 1, 2])
+@pytest.mark.parametrize("width, height", [(1084, 840), (1500, 980), (700, 900)])
+def test_focus_layout_enlarges_one_square_beside_two_smaller(window, focus, width, height):
+    window.stage.set_layout("focus", focus)
+    rects = window.stage.geometry_for(width, height)
+    large = rects[focus]
+    smalls = [r for i, r in enumerate(rects) if i != focus]
+    assert all(r.width() == r.height() for r in rects)
+    assert all(r.width() < large.width() for r in smalls)
+    assert all(r.left() >= 0 and r.top() >= 0 and r.right() < width and r.bottom() < height for r in rects)
+    assert not any(a.intersects(b) for i, a in enumerate(rects) for b in rects[i + 1 :])
+
+
+def test_the_layout_buttons_switch_layout_and_stay_in_step(window):
+    buttons = {str(b.property("segment_key")): b for b in window._layout_group.buttons()}
+    buttons["focus:2"].click()
+    assert window.layout_mode() == "focus" and window.stage.focus_index() == 2
+    window.set_layout_mode("equal")
+    assert buttons["equal"].isChecked()
+    assert window.splitter.orientation() == Qt.Vertical and window.deck.orientation() == "row"
+
+
+def test_keyboard_shortcuts_are_scoped_to_the_images(window):
+    keys = {shortcut.key().toString() for shortcut in window._shortcuts}
+    assert {"Space", "Left", "Right", "Home", "0", "1", "2", "3"} <= keys
+    assert all(shortcut.context() == Qt.WidgetWithChildrenShortcut for shortcut in window._shortcuts)
+    assert all(shortcut.parent() is window.stage for shortcut in window._shortcuts)
+
+
+def test_space_toggles_playback(window):
+    window.panels[0].set_frames(_sequence(0.0, n=3))
+    window.toggle_play()
+    assert window._play_timer.isActive()
+    window.toggle_play()
+    assert not window._play_timer.isActive()
+
+
+def test_a_dragged_splitter_is_respected_until_the_layout_changes(window):
+    window.resize(1470, 900)
+    window.show()
+    _flush(20)
+    try:
+        window._on_splitter_moved(300, 1)
+        window.splitter.setSizes([300, window.splitter.height() - 300])
+        window._fit_splitter(force=False)
+        assert window.stage.height() <= 310
+        window.set_layout_mode("equal")  # an explicit layout change re-fits
+        _flush(20)
+        assert abs(window.stage.height() - window.stage.ideal_height(window.splitter.width())) <= 2
+    finally:
+        window.hide()
+
+
+# --- Readouts ---------------------------------------------------------------------------
+
+
+def test_the_cursor_readout_gives_position_angle_and_solar_radii(window):
+    panel = window.panels[0]
+    panel.set_frames(_sequence(0.0, n=2))
+    radius = panel.observer.rsun_arcsec
+    window._on_hover("A", -3.0 * radius, 0.0)  # three radii due east
+    text = window.coord_label.text()
+    assert "PA 90°" in text and "3.00 R☉" in text
+    window._on_hover("A", None, None)
+    assert window.coord_label.text() == ""
+
+
+def test_the_caption_fits_even_the_smallest_panel(window):
+    for panel, lon in zip(window.panels, (0.0, 62.0, -70.0)):
+        panel.set_frames(_sequence(lon, n=4))
+    window.resize(1470, 900)
+    window.show()
+    window.set_layout_mode("focus", 0)
+    _flush(20)
+    try:
+        for panel in window.panels[1:]:
+            caption_width = panel.title_label._item.boundingRect().width()
+            assert caption_width < panel.width()
+    finally:
+        window.hide()
+
+
+def test_the_window_fits_a_1280_pixel_screen(window):
+    """The toolbar once pinned the minimum width at 1290 px."""
+    assert window.minimumSizeHint().width() <= 1200

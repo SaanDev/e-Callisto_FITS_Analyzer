@@ -6203,20 +6203,19 @@ class SolarDataAnalysisWindow(QMainWindow):
         except Exception:
             alive = False
         if not alive:
-            # Seed panel A with the frames already loaded here, when they carry a
-            # usable coordinate system — a crop or composite does not, and the
-            # window would rather start empty than with a panel it cannot fit.
-            from src.Backend.gcs_model import ObserverGeometry
-
-            seed = self._original_frames or self._map_frames
-            if seed and ObserverGeometry.from_frame(seed[0]) is None:
-                seed = []
+            # The GCS window loads only Helioviewer JPEG2000 frames, so nothing
+            # loaded here is handed over as pixels. What carries across is the
+            # moment: starting on the frame being looked at means "Fetch all" goes
+            # straight to this event.
+            target = None
+            frames = self._map_frames or self._original_frames
+            if frames:
+                index = max(0, min(int(getattr(self, "_current_frame_index", 0)), len(frames) - 1))
+                target = frame_observation_time(frames[index])
             self._gcs_window = GCSFittingWindow(
                 self,
-                seed_frames=list(seed),
-                seed_label=self._frames_word() or "A",
+                target_time=target,
                 cache_dir=self.cache_dir,
-                jsoc_email=str(self.jsoc_email_edit.text() or "").strip(),
                 theme=self.theme,
             )
         self._gcs_window.show()
