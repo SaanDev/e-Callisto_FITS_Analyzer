@@ -24,6 +24,7 @@ from src.Backend.gcs_model import (
     GCSParameters,
     GCSViewpoint,
     ObserverGeometry,
+    angular_widths_deg,
     apex_arcsec,
     apex_cross_section_radius_rsun,
     apex_height_rsun,
@@ -32,6 +33,7 @@ from src.Backend.gcs_model import (
     free_parameters,
     gcs_mesh,
     handle_positions_arcsec,
+    has_independent_viewpoints,
     height_for_apex_radius,
     join_polylines,
     leg_height_rsun,
@@ -100,6 +102,9 @@ def test_parameters_round_trip_through_an_array():
         GCSParameters(0.0, 0.0, 0.0, -1.0, 32.0, 0.3),
         GCSParameters(0.0, 0.0, 0.0, 9.0, 95.0, 0.3),
         GCSParameters(0.0, 120.0, 0.0, 9.0, 32.0, 0.3),
+        GCSParameters(float("nan"), 0.0, 0.0, 9.0, 32.0, 0.3),
+        GCSParameters(0.0, 0.0, float("inf"), 9.0, 32.0, 0.3),
+        GCSParameters(0.0, 0.0, 0.0, float("inf"), 32.0, 0.3),
     ],
 )
 def test_unphysical_parameters_are_rejected(params):
@@ -137,6 +142,13 @@ def test_a_narrower_shell_has_a_smaller_cross_section():
     wide = GCSParameters(0.0, 0.0, 0.0, 9.0, 32.0, 0.6)
     narrow = GCSParameters(0.0, 0.0, 0.0, 9.0, 32.0, 0.1)
     assert apex_cross_section_radius_rsun(narrow) < apex_cross_section_radius_rsun(wide)
+
+
+def test_intrinsic_widths_include_the_shell_cross_section():
+    params = TRUTH.replace_values(alpha_deg=30.0, kappa=0.5)
+    face_on, edge_on = angular_widths_deg(params)
+    assert face_on == pytest.approx(120.0)
+    assert edge_on == pytest.approx(60.0)
 
 
 # --- Mesh and orientation --------------------------------------------------
@@ -239,6 +251,11 @@ def test_sub_photospheric_mesh_points_are_never_drawn(disk_map):
     _, _, occulted = project_points_to_arcsec(oriented, observer)
     inside = radius < MIN_MODEL_RADIUS_RSUN
     assert occulted[inside].all()
+
+
+def test_apparent_solar_radius_matches_sunpy(disk_map):
+    observer = ObserverGeometry.from_frame(disk_map)
+    assert observer.rsun_arcsec == pytest.approx(disk_map.rsun_obs.value, abs=1e-8)
 
 
 def test_projection_masks_the_coronagraph_occulter():
@@ -526,6 +543,82 @@ def test_two_nearby_viewpoints_are_treated_as_one():
     assert "lon_deg" not in free_parameters(views)
 
 
+@pytest.mark.parametrize("empty", [np.empty((0, 2)), np.array([[np.nan, np.nan]])])
+def test_an_empty_second_view_does_not_release_direction(two_viewpoints, empty):
+    views = [two_viewpoints[0], GCSViewpoint(VIEW_B, empty)]
+    assert not has_independent_viewpoints(views)
+    result = refine_gcs(views, TRUTH)
+    assert result.n_viewpoints == 1
+    assert "lon_deg" not in result.free
+    assert result.parameters.lon_deg == TRUTH.lon_deg
+    assert result.parameters.lat_deg == TRUTH.lat_deg
+
+
+def test_near_opposite_views_remain_geometrically_degenerate():
+    opposite = ObserverGeometry(
+        lon_deg=VIEW_A.lon_deg + 178.0, lat_deg=-VIEW_A.lat_deg,
+        dsun_rsun=215.0, rsun_arcsec=960.0,
+    )
+    views = [GCSViewpoint(view, _synthetic_clicks(TRUTH, view)) for view in (VIEW_A, opposite)]
+    assert not has_independent_viewpoints(views)
+    assert "lon_deg" not in free_parameters(views)
+    views.append(GCSViewpoint(VIEW_B, _synthetic_clicks(TRUTH, VIEW_B)))
+    assert has_independent_viewpoints(views)
+
+
+def test_reported_residuals_are_arcseconds_for_each_observer():
+    from scipy.spatial import cKDTree
+
+    close = ObserverGeometry(
+        lon_deg=62.0, lat_deg=2.0, dsun_rsun=40.0,
+        rsun_arcsec=math.asin(1.0 / 40.0) * ARCSEC_PER_RADIAN,
+    )
+    views = [GCSViewpoint(view, _synthetic_clicks(TRUTH, view, n=12)) for view in (VIEW_A, close)]
+    result = refine_gcs(views, TRUTH, free=["height_rsun"], max_nfev=8)
+    expected = []
+    for view in views:
+        projection = project_to_arcsec(gcs_mesh(result.parameters), result.parameters, view.observer)
+        finite = np.isfinite(projection.tx_arcsec) & np.isfinite(projection.ty_arcsec)
+        mesh_points = np.column_stack((projection.tx_arcsec[finite], projection.ty_arcsec[finite]))
+        expected.extend(cKDTree(mesh_points).query(view.clicks_arcsec)[0])
+    np.testing.assert_allclose(result.residuals_arcsec, expected)
+    assert result.rms_arcsec == pytest.approx(np.sqrt(np.mean(np.square(expected))))
+
+
+def test_refinement_respects_the_detector_occulter():
+    from scipy.spatial import cKDTree
+
+    clicks = _synthetic_clicks(TRUTH, VIEW_A, n=12)
+    view = GCSViewpoint(VIEW_A, clicks, fov_rsun=(6.0, 30.0))
+    result = refine_gcs([view], TRUTH, free=["height_rsun"], max_nfev=1)
+    projection = project_to_arcsec(gcs_mesh(result.parameters), result.parameters, VIEW_A, fov_rsun=view.fov_rsun)
+    finite = np.isfinite(projection.tx_arcsec) & np.isfinite(projection.ty_arcsec)
+    mesh_points = np.column_stack((projection.tx_arcsec[finite], projection.ty_arcsec[finite]))
+    expected = cKDTree(mesh_points).query(clicks)[0]
+    np.testing.assert_allclose(result.residuals_arcsec, expected)
+
+
+def test_repeated_identical_clicks_do_not_produce_precise_uncertainties():
+    click = _synthetic_clicks(TRUTH, VIEW_A, n=1)[0]
+    view = GCSViewpoint(VIEW_A, np.tile(click, (12, 1)))
+    result = refine_gcs([view], TRUTH, free=["height_rsun", "kappa"])
+    assert result.covariance is None
+    assert math.isnan(result.sigma["height_rsun"])
+    assert math.isnan(result.sigma["kappa"])
+    assert "uncertainties unavailable" in result.message
+
+
+def test_refinement_requires_a_visible_manual_seed():
+    view = GCSViewpoint(VIEW_A, _synthetic_clicks(TRUTH, VIEW_A), fov_rsun=(3.7, 30.0))
+    with pytest.raises(ValueError, match="outside the visible field"):
+        refine_gcs([view], TRUTH.replace_values(height_rsun=1.1))
+
+
+def test_refinement_does_not_silently_clip_an_imported_seed(two_viewpoints):
+    with pytest.raises(ValueError, match="outside the refinement range"):
+        refine_gcs(two_viewpoints, TRUTH.replace_values(height_rsun=40.0))
+
+
 def test_refine_raises_with_user_facing_text(two_viewpoints):
     """Matches fit_circle/fit_height_time so the controller can show it verbatim."""
     seed = GCSParameters(43.0, -18.0, 34.0, 7.9, 37.0, 0.27)
@@ -539,6 +632,11 @@ def test_refine_raises_with_user_facing_text(two_viewpoints):
         refine_gcs(two_viewpoints, seed, free=["nonsense"])
     with pytest.raises(ValueError, match="valid range"):
         refine_gcs(two_viewpoints, seed.replace_values(kappa=1.0))
+    for free in ([], ["height_rsun", "height_rsun"]):
+        with pytest.raises(ValueError, match="distinct parameter"):
+            refine_gcs(two_viewpoints, seed, free=free)
+    with pytest.raises(ValueError, match="positive finite"):
+        refine_gcs(two_viewpoints, seed, click_tolerance_arcsec=float("nan"))
 
 
 def test_refine_ignores_non_finite_clicks():

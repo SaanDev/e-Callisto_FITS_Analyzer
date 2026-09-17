@@ -96,7 +96,16 @@ _LIMB_SAMPLES = 361
 
 
 def _utc_naive(value: Any) -> datetime:
-    return value.toPython().replace(tzinfo=None) if hasattr(value, "toPython") else value
+    value = value.toPython() if hasattr(value, "toPython") else value
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc)
+    return value.replace(tzinfo=None)
+
+
+def _qdatetime_utc(value: datetime) -> QDateTime:
+    value = _utc_naive(value)
+    return QDateTime(value.year, value.month, value.day, value.hour, value.minute,
+                     value.second, value.microsecond // 1000, Qt.UTC)
 
 
 def jp2_cache_dir(base: Any = None) -> Path:
@@ -167,6 +176,43 @@ class JP2FetchWorker(QObject):
         self.finished.emit(sequence)
 
 
+class _FetchDelivery(QObject):
+    """Deliver a worker's signals only while that exact request is current.
+
+    A queued Qt signal can still arrive after disconnect(). A receiver retained
+    for the request carries its identity through queueing and also guarantees
+    that all widget updates happen on the GUI thread.
+    """
+
+    def __init__(self, panel: GCSViewpointPanel, worker: JP2FetchWorker):
+        super().__init__(panel)
+        self.panel = panel
+        self.worker = worker
+
+    @Slot(str)
+    def progress(self, message: str) -> None:
+        if self.panel._worker is self.worker:
+            self.panel._on_progress(message)
+
+    @Slot(object)
+    def finished(self, sequence: Any) -> None:
+        if self.panel._worker is self.worker:
+            self.panel._on_fetch_finished(sequence)
+        self.deleteLater()
+
+    @Slot(str)
+    def failed(self, message: str) -> None:
+        if self.panel._worker is self.worker:
+            self.panel._on_failed(message)
+        self.deleteLater()
+
+    @Slot()
+    def cancelled(self) -> None:
+        if self.panel._worker is self.worker:
+            self.panel._on_cancelled()
+        self.deleteLater()
+
+
 class ImageCaption:
     """A panel's caption, drawn on the image and pinned to its top-left corner.
 
@@ -181,8 +227,14 @@ class ImageCaption:
         self._text = ""
         self._item = pg.TextItem("", color=(240, 240, 240), fill=pg.mkBrush(0, 0, 0, 160), anchor=(0, 0))
         self._item.setZValue(60)
-        self._item.setParentItem(canvas.map_plot.getViewBox())
+        self._view = canvas.map_plot.getViewBox()
+        self._item.setParentItem(self._view)
         self._item.setPos(6, 6)
+        self._view.sigResized.connect(self._resize)
+        self._resize()
+
+    def _resize(self) -> None:
+        self._item.setTextWidth(max(80.0, self._view.width() - 16.0))
 
     def text(self) -> str:
         return self._text
@@ -222,6 +274,7 @@ class GCSViewpointPanel(QWidget):
         self.frames: list[Any] = []
         self.observer: ObserverGeometry | None = None
         self._display_cache: dict[tuple[str, int], np.ndarray] = {}
+        self._display_failures: dict[tuple[str, int], str] = {}
         #: Display ranges, which only change with the frame, mode or sliders. The
         #: percentile behind each costs ~15 ms on a 1024-pixel frame.
         self._levels_cache: dict[tuple, tuple[float | None, float | None]] = {}
@@ -230,6 +283,7 @@ class GCSViewpointPanel(QWidget):
         self._thread: QThread | None = None
         self._worker: QObject | None = None
         self._target_time: datetime | None = None
+        self._sync_tolerance_seconds = 300.0
         self._difference_failed = ""
         self._limb_visible = True
         #: Set by the window: the cap on frames per channel for a range fetch.
@@ -238,6 +292,9 @@ class GCSViewpointPanel(QWidget):
         self._build_image()
         self._build_controls()
         self.select_source(source_key)
+        self.source_combo.currentIndexChanged.connect(self.invalidate_frames)
+        self.start_edit.dateTimeChanged.connect(self.invalidate_frames)
+        self.end_edit.dateTimeChanged.connect(self.invalidate_frames)
 
     # ------------------------------------------------------------------- UI
     def _build_image(self) -> None:
@@ -268,9 +325,10 @@ class GCSViewpointPanel(QWidget):
         )
 
         now = datetime.now(timezone.utc).replace(tzinfo=None, second=0, microsecond=0)
-        self.start_edit = QDateTimeEdit(QDateTime(now - timedelta(hours=1)))
-        self.end_edit = QDateTimeEdit(QDateTime(now + timedelta(hours=1)))
+        self.start_edit = QDateTimeEdit(_qdatetime_utc(now - timedelta(hours=1)))
+        self.end_edit = QDateTimeEdit(_qdatetime_utc(now + timedelta(hours=1)))
         for edit, which in ((self.start_edit, "first"), (self.end_edit, "last")):
+            edit.setTimeSpec(Qt.UTC)
             edit.setCalendarPopup(True)
             edit.setDisplayFormat(RANGE_FORMAT)
             edit.setToolTip(f"UTC time of the {which} frame this channel should load.")
@@ -335,8 +393,22 @@ class GCSViewpointPanel(QWidget):
         return _utc_naive(self.start_edit.dateTime()), _utc_naive(self.end_edit.dateTime())
 
     def set_date_range(self, start: datetime, end: datetime) -> None:
-        self.start_edit.setDateTime(QDateTime(start.replace(tzinfo=None, microsecond=0)))
-        self.end_edit.setDateTime(QDateTime(end.replace(tzinfo=None, microsecond=0)))
+        start, end = (_utc_naive(value).replace(microsecond=0) for value in (start, end))
+        if (start, end) == self.date_range():
+            return
+        for edit, value in ((self.start_edit, start), (self.end_edit, end)):
+            blocked = edit.blockSignals(True)
+            edit.setDateTime(_qdatetime_utc(value))
+            edit.blockSignals(blocked)
+        self.invalidate_frames()
+
+    def invalidate_frames(self, *_args: Any) -> None:
+        """Discard frames and pending downloads when their source/range changes."""
+        self.cancel_fetch(discard_result=True)
+        if self.frames:
+            self.set_frames([])
+        else:
+            self.render()
 
     # -------------------------------------------------------------- frames
     def set_frames(self, frames: list[Any], *, harmonised: bool = False) -> None:
@@ -360,11 +432,9 @@ class GCSViewpointPanel(QWidget):
                 "pixel grid."
             )
         self.frames = ordered
-        self.observer = (
-            ObserverGeometry.from_frame(ordered[0], label=self.label) if ordered else None
-        )
         self._index = 0
         self._display_cache.clear()
+        self._display_failures.clear()
         self._levels_cache.clear()
         self._difference_failed = ""
         if ordered:
@@ -373,12 +443,16 @@ class GCSViewpointPanel(QWidget):
             self.colormap_combo.setCurrentText(DEFAULT_COLORMAP)
             self.colormap_combo.blockSignals(was)
         self.frames_label.setText(f"{len(ordered)} frame{'s' if len(ordered) != 1 else ''}" if ordered else "—")
-        self._refresh_limb()
+        self._select_nearest_frame()
+        self._refresh_observer()
         self.framesChanged.emit(self)
         self.render()
 
     def set_difference_mode(self, mode: str) -> None:
-        self._difference_mode = str(mode or "raw")
+        mode = str(mode or "raw")
+        if mode not in dict(DIFFERENCE_MODES):
+            raise ValueError(f"Unknown difference mode: {mode}")
+        self._difference_mode = mode
         self._difference_failed = ""
         self.render()
 
@@ -387,10 +461,17 @@ class GCSViewpointPanel(QWidget):
         return len(self.frames) >= 2
 
     def difference_mode(self) -> str:
-        """The mode actually in effect, which is ``raw`` when it cannot difference."""
+        """Selected sequence mode, or ``raw`` when it cannot difference."""
         if self._difference_mode != "raw" and not self.can_difference():
             return "raw"
         return self._difference_mode
+
+    def rendered_mode(self) -> str:
+        """Mode of the current image, including baseline and failed references."""
+        mode = self.difference_mode()
+        if self._index == 0 or (mode, self._index) in self._display_failures:
+            return "raw"
+        return mode
 
     def frame_count(self) -> int:
         return len(self.frames)
@@ -403,31 +484,36 @@ class GCSViewpointPanel(QWidget):
         and a playback pass pays the cost once per frame. A failure falls back to
         the raw frame *and says so*.
         """
+        if not self.frames:
+            raise ValueError("No frames are loaded.")
         index = max(0, min(int(index), len(self.frames) - 1))
         mode = self.difference_mode()
         key = (mode, index)
+        self._difference_failed = self._display_failures.get(key, "")
         cached = self._display_cache.get(key)
         if cached is not None:
             return cached
 
         frame = self.frames[index]
-        if mode == "raw":
+        # There is no previous observation for the first frame. Displaying the
+        # next minus first image here would label a future front with the first
+        # frame's timestamp, observer position and saved-fit metadata.
+        if mode == "raw" or index == 0:
             image = np.asarray(frame.data, dtype=np.float32)
         else:
             try:
                 if mode == "running":
-                    if index == 0:
-                        current, reference = self.frames[1], self.frames[0]
-                    else:
-                        current, reference = frame, self.frames[index - 1]
+                    current, reference = frame, self.frames[index - 1]
                 else:
                     current, reference = frame, self.frames[0]
+                self._validate_difference_grid(current, reference)
                 image = hvjp2.difference_image(current, reference)
             except Exception as exc:
                 message = str(exc) or type(exc).__name__
                 if message != self._difference_failed:
                     self.statusChanged.emit(f"{self.label}: differencing failed ({message}); showing raw.")
                 self._difference_failed = message
+                self._display_failures[key] = message
                 image = np.asarray(frame.data, dtype=np.float32)
 
         if len(self._display_cache) > 4 * max(1, len(self.frames)):
@@ -435,6 +521,26 @@ class GCSViewpointPanel(QWidget):
             self._levels_cache.clear()
         self._display_cache[key] = image
         return image
+
+    def _validate_difference_grid(self, current: Any, reference: Any) -> None:
+        """Reject equal-sized arrays whose pixels refer to different sky points."""
+        current_grid = self._axis_transform(current, current.data.shape)
+        reference_grid = self._axis_transform(reference, reference.data.shape)
+        if current_grid is None or reference_grid is None:
+            raise ValueError("a north-up solar WCS is required for differencing")
+        for axis, size in (("x", current.data.shape[1]), ("y", current.data.shape[0])):
+            positions = np.array([0.0, float(size - 1)])
+            coordinates = []
+            scales = []
+            for grid in (current_grid, reference_grid):
+                scale = grid[f"{axis}_scale_arcsec_per_pix"]
+                coordinates.append(grid[f"{axis}_ref_arcsec"] +
+                                   (positions - grid[f"{axis}_ref_pix"]) * scale)
+                scales.append(abs(scale))
+            # The loader ignores pointing corrections below 0.05 pixel. Allow
+            # this numerical tolerance while rejecting scale/roll mismatches.
+            if np.max(np.abs(coordinates[0] - coordinates[1])) > 0.1 * min(scales):
+                raise ValueError("frames do not share the same solar coordinate grid")
 
     def times(self) -> list[datetime]:
         out: list[datetime] = []
@@ -450,7 +556,13 @@ class GCSViewpointPanel(QWidget):
         Matching on time rather than index is what keeps three instruments with
         different cadences actually simultaneous.
         """
-        self._target_time = when
+        self._target_time = _utc_naive(when) if when is not None else None
+        self._select_nearest_frame()
+        self._refresh_observer()
+        self.render()
+
+    def _select_nearest_frame(self) -> None:
+        when = self._target_time
         if when is None or not self.frames:
             return
         best = 0
@@ -463,7 +575,34 @@ class GCSViewpointPanel(QWidget):
             if best_gap is None or gap < best_gap:
                 best, best_gap = index, gap
         self._index = best
+
+    def set_sync_tolerance(self, seconds: float) -> None:
+        seconds = float(seconds)
+        if not math.isfinite(seconds) or seconds < 0:
+            raise ValueError("Synchronization tolerance must be finite and nonnegative.")
+        self._sync_tolerance_seconds = seconds
         self.render()
+
+    def time_offset_seconds(self) -> float | None:
+        when = self.current_time()
+        if when is None or self._target_time is None:
+            return None
+        return (when - self._target_time).total_seconds()
+
+    def is_synchronized(self) -> bool:
+        if self.current_time() is None:
+            return False
+        offset = self.time_offset_seconds()
+        return offset is None or abs(offset) <= self._sync_tolerance_seconds
+
+    def _refresh_observer(self) -> None:
+        frame = self.current_frame()
+        self.observer = (
+            ObserverGeometry.from_frame(frame, label=self.label)
+            if frame is not None and self._axis_transform(frame, frame.data.shape) is not None
+            else None
+        )
+        self._refresh_limb()
 
     def current_frame(self) -> Any | None:
         if not self.frames:
@@ -504,6 +643,7 @@ class GCSViewpointPanel(QWidget):
     def render(self) -> None:
         """Redraw the image for the current index, contrast and colormap."""
         if not self.frames:
+            self.canvas.clear_plot()
             self.canvas.clear_gcs_overlay()
             if not self.is_fetching():
                 self.title_label.setText(f"{self.label} · not loaded")
@@ -511,6 +651,8 @@ class GCSViewpointPanel(QWidget):
         index = max(0, min(self._index, len(self.frames) - 1))
         data = self.display_array(index)
         mode = self.difference_mode()
+        rendered_mode = self.rendered_mode()
+        self.low_slider.setEnabled(rendered_mode == "raw")
         levels_key = (
             mode,
             index,
@@ -520,7 +662,7 @@ class GCSViewpointPanel(QWidget):
         )
         levels = self._levels_cache.get(levels_key)
         if levels is None:
-            levels = self._levels(data, mode)
+            levels = self._levels(data, rendered_mode)
             self._levels_cache[levels_key] = levels
         vmin, vmax = levels
 
@@ -537,12 +679,28 @@ class GCSViewpointPanel(QWidget):
         # Short enough for the smallest panel: the view mode and the full date are
         # already in the toolbar, so the caption carries only what differs per
         # panel — and says so when this panel cannot show what the toolbar asks.
-        stamp = f"{when:%m-%d %H:%M:%S}" if when else "—"
-        caption = f"{self.label} · {self._frame_name(frame)} · {stamp} · {index + 1}/{len(self.frames)}"
+        stamp = f"{when:%Y-%m-%d %H:%M:%S} UTC" if when else "time unknown"
+        caption = f"{self.label} · {self._frame_name(frame)}\n{stamp} · {index + 1}/{len(self.frames)}"
+        offset = self.time_offset_seconds()
+        if offset is not None:
+            caption += f" · Δt {offset / 60:+.1f} min"
+            if not self.is_synchronized():
+                caption += " · outside tolerance"
         if self._difference_mode != "raw" and not self.can_difference():
             caption += f" · {dict(DIFFERENCE_MODES)[self._difference_mode].lower()} unavailable — 1 frame"
         elif self._difference_failed and mode != "raw":
             caption += f" · {dict(DIFFERENCE_MODES)[mode].lower()} failed — showing raw"
+        elif mode == "running" and index == 0:
+            caption += "\nRunning difference unavailable — no earlier frame; showing raw"
+        elif mode == "base" and index == 0:
+            caption += "\nBase reference frame — showing raw (self-difference is zero)"
+        elif mode != "raw":
+            reference = self.frames[index - 1] if mode == "running" else self.frames[0]
+            reference_time = frame_observation_time(reference)
+            reference_stamp = f"{reference_time:%Y-%m-%d %H:%M:%S} UTC" if reference_time else "unknown time"
+            caption += f"\n{dict(DIFFERENCE_MODES)[mode]} · reference {reference_stamp}"
+        if self.observer is None:
+            caption += "\nProjection unavailable — no usable solar WCS/observer"
         self.title_label.setText(caption)
 
     def _levels(self, data: np.ndarray, mode: str) -> tuple[float | None, float | None]:
@@ -593,7 +751,10 @@ class GCSViewpointPanel(QWidget):
             scale = frame.scale
             reference_pixel = frame.reference_pixel
             reference_coord = frame.reference_coordinate
-            return {
+            rotation = np.asarray(frame.rotation_matrix, dtype=float)
+            if rotation.shape != (2, 2) or not np.allclose(rotation, np.eye(2), atol=1e-8):
+                return None
+            transform = {
                 "x_ref_pix": float(reference_pixel.x.to_value(u.pix)),
                 "y_ref_pix": float(reference_pixel.y.to_value(u.pix)),
                 "x_scale_arcsec_per_pix": float(scale.axis1.to_value(u.arcsec / u.pix)),
@@ -601,6 +762,11 @@ class GCSViewpointPanel(QWidget):
                 "x_ref_arcsec": float(reference_coord.Tx.to_value(u.arcsec)),
                 "y_ref_arcsec": float(reference_coord.Ty.to_value(u.arcsec)),
             }
+            if not all(math.isfinite(value) for value in transform.values()):
+                return None
+            if not transform["x_scale_arcsec_per_pix"] or not transform["y_scale_arcsec_per_pix"]:
+                return None
+            return transform
         except Exception:
             # A frame without a usable WCS still renders, just in pixel space —
             # the GCS overlay hides itself for the same frames (ObserverGeometry
@@ -635,10 +801,11 @@ class GCSViewpointPanel(QWidget):
         worker = JP2FetchWorker(
             jp2_source, start, end, max_frames=max_frames, cache_dir=jp2_cache_dir(self._cache_base)
         )
-        worker.progress.connect(self._on_progress)
-        worker.finished.connect(self._on_fetch_finished)
-        worker.failed.connect(self._on_failed)
-        worker.cancelled.connect(self._on_cancelled)
+        delivery = _FetchDelivery(self, worker)
+        worker.progress.connect(delivery.progress)
+        worker.finished.connect(delivery.finished)
+        worker.failed.connect(delivery.failed)
+        worker.cancelled.connect(delivery.cancelled)
         self.fetch_btn.setEnabled(False)
         self.frames_label.setText("Loading…")
         self._on_progress(f"Searching {jp2_source.label} {start:%m-%d %H:%M} → {end:%m-%d %H:%M}…")
@@ -647,6 +814,8 @@ class GCSViewpointPanel(QWidget):
         return True
 
     def _on_progress(self, text: str) -> None:
+        if not self._accept_worker_signal():
+            return
         if not self.frames:
             self.title_label.setText(f"{self.label} · {text}")
         self.statusChanged.emit(f"{self.label}: {text}")
@@ -657,9 +826,12 @@ class GCSViewpointPanel(QWidget):
         self.busyChanged.emit(False)
 
     def _on_fetch_finished(self, sequence: Any) -> None:
+        if not self._accept_worker_signal():
+            return
         self._finish_fetch()
         frames = list(getattr(sequence, "frames", ()) or ())
         if not frames:
+            self.set_frames([])
             self.frames_label.setText("none")
             self.statusChanged.emit(f"{self.label}: nothing could be loaded.")
             return
@@ -678,6 +850,8 @@ class GCSViewpointPanel(QWidget):
         self.statusChanged.emit(f"{self.label}: loaded {source_label} — {', '.join(notes)}.")
 
     def _on_failed(self, message: str) -> None:
+        if not self._accept_worker_signal():
+            return
         self._finish_fetch()
         last = [line for line in str(message).strip().splitlines() if line.strip()]
         text = last[-1] if last else "load failed"
@@ -687,10 +861,36 @@ class GCSViewpointPanel(QWidget):
         self.statusChanged.emit(f"{self.label}: {text}")
 
     def _on_cancelled(self) -> None:
+        if not self._accept_worker_signal():
+            return
         self._finish_fetch()
         self.frames_label.setText(f"{len(self.frames)} frames" if self.frames else "—")
         self.statusChanged.emit(f"{self.label}: load cancelled.")
         self.render()
+
+    def _accept_worker_signal(self) -> bool:
+        """Ignore a queued completion belonging to an invalidated request."""
+        sender = self.sender()
+        return not isinstance(sender, JP2FetchWorker) or sender is self._worker
+
+    def cancel_fetch(self, *, discard_result: bool = False) -> None:
+        """Cancel the active request; optionally detach it so a new one may start.
+
+        Detached threads retain their own lifetime/cleanup connections and may
+        finish a network request in the background. Their queued results must
+        never replace images belonging to a different event or channel.
+        """
+        worker = self._worker
+        if worker is not None and hasattr(worker, "cancel"):
+            worker.cancel()
+        if not discard_result:
+            return
+        was_fetching = self._thread is not None or worker is not None
+        self._teardown()
+        self.fetch_btn.setEnabled(True)
+        self.frames_label.setText(f"{len(self.frames)} frames" if self.frames else "—")
+        if was_fetching:
+            self.busyChanged.emit(False)
 
     def _launch(self, worker: QObject) -> None:
         """Start ``worker`` on its own thread, wired to clean itself up.

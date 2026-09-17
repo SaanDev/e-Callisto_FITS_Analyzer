@@ -6202,22 +6202,26 @@ class SolarDataAnalysisWindow(QMainWindow):
             alive = existing is not None and bool(existing.windowTitle())
         except Exception:
             alive = False
+        # Reopening from a different parent frame must update an existing GCS
+        # window too; previously its original event remained silently selected.
+        target = None
+        frames = self._map_frames or self._original_frames
+        if frames:
+            index = max(0, min(int(getattr(self, "_current_frame_index", 0)), len(frames) - 1))
+            target = frame_observation_time(frames[index])
         if not alive:
             # The GCS window loads only Helioviewer JPEG2000 frames, so nothing
             # loaded here is handed over as pixels. What carries across is the
             # moment: starting on the frame being looked at means "Fetch all" goes
             # straight to this event.
-            target = None
-            frames = self._map_frames or self._original_frames
-            if frames:
-                index = max(0, min(int(getattr(self, "_current_frame_index", 0)), len(frames) - 1))
-                target = frame_observation_time(frames[index])
             self._gcs_window = GCSFittingWindow(
                 self,
                 target_time=target,
                 cache_dir=self.cache_dir,
                 theme=self.theme,
             )
+        elif target is not None:
+            self._gcs_window.set_target_time(target)
         self._gcs_window.show()
         self._gcs_window.raise_()
         self._gcs_window.activateWindow()

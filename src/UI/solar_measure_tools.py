@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -51,6 +52,7 @@ from src.Backend.coronagraph import (
 from src.Backend.gcs_model import (
     PARAMETER_NAMES,
     GCSParameters,
+    angular_widths_deg,
     apex_cross_section_radius_rsun,
     leg_height_rsun,
     shell_centre_distance_rsun,
@@ -754,12 +756,12 @@ class CircleFitEntry(NamedTuple):
 
 
 class GCSParameterSlider(QWidget):
-    """One GCS parameter: label, slider and live readout on a single row.
+    """One GCS parameter: label, slider and precise numeric input.
 
     Like ``PercentSlider`` in the window module, but over an arbitrary physical
     range and with the unit in the readout. 1000 steps across the range, which is
-    finer than a pixel of travel on any realistic panel width, so the fit can be
-    dialled in by dragging rather than by typing.
+    finer than a pixel of travel on any realistic panel width. The stored float
+    is independent of slider ticks so echoing a fit never quantizes it.
     """
 
     valueChanged = Signal(float)
@@ -782,6 +784,7 @@ class GCSParameterSlider(QWidget):
         self._maximum = float(maximum)
         self._unit = str(unit)
         self._decimals = int(decimals)
+        self._value = float(value)
 
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         row = QHBoxLayout(self)
@@ -791,8 +794,13 @@ class GCSParameterSlider(QWidget):
         self.name_label.setMinimumWidth(54)
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setRange(0, self._STEPS)
-        self.readout = QLabel("")
-        self.readout.setMinimumWidth(62)
+        self.readout = QDoubleSpinBox()
+        self.readout.setRange(self._minimum, self._maximum)
+        self.readout.setDecimals(max(self._decimals, 3))
+        self.readout.setSingleStep(10.0 ** -self._decimals)
+        self.readout.setSuffix(self._unit)
+        self.readout.setKeyboardTracking(False)
+        self.readout.setMinimumWidth(94)
         self.readout.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         row.addWidget(self.name_label)
         row.addWidget(self.slider, 1)
@@ -802,6 +810,7 @@ class GCSParameterSlider(QWidget):
         # No debounce: a GCS update is ~0.3 ms, so coalescing would only add
         # latency. See src/Backend/gcs_model for the measurements.
         self.slider.valueChanged.connect(self._on_slider_moved)
+        self.readout.valueChanged.connect(self._on_number_changed)
 
     def _to_value(self, position: int) -> float:
         span = self._maximum - self._minimum
@@ -815,23 +824,35 @@ class GCSParameterSlider(QWidget):
         return int(round(max(0.0, min(1.0, fraction)) * self._STEPS))
 
     def value(self) -> float:
-        return self._to_value(self.slider.value())
+        return self._value
 
     def setValue(self, value: float) -> None:  # noqa: N802 (Qt naming)
         """Set without emitting, so echoing a drag back cannot feed back."""
+        value = float(value)
+        if not np.isfinite(value):
+            return
+        # Imported fits and periodic angles can lie beyond the default slider
+        # range. Show the actual model value instead of clipping the label.
+        self._minimum = min(self._minimum, value)
+        self._maximum = max(self._maximum, value)
+        self._value = value
         self.slider.blockSignals(True)
+        self.readout.blockSignals(True)
         try:
             self.slider.setValue(self._to_position(value))
+            self.readout.setRange(self._minimum, self._maximum)
+            self.readout.setValue(value)
         finally:
             self.slider.blockSignals(False)
-        self._refresh_readout()
+            self.readout.blockSignals(False)
 
     def _on_slider_moved(self, _position: int) -> None:
-        self._refresh_readout()
+        self.setValue(self._to_value(self.slider.value()))
         self.valueChanged.emit(self.value())
 
-    def _refresh_readout(self) -> None:
-        self.readout.setText(f"{self.value():.{self._decimals}f}{self._unit}")
+    def _on_number_changed(self, value: float) -> None:
+        self.setValue(value)
+        self.valueChanged.emit(self.value())
 
 
 class GCSParameterPanel(QWidget):
@@ -877,6 +898,11 @@ class GCSParameterPanel(QWidget):
             layout.addWidget(slider)
 
         self.derived_label = QLabel("—")
+        self.derived_label.setToolTip(
+            "Height is the leading edge's distance from Sun centre.\n"
+            "Intrinsic face-on width = 2[α + asin(κ)]; edge-on width = 2 asin(κ).\n"
+            "These model widths differ from the apparent width in a coronagraph image."
+        )
         layout.addWidget(self.derived_label)
 
         self.refine_btn = QPushButton("Refine fit")
@@ -937,15 +963,17 @@ class GCSParameterPanel(QWidget):
             leg = leg_height_rsun(params)
             rapex = apex_cross_section_radius_rsun(params)
             centre = shell_centre_distance_rsun(params)
+            face_on, edge_on = angular_widths_deg(params)
         except Exception:
             self.derived_label.setText("—")
             return
-        # Two fixed lines rather than word wrap: a wrapping label makes every
+        # Short fixed lines rather than word wrap: a wrapping label makes every
         # layout above it height-for-width, and a scroll area then sizes the whole
         # control row for the narrowest wrap it can imagine.
         self.derived_label.setText(
             f"apex {params.height_rsun:.2f} R☉  ·  leg h {leg:.2f}  ·  r_apex {rapex:.2f}\n"
-            f"centre {centre:.2f} R☉  ·  full width {2.0 * params.alpha_deg:.0f}°"
+            f"centre {centre:.2f} R☉\n"
+            f"widths: face-on {face_on:.1f}° / edge-on {edge_on:.1f}°"
         )
 
 

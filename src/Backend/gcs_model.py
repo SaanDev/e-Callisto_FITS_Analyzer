@@ -7,17 +7,18 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 Graduated Cylindrical Shell (GCS) flux-rope model for 3-D CME reconstruction.
 
 The plane-of-sky tools in ``image_measure`` and ``coronagraph`` measure a CME as
-it appears, so the height and speed they report are lower bounds that shrink the
-further the eruption sits from the plane of the sky. GCS removes that: a
+it appears. A radial plane-of-sky measurement generally underestimates the
+heliocentric height when the eruption is away from that plane. GCS estimates
+the three-dimensional geometry under a flux-rope shape assumption: a
 six-parameter "croissant" is projected onto two or more simultaneous coronagraph
-views and adjusted until it matches all of them at once, which fixes the CME's
-true direction, angular width and de-projected height.
+views and adjusted against all of them. Direction, angular width and
+de-projected height remain subject to observational and model uncertainty.
 
 Parameters (Thernisien et al. 2006; Thernisien 2011)
 ---------------------------------------------------
 Three positional — ``lon``, ``lat`` (Stonyhurst direction of propagation) and
 ``tilt`` (rotation of the croissant about that direction) — and three
-geometrical: ``height`` (the leg parameter ``h``), ``alpha`` (half angle between
+geometrical: ``height`` (leading-edge distance), ``alpha`` (half angle between
 the leg axes) and ``kappa`` (aspect ratio, ``0 < kappa < 1``).
 
 ``height`` is the **leading edge** (apex) distance from Sun centre, and the other
@@ -38,8 +39,8 @@ front, so the per-update cost *is* the user experience. Going through
 ``SkyCoord.transform_to`` costs ~3.2 ms per 5130-point mesh; the matrix form
 below costs ~0.07 ms and agrees with sunpy to 2e-10 arcsec, with an occultation
 test that matches ``Helioprojective.is_visible()`` exactly for every point above
-1.05 R_sun (the whole domain a GCS mesh occupies — the two differ only for
-points inside the photosphere, which this mesh never has). That is what makes a
+1.05 R_sun. The mathematical legs extend to Sun centre, so points below this
+cutoff are masked before rendering. That is what makes a
 full six-parameter update ~0.3 ms and lets the sliders run without a debounce
 timer, a level-of-detail fallback or a projection cache.
 
@@ -131,8 +132,7 @@ class GCSParameters:
     lat_deg: float
     #: Rotation of the croissant about its own propagation axis.
     tilt_deg: float
-    #: The GCS leg parameter ``h`` — NOT the leading edge (see
-    #: :func:`apex_height_rsun`).
+    #: Heliocentric leading-edge (apex) distance, not the cone-junction ``h``.
     height_rsun: float
     #: Half angle between the two leg axes.
     alpha_deg: float
@@ -174,7 +174,8 @@ class GCSParameters:
     def is_physical(self) -> bool:
         """False for parameter sets the model cannot evaluate at all."""
         return (
-            0.0 < self.kappa < 1.0
+            all(math.isfinite(value) for value in self.as_array())
+            and 0.0 < self.kappa < 1.0
             and self.height_rsun > 0.0
             and 0.0 < self.alpha_deg < 90.0
             and -90.0 <= self.lat_deg <= 90.0
@@ -223,6 +224,18 @@ def shell_centre_distance_rsun(params: GCSParameters) -> float:
     quantities PyThea does.
     """
     return float(params.height_rsun - apex_cross_section_radius_rsun(params))
+
+
+def angular_widths_deg(params: GCSParameters) -> tuple[float, float]:
+    """Return intrinsic (face-on, edge-on) angular widths in degrees.
+
+    Thernisien's cone half angle is ``delta = asin(kappa)``. The full
+    face-on width is ``2 * (alpha + delta)`` and edge-on width ``2 * delta``;
+    ``2 * alpha`` alone omits the finite shell cross-section. These intrinsic
+    widths are not the apparent width in an arbitrary observer's image.
+    """
+    delta = math.degrees(math.asin(params.kappa))
+    return 2.0 * (params.alpha_deg + delta), 2.0 * delta
 
 
 # --- Mesh -----------------------------------------------------------------
@@ -473,7 +486,8 @@ class ObserverGeometry:
             dsun = float(stonyhurst.radius.to_value(u.R_sun))
             if not (math.isfinite(dsun) and dsun > rsun_rsun_units):
                 return None
-            rsun_arcsec = math.degrees(math.atan2(rsun_rsun_units, dsun)) * 3600.0
+            # Apparent limb is the tangent to the sphere: sin(angle) = R / d.
+            rsun_arcsec = math.degrees(math.asin(rsun_rsun_units / dsun)) * 3600.0
             lon = float(stonyhurst.lon.to_value(u.deg))
             lat = float(stonyhurst.lat.to_value(u.deg))
         except Exception:
@@ -569,7 +583,7 @@ def project_points_to_arcsec(
         # Parameter along the segment at closest approach to Sun centre.
         closest = -(dsun * to_point_z) / length_sq
         perp_sq = (closest * x) ** 2 + (closest * y) ** 2 + (dsun + closest * to_point_z) ** 2
-    rsun_model = math.tan(math.radians(observer.rsun_arcsec / 3600.0)) * dsun
+    rsun_model = math.sin(math.radians(observer.rsun_arcsec / 3600.0)) * dsun
     behind_disk = (perp_sq < rsun_model * rsun_model) & (closest > 0.0) & (closest < 1.0)
     inside_sun = (
         points_hgs[0] ** 2 + points_hgs[1] ** 2 + points_hgs[2] ** 2
@@ -933,6 +947,8 @@ class GCSViewpoint:
     #: ``(K, 2)`` clicked helioprojective positions, arcsec.
     clicks_arcsec: np.ndarray
     label: str = ""
+    #: Visible detector range (inner, outer), in apparent solar radii.
+    fov_rsun: tuple[float, float] | None = None
 
     @property
     def n_clicks(self) -> int:
@@ -962,9 +978,9 @@ class GCSRefinement:
     #: Treat sigma as a precision estimate, never an accuracy claim, and read
     #: :attr:`weakly_constrained` alongside it.
     sigma: dict[str, float]
-    #: ``(6, 6)`` parameter covariance, or ``None`` when undetermined.
+    #: Covariance in ``free`` order, or ``None`` when undetermined or unreliable.
     covariance: np.ndarray | None
-    #: Signed per-click residuals in arcsec, in input order.
+    #: Nonnegative nearest-mesh distances in arcsec, in finite-click input order.
     residuals_arcsec: np.ndarray
     rms_arcsec: float
     #: RMS the seed produced, so the caller can show the improvement.
@@ -978,7 +994,7 @@ class GCSRefinement:
     #: Names actually varied; the rest were held (see :func:`free_parameters`).
     free: tuple[str, ...]
     weakly_constrained: tuple[str, ...]
-    #: ``cond(JtJ)``; above ~1e8 the fit is not really determined.
+    #: Condition of the normal matrix after scaling columns by parameter units.
     condition_number: float
     converged: bool
     n_evaluations: int
@@ -1008,8 +1024,26 @@ _X_SCALE: dict[str, float] = {
     "kappa": 0.1,
 }
 
-#: Minimum observer separation that can constrain the propagation longitude.
+#: Conservative geometry heuristic, not a universal accuracy threshold.
 MIN_USEFUL_SEPARATION_DEG = 20.0
+
+
+def has_independent_viewpoints(viewpoints: Sequence[GCSViewpoint]) -> bool:
+    """Whether point-bearing views include a usefully non-collinear pair.
+
+    Empty views supply no constraints. Near-opposite observers also have
+    nearly parallel lines of sight, so their large angular separation alone
+    does not make direction recovery well posed. The 20-degree margin is a
+    practical guard, not a guarantee of a unique or accurate solution.
+    """
+    active = [view for view in viewpoints if len(_clicks_array(view))]
+    return any(
+        MIN_USEFUL_SEPARATION_DEG
+        <= observer_separation_deg(a.observer, b.observer)
+        <= 180.0 - MIN_USEFUL_SEPARATION_DEG
+        for index, a in enumerate(active)
+        for b in active[index + 1 :]
+    )
 
 
 def free_parameters(viewpoints: Sequence[GCSViewpoint]) -> tuple[str, ...]:
@@ -1022,14 +1056,7 @@ def free_parameters(viewpoints: Sequence[GCSViewpoint]) -> tuple[str, ...]:
     and means nothing.
     """
     geometric = ("tilt_deg", "height_rsun", "alpha_deg", "kappa")
-    if len(viewpoints) < 2:
-        return geometric
-    separation = max(
-        observer_separation_deg(a.observer, b.observer)
-        for index, a in enumerate(viewpoints)
-        for b in viewpoints[index + 1 :]
-    )
-    if separation < MIN_USEFUL_SEPARATION_DEG:
+    if not has_independent_viewpoints(viewpoints):
         return geometric
     return PARAMETER_NAMES
 
@@ -1075,10 +1102,35 @@ def refine_gcs(
     if not seed.is_physical:
         raise ValueError("The starting GCS parameters are outside the model's valid range.")
 
+    # An open image without usable clicks contributes no information, including
+    # no justification for releasing direction parameters in a one-view fit.
+    active = [(view, points) for view, points in zip(viewpoints, clicks) if len(points)]
+    viewpoints = [view for view, _ in active]
+    clicks = [points for _, points in active]
+    for view in viewpoints:
+        geometry = view.observer
+        if not (
+            all(math.isfinite(value) for value in (
+                geometry.lon_deg, geometry.lat_deg, geometry.dsun_rsun, geometry.rsun_arcsec
+            ))
+            and -90.0 <= geometry.lat_deg <= 90.0
+            and geometry.dsun_rsun > 1.0
+            and 0.0 < geometry.rsun_arcsec < 90.0 * 3600.0
+        ):
+            raise ValueError("Every fitted viewpoint needs valid observer coordinates and distance.")
+        if view.fov_rsun is not None:
+            inner, outer = view.fov_rsun
+            if not (math.isfinite(inner) and math.isfinite(outer) and 0.0 <= inner < outer):
+                raise ValueError("The detector field of view must have increasing, finite radii.")
+    if not (math.isfinite(click_tolerance_arcsec) and click_tolerance_arcsec > 0.0):
+        raise ValueError("Click tolerance must be a positive finite value in arcseconds.")
+
     names = tuple(free) if free is not None else free_parameters(viewpoints)
     unknown = [name for name in names if name not in PARAMETER_NAMES]
     if unknown:
         raise ValueError(f"Unknown GCS parameter(s): {', '.join(unknown)}.")
+    if not names or len(set(names)) != len(names):
+        raise ValueError("Choose at least one distinct parameter to refine.")
     if total < len(names) + 1:
         raise ValueError(
             f"A {len(names)}-parameter GCS refine needs at least {len(names) + 1} "
@@ -1108,8 +1160,28 @@ def refine_gcs(
             low, high = _ABSOLUTE_BOUNDS[name]
             lower.append(low)
             upper.append(high)
+            if not low <= seed_values[name] <= high:
+                raise ValueError(
+                    f"Starting {name} is outside the refinement range [{low:g}, {high:g}]. "
+                    "Adjust the manual model before refining."
+                )
         scale.append(_X_SCALE[name])
-    start = np.clip([seed_values[name] for name in names], lower, upper)
+    start = np.asarray([seed_values[name] for name in names], dtype=float)
+
+    # Use one scale for numerical conditioning only. All clicks and the robust
+    # tolerance are specified in arcsec; dividing each observer by a different
+    # solar radius changes their relative weights and corrupts reported units.
+    reference_rsun = float(np.mean([view.observer.rsun_arcsec for view in viewpoints]))
+
+    seed_mesh = gcs_mesh(seed, **resolution)
+    for view in viewpoints:
+        seed_projection = project_to_arcsec(seed_mesh, seed, view.observer, fov_rsun=view.fov_rsun)
+        if not np.any(np.isfinite(seed_projection.tx_arcsec) & np.isfinite(seed_projection.ty_arcsec)):
+            label = view.label or view.observer.label or "a fitted viewpoint"
+            raise ValueError(
+                f"The starting model is outside the visible field in {label}. "
+                "Move the wireframe onto the observed CME before refining."
+            )
 
     def build(values: Sequence[float]) -> GCSParameters:
         merged = dict(seed_values)
@@ -1127,7 +1199,7 @@ def refine_gcs(
         for view, points in zip(viewpoints, clicks):
             if not len(points):
                 continue
-            projection = project_to_arcsec(mesh, params, view.observer)
+            projection = project_to_arcsec(mesh, params, view.observer, fov_rsun=view.fov_rsun)
             drawn = np.isfinite(projection.tx_arcsec) & np.isfinite(projection.ty_arcsec)
             if not drawn.any():
                 out.append(np.full(len(points), 1.0e4))
@@ -1135,13 +1207,10 @@ def refine_gcs(
             tree = cKDTree(
                 np.column_stack((projection.tx_arcsec[drawn], projection.ty_arcsec[drawn]))
             )
-            # Residuals go in units of this observer's solar radius, so panels at
-            # very different plate scales (C3 vs COR2) contribute comparably.
-            out.append(tree.query(points)[0] / view.observer.rsun_arcsec)
+            out.append(tree.query(points)[0] / reference_rsun)
         return np.concatenate(out) if out else np.full(total, 1.0e4)
 
-    reference_rsun = float(np.mean([view.observer.rsun_arcsec for view in viewpoints]))
-    seed_residual = residuals(start) * reference_rsun
+    seed_residual = residuals([seed_values[name] for name in names]) * reference_rsun
     started = time.perf_counter()
     result = least_squares(
         residuals,
@@ -1152,7 +1221,7 @@ def refine_gcs(
         # Must stay small: at 3e-2 the fitted alpha degrades from -2 to +18 deg.
         diff_step=1e-3,
         loss="soft_l1" if robust else "linear",
-        f_scale=max(float(click_tolerance_arcsec), 1.0) / reference_rsun,
+        f_scale=float(click_tolerance_arcsec) / reference_rsun,
         max_nfev=int(max_nfev),
     )
     elapsed = time.perf_counter() - started
@@ -1174,34 +1243,51 @@ def refine_gcs(
     condition = math.inf
     if n_obs > n_free:
         variance = 2.0 * float(result.cost) / float(n_obs - n_free)
-        normal = jacobian.T @ jacobian
+        # Scale the Jacobian columns before judging conditioning; otherwise a
+        # degree, a solar radius and a dimensionless kappa create an arbitrary
+        # condition number merely from their unit choices.
+        scales = np.asarray(scale, dtype=float)
+        scaled_jacobian = jacobian * scales
+        normal = scaled_jacobian.T @ scaled_jacobian
         try:
             condition = float(np.linalg.cond(normal))
         except Exception:
             condition = math.inf
-        # pinv, not inv: the same reason coronagraph._polyfit_with_covariance
-        # uses it — a rank-deficient normal matrix must degrade, not explode.
-        # Units: J is d(residual in R_sun)/d(parameter in its own unit), so
-        # variance * pinv(J'J) already comes out in parameter units squared.
-        # Rescaling by rsun_arcsec here would inflate every sigma by ~960.
-        covariance = variance * np.linalg.pinv(normal)
-        for index, name in enumerate(names):
-            value = covariance[index, index]
-            sigma[name] = float(math.sqrt(value)) if value > 0.0 else math.nan
+        # A pseudo-inverse assigns zero variance to unconstrained null-space
+        # directions. Those are *unknown*, not precise. Suppress uncertainties
+        # for rank deficiency, an unstable Hessian, an unfinished solve or an
+        # active parameter bound, where symmetric local error bars mislead.
+        if (
+            result.success
+            and np.linalg.matrix_rank(scaled_jacobian) == n_free
+            and math.isfinite(condition)
+            and condition <= 1.0e8
+            and not np.any(result.active_mask)
+        ):
+            covariance = variance * np.linalg.inv(normal) * np.outer(scales, scales)
+            for index, name in enumerate(names):
+                value = covariance[index, index]
+                sigma[name] = float(math.sqrt(value)) if value >= 0.0 else math.nan
 
     notes = [f"rms {rms:.0f}\" over {total} point(s)"]
-    if len(viewpoints) < 2 or separation < MIN_USEFUL_SEPARATION_DEG:
-        notes.append(
-            "one effective viewpoint — direction held fixed; height and width "
-            "are degenerate with it"
+    if not has_independent_viewpoints(viewpoints):
+        direction_status = (
+            "direction held fixed" if not {"lon_deg", "lat_deg"}.intersection(names)
+            else "direction was released explicitly and may be degenerate"
         )
+        notes.append(f"one effective viewpoint — {direction_status}; height and width are degenerate with it")
     if condition > 1.0e8:
         notes.append("poorly constrained — add clicks on the opposite flank")
+    if covariance is None:
+        notes.append("formal uncertainties unavailable for this solution")
+    else:
+        notes.append("errors are local formal estimates; exclude model and feature-identification uncertainty")
+    if np.any(result.active_mask):
+        notes.append("parameter bound reached — review the manual model")
     weak_free = [name for name in WEAKLY_CONSTRAINED if name in names]
     if weak_free:
         notes.append(
-            f"{' and '.join(n.removesuffix('_deg') for n in weak_free)} weakly "
-            "constrained; quoted errors are formal only and exclude model bias"
+            f"{' and '.join(n.removesuffix('_deg') for n in weak_free)} weakly constrained"
         )
     if not result.success:
         notes.insert(0, "did not converge")

@@ -10232,6 +10232,7 @@ class MainWindow(QMainWindow):
         """Open the standalone three-viewpoint GCS CME fitting window."""
         from src.UI.gcs_fitting_window import GCSFittingWindow  # import here, not at top
 
+        event_range = self._current_time_window_utc()
         try:
             alive = self._gcs_window is not None
             if alive:
@@ -10239,7 +10240,9 @@ class MainWindow(QMainWindow):
         except Exception:
             alive = False
         if not alive:
-            self._gcs_window = GCSFittingWindow(self)
+            self._gcs_window = GCSFittingWindow(self, event_range=event_range)
+        elif event_range:
+            self._gcs_window.set_time_window(*event_range)
         self._gcs_window.show()
         self._gcs_window.raise_()
         self._gcs_window.activateWindow()

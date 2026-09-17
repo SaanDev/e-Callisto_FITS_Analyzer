@@ -20,12 +20,13 @@ pytest.importorskip("PySide6")
 pytest.importorskip("pyqtgraph")
 pytest.importorskip("sunpy.map")
 
-from PySide6.QtCore import QDateTime, QObject, Qt, Signal, Slot
+from PySide6.QtCore import QObject, Qt, Signal, Slot
 from PySide6.QtWidgets import QApplication
 
 from src.Backend.gcs_model import GCSParameters, apex_arcsec
 from src.UI.gcs_fitting_window import PANEL_LABELS, GCSFittingWindow
 from src.UI.gcs_viewpoint_panel import DIFFERENCE_MODES, GCSViewpointPanel
+from src.UI.gcs_viewpoint_panel import _qdatetime_utc as QDateTime
 
 
 def _app():
@@ -349,7 +350,7 @@ def test_refine_uses_every_fetched_viewpoint(window):
 
     rng = np.random.default_rng(13)
     for panel in window.panels:
-        projection = project_to_arcsec(gcs_mesh(truth), truth, panel.observer)
+        projection = project_to_arcsec(gcs_mesh(truth), truth, panel.observer, fov_rsun=(3.7, 30.0))
         usable = np.nonzero(np.isfinite(projection.tx_arcsec))[0]
         radius = np.hypot(projection.tx_arcsec[usable], projection.ty_arcsec[usable])
         outer = usable[radius > np.percentile(radius, 70.0)]
@@ -963,6 +964,7 @@ def test_a_differencing_failure_is_reported_not_swallowed(window, monkeypatch):
         lambda *a, **k: (_ for _ in ()).throw(ValueError("boom")),
     )
     panel.set_frames(_sequence(0.0, n=4))  # loads straight into running difference
+    window.next_frame()  # first observation has no earlier difference reference
     _flush()
     assert any("differencing failed" in message for message in messages)
     assert "failed" in panel.title_label.text()
@@ -981,6 +983,7 @@ def test_a_difference_image_is_stretched_symmetrically_about_zero(window):
     assert raw_low >= 0  # the raw ramp is positive
 
     panel.set_difference_mode("running")
+    window.next_frame()  # test the first genuine difference, not its raw reference
     _flush()
     low, high = panel.canvas._last_map_levels
     assert low == pytest.approx(-high)
@@ -1184,7 +1187,7 @@ def test_difference_frames_are_built_once_and_cached(window, monkeypatch):
     for _ in range(3):
         for index in range(panel.frame_count()):
             panel.display_array(index)
-    assert calls["n"] == panel.frame_count()
+    assert calls["n"] == panel.frame_count() - 1  # first frame is the raw reference
 
 
 def test_switching_modes_never_serves_a_stale_image(window):
