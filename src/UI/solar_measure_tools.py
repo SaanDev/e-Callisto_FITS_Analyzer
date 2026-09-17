@@ -151,6 +151,9 @@ class TrackingPanel(QWidget):
         # the viewpoint count and every error bar ride in the row tooltip —
         # the same split refresh_circles already uses for rms and centre.
         "gcs": ["Time (UT)", "t (s)", "Apex (R☉)", "Lon (°)", "Lat (°)", "α (°)"],
+        # The shock's shape parameters (ε, α, tilt), its semi-axes and error bars
+        # ride in the row tooltip for the same reason.
+        "shock": ["Time (UT)", "t (s)", "Apex (R☉)", "Lon (°)", "Lat (°)", "κ"],
     }
 
     def __init__(self, parent: Any = None):
@@ -352,14 +355,15 @@ class TrackingPanel(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         circle = source == "circle_fit"
         gcs = source == "gcs"
+        shock = source == "shock"
         self.lock_center_check.setVisible(circle)
         self.commit_btn.setVisible(circle)
-        if gcs:
-            # The GCS apex height is de-projected, so say 3-D: reporting it as a
+        if gcs or shock:
+            # A model apex height is de-projected, so say 3-D: reporting it as a
             # plane-of-sky height would throw away the whole point of the model.
-            self.plot.setLabel("left", "Apex height (R☉, 3-D)")
+            self.plot.setLabel("left", "Shock apex height (R☉, 3-D)" if shock else "Apex height (R☉, 3-D)")
             self.fit_btn.setText("Fit Height–Time (3-D)")
-            self.clear_btn.setText("Clear GCS Fits")
+            self.clear_btn.setText("Clear Shock Fits" if shock else "Clear GCS Fits")
         else:
             self.plot.setLabel("left", "Radius (R☉)" if circle else "Height (R☉)")
             self.fit_btn.setText("Fit Radius–Time" if circle else "Fit Height–Time")
@@ -368,6 +372,8 @@ class TrackingPanel(QWidget):
         self.export_btn.setEnabled(False)
         if gcs:
             message = "Match the wireframe to the front, then Commit GCS."
+        elif shock:
+            message = SHOCK_EMPTY_MESSAGE
         elif circle:
             message = "Click ≥3 points along the CME front, then Commit."
         else:
@@ -479,6 +485,76 @@ class TrackingPanel(QWidget):
             heights,
             noun="frames",
             single_text="1 frame — step on and fit the front again for a 3-D speed.",
+        )
+
+    def refresh_shock(self, fits: Mapping[int, Any]) -> None:
+        """Rebuild the table and the live plot from recorded shock fits.
+
+        Field 1 of :class:`ShockFitEntry` is the shock apex height, de-projected
+        like the GCS apex, so the plot, the height-time fit and the order selector
+        work unchanged and the speed is the shock's 3-D apex speed.
+        """
+        from src.Backend.shock_model import SHOCK_MODEL_LABELS
+
+        entries = sorted(
+            (entry for entry in fits.values() if entry[0] is not None),
+            key=lambda item: item[0],
+        )
+        self._entries = entries
+        self.table.setRowCount(len(entries))
+        self.export_btn.setEnabled(bool(entries))
+        if not entries:
+            self._render_empty(SHOCK_EMPTY_MESSAGE)
+            return
+
+        t0 = entries[0][0]
+        seconds = [(entry[0] - t0).total_seconds() for entry in entries]
+        heights = [float(entry[1]) for entry in entries]
+        for row, (entry, t_s) in enumerate(zip(entries, seconds)):
+            cells = (
+                f"{entry.when:%H:%M:%S}",
+                f"{t_s:.0f}",
+                f"{float(entry.apex_height_rsun):.3f}",
+                f"{float(entry.lon_deg):+.1f}",
+                f"{float(entry.lat_deg):+.1f}",
+                f"{float(entry.kappa):.3f}",
+            )
+            axes = shock_entry_axes(entry)
+            tip_parts = [
+                SHOCK_MODEL_LABELS.get(entry.model, str(entry.model)),
+                f"ε {float(entry.epsilon):+.3f}",
+            ]
+            if entry.model == "ellipsoid":
+                tip_parts += [f"α {float(entry.alpha):.3f}", f"tilt {float(entry.tilt_deg):+.1f}°"]
+            tip_parts.append(
+                f"centre {axes.rcenter_rsun:.2f} R☉, a {axes.radaxis_rsun:.2f}, b {axes.orthoaxis1_rsun:.2f}"
+                + (f", c {axes.orthoaxis2_rsun:.2f}" if entry.model == "ellipsoid" else "")
+            )
+            if np.isfinite(float(entry.rms_arcsec)):
+                tip_parts.insert(0, f"rms {float(entry.rms_arcsec):.1f}″")
+            tip_parts += [
+                f"{int(entry.n_viewpoints)} viewpoint(s), {float(entry.separation_deg):.0f}° apart",
+                f"{int(entry.n_points)} clicked point(s)",
+                "refined" if bool(entry.refined) else "manual",
+                "  ·  ".join([
+                    self._with_error(float(entry.lon_deg), float(entry.lon_err_deg), "+.1f") + " lon",
+                    self._with_error(float(entry.lat_deg), float(entry.lat_err_deg), "+.1f") + " lat",
+                    self._with_error(float(entry.apex_height_rsun), float(entry.height_err_rsun), ".2f") + " R☉ apex",
+                ]),
+                "errors are formal only — ε and tilt are weakly constrained",
+            ]
+            tip = "  ·  ".join(tip_parts)
+            for col, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                item.setTextAlignment(Qt.AlignCenter)
+                item.setToolTip(tip)
+                self.table.setItem(row, col, item)
+
+        self._render_series(
+            seconds,
+            heights,
+            noun="frames",
+            single_text="1 frame — step on and fit the shock again for a 3-D speed.",
         )
 
     def _render_empty(self, text: str) -> None:
@@ -638,6 +714,7 @@ class TrackingPanel(QWidget):
 
         titles = {
             "gcs": ("Export CME GCS Fit CSV", "cme_gcs_fit.csv"),
+            "shock": ("Export CME Shock Fit CSV", "cme_shock_fit.csv"),
             "circle_fit": ("Export CME Circle Fit CSV", "cme_circle_fit.csv"),
         }
         title, suggested = titles.get(
@@ -692,6 +769,32 @@ class TrackingPanel(QWidget):
                 "separation_deg",
                 "refined",
             ]
+        if self._source == "shock":
+            # PyThea's names for the centre and semi-axes, so the two can be compared.
+            return [
+                "time_utc",
+                "t_seconds",
+                "model",
+                "apex_height_rsun",
+                "apex_height_err_rsun",
+                "lon_deg",
+                "lon_err_deg",
+                "lat_deg",
+                "lat_err_deg",
+                "tilt_deg",
+                "kappa",
+                "epsilon",
+                "alpha",
+                "rcenter_rsun",
+                "radaxis_rsun",
+                "orthoaxis1_rsun",
+                "orthoaxis2_rsun",
+                "rms_arcsec",
+                "n_points",
+                "n_viewpoints",
+                "separation_deg",
+                "refined",
+            ]
         return ["time_utc", "t_seconds", "height_rsun", "position_angle_deg"]
 
     def csv_row(self, entry: Sequence[Any], t0: datetime) -> list[Any]:
@@ -729,6 +832,32 @@ class TrackingPanel(QWidget):
                 int(entry[9]),
                 f"{float(entry[10]):.2f}",
                 int(bool(entry[14])),
+            ]
+        if self._source == "shock":
+            axes = shock_entry_axes(entry)
+            return [
+                when.isoformat(),
+                seconds,
+                entry.model,
+                f"{float(entry.apex_height_rsun):.4f}",
+                f"{float(entry.height_err_rsun):.4f}",
+                f"{float(entry.lon_deg):.3f}",
+                f"{float(entry.lon_err_deg):.3f}",
+                f"{float(entry.lat_deg):.3f}",
+                f"{float(entry.lat_err_deg):.3f}",
+                f"{float(entry.tilt_deg):.3f}",
+                f"{float(entry.kappa):.4f}",
+                f"{float(entry.epsilon):.4f}",
+                f"{float(entry.alpha):.4f}",
+                f"{axes.rcenter_rsun:.4f}",
+                f"{axes.radaxis_rsun:.4f}",
+                f"{axes.orthoaxis1_rsun:.4f}",
+                f"{axes.orthoaxis2_rsun:.4f}",
+                f"{float(entry.rms_arcsec):.3f}",
+                int(entry.n_points),
+                int(entry.n_viewpoints),
+                f"{float(entry.separation_deg):.2f}",
+                int(bool(entry.refined)),
             ]
         pa = float(entry[4]) if len(entry) > 4 else float("nan")
         return [when.isoformat(), seconds, f"{float(entry[1]):.4f}", f"{pa:.2f}"]
@@ -1005,6 +1134,61 @@ class GCSFitEntry(NamedTuple):
     lat_err_deg: float
     height_err_rsun: float
     refined: bool
+
+
+class ShockFitEntry(NamedTuple):
+    """One recorded spheroid or ellipsoid shock fit in the GCS fitting window.
+
+    Fields 0 and 1 mirror the other tracking stores (time, then the plotted and
+    fitted quantity) so :class:`TrackingPanel` sorts, plots and fits it with the
+    same code. The parameters are PyThea's (see ``src.Backend.shock_model``); the
+    centre and semi-axes are derived from them on demand, never stored twice.
+    """
+
+    when: datetime | None
+    apex_height_rsun: float  # the height that drives the kinematic fit
+    lon_deg: float
+    lat_deg: float
+    tilt_deg: float
+    kappa: float
+    epsilon: float
+    alpha: float
+    model: str
+    rms_arcsec: float
+    n_points: int
+    n_viewpoints: int
+    separation_deg: float
+    lon_err_deg: float
+    lat_err_deg: float
+    height_err_rsun: float
+    refined: bool
+
+
+def shock_entry_parameters(entry: ShockFitEntry) -> Any:
+    """The :class:`~src.Backend.shock_model.ShockParameters` a recorded fit holds."""
+    from src.Backend.shock_model import ShockParameters
+
+    return ShockParameters(
+        lon_deg=float(entry.lon_deg),
+        lat_deg=float(entry.lat_deg),
+        height_rsun=float(entry.apex_height_rsun),
+        kappa=float(entry.kappa),
+        epsilon=float(entry.epsilon),
+        tilt_deg=float(entry.tilt_deg),
+        alpha=float(entry.alpha),
+        model=str(entry.model),
+    )
+
+
+def shock_entry_axes(entry: ShockFitEntry) -> Any:
+    """Centre distance and semi-axes of a recorded shock fit."""
+    from src.Backend.shock_model import shock_semi_axes
+
+    return shock_semi_axes(shock_entry_parameters(entry))
+
+
+#: What the shock kinematics table says while nothing is recorded.
+SHOCK_EMPTY_MESSAGE = "Match the shock model to the front, then Commit Shock."
 
 
 class MeasurementController(QObject):

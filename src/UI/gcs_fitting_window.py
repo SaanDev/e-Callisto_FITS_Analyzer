@@ -47,6 +47,7 @@ Playback with fits recorded draws the recorded shells instead of the working mod
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -65,6 +66,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSizePolicy,
     QSlider,
@@ -91,6 +93,15 @@ from src.Backend.gcs_model import (
     wireframe_arcsec,
 )
 from src.Backend.helioviewer_jp2 import DEFAULT_MAX_FRAMES, default_viewpoints, validate_range
+from src.Backend.shock_model import (
+    ShockParameters,
+    apply_shock_apex_drag,
+    interpolate_shock_parameters,
+    refine_shock,
+    shock_free_parameters,
+    shock_handle_positions_arcsec,
+    shock_wireframe_arcsec,
+)
 from src.UI.gcs_viewpoint_panel import (
     DEFAULT_DIFFERENCE_MODE,
     DIFFERENCE_MODES,
@@ -131,6 +142,51 @@ DECK_MIN_HEIGHT = 250
 #: Width range of the control column in the Focus layout.
 DECK_COLUMN_MIN_WIDTH = 370
 DECK_COLUMN_MAX_WIDTH = 470
+
+#: The two models fitted side by side: the flux rope, and the shock it drives.
+GCS_MODEL = "gcs"
+SHOCK_MODEL = "shock"
+MODEL_LABELS = {GCS_MODEL: "GCS", SHOCK_MODEL: "Shock"}
+#: The shock wireframe's colour: sky blue, which stays distinct from the orange
+#: GCS shell for colour-blind viewers too (the Okabe-Ito pair).
+DEFAULT_SHOCK_COLOUR = (86, 180, 233)
+
+
+def _empty_clicks() -> dict[str, list[tuple[float, float]]]:
+    return {key: [] for key in PANEL_LABELS}
+
+
+@dataclass
+class ModelTrack:
+    """Everything one fitted model owns, so the flux rope and shock never mix.
+
+    Front points are model specific — a shock front is not the ejecta front — as
+    are the refinement, the recorded fits behind the kinematics, and the fits
+    archived when the event changes.
+    """
+
+    key: str
+    #: Current parameters; ``None`` until first needed.
+    params: Any = None
+    #: Front points on the displayed frame of each panel.
+    clicks: dict[str, list[tuple[float, float]]] = field(default_factory=_empty_clicks)
+    #: Points kept per (panel, frame id), restored when that frame is shown again.
+    frame_points: dict[tuple[str, int], list[tuple[float, float]]] = field(default_factory=dict)
+    last_refinement: Any = None
+    #: Recorded fits and their observation provenance, keyed by shared time.
+    fits: dict[datetime, Any] = field(default_factory=dict)
+    provenance: dict[datetime, Any] = field(default_factory=dict)
+    archived_fits: dict[datetime, Any] = field(default_factory=dict)
+    archived_provenance: dict[datetime, Any] = field(default_factory=dict)
+
+
+def _gcs_track_attribute(name: str) -> property:
+    """A window attribute that is the GCS track's ``name`` (the pre-shock spelling)."""
+    return property(
+        lambda self: getattr(self._tracks[GCS_MODEL], name),
+        lambda self, value: setattr(self._tracks[GCS_MODEL], name, value),
+        doc=f"The GCS model's ``{name}``; the shock's lives in ``_tracks[SHOCK_MODEL]``.",
+    )
 
 
 # --- Image stage ----------------------------------------------------------------
@@ -219,6 +275,22 @@ class GCSImageStage(QWidget):
 # --- Control deck -----------------------------------------------------------------
 
 
+class RoomyCheckBox(QCheckBox):
+    """A check box whose size hint leaves room for its whole label.
+
+    Under the app theme a check box reports a width a few pixels short of the
+    label it draws, so in a row of them each label is clipped by its neighbour.
+    Two spaces' width of slack covers it and follows the font.
+    """
+
+    def sizeHint(self) -> QSize:  # noqa: N802 (Qt naming)
+        hint = super().sizeHint()
+        return QSize(hint.width() + self.fontMetrics().horizontalAdvance("  "), hint.height())
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 (Qt naming)
+        return self.sizeHint()
+
+
 class LetterButton(QPushButton):
     """A one-letter segment button (A, B, C), as narrow as its letter allows.
 
@@ -251,7 +323,15 @@ class LetterButton(QPushButton):
 class GCSCard(QFrame):
     """A titled group of controls in the deck."""
 
-    def __init__(self, title: str, body: QWidget, *, scroll_body: bool = False, parent: QWidget | None = None):
+    def __init__(
+        self,
+        title: str,
+        body: QWidget,
+        *,
+        scroll_body: bool = False,
+        header: QWidget | None = None,
+        parent: QWidget | None = None,
+    ):
         super().__init__(parent)
         self.setObjectName("GCSCard")
         self.setFrameShape(QFrame.StyledPanel)
@@ -264,7 +344,18 @@ class GCSCard(QFrame):
         layout.setSpacing(6)
         heading = QLabel(title)
         heading.setObjectName("GCSCardTitle")
-        layout.addWidget(heading)
+        self.title_label = heading
+        if header is None:
+            layout.addWidget(heading)
+        else:
+            # Controls that belong to the whole card sit on its title row, which
+            # costs no height the card would not spend on the title anyway.
+            title_row = QHBoxLayout()
+            title_row.setSpacing(6)
+            title_row.addWidget(heading)
+            title_row.addStretch(1)
+            title_row.addWidget(header)
+            layout.addLayout(title_row)
         self.body = body
         self._scroll: QScrollArea | None = None
         if scroll_body:
@@ -343,6 +434,16 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
     #: Emitted with the fitted parameters when the user sends them onward.
     parametersCommitted = Signal(object)
 
+    # The GCS model's state, under the names it had before the shock model.
+    _params = _gcs_track_attribute("params")
+    _clicks = _gcs_track_attribute("clicks")
+    _frame_points = _gcs_track_attribute("frame_points")
+    _last_refinement = _gcs_track_attribute("last_refinement")
+    _fits = _gcs_track_attribute("fits")
+    _fit_provenance = _gcs_track_attribute("provenance")
+    _archived_fits = _gcs_track_attribute("archived_fits")
+    _archived_provenance = _gcs_track_attribute("archived_provenance")
+
     def __init__(
         self,
         parent: QWidget | None = None,
@@ -356,11 +457,11 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         super().__init__(parent)
         self.setWindowTitle("GCS CME Fitting — Three Viewpoints")
         self.theme = theme
+        self._tracks: dict[str, ModelTrack] = {key: ModelTrack(key) for key in (GCS_MODEL, SHOCK_MODEL)}
+        #: The model the handles, front points, Refine, Commit and kinematics act on.
+        self._editing = GCS_MODEL
         self._params = initial
-        self._clicks: dict[str, list[tuple[float, float]]] = {key: [] for key in PANEL_LABELS}
-        self._frame_points: dict[tuple[str, int], list[tuple[float, float]]] = {}
         self._displayed_frames: dict[str, int | None] = {key: None for key in PANEL_LABELS}
-        self._last_refinement: Any = None
         self._mesh: Any = None
         self._mesh_key: tuple[float, float, float] | None = None
         self._shared_time: datetime | None = None
@@ -370,14 +471,10 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         self._time_axis: list[datetime] = []
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._advance_frame)
-        #: While playback follows the recorded fits: which shell is drawn, for the status bar.
+        #: While playback follows the recorded fits: which shells are drawn, for the status bar.
         self._playback_note = ""
-        #: Recorded fits, keyed by the shared time they were committed at.
-        self._fits: dict[datetime, Any] = {}
-        self._fit_provenance: dict[datetime, Any] = {}
-        self._archived_fits: dict[datetime, Any] = {}
-        self._archived_provenance: dict[datetime, Any] = {}
         self._wireframe_colour = (255, 140, 40)
+        self._shock_colour = DEFAULT_SHOCK_COLOUR
         #: Whether the user has dragged the splitter, per layout. Until they do,
         #: every resize re-fits it so the images leave no space unused.
         self._user_split = {LAYOUT_EQUAL: False, LAYOUT_FOCUS: False}
@@ -667,13 +764,44 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         return card
 
     def _build_model_card(self) -> GCSCard:
+        from src.UI.shock_parameter_panel import ShockParameterPanel
         from src.UI.solar_measure_tools import GCSParameterPanel
 
         body = QWidget()
         layout = QVBoxLayout(body)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
-        # One parameter set for every panel — see the module docstring.
+
+        # Both models are drawn together; one is edited at a time, which decides
+        # what the handles, clicks, Refine, Commit and the kinematics card act on.
+        # Radio buttons on the card's title row: under the app theme a push button
+        # is 46 px tall, and every pixel the deck gains is taken from the images.
+        edit_holder = QWidget()
+        edit_row = QHBoxLayout(edit_holder)
+        edit_row.setContentsMargins(0, 0, 0, 0)
+        edit_row.setSpacing(8)
+        edit_row.addWidget(QLabel("Edit"))
+        self._model_group = QButtonGroup(self)
+        self._model_group.setExclusive(True)
+        for index, (key, text) in enumerate(((GCS_MODEL, "GCS flux rope"), (SHOCK_MODEL, "Shock"))):
+            radio = QRadioButton(text)
+            radio.setChecked(key == GCS_MODEL)
+            radio.setProperty("segment_key", key)
+            self._model_group.addButton(radio, index)
+            edit_row.addWidget(radio)
+        tips = {
+            GCS_MODEL: "Fit the flux rope (the CME ejecta) with the Graduated Cylindrical Shell.",
+            SHOCK_MODEL: (
+                "Fit the shock the CME drives — the faint outer envelope — with a spheroid or\n"
+                "ellipsoid, in PyThea's parameters. Its front points and records are separate."
+            ),
+        }
+        for button in self._model_group.buttons():
+            key = str(button.property("segment_key"))
+            button.setToolTip(tips[key])
+            button.toggled.connect(lambda on, value=key: self.set_editing_model(value) if on else None)
+
+        # One parameter set per model for every panel — see the module docstring.
         self.gcs_panel = GCSParameterPanel()
         self.gcs_panel.parametersChanged.connect(self._on_parameters)
         self.gcs_panel.refineRequested.connect(self._on_refine)
@@ -683,43 +811,60 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
             "Record this fit at the current time. Commit across several times to build\n"
             "a de-projected 3-D height-time profile."
         )
-        layout.addWidget(self.gcs_panel)
+        self.shock_panel = ShockParameterPanel()
+        self.shock_panel.parametersChanged.connect(self._on_shock_parameters)
+        self.shock_panel.refineRequested.connect(self._on_refine)
+        self.shock_panel.commitRequested.connect(self._on_commit)
+        self.shock_panel.commit_btn.setToolTip(
+            "Record this shock fit at the current time. Commit across several times to build\n"
+            "a de-projected 3-D height-time profile of the shock apex."
+        )
+        self.model_stack = QStackedWidget()
+        self.model_stack.addWidget(self.gcs_panel)
+        self.model_stack.addWidget(self.shock_panel)
+        layout.addWidget(self.model_stack)
 
         interaction = QHBoxLayout()
-        self.pick_points_check = QCheckBox("Pick front points")
+        self.pick_points_check = RoomyCheckBox("Pick front points")
         self.pick_points_check.setChecked(True)
         self.pick_points_check.setToolTip(
             "Left-click the CME ejecta front to add a constraint; right-click removes the last.\n"
             "Turn off to navigate without adding points. Points belong to the displayed frame."
         )
-        self.wireframe_check = QCheckBox("Wireframe")
+        self.wireframe_check = RoomyCheckBox("GCS")
         self.wireframe_check.setChecked(True)
-        self.wireframe_check.setToolTip("Hide the model temporarily to inspect the observed front.")
+        self.wireframe_check.setToolTip("Show the GCS shell. Hide it temporarily to inspect the observed front.")
         self.wireframe_check.toggled.connect(lambda _on: self._sync_all())
-        interaction.addWidget(self.pick_points_check)
+        # Off until the shock is first edited, so a GCS-only fit is never cluttered.
+        self.shock_check = RoomyCheckBox("Shock")
+        self.shock_check.setChecked(False)
+        self.shock_check.setToolTip("Show the shock model in every view, alongside the GCS shell.")
+        self.shock_check.toggled.connect(lambda _on: self._sync_all())
+        interaction.setSpacing(12)
+        interaction.addWidget(self.pick_points_check, 1)
         interaction.addWidget(self.wireframe_check)
+        interaction.addWidget(self.shock_check)
         layout.addLayout(interaction)
 
         extras = QHBoxLayout()
         self.clear_points_btn = QPushButton("Clear points")
-        self.clear_points_btn.setToolTip("Remove the front points clicked for Refine fit.")
+        self.clear_points_btn.setToolTip("Remove the edited model's front points on the displayed frames.")
         self.clear_points_btn.clicked.connect(self._clear_points)
         self.send_btn = QPushButton("Send to analyzer")
-        self.send_btn.setToolTip("Push the current parameters back to the Solar Image Analysis window.")
+        self.send_btn.setToolTip("Push the current GCS parameters back to the Solar Image Analysis window.")
         self.send_btn.clicked.connect(self._on_send)
         extras.addWidget(self.clear_points_btn)
         extras.addWidget(self.send_btn)
         layout.addLayout(extras)
-        guidance = QLabel("Align → pick front → refine → record")
-        guidance.setToolTip(
-            "Fit the same ejecta in independent, near-simultaneous views. GCS describes a flux rope,\n"
-            "not the outer shock. Height is measured from Sun centre. Refinement errors are formal\n"
-            "and do not include uncertainty from timing, front selection or model assumptions.\n"
-            "See Help → Fitting workflow for details."
-        )
-        layout.addWidget(guidance)
         layout.addStretch(1)
-        card = GCSCard("GCS model", body)
+        card = GCSCard("Model", body, header=edit_holder)
+        card.title_label.setToolTip(
+            "Align → pick front → refine → record, for each model.\n"
+            "Fit the same feature in independent, near-simultaneous views. GCS describes the flux rope;\n"
+            "the shock model describes the outer shock envelope. Heights are measured from Sun centre.\n"
+            "Refinement errors are formal and do not include uncertainty from timing, front selection\n"
+            "or model assumptions. See Help → Fitting workflow for details."
+        )
         card.setMinimumWidth(280)
         return card
 
@@ -745,9 +890,14 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         wire_heading = QHBoxLayout()
         wire_heading.addWidget(QLabel("Wireframe"))
         wire_heading.addStretch(1)
-        self.colour_btn = QPushButton("Colour…")
+        self.colour_btn = QPushButton("GCS…")
+        self.colour_btn.setToolTip("Colour of the GCS shell.")
         self.colour_btn.clicked.connect(self._pick_colour)
+        self.shock_colour_btn = QPushButton("Shock…")
+        self.shock_colour_btn.setToolTip("Colour of the shock model.")
+        self.shock_colour_btn.clicked.connect(self._pick_shock_colour)
         wire_heading.addWidget(self.colour_btn)
+        wire_heading.addWidget(self.shock_colour_btn)
         layout.addLayout(wire_heading)
         for slider in (self.width_slider, self.opacity_slider, self.density_slider):
             layout.addWidget(slider)
@@ -815,9 +965,21 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         self.tracking_panel.plot.setLabel("bottom", "t (s since first recorded fit)")
         self.tracking_panel.fit_btn.clicked.connect(self._on_fit_kinematics)
         self.tracking_panel.clear_btn.clicked.connect(self._on_clear_fits)
-        card = GCSCard("Kinematics", self.tracking_panel, scroll_body=True)
+        card = GCSCard("Kinematics · GCS", self.tracking_panel, scroll_body=True)
         card.setMinimumWidth(240)
+        self.kinematics_card = card
         return card
+
+    def _show_kinematics(self, key: str) -> None:
+        """Point the kinematics card at one model's recorded fits."""
+        panel = self.tracking_panel
+        panel.set_source(key)
+        # set_source restores the analyzer's longer button texts.
+        panel.fit_btn.setText("Fit height–time")
+        panel.clear_btn.setText("Clear fits")
+        panel.export_btn.setText("CSV…")
+        self.kinematics_card.title_label.setText(f"Kinematics · {MODEL_LABELS[key]}")
+        self._refresh_fits()
 
     def _install_shortcuts(self) -> None:
         """Playback and layout keys, active while an image has focus.
@@ -938,7 +1100,7 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         self._play_timer.setInterval(int(1000 / max(1, int(self.fps_spin.value()))))
         self._play_timer.start()
         self._sync_transport()
-        if self._fits:
+        if any(track.fits for track in self._tracks.values()):
             self._follow_recorded_fits()
             self._sync_all()
 
@@ -952,46 +1114,54 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
             self._refresh_status()
 
     def _follow_recorded_fits(self) -> None:
-        """While playing, make the model the recorded fits' shell for the shared time.
+        """While playing, make each model the shell its recorded fits give for the shared time.
 
-        Playback is how the recorded fits are reviewed, so the shell evolves with
-        them instead of staying wherever the sliders were last left.
+        Playback is how the recorded fits are reviewed, so the flux rope and the
+        shock each evolve with their own records instead of staying wherever the
+        sliders were last left. A model with nothing recorded is left alone.
         """
         self._playback_note = ""
         if not self._play_timer.isActive() or self._shared_time is None:
             return
-        found = self._recorded_shell(self._shared_time)
-        if found is None:
-            return
-        params, self._playback_note = found
-        if params != self._params:
-            self._params = params
-            self._last_refinement = None
+        notes: list[str] = []
+        for key, prefix in ((GCS_MODEL, "Shell"), (SHOCK_MODEL, "Shock")):
+            found = self._recorded_shell(self._shared_time, key)
+            if found is None:
+                continue
+            params, note = found
+            track = self._tracks[key]
+            if params != track.params:
+                track.params = params
+                track.last_refinement = None
+            notes.append(f"{prefix}: {note}")
+        self._playback_note = " · ".join(notes)
 
-    def _recorded_shell(self, when: datetime) -> tuple[GCSParameters, str] | None:
-        """The recorded fits' shell at ``when``, and a note saying how it was found.
+    def _recorded_shell(self, when: datetime, key: str = GCS_MODEL) -> tuple[Any, str] | None:
+        """A model's recorded shell at ``when``, and a note saying how it was found.
 
         The fit recorded for the images on screen when there is one. Between two
         recorded times the two fits are interpolated in time — a display of the
         evolution, not a fit. Before the first and after the last, the nearest
         fit is held.
         """
-        if not self._fits:
+        fits = self._tracks[key].fits
+        if not fits:
             return None
-        exact = self._recorded_time_for_current_frames()
-        if exact is None and when in self._fits:
+        exact = self._recorded_time_for_current_frames(key)
+        if exact is None and when in fits:
             exact = when
         if exact is not None:
-            return self._recorded_parameters(exact), f"recorded fit {exact:%H:%M:%S}"
-        times = sorted(self._fits)
+            return self._recorded_parameters(exact, key), f"recorded fit {exact:%H:%M:%S}"
+        times = sorted(fits)
         if when < times[0]:
-            return self._recorded_parameters(times[0]), f"recorded fit {times[0]:%H:%M:%S} held (before first fit)"
+            return self._recorded_parameters(times[0], key), f"recorded fit {times[0]:%H:%M:%S} held (before first fit)"
         if when > times[-1]:
-            return self._recorded_parameters(times[-1]), f"recorded fit {times[-1]:%H:%M:%S} held (after last fit)"
+            return self._recorded_parameters(times[-1], key), f"recorded fit {times[-1]:%H:%M:%S} held (after last fit)"
         before = max(stamp for stamp in times if stamp < when)
         after = min(stamp for stamp in times if stamp > when)
         fraction = (when - before).total_seconds() / (after - before).total_seconds()
-        params = interpolate_parameters(self._recorded_parameters(before), self._recorded_parameters(after), fraction)
+        interpolate = interpolate_parameters if key == GCS_MODEL else interpolate_shock_parameters
+        params = interpolate(self._recorded_parameters(before, key), self._recorded_parameters(after, key), fraction)
         return params, f"interpolated between recorded fits {before:%H:%M:%S} and {after:%H:%M:%S}"
 
     def toggle_play(self) -> None:
@@ -1033,6 +1203,49 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
             )
         return self._params
 
+    def shock_parameters(self) -> ShockParameters:
+        """The one shared shock, first aimed along the GCS shell's direction."""
+        track = self._tracks[SHOCK_MODEL]
+        if track.params is None:
+            from src.UI.shock_parameter_panel import default_shock
+
+            gcs = self.parameters()
+            track.params = default_shock(gcs.lon_deg, gcs.lat_deg)
+        return track.params
+
+    def _model_parameters(self, key: str) -> Any:
+        return self.parameters() if key == GCS_MODEL else self.shock_parameters()
+
+    def _track(self, key: str | None = None) -> ModelTrack:
+        """A model's state; the edited model's by default."""
+        return self._tracks[key or self._editing]
+
+    def editing_model(self) -> str:
+        return self._editing
+
+    def set_editing_model(self, key: str) -> None:
+        """Choose the model the handles, front points, Refine, Commit and kinematics act on.
+
+        The chosen model is shown if it was hidden: editing an invisible model
+        would move nothing on screen.
+        """
+        if key not in self._tracks:
+            raise ValueError(f"Unknown model: {key}")
+        self._editing = key
+        for button in self._model_group.buttons():
+            wanted = str(button.property("segment_key")) == key
+            if button.isChecked() != wanted:
+                was = button.blockSignals(True)
+                button.setChecked(wanted)
+                button.blockSignals(was)
+        self.model_stack.setCurrentWidget(self.gcs_panel if key == GCS_MODEL else self.shock_panel)
+        check = self.wireframe_check if key == GCS_MODEL else self.shock_check
+        was = check.blockSignals(True)
+        check.setChecked(True)
+        check.blockSignals(was)
+        self._show_kinematics(key)
+        self._sync_all()
+
     def _panel(self, key: str) -> GCSViewpointPanel:
         return self.panels[PANEL_LABELS.index(key)]
 
@@ -1044,7 +1257,7 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         return float(control.value()) * 60.0 if control is not None else 300.0
 
     def _on_sync_tolerance_changed(self, _value: float = 0.0) -> None:
-        self._last_refinement = None
+        self._forget_refinements()
         for panel in self.panels:
             panel.set_sync_tolerance(self._sync_tolerance_seconds())
         self._sync_all()
@@ -1057,6 +1270,11 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
                    if panel.time_offset_seconds() is not None]
         return f" · max |Δt| {max(offsets):.0f} s" if offsets else ""
 
+    def _forget_refinements(self) -> None:
+        """Refinement errors describe the inputs they were computed from; drop them all."""
+        for track in self._tracks.values():
+            track.last_refinement = None
+
     def _cached_mesh(self, params: GCSParameters) -> Any:
         key = (params.height_rsun, params.alpha_deg, params.kappa)
         if self._mesh is None or self._mesh_key != key:
@@ -1066,35 +1284,60 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
 
     # ------------------------------------------------------------- rendering
     def _sync_all(self) -> None:
-        """Redraw the one shell on every panel that has a usable observer."""
+        """Redraw both models on every panel that has a usable observer."""
         params = self.parameters()
+        shock = self.shock_parameters()
         self.gcs_panel.show_parameters(params)
+        self.shock_panel.show_parameters(shock)
+        if shock.model != getattr(self, "_shock_layout_model", shock.model):
+            # An ellipsoid shows two more slider rows; let the images give them room.
+            self._schedule_split()
+        self._shock_layout_model = shock.model
         mesh = self._cached_mesh(params)
         # Slider is "density", the backend wants a ring stride, so invert.
         density = int(round(self.density_slider.value()))
         stride = max(1, 9 - density)
+        gcs_check = getattr(self, "wireframe_check", None)
+        show_gcs = gcs_check is None or gcs_check.isChecked()
+        shock_check = getattr(self, "shock_check", None)
+        show_shock = shock_check is not None and shock_check.isChecked()
+        points_by_panel = self._track().clicks
 
         for panel in self.panels:
             canvas = panel.canvas
             if panel.observer is None:
-                canvas.clear_gcs_overlay()
+                canvas.clear_model_overlays()
                 canvas.set_measurement_overlay([], [], connect=False)
                 continue
-            # The shell goes on every image that can be projected, whatever its
+            # The models go on every image that can be projected, whatever its
             # offset from the shared time, so the views can always be compared
-            # against the one model. Only views inside the time tolerance take
-            # part in the fit, so only they offer the handle and front points.
+            # against them. Only views inside the time tolerance take part in the
+            # fit, so only they offer the edited model's handle and front points.
             synchronized = panel.is_synchronized()
-            visible = getattr(self, "wireframe_check", None)
-            if visible is None or visible.isChecked():
+            if show_gcs:
                 x, y, _ = wireframe_arcsec(
                     params, panel.observer, mesh=mesh, ring_stride=stride, n_longitudinal=max(4, 12 - stride)
                 )
                 canvas.set_gcs_overlay(x, y)
-                canvas.set_gcs_handles(handle_positions_arcsec(params, panel.observer), visible=synchronized)
+                canvas.set_gcs_handles(
+                    handle_positions_arcsec(params, panel.observer),
+                    visible=synchronized and self._editing == GCS_MODEL,
+                )
             else:
                 canvas.clear_gcs_overlay()
-            points = self._clicks.get(panel.label, []) if synchronized else []
+            if show_shock:
+                x, y = shock_wireframe_arcsec(
+                    shock, panel.observer, ring_stride=stride, n_meridians=max(4, 12 - stride)
+                )
+                canvas.set_gcs_overlay(x, y, layer=SHOCK_MODEL)
+                canvas.set_gcs_handles(
+                    shock_handle_positions_arcsec(shock, panel.observer),
+                    visible=synchronized and self._editing == SHOCK_MODEL,
+                    layer=SHOCK_MODEL,
+                )
+            else:
+                canvas.clear_gcs_overlay(SHOCK_MODEL)
+            points = points_by_panel.get(panel.label, []) if synchronized else []
             canvas.set_measurement_overlay(
                 [point[0] for point in points], [point[1] for point in points], connect=False
             )
@@ -1104,19 +1347,27 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
             self._sync_menu_actions()
 
     def _apply_style(self) -> None:
+        # Width and opacity are shared; each model keeps its own colour.
+        width = self.width_slider.value()
+        opacity = self.opacity_slider.value() / 100.0
         for panel in self.panels:
-            panel.canvas.set_gcs_style(
-                width=self.width_slider.value(),
-                color=self._wireframe_colour,
-                opacity=self.opacity_slider.value() / 100.0,
-            )
+            panel.canvas.set_gcs_style(width=width, color=self._wireframe_colour, opacity=opacity)
+            panel.canvas.set_gcs_style(width=width, color=self._shock_colour, opacity=opacity, layer=SHOCK_MODEL)
 
     def _pick_colour(self) -> None:
         from PySide6.QtGui import QColor
 
-        chosen = QColorDialog.getColor(QColor(*self._wireframe_colour), self, "Wireframe colour")
+        chosen = QColorDialog.getColor(QColor(*self._wireframe_colour), self, "GCS wireframe colour")
         if chosen.isValid():
             self._wireframe_colour = (chosen.red(), chosen.green(), chosen.blue())
+            self._apply_style()
+
+    def _pick_shock_colour(self) -> None:
+        from PySide6.QtGui import QColor
+
+        chosen = QColorDialog.getColor(QColor(*self._shock_colour), self, "Shock wireframe colour")
+        if chosen.isValid():
+            self._shock_colour = (chosen.red(), chosen.green(), chosen.blue())
             self._apply_style()
 
     def _on_limb_toggled(self, on: bool) -> None:
@@ -1145,10 +1396,11 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
     def _on_panel_frames_changed(self, panel: Any) -> None:
         # A reload/source edit changes the images to which annotations belong.
         label = panel.label
-        self._clicks[label] = []
         self._displayed_frames[label] = None
-        self._frame_points = {key: points for key, points in self._frame_points.items() if key[0] != label}
-        self._last_refinement = None
+        for track in self._tracks.values():
+            track.clicks[label] = []
+            track.frame_points = {key: points for key, points in track.frame_points.items() if key[0] != label}
+            track.last_refinement = None
         panel.set_sync_tolerance(self._sync_tolerance_seconds())
         # Every load opens the same way, whichever mode the view was left in.
         if getattr(panel, "frames", None):
@@ -1197,19 +1449,22 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         if user_initiated:
             self._requested_time = when
         if when != self._shared_time:
-            self._last_refinement = None
+            self._forget_refinements()
         self._shared_time = when
         self.time_label.setText(f"{when:%Y-%m-%d %H:%M:%S}")
         for panel in self.panels:
             previous = self._displayed_frames[panel.label]
             if previous is not None:
-                self._frame_points[(panel.label, previous)] = list(self._clicks[panel.label])
+                for track in self._tracks.values():
+                    track.frame_points[(panel.label, previous)] = list(track.clicks[panel.label])
             panel.set_shared_time(when)
             frame = panel.current_frame()
             current = id(frame) if frame is not None else None
             if current != previous:
-                self._clicks[panel.label] = list(self._frame_points.get((panel.label, current), []))
-                self._last_refinement = None
+                # Points belong to the image they were clicked on, per model.
+                for track in self._tracks.values():
+                    track.clicks[panel.label] = list(track.frame_points.get((panel.label, current), []))
+                    track.last_refinement = None
             self._displayed_frames[panel.label] = current
         self._follow_recorded_fits()
         self._sync_all()
@@ -1232,7 +1487,7 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
                 button.blockSignals(was)
 
     def _on_difference_mode(self, mode: str) -> None:
-        self._last_refinement = None
+        self._forget_refinements()
         self._set_mode_buttons(mode)
         for panel in self.panels:
             panel.set_difference_mode(mode)
@@ -1261,20 +1516,21 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
             # Preserve work when the range is adjusted within an event. A jump
             # to a different event must never mix its height-time fit with this one.
             if previous is not None and (end < previous[0] or start > previous[1]):
-                self._archived_fits.update(self._fits)
-                self._archived_provenance.update(self._fit_provenance)
-                self._fits = {when: entry for when, entry in self._archived_fits.items()
-                              if start <= when <= end}
-                self._fit_provenance = {when: self._archived_provenance[when]
-                                        for when in self._fits if when in self._archived_provenance}
-                for when in self._fits:
-                    self._archived_fits.pop(when, None)
-                    self._archived_provenance.pop(when, None)
+                for track in self._tracks.values():
+                    track.archived_fits.update(track.fits)
+                    track.archived_provenance.update(track.provenance)
+                    track.fits = {when: entry for when, entry in track.archived_fits.items()
+                                  if start <= when <= end}
+                    track.provenance = {when: track.archived_provenance[when]
+                                        for when in track.fits if when in track.archived_provenance}
+                    for when in track.fits:
+                        track.archived_fits.pop(when, None)
+                        track.archived_provenance.pop(when, None)
                 self._refresh_fits()
             self._last_event_range = (start, end)
             if self._requested_time is not None and not start <= self._requested_time <= end:
                 self._requested_time = start + (end - start) / 2
-        self._last_refinement = None
+        self._forget_refinements()
         self._rebuild_time_axis()
         self._sync_all()
 
@@ -1347,17 +1603,31 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         self._last_refinement = None
         self._sync_all()
 
+    def _on_shock_parameters(self, params: ShockParameters) -> None:
+        self.pause()
+        track = self._tracks[SHOCK_MODEL]
+        track.params = params
+        track.last_refinement = None
+        self._sync_all()
+
     def _on_handle(self, key: str, name: str, x: float, y: float, _finished: bool) -> None:
-        if name != "apex":
+        # Handles outside the GCS layer arrive as "<layer>:<name>".
+        model, _, handle = name.rpartition(":")
+        model = model or GCS_MODEL
+        if handle != "apex" or model not in self._tracks:
             return
         panel = self._panel(key)
         if panel.observer is None or not panel.is_synchronized():
             return
         self.pause()
-        # Dragging on any panel moves the one shared shell: steer from whichever
+        # Dragging on any panel moves the one shared model: steer from whichever
         # view shows the front most clearly.
-        self._params = apply_apex_drag(self.parameters(), panel.observer, (x, y))
-        self._last_refinement = None
+        track = self._tracks[model]
+        if model == GCS_MODEL:
+            track.params = apply_apex_drag(self.parameters(), panel.observer, (x, y))
+        else:
+            track.params = apply_shock_apex_drag(self.shock_parameters(), panel.observer, (x, y))
+        track.last_refinement = None
         self._sync_all()
 
     def _on_canvas_click(self, key: str, x: float, y: float, button: str) -> None:
@@ -1369,29 +1639,34 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         if canvas.gcs_drag_active():
             return
         self.pause()
+        track = self._track()
         if button == "right":
-            if self._clicks[key]:
-                self._clicks[key].pop()
+            if track.clicks[key]:
+                track.clicks[key].pop()
         elif button == "left":
-            self._clicks[key].append((float(x), float(y)))
+            track.clicks[key].append((float(x), float(y)))
         else:
             return
-        self._last_refinement = None
+        track.last_refinement = None
         self._sync_all()
 
     def _clear_points(self) -> None:
-        for key in self._clicks:
-            self._clicks[key] = []
+        """Clear the edited model's points on the displayed frames."""
+        track = self._track()
+        for key in track.clicks:
+            track.clicks[key] = []
             current = self._displayed_frames[key]
             if current is not None:
-                self._frame_points.pop((key, current), None)
-        self._last_refinement = None
+                track.frame_points.pop((key, current), None)
+        track.last_refinement = None
         self._sync_all()
 
     # --------------------------------------------------------------- fitting
-    def _viewpoints(self) -> list[GCSViewpoint]:
+    def _viewpoints(self, model: str | None = None) -> list[GCSViewpoint]:
+        """The synchronized views with a model's front points (the edited model's by default)."""
         from src.Backend.coronagraph_composite import INSTRUMENT_FOV_RSUN
 
+        clicks = self._track(model).clicks
         out: list[GCSViewpoint] = []
         for panel in self._active_panels():
             frame = panel.current_frame()
@@ -1401,67 +1676,81 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
             out.append(
                 GCSViewpoint(
                     panel.observer,
-                    np.asarray(self._clicks[panel.label], dtype=float).reshape(-1, 2),
+                    np.asarray(clicks[panel.label], dtype=float).reshape(-1, 2),
                     panel.observer.label or panel.label,
                     fov_rsun=fov,
                 )
             )
         return out
 
+    def _free_parameter_count(self, model: str) -> int:
+        viewpoints = self._viewpoints(model)
+        if model == GCS_MODEL:
+            return len(free_parameters(viewpoints))
+        return len(shock_free_parameters(viewpoints, self.shock_parameters().model))
+
     def _on_refine(self) -> None:
+        """Refine the edited model against its own front points."""
         self.pause()
-        self._last_refinement = None
+        model = self._editing
+        track = self._track(model)
+        name = "GCS" if model == GCS_MODEL else "Shock"
+        track.last_refinement = None
         try:
-            result = refine_gcs(self._viewpoints(), self.parameters())
+            if model == GCS_MODEL:
+                result = refine_gcs(self._viewpoints(model), self.parameters())
+            else:
+                result = refine_shock(self._viewpoints(model), self.shock_parameters())
         except ValueError as exc:
-            self._set_status(f"GCS refine: {exc}")
+            self._set_status(f"{name} refine: {exc}")
             return
         if not result.converged:
-            self._set_status(f"GCS refine did not converge; retained the previous parameters. {result.message}")
+            self._set_status(f"{name} refine did not converge; retained the previous parameters. {result.message}")
             return
-        self._last_refinement = result
-        self._params = result.parameters
+        track.last_refinement = result
+        track.params = result.parameters
         self._sync_all()
         self._set_status(result.message)
 
     def _on_commit(self) -> None:
-        """Record the current fit at the current shared time."""
-        from src.UI.solar_measure_tools import GCSFitEntry
+        """Record the edited model's current fit at the current shared time."""
+        from src.UI.solar_measure_tools import GCSFitEntry, ShockFitEntry
 
         self.pause()
+        model = self._editing
+        track = self._track(model)
         when = self._shared_time
         active = self._active_panels()
         if when is None or not active:
             self._set_status("Nothing to commit — load a dated channel within the synchronization tolerance.")
             return
-        recorded_time = self._recorded_time_for_current_frames()
+        recorded_time = self._recorded_time_for_current_frames(model)
         if recorded_time is not None and recorded_time != when:
             self._set_status(
                 f"These same observations are already recorded at {recorded_time:%Y-%m-%d %H:%M:%S} UTC. "
                 "Return to that time to update the fit; repeated images are not independent height-time samples."
             )
             return
-        result = self._last_refinement
-        if result is not None and (not result.converged or result.parameters != self.parameters()):
+        params = self._model_parameters(model)
+        result = track.last_refinement
+        if result is not None and (not result.converged or result.parameters != params):
             result = None
-            self._last_refinement = None
+            track.last_refinement = None
         sigma = result.sigma if result is not None else {}
         separations = [
             observer_separation_deg(a.observer, b.observer)
             for index, a in enumerate(active)
             for b in active[index + 1 :]
         ]
-        params = self.parameters()
-        self._fits[when] = GCSFitEntry(
+        common = dict(
             when=when,
             apex_height_rsun=params.height_rsun,
             lon_deg=params.lon_deg,
             lat_deg=params.lat_deg,
             tilt_deg=params.tilt_deg,
-            alpha_deg=params.alpha_deg,
             kappa=params.kappa,
             rms_arcsec=float(getattr(result, "rms_arcsec", float("nan"))),
-            n_points=int(result.n_points) if result is not None else sum(len(self._clicks[p.label]) for p in active),
+            n_points=int(result.n_points) if result is not None else sum(len(track.clicks[p.label]) for p in active),
             n_viewpoints=int(result.n_viewpoints) if result is not None else len(active),
             separation_deg=float(result.separation_deg) if result is not None else (max(separations) if separations else 0.0),
             lon_err_deg=float(sigma.get("lon_deg", float("nan"))),
@@ -1469,15 +1758,22 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
             height_err_rsun=float(sigma.get("height_rsun", float("nan"))),
             refined=result is not None,
         )
-        self._fit_provenance[when] = self._current_provenance()
+        if model == GCS_MODEL:
+            track.fits[when] = GCSFitEntry(alpha_deg=params.alpha_deg, **common)
+        else:
+            track.fits[when] = ShockFitEntry(
+                epsilon=params.epsilon, alpha=params.alpha, model=params.model, **common
+            )
+        track.provenance[when] = self._current_provenance(model)
         self._refresh_fits()
+        subject = "" if model == GCS_MODEL else "shock "
         self._set_status(
-            f"Committed {when:%H:%M:%S} → apex {params.height_rsun:.2f} R☉ "
-            f"({len(self._fits)} frame(s) recorded)."
+            f"Committed {subject}{when:%H:%M:%S} → apex {params.height_rsun:.2f} R☉ "
+            f"({len(track.fits)} frame(s) recorded)."
         )
 
-    def _recorded_time_for_current_frames(self) -> datetime | None:
-        """Find a record for the same actual images, independent of slider time.
+    def _recorded_time_for_current_frames(self, model: str | None = None) -> datetime | None:
+        """Find a model's record for the same actual images, independent of slider time.
 
         Adjacent times in the union timeline can snap every panel to the same
         observation tuple. Counting both would invent an independent time sample.
@@ -1489,23 +1785,31 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
                 for frame in provenance.get("frames", ()) if frame.get("included_in_fit")
             ))
 
-        current = signature(self._current_provenance())
+        track = self._track(model)
+        if not track.fits:
+            return None
+        current = signature(self._current_provenance(model))
         if not current:
             return None
-        for when in sorted(self._fits):
-            if signature(self._fit_provenance.get(when, {})) == current:
+        for when in sorted(track.fits):
+            if signature(track.provenance.get(when, {})) == current:
                 return when
         return None
 
     def _refresh_fits(self) -> None:
-        entries = sorted(self._fits.values(), key=lambda entry: entry[0])
-        self.tracking_panel.refresh_gcs(dict(enumerate(entries)))
+        """Show the edited model's recorded fits in the kinematics card."""
+        entries = dict(enumerate(sorted(self._track().fits.values(), key=lambda entry: entry[0])))
+        if self._editing == GCS_MODEL:
+            self.tracking_panel.refresh_gcs(entries)
+        else:
+            self.tracking_panel.refresh_shock(entries)
         self._sync_kinematics_buttons()
 
     def _sync_kinematics_buttons(self, _index: int = 0) -> None:
-        self.tracking_panel.fit_btn.setEnabled(len(self._fits) >= self.tracking_panel.fit_order() + 1)
-        self.tracking_panel.clear_btn.setEnabled(bool(self._fits))
-        heights = [entry.apex_height_rsun for entry in self._fits.values()]
+        fits = self._track().fits
+        self.tracking_panel.fit_btn.setEnabled(len(fits) >= self.tracking_panel.fit_order() + 1)
+        self.tracking_panel.clear_btn.setEnabled(bool(fits))
+        heights = [entry.apex_height_rsun for entry in fits.values()]
         if heights and max(heights) - min(heights) < 0.01:
             # Polynomial roundoff in a constant-height series otherwise makes
             # autorange show 15-digit ticks and visually exaggerate numerical noise.
@@ -1516,16 +1820,17 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
             self._sync_menu_actions()
 
     def _on_clear_fits(self) -> None:
-        self._fits.clear()
-        self._fit_provenance.clear()
+        track = self._track()
+        track.fits.clear()
+        track.provenance.clear()
         self._refresh_fits()
-        self._set_status("Recorded GCS fits cleared.")
+        self._set_status(f"Recorded {'GCS' if self._editing == GCS_MODEL else 'shock'} fits cleared.")
 
     def _on_fit_kinematics(self) -> None:
-        """Fit apex height(t) to estimate model-dependent radial kinematics."""
+        """Fit the edited model's apex height(t) for model-dependent radial kinematics."""
         from src.Backend.coronagraph import RSUN_KM, fit_height_time
 
-        entries = sorted(self._fits.values(), key=lambda item: item[0])
+        entries = sorted(self._track().fits.values(), key=lambda item: item[0])
         if len(entries) < 2:
             self._set_status("A height-time fit needs commits at two or more times.")
             return
@@ -1544,13 +1849,14 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
             self._set_status(f"Fit: {exc}")
             return
         self.tracking_panel.show_fit(fit)
+        subject = "" if self._editing == GCS_MODEL else "shock-apex "
         self._set_status(
-            f"3-D model-dependent (de-projected) kinematics over {len(entries)} commit(s): "
+            f"3-D model-dependent (de-projected) {subject}kinematics over {len(entries)} commit(s): "
             + self.tracking_panel.fit_summary(fit, noun="commits")
         )
 
     def _on_send(self) -> None:
-        """Push the parameters back to the Solar Image Analysis window."""
+        """Push the GCS parameters back to the Solar Image Analysis window."""
         self.parametersCommitted.emit(self.parameters())
         measure = getattr(self.parent(), "_measure", None)
         if measure is not None and hasattr(measure, "set_gcs_parameters"):
@@ -1570,21 +1876,27 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
 
     def _refresh_status(self) -> None:
         active = self._active_panels()
-        clicks = sum(len(self._clicks[panel.label]) for panel in active)
-        self.gcs_panel.commit_gcs_btn.setEnabled(bool(active) and self._shared_time is not None)
-        self.gcs_panel.refine_btn.setEnabled(clicks >= len(free_parameters(self._viewpoints())) + 1)
-        self.clear_points_btn.setEnabled(any(self._clicks.values()))
+        track = self._track()
+        clicks = sum(len(track.clicks[panel.label]) for panel in active)
+        can_commit = bool(active) and self._shared_time is not None
+        self.gcs_panel.commit_gcs_btn.setEnabled(can_commit)
+        self.shock_panel.commit_btn.setEnabled(can_commit)
+        for model, button in ((GCS_MODEL, self.gcs_panel.refine_btn), (SHOCK_MODEL, self.shock_panel.refine_btn)):
+            points = sum(len(self._tracks[model].clicks[panel.label]) for panel in active)
+            button.setEnabled(points >= self._free_parameter_count(model) + 1)
+        self.clear_points_btn.setEnabled(any(track.clicks.values()))
         self.send_btn.setEnabled(hasattr(getattr(self.parent(), "_measure", None), "set_gcs_parameters"))
         synchronization = self._synchronization_summary()
-        # During playback, which shell is drawn leads: it changes every frame.
-        playback = f"▶ Shell: {self._playback_note} · " if self._playback_note else ""
+        # During playback, which shells are drawn leads: they change every frame.
+        playback = f"▶ {self._playback_note} · " if self._playback_note else ""
+        point_text = "point(s) clicked" if self._editing == GCS_MODEL else "shock point(s) clicked"
         if not active:
             self._set_status(playback + "No synchronized viewpoint with valid WCS. "
                              "Set the UTC event range and load channels." + synchronization)
             return
         if len(active) < 2:
             self._set_status(
-                playback + f"{len(active)} viewpoint(s) · {clicks} point(s) clicked — "
+                playback + f"{len(active)} viewpoint(s) · {clicks} {point_text} — "
                 "one view cannot constrain the propagation direction, so it is held fixed. "
                 "Load at least one more channel." + synchronization
             )
@@ -1599,9 +1911,9 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         if not any(MIN_USEFUL_SEPARATION_DEG <= value <= 180.0 - MIN_USEFUL_SEPARATION_DEG
                    for value in separations):
             note = " — viewing geometry cannot constrain direction; it is held fixed"
-        elif sum(bool(self._clicks[panel.label]) for panel in active) < 2:
+        elif sum(bool(track.clicks[panel.label]) for panel in active) < 2:
             note = " — add front points in separated views to refine direction"
-        message = f"{len(active)} viewpoints · separations {summary} · {clicks} point(s) clicked{note}{synchronization}"
+        message = f"{len(active)} viewpoints · separations {summary} · {clicks} {point_text}{note}{synchronization}"
         stuck = [panel.label for panel in self.panels if panel.frames and not panel.can_difference()]
         if stuck and self._difference_mode() != "raw":
             message += (

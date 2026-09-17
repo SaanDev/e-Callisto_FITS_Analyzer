@@ -682,7 +682,7 @@ class GCSViewpointPanel(QWidget):
         """Redraw the image for the current index, contrast and colormap."""
         if not self.frames:
             self.canvas.clear_plot()
-            self.canvas.clear_gcs_overlay()
+            self.canvas.clear_model_overlays()
             if not self.is_fetching():
                 self.title_label.setText(f"{self.label} · not loaded")
             return

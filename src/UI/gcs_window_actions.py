@@ -1,4 +1,4 @@
-"""Menus, scientific workflow guidance and reproducible GCS result exports."""
+"""Menus, scientific workflow guidance and reproducible GCS and shock result exports."""
 
 from __future__ import annotations
 
@@ -14,8 +14,12 @@ from PySide6.QtWidgets import (
     QMessageBox, QTextBrowser, QVBoxLayout,
 )
 
-from src.Backend.gcs_model import GCSParameters, free_parameters
+from src.Backend.gcs_model import GCSParameters
 from src.UI.gcs_viewpoint_panel import _qdatetime_utc
+
+#: Model keys, as in ``src.UI.gcs_fitting_window`` (not imported: it imports this module).
+_GCS = "gcs"
+_SHOCK = "shock"
 
 
 def _json_value(value):
@@ -86,15 +90,26 @@ class GCSWindowActions:
                           lambda _on, mode=key: self._on_layout_button(mode), checkable=True)
             layouts.addAction(item)
         view_menu.addSeparator()
-        for key, title, widget in (("wireframe", "Wireframe", self.wireframe_check),
+        for key, title, widget in (("wireframe", "GCS wireframe", self.wireframe_check),
+                                   ("shock", "Shock wireframe", self.shock_check),
                                    ("limb", "Solar limb", self.limb_check),
                                    ("axes", "Arcsecond axes", self.axes_check)):
-            action(view_menu, key, title, widget.setChecked, checkable=True)
+            # A lambda, not widget.setChecked: PySide calls a bound method of a
+            # Python QCheckBox subclass without the checked argument.
+            action(view_menu, key, title, lambda checked, target=widget: target.setChecked(checked), checkable=True)
         action(view_menu, "zoom", "Reset image zoom", self._reset_image_zoom)
         action(view_menu, "layout_reset", "Fit layout to window", lambda: self._fit_splitter(force=True))
 
         fit_menu = self.menuBar().addMenu("&Fit")
-        action(fit_menu, "pick", "Pick front points", self.pick_points_check.setChecked, checkable=True)
+        editing = QActionGroup(self)
+        editing.setExclusive(True)
+        for key, title in ((_GCS, "Edit &GCS flux rope"), (_SHOCK, "Edit s&hock")):
+            item = action(fit_menu, "edit_" + key, title,
+                          lambda _on, model=key: self.set_editing_model(model), checkable=True)
+            editing.addAction(item)
+        fit_menu.addSeparator()
+        action(fit_menu, "pick", "Pick front points",
+               lambda checked: self.pick_points_check.setChecked(checked), checkable=True)
         action(fit_menu, "clear_points", "Clear current front points", self._clear_points)
         fit_menu.addSeparator()
         action(fit_menu, "refine", "&Refine current model", self._on_refine, "Ctrl+R")
@@ -104,7 +119,7 @@ class GCSWindowActions:
         fit_menu.addSeparator()
         action(fit_menu, "reset_model", "Reset model parameters", self._reset_model)
         action(fit_menu, "kinematics", "Fit recorded heights over time", self._on_fit_kinematics)
-        action(fit_menu, "send", "Send parameters to analyzer", self._on_send)
+        action(fit_menu, "send", "Send GCS parameters to analyzer", self._on_send)
 
         help_menu = self.menuBar().addMenu("&Help")
         action(help_menu, "guide", "Fitting &workflow and scientific limits…", self._show_fitting_guide, "F1")
@@ -118,13 +133,14 @@ class GCSWindowActions:
         has_record = self._recorded_time_for_current_frames() is not None
         has_view = bool(self._active_panels())
         points = sum(view.n_clicks for view in self._viewpoints())
+        fits = self._track().fits
         enabled = {
             "load": not any(panel.is_fetching() for panel in self.panels),
             "cancel": any(panel.is_fetching() for panel in self.panels),
-            "export_csv": bool(self._fits), "snapshot": any(panel.frames for panel in self.panels),
-            "jump": has_time, "refine": has_view and points >= len(free_parameters(self._viewpoints())) + 1,
+            "export_csv": bool(fits), "snapshot": any(panel.frames for panel in self.panels),
+            "jump": has_time, "refine": has_view and points >= self._free_parameter_count(self._editing) + 1,
             "commit": has_time and has_view, "restore": has_record, "delete": has_record,
-            "kinematics": len(self._fits) >= self.tracking_panel.fit_order() + 1,
+            "kinematics": len(fits) >= self.tracking_panel.fit_order() + 1,
             "send": hasattr(getattr(self.parent(), "_measure", None), "set_gcs_parameters"),
         }
         for key in ("first", "previous", "next", "last", "play"):
@@ -132,8 +148,10 @@ class GCSWindowActions:
         for key, on in enabled.items():
             actions[key].setEnabled(on)
         selected = {
-            "wireframe": self.wireframe_check.isChecked(), "limb": self.limb_check.isChecked(),
+            "wireframe": self.wireframe_check.isChecked(), "shock": self.shock_check.isChecked(),
+            "limb": self.limb_check.isChecked(),
             "axes": self.axes_check.isChecked(), "pick": self.pick_points_check.isChecked(),
+            "edit_" + _GCS: self._editing == _GCS, "edit_" + _SHOCK: self._editing == _SHOCK,
         }
         for mode in ("raw", "running", "base"):
             selected["mode_" + mode] = mode == self._difference_mode()
@@ -156,28 +174,39 @@ class GCSWindowActions:
         self._set_status("Download cancellation requested; waiting for current requests to finish.")
 
     def _reset_model(self):
+        """Reset the edited model; the shock starts again along the GCS direction."""
         self.pause()
-        self._params = None
-        self._last_refinement = None
+        track = self._track()
+        track.params = None
+        track.last_refinement = None
         self._sync_all()
         self._set_status("Model reset. Recorded fits are available in the kinematics table.")
 
-    def _recorded_parameters(self, when):
-        """The model recorded at ``when``, as parameters the shell can be drawn from."""
-        entry = self._fits[when]
+    def _recorded_parameters(self, when, model=_GCS):
+        """A model's fit recorded at ``when``, as parameters its shell can be drawn from."""
+        entry = self._tracks[model].fits[when]
+        if model == _SHOCK:
+            from src.UI.solar_measure_tools import shock_entry_parameters
+
+            return shock_entry_parameters(entry)
         return GCSParameters(entry.lon_deg, entry.lat_deg, entry.tilt_deg,
                              entry.apex_height_rsun, entry.alpha_deg, entry.kappa)
 
     def _restore_recorded_model(self):
-        when = self._recorded_time_for_current_frames()
-        if when not in self._fits:
+        model = self._editing
+        when = self._recorded_time_for_current_frames(model)
+        if when not in self._track(model).fits:
             return
         self.pause()
-        self._on_parameters(self._recorded_parameters(when))
+        params = self._recorded_parameters(when, model)
+        if model == _GCS:
+            self._on_parameters(params)
+        else:
+            self._on_shock_parameters(params)
         self._set_status("Restored recorded model. Refine again to calculate errors for the current points.")
 
     def _restore_fit_row(self, row, _column):
-        times = sorted(self._fits)
+        times = sorted(self._track().fits)
         if 0 <= row < len(times):
             self.pause()
             self._seek_time(times[row])
@@ -187,9 +216,10 @@ class GCSWindowActions:
                 self._set_status("Reload the images for this recorded time before restoring its fit.")
 
     def _delete_recorded_fit(self):
+        track = self._track()
         when = self._recorded_time_for_current_frames()
-        if self._fits.pop(when, None) is not None:
-            self._fit_provenance.pop(when, None)
+        if track.fits.pop(when, None) is not None:
+            track.provenance.pop(when, None)
             self._refresh_fits()
             self._set_status("Recorded fit at the current time deleted.")
 
@@ -221,7 +251,9 @@ class GCSWindowActions:
             self.time_slider.setValue(min(range(len(self._time_axis)),
                                            key=lambda i: abs((self._time_axis[i] - when).total_seconds())))
 
-    def _current_provenance(self):
+    def _current_provenance(self, model=None):
+        """What the current fit of ``model`` (the edited one by default) was made from."""
+        clicks = self._track(model).clicks
         active = self._active_panels()
         frames = []
         for panel in self.panels:
@@ -243,7 +275,7 @@ class GCSWindowActions:
                 "included_in_fit": panel in active, "display_mode": mode,
                 "difference_reference_utc": reference,
                 "observer": asdict(panel.observer) if panel.observer is not None else None,
-                "front_points_arcsec": list(self._clicks[panel.label]),
+                "front_points_arcsec": list(clicks[panel.label]),
                 "image_shape": list(frame.data.shape),
             })
         return {
@@ -252,12 +284,23 @@ class GCSWindowActions:
         }
 
     def _analysis_document(self):
-        def records(fits, provenance):
-            return [dict(parameters=entry._asdict(), observations=provenance.get(when))
-                    for when, entry in sorted(fits.items())]
+        from src.Backend.shock_model import shock_semi_axes
+        from src.UI.solar_measure_tools import shock_entry_axes
 
+        def records(fits, provenance, axes=None):
+            out = []
+            for when, entry in sorted(fits.items()):
+                parameters = entry._asdict()
+                if axes is not None:
+                    parameters.update(asdict(axes(entry)))
+                out.append(dict(parameters=parameters, observations=provenance.get(when)))
+            return out
+
+        shock = self._tracks[_SHOCK]
+        shock_params = self.shock_parameters()
         return _json_value({
-            "format": "e-callisto-gcs-analysis", "schema_version": 1,
+            # Version 2 adds the "shock" section; every version-1 key is unchanged.
+            "format": "e-callisto-gcs-analysis", "schema_version": 2,
             "exported_at_utc": datetime.now(timezone.utc),
             "model": "Graduated Cylindrical Shell",
             "coordinate_system": "Heliographic Stonyhurst at observation time; angles in degrees",
@@ -270,6 +313,16 @@ class GCSWindowActions:
             "archived_fits": records(getattr(self, "_archived_fits", {}),
                                      getattr(self, "_archived_provenance", {})),
             "kinematics_polynomial_order": self.tracking_panel.fit_order(),
+            "shock": {
+                "model": "Spheroid or ellipsoid shock surface",
+                "parameter_convention": "PyThea (Kouloumvakos et al. 2022, doi:10.3389/fspas.2022.974137)",
+                "height_definition": "Apex heliocentric distance in solar radii, rcenter + radaxis",
+                "fitted_feature": "Projected outline of the shock surface",
+                "current_model": {**asdict(shock_params), **asdict(shock_semi_axes(shock_params))},
+                "current_observations": self._current_provenance(_SHOCK),
+                "recorded_fits": records(shock.fits, shock.provenance, shock_entry_axes),
+                "archived_fits": records(shock.archived_fits, shock.archived_provenance, shock_entry_axes),
+            },
         })
 
     def _write_analysis(self, path):
@@ -311,14 +364,14 @@ class GCSWindowActions:
         text = QTextBrowser()
         text.setOpenExternalLinks(True)
         text.setHtml("""
-            <h2>Fit the same CME ejecta in every view</h2>
+            <h2>Fit the same CME feature in every view</h2>
             <ol>
             <li><b>Choose the event in UTC.</b> Load independent spacecraft views.
             LASCO C2 and C3 share an observer; opposite viewpoints also provide weak depth constraints.</li>
             <li><b>Check timing.</b> The timeline is the union of image timestamps. Each panel shows its
             nearest image and offset. Adjust Max time offset to suit the CME's evolution; a five-minute
             default is not an accuracy guarantee. Excluded panels do not constrain the fit, but the
-            shell is still drawn on them for comparison.</li>
+            models are still drawn on them for comparison.</li>
             <li><b>Inspect the ejecta front.</b> Use raw, running or base difference and adjust contrast.
             The first loaded frame is running-differenced against the archive frame just before the
             range; it is raw only when no earlier frame exists. A base image containing the CME
@@ -335,18 +388,29 @@ class GCSWindowActions:
             do not provide independent height measurements. Play the sequence to review them: each
             recorded fit is drawn on its own images, fits are interpolated in time between recorded
             times (a display, not a fit) and held before the first and after the last.</li>
-            <li><b>Export.</b> JSON includes all six parameters, frame times, offsets, observer geometry,
-            points and archived fits. CSV contains the recorded numerical series; PNG saves the views.
+            <li><b>Fit the shock too.</b> Choose <i>Edit: Shock</i> to fit the faint outer envelope
+            the CME drives with a spheroid or ellipsoid, drawn alongside the GCS shell in its own colour.
+            Parameters follow PyThea: height is the apex distance, κ = b/(height − 1 R☉) sets the lateral
+            size, ε stretches the shock radially (positive) or flattens it (negative), and an ellipsoid
+            adds α = b/c and a tilt about the radial axis. Click the shock front — the model's outline
+            is what Refine pulls through the points. Front points, recorded fits and kinematics are kept
+            separately per model. With fewer than three views ε and tilt are weakly constrained; prefer
+            a spheroid.</li>
+            <li><b>Export.</b> JSON includes every model parameter, frame times, offsets, observer geometry,
+            points and archived fits for both models, with the shock's centre and semi-axes. CSV contains
+            the recorded series of the model shown in Kinematics; PNG saves the views.
             JSON is an analyzer export, not a PyThea session file.</li>
             </ol>
             <p><b>Scientific limits:</b> formal fit errors omit uncertainty from front selection,
-            non-simultaneous observations, image preparation and the assumed shell geometry.
+            non-simultaneous observations, image preparation and the assumed shell or shock geometry.
             Helioviewer JP2 images support morphological fitting, not calibrated intensity measurements.
             Inspect sensitivity to timing and alternative plausible shells.</p>
             <p><b>Keys while an image has focus:</b> Space plays/pauses; arrows step; Home goes to the
             first frame; 0 equalizes views; 1–3 focus A–C. Menus provide additional shortcuts.</p>
             <p>References: <a href="https://www.pythea.org/en/docs/geometrical_models.html">PyThea model definitions</a>
-            · <a href="https://arxiv.org/abs/2302.00531">GCS reconstruction uncertainty</a></p>
+            · <a href="https://arxiv.org/abs/2302.00531">GCS reconstruction uncertainty</a>
+            · <a href="https://doi.org/10.3847/1538-4357/ab15d7">Kouloumvakos et al. (2019), spheroid shock model</a>
+            · <a href="https://doi.org/10.1088/0004-637X/794/2/148">Kwon et al. (2014), ellipsoid shock model</a></p>
         """)
         layout.addWidget(text)
         buttons = QDialogButtonBox(QDialogButtonBox.Close)

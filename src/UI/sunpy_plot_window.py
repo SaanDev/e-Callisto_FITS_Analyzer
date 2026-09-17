@@ -284,8 +284,14 @@ class SunPyPlotCanvas(QWidget):
         self._gcs_curve.hide()
         self.map_plot.addItem(self._gcs_curve)
         self._gcs_handles: dict[str, Any] = {}
+        # Further model overlays (the shock), each with its own curve, handles
+        # and style, created on first use. See _overlay_layer.
+        self._model_layers: dict[str, dict[str, Any]] = {}
         self._gcs_handle_callback = None
         self._gcs_drag_active = False
+        #: Layer of the handle being dragged, so clearing another layer mid-drag
+        #: cannot end the drag and let its release register as a click.
+        self._gcs_drag_layer: str | None = None
         self._gcs_syncing = False
 
         # HMI vector magnetic field overlay: |B| magnitude layer under the
@@ -472,9 +478,32 @@ class SunPyPlotCanvas(QWidget):
             self._measure_points.setData(x=[], y=[])
 
     # ------------------------------------------------------------- GCS overlay
-    def _gcs_pen(self) -> Any:
-        """Pen for the GCS wireframe from the current style."""
-        style = getattr(self, "_gcs_style", None) or {
+    #: The original model overlay; the GCS wireframe keeps its attributes.
+    GCS_LAYER = "gcs"
+
+    def _overlay_layer(self, layer: str, *, create: bool = True) -> dict[str, Any] | None:
+        """Curve, handles and style of one model overlay.
+
+        ``"gcs"`` is the original wireframe. Any other layer — the shock model —
+        gets its own curve and handles on first use, just under the GCS curve, so
+        two models can be drawn, styled and dragged independently.
+        """
+        if layer == self.GCS_LAYER:
+            return {"curve": self._gcs_curve, "handles": self._gcs_handles, "style": self._gcs_style}
+        state = self._model_layers.get(layer)
+        if state is None and create:
+            style = dict(getattr(self, "_gcs_style", {}) or {})
+            curve = pg.PlotCurveItem(pen=self._gcs_pen(style), antialias=True)
+            curve.setZValue(29)
+            curve.hide()
+            self.map_plot.addItem(curve)
+            state = {"curve": curve, "handles": {}, "style": style}
+            self._model_layers[layer] = state
+        return state
+
+    def _gcs_pen(self, style: dict[str, Any] | None = None) -> Any:
+        """Pen for a model wireframe from a style (the GCS style by default)."""
+        style = style or getattr(self, "_gcs_style", None) or {
             "width": 2.6,
             "color": (255, 140, 40),
             "opacity": 1.0,
@@ -489,64 +518,77 @@ class SunPyPlotCanvas(QWidget):
         width: float | None = None,
         color: tuple[int, int, int] | None = None,
         opacity: float | None = None,
+        layer: str = GCS_LAYER,
     ) -> None:
-        """Restyle the wireframe in place.
+        """Restyle a model wireframe in place.
 
         Only the pen changes, so this is as cheap as a parameter update and can
         be driven from a live slider. Handles follow the colour so the two never
         read as separate objects.
         """
-        style = dict(getattr(self, "_gcs_style", {}) or {})
+        state = self._overlay_layer(layer)
+        style = dict(state["style"] or {})
         if width is not None:
             style["width"] = max(0.2, float(width))
         if color is not None:
             style["color"] = (int(color[0]), int(color[1]), int(color[2]))
         if opacity is not None:
             style["opacity"] = max(0.05, min(1.0, float(opacity)))
-        self._gcs_style = style
-        self._gcs_curve.setPen(self._gcs_pen())
+        if layer == self.GCS_LAYER:
+            self._gcs_style = style
+        else:
+            state["style"] = style
+        state["curve"].setPen(self._gcs_pen(style))
         handle_pen = pg.mkPen(style["color"], width=max(1.2, float(style["width"]) * 0.7))
-        for item in getattr(self, "_gcs_handles", {}).values():
+        for item in state["handles"].values():
             try:
                 item.setPen(handle_pen)
             except Exception:
                 pass
 
-    def gcs_style(self) -> dict[str, Any]:
-        """The current wireframe style, for persisting it with a session."""
-        return dict(getattr(self, "_gcs_style", {}) or {})
+    def gcs_style(self, layer: str = GCS_LAYER) -> dict[str, Any]:
+        """A model wireframe's current style, for persisting it with a session."""
+        state = self._overlay_layer(layer, create=False)
+        return dict(state["style"] or {}) if state is not None else {}
 
-    def set_gcs_overlay(self, x_arcsec, y_arcsec, *, visible: bool = True) -> None:
-        """Draw the GCS CME wireframe (arcsec view coordinates).
+    def set_gcs_overlay(self, x_arcsec, y_arcsec, *, visible: bool = True, layer: str = GCS_LAYER) -> None:
+        """Draw a model wireframe (arcsec view coordinates), the GCS one by default.
 
         ``x_arcsec``/``y_arcsec`` are one NaN-separated pair of arrays covering
         every polyline of the mesh, so the whole wireframe is a single
         ``setData`` and Qt repaints only the dirty scene rect. Build them with
-        ``src.Backend.gcs_model.wireframe_arcsec``.
+        ``src.Backend.gcs_model.wireframe_arcsec`` or
+        ``src.Backend.shock_model.shock_wireframe_arcsec``.
         """
+        curve = self._overlay_layer(layer)["curve"]
         x_arr = np.asarray(x_arcsec, dtype=float)
         y_arr = np.asarray(y_arcsec, dtype=float)
         if not visible or x_arr.size < 2 or x_arr.size != y_arr.size:
-            self._gcs_curve.setData([], [])
-            self._gcs_curve.hide()
+            curve.setData([], [])
+            curve.hide()
             return
         if not np.any(np.isfinite(x_arr) & np.isfinite(y_arr)):
-            self._gcs_curve.setData([], [])
-            self._gcs_curve.hide()
+            curve.setData([], [])
+            curve.hide()
             return
-        self._gcs_curve.setData(x_arr, y_arr, connect="finite")
-        self._gcs_curve.show()
+        curve.setData(x_arr, y_arr, connect="finite")
+        curve.show()
 
-    def set_gcs_handles(self, positions, *, visible: bool = True, movable: bool = True) -> None:
-        """Place the draggable GCS handles, creating them on first use.
+    def set_gcs_handles(
+        self, positions, *, visible: bool = True, movable: bool = True, layer: str = GCS_LAYER
+    ) -> None:
+        """Place a model's draggable handles, creating them on first use.
 
         ``positions`` maps handle name to ``(x_arcsec, y_arcsec)``. Uses
         ``pg.TargetItem``, which hit-tests itself in *pixel* space (so the grab
         radius is zoom-invariant) and accepts the left-drag before it reaches the
-        ViewBox — which is why pan/zoom can stay enabled alongside it.
+        ViewBox — which is why pan/zoom can stay enabled alongside it. A handle
+        outside the GCS layer reports its drags as ``"<layer>:<name>"``.
         """
+        state = self._overlay_layer(layer)
+        handles = state["handles"]
         if not positions:
-            for item in self._gcs_handles.values():
+            for item in handles.values():
                 item.hide()
             return
         # setPos re-emits sigPositionChanged, so snapping handles back onto the
@@ -560,31 +602,29 @@ class SunPyPlotCanvas(QWidget):
                 except Exception:
                     continue
                 if not (np.isfinite(x_value) and np.isfinite(y_value)):
-                    if name in self._gcs_handles:
-                        self._gcs_handles[name].hide()
+                    if name in handles:
+                        handles[name].hide()
                     continue
-                item = self._gcs_handles.get(name)
+                item = handles.get(name)
                 if item is None:
+                    key = name if layer == self.GCS_LAYER else f"{layer}:{name}"
                     item = pg.TargetItem(
                         pos=(x_value, y_value),
                         size=11,
                         symbol="crosshair",
-                        pen=pg.mkPen(
-                            (getattr(self, "_gcs_style", {}) or {}).get("color", (255, 210, 60)),
-                            width=1.8,
-                        ),
+                        pen=pg.mkPen((state["style"] or {}).get("color", (255, 210, 60)), width=1.8),
                         hoverPen=pg.mkPen((255, 255, 255), width=2.4),
                         movable=bool(movable),
                     )
                     item.setZValue(31)
                     item.sigPositionChanged.connect(
-                        lambda handle, key=name: self._on_gcs_handle_moved(key, handle, False)
+                        lambda handle, key=key: self._on_gcs_handle_moved(key, handle, False)
                     )
                     item.sigPositionChangeFinished.connect(
-                        lambda handle, key=name: self._on_gcs_handle_moved(key, handle, True)
+                        lambda handle, key=key: self._on_gcs_handle_moved(key, handle, True)
                     )
                     self.map_plot.addItem(item)
-                    self._gcs_handles[name] = item
+                    handles[name] = item
                 else:
                     item.blockSignals(True)
                     try:
@@ -603,6 +643,7 @@ class SunPyPlotCanvas(QWidget):
         if self._gcs_syncing:
             return
         self._gcs_drag_active = True
+        self._gcs_drag_layer = name.split(":", 1)[0] if ":" in name else self.GCS_LAYER
         callback = self._gcs_handle_callback
         if callback is not None:
             try:
@@ -618,21 +659,33 @@ class SunPyPlotCanvas(QWidget):
 
     def _clear_gcs_drag_active(self) -> None:
         self._gcs_drag_active = False
+        self._gcs_drag_layer = None
 
     def gcs_drag_active(self) -> bool:
         """True while a GCS handle drag is in flight (see ``_on_gcs_handle_moved``)."""
         return bool(getattr(self, "_gcs_drag_active", False))
 
-    def has_gcs_overlay(self) -> bool:
-        x_data, _ = self._gcs_curve.getData()
-        return bool(self._gcs_curve.isVisible() and x_data is not None and len(x_data) > 0)
+    def has_gcs_overlay(self, layer: str = GCS_LAYER) -> bool:
+        state = self._overlay_layer(layer, create=False)
+        if state is None:
+            return False
+        x_data, _ = state["curve"].getData()
+        return bool(state["curve"].isVisible() and x_data is not None and len(x_data) > 0)
 
-    def clear_gcs_overlay(self) -> None:
-        self._gcs_curve.setData([], [])
-        self._gcs_curve.hide()
-        for item in self._gcs_handles.values():
-            item.hide()
-        self._gcs_drag_active = False
+    def clear_gcs_overlay(self, layer: str = GCS_LAYER) -> None:
+        state = self._overlay_layer(layer, create=False)
+        if state is not None:
+            state["curve"].setData([], [])
+            state["curve"].hide()
+            for item in state["handles"].values():
+                item.hide()
+        if getattr(self, "_gcs_drag_layer", None) in (None, layer):
+            self._clear_gcs_drag_active()
+
+    def clear_model_overlays(self) -> None:
+        """Clear every model overlay: the GCS wireframe and any other layer."""
+        for layer in (self.GCS_LAYER, *self._model_layers):
+            self.clear_gcs_overlay(layer)
 
     def set_colormap_name(self, name: str) -> None:
         text = str(name or "").strip() or "inferno"
