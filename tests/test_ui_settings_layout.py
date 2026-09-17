@@ -370,6 +370,7 @@ def test_sidebar_sections_are_collapsible_cards():
         sections = collapsible_sections(win.side_scroll.widget())
         assert [section.title() for section in sections] == [
             "Timeline",
+            "Background Subtraction",
             "Noise Clipping Thresholds",
             "Units",
             "Axis",

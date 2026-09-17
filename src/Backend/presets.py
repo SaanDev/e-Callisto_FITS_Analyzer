@@ -61,23 +61,32 @@ def normalize_preset(raw: dict[str, Any]) -> dict[str, Any]:
     if noise_clip_low > noise_clip_high:
         noise_clip_low, noise_clip_high = noise_clip_high, noise_clip_low
 
+    normalized_settings = {
+        "lower_slider": int(round(noise_clip_low)),
+        "upper_slider": int(round(noise_clip_high)),
+        "noise_clip_low": float(noise_clip_low),
+        "noise_clip_high": float(noise_clip_high),
+        "noise_clip_scale": _normalize_noise_clip_scale(settings.get("noise_clip_scale")),
+        "use_db": bool(settings.get("use_db", False)),
+        "use_utc": bool(settings.get("use_utc", False)),
+        "cmap": str(settings.get("cmap") or "Custom"),
+        "graph": dict(settings.get("graph") or {}),
+        "rfi": dict(settings.get("rfi") or {}),
+        "annotation_style_defaults": dict(settings.get("annotation_style_defaults") or {}),
+    }
+    # Presets saved before background subtraction had its own control carry
+    # neither key. Leaving them out, rather than defaulting them, lets the
+    # window tell those presets apart and keep what they used to show.
+    if "background_method" in settings:
+        normalized_settings["background_method"] = str(settings.get("background_method") or "").strip().lower()
+    if "background_subtracted" in settings:
+        normalized_settings["background_subtracted"] = bool(settings.get("background_subtracted"))
+
     return {
         "name": name,
         "version": _safe_int(raw.get("version"), PRESET_SCHEMA_VERSION),
         "created_at": str(raw.get("created_at") or _now_iso()),
-        "settings": {
-            "lower_slider": int(round(noise_clip_low)),
-            "upper_slider": int(round(noise_clip_high)),
-            "noise_clip_low": float(noise_clip_low),
-            "noise_clip_high": float(noise_clip_high),
-            "noise_clip_scale": _normalize_noise_clip_scale(settings.get("noise_clip_scale")),
-            "use_db": bool(settings.get("use_db", False)),
-            "use_utc": bool(settings.get("use_utc", False)),
-            "cmap": str(settings.get("cmap") or "Custom"),
-            "graph": dict(settings.get("graph") or {}),
-            "rfi": dict(settings.get("rfi") or {}),
-            "annotation_style_defaults": dict(settings.get("annotation_style_defaults") or {}),
-        },
+        "settings": normalized_settings,
     }
 
 

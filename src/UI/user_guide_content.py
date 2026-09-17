@@ -127,8 +127,11 @@ _BODY = f"""
 <ol>
 <li><b>Open a file.</b> Choose <code>File &#8594; Open</code> (or press {_kbd('Ctrl+O')}, or click the
 Open icon on the toolbar) and select an e-CALLISTO FITS file. The dynamic spectrum appears at once.</li>
-<li><b>Clean up the display.</b> Drag the <b>Lower Threshold</b> and <b>Upper Threshold</b> sliders in the
-left sidebar. The plot updates live, so you can watch the burst emerge from the background.</li>
+<li><b>Remove the background.</b> In the left sidebar's <b>Background Subtraction</b> section, pick a
+method (Mean, Median, or Median (dB)) and click <b>Subtract Background</b>. It is always computed from the raw
+data, so clicking again with another method replaces the result rather than stacking on it.</li>
+<li><b>Adjust the contrast.</b> Drag the <b>Lower Threshold</b> and <b>Upper Threshold</b> sliders. They only
+set the color-scale limits and update live, so you can watch the burst emerge; the data are never modified.</li>
 <li><b>Pick units and colors.</b> In <b>Units</b> choose Digits or dB, and Seconds or UT. In
 <b>Graph Properties</b> pick a colormap.</li>
 <li><b>Focus on the burst.</b> Click <b>Isolate Burst</b> on the toolbar and draw a loop around the emission.
@@ -151,7 +154,7 @@ analysis controls become active.</p>
 <li><b>Menu bar</b> (top): File, Edit, Download, Solar Events, View, Analysis, Processing, About, and Help.</li>
 <li><b>Toolbar</b> (below the menu): icon buttons for the most common actions, plus a
 <b>Cite this Software</b> button on the right.</li>
-<li><b>Left sidebar</b>: grouped controls for thresholds, units, graph appearance, the analysis summary,
+<li><b>Left sidebar</b>: grouped controls for the timeline, background subtraction, thresholds, units, graph appearance, the analysis summary,
 and ruler readouts. A vertical arrow button on its edge hides or shows the sidebar to give the plot more room.</li>
 <li><b>Viewer</b> (center): the dynamic spectrum. A status bar at the bottom shows messages on the left and,
 on the right, the live cursor readout (time, frequency, intensity) and the update-check status.</li>
@@ -278,8 +281,16 @@ data or a loaded file stay disabled until they are usable.</p>
 <a name="sidebar"></a>
 <h2>12. Left sidebar panels</h2>
 <ul>
+<li><b>Background Subtraction</b>: choose <b>Mean</b> or <b>Median</b> to subtract each channel's mean or
+median (the result stays in Digits), or <b>Median (dB)</b> to subtract each channel's median and convert to dB above
+that background, as the Plotutil recipe and the batch processor do. Click <b>Subtract Background</b> to apply.
+The subtraction always starts from the raw data, so re-applying replaces the previous result, and RFI cleaning or
+an isolated burst made from the old result is cleared. While a Median (dB) result is shown, the Digits/dB switch is
+locked to dB because the data are already in dB. <code>Edit &#8594; Reset to Raw</code> removes the subtraction.</li>
 <li><b>Noise Clipping Thresholds</b>: the <b>Lower</b> and <b>Upper</b> sliders set the color-scale limits
-(Vmin/Vmax) live. The <b>Logarithmic Threshold Scale</b> checkbox gives finer control near zero.</li>
+(Vmin/Vmax) live, for contrast only &#8212; the data are never clipped or changed. With both at zero the color
+scale fits the whole data range. Limits chosen on raw data reset when you subtract the background, since they
+would saturate the new scale. The <b>Logarithmic Threshold Scale</b> checkbox gives finer control near zero.</li>
 <li><b>Units</b>: Intensity as Digits or dB, and Time as Seconds or UT. Switching time units does not lose data.</li>
 <li><b>Graph Properties</b> (active after a file loads): colormap (Custom, viridis, plasma, inferno, magma,
 cividis, turbo, RdYlBu, jet, cubehelix, bone_r), font family, graph title and a Remove Titles checkbox, font
@@ -439,8 +450,8 @@ hours wide, and the <b>UT</b> time mode shows the real clock time.</td></tr>
 58.51 counts/dB for the ASG, from a 4096-count (12-bit) ADC full scale over the receiver's published
 70 dB dynamic range.</td></tr>
 <tr><td>Channels differ in gain by more than an order of magnitude.</td>
-<td>The file opens <b>background subtracted</b>, because a raw plot shows the receiver's gain profile rather
-than the Sun. <code>Edit &#8594; Reset to Raw</code> shows the stored counts. The threshold sliders are widened
+<td>The file opens <b>background subtracted</b> with the method selected in the sidebar, because a raw plot
+shows the receiver's gain profile rather than the Sun. <code>Edit &#8594; Reset to Raw</code> shows the stored counts. The threshold sliders are widened
 to the receiver's real range.</td></tr>
 </table>
 <p><b>What the decibels mean.</b> ARTEMIS-IV has no absolute flux calibration &#8212; no per-file hot/cold load

@@ -74,3 +74,20 @@ def test_normalize_preset_reads_legacy_noise_thresholds():
     assert preset["settings"]["noise_clip_low"] == -9.0
     assert preset["settings"]["noise_clip_high"] == 14.0
     assert preset["settings"]["noise_clip_scale"] == "linear"
+
+
+def test_normalize_preset_keeps_background_keys_only_when_recorded():
+    recorded = normalize_preset(
+        {
+            "name": "Median dB",
+            "settings": {"background_method": "Plotutil_Median_DB", "background_subtracted": 1},
+        }
+    )
+    assert recorded["settings"]["background_method"] == "plotutil_median_db"
+    assert recorded["settings"]["background_subtracted"] is True
+
+    # Presets written before the Background Subtraction section must stay
+    # distinguishable, so the keys are not invented for them.
+    legacy = normalize_preset({"name": "Legacy", "settings": {"noise_clip_low": -5, "noise_clip_high": 20}})
+    assert "background_method" not in legacy["settings"]
+    assert "background_subtracted" not in legacy["settings"]

@@ -93,7 +93,15 @@ from src.Backend.annotations import (
     normalize_annotations,
     toggle_all_visibility,
 )
-from src.Backend.artemis import describe_artemis, suggested_display_range
+from src.Backend.artemis import db_scale_for_header, describe_artemis, suggested_display_range
+from src.Backend.batch_processing import (
+    BACKGROUND_METHOD_MEAN,
+    BACKGROUND_METHOD_MEDIAN,
+    BACKGROUND_METHOD_PLOTUTIL,
+    PLOTUTIL_DB_SCALE,
+    normalize_background_method,
+    subtract_background,
+)
 from src.Backend.frequency_axis import (
     finite_data_limits,
     format_frequency_mhz,
@@ -145,7 +153,7 @@ from src.Backend.recovery_manager import (
     load_recovery_snapshot,
     save_recovery_snapshot,
 )
-from src.Backend.noise_reduction import rowwise_baseline, subtract_background_rows
+from src.Backend.noise_reduction import rowwise_baseline
 from src.Backend.rfi_filters import clean_rfi, config_dict as rfi_config_dict
 from src.Backend.update_checker import GITHUB_REPO
 from src.Backend.view_config import (
@@ -250,6 +258,14 @@ class MainWindow(QMainWindow):
     NOISE_SLIDER_MID = NOISE_SLIDER_MAX // 2
     NOISE_CLIP_SCALE_LINEAR = "linear"
     NOISE_CLIP_SCALE_SIGNED_LOG = "signed_log"
+    #: Background subtraction methods offered in the sidebar, in menu order.
+    #: Median (dB) is the Plotutil recipe, so its product is already in dB.
+    BACKGROUND_METHODS = (
+        (BACKGROUND_METHOD_MEAN, "Mean"),
+        (BACKGROUND_METHOD_MEDIAN, "Median"),
+        (BACKGROUND_METHOD_PLOTUTIL, "Median (dB)"),
+    )
+    DEFAULT_BACKGROUND_METHOD = BACKGROUND_METHOD_MEAN
     RAW_FITS_PRESET_NAME = "Raw FITS Percentile (5-98%)"
     RAW_FITS_VMIN_PERCENTILE = 5.0
     RAW_FITS_VMAX_PERCENTILE = 98.0
@@ -374,6 +390,12 @@ class MainWindow(QMainWindow):
         self.noise_vmin = None
         self.noise_vmax = None
 
+        # The method picked in the sidebar, and the one behind the product on
+        # screen (None while the raw data are shown). They differ until the
+        # user clicks Subtract Background.
+        self.background_method = self.DEFAULT_BACKGROUND_METHOD
+        self._background_applied_method = None
+
         self.current_display_data = None
         self._current_plot_source_data = None
 
@@ -405,8 +427,6 @@ class MainWindow(QMainWindow):
         self._noise_undo_pending = False
         self._noise_slider_drag_active = False
         self._noise_preview_active = False
-        self._noise_base_data = None
-        self._noise_base_source_id = None
         self._noise_slider_sync_guard = False
 
         self._import_thread = None
@@ -565,6 +585,11 @@ class MainWindow(QMainWindow):
         self.upper_slider.setSingleStep(1)
         self.upper_slider.setPageStep(50)
         self.upper_slider.setValue(self._noise_threshold_to_slider(self.noise_clip_high))
+        for slider in (self.lower_slider, self.upper_slider):
+            slider.setToolTip(
+                "Sets the color-scale limits only. The data are never modified; "
+                "use Background Subtraction above to change them."
+            )
 
         slider_group = QGroupBox("Noise Clipping Thresholds")
         self.slider_group = slider_group
@@ -853,6 +878,7 @@ class MainWindow(QMainWindow):
         analysis_summary_layout.addWidget(self.analysis_summary_label)
 
         self.timeline_group = self._build_timeline_section()
+        self.background_group = self._build_background_section()
 
         self.measurement_readout = MeasurementReadout("Ruler Measurement", self)
         self.measurement_readout.clearRequested.connect(self.clear_ruler_measurement)
@@ -867,6 +893,7 @@ class MainWindow(QMainWindow):
         side_panel_layout.setSpacing(10)
 
         side_panel_layout.addWidget(self.timeline_group)
+        side_panel_layout.addWidget(self.background_group)
         side_panel_layout.addWidget(slider_group)
         side_panel_layout.addWidget(self.units_group_box)
         side_panel_layout.addWidget(self.axis_group_box)
@@ -878,6 +905,7 @@ class MainWindow(QMainWindow):
         # Consistent width for all groups (better on Windows DPI scaling)
         SIDEBAR_W = 268
         self.timeline_group.setMaximumWidth(SIDEBAR_W)
+        self.background_group.setMaximumWidth(SIDEBAR_W)
         slider_group.setMaximumWidth(SIDEBAR_W)
         self.units_group_box.setMaximumWidth(SIDEBAR_W)
         self.axis_group_box.setMaximumWidth(SIDEBAR_W)
@@ -1365,6 +1393,8 @@ class MainWindow(QMainWindow):
         self.lower_slider.sliderReleased.connect(self._on_noise_slider_released)
         self.upper_slider.sliderReleased.connect(self._on_noise_slider_released)
         self.noise_log_scale_chk.toggled.connect(self._on_noise_scale_mode_toggled)
+        self.background_method_combo.currentIndexChanged.connect(self._on_background_method_changed)
+        self.background_subtract_btn.clicked.connect(self.apply_background_subtraction)
         self.cmap_combo.currentTextChanged.connect(self.change_cmap)
         self.open_action.triggered.connect(self.load_file)
         self.combine_fits_action.triggered.connect(self.open_combine_fits_window)
@@ -1822,7 +1852,7 @@ class MainWindow(QMainWindow):
             color: {muted};
             margin-top: 8px;
         }}
-        QLabel#TimelineStatusLabel {{
+        QLabel#TimelineStatusLabel, QLabel#BackgroundStatusLabel {{
             font-size: 11px;
             color: {muted};
         }}
@@ -1856,13 +1886,13 @@ class MainWindow(QMainWindow):
             background-color: transparent;
             color: {muted};
         }}
-        QPushButton#TimelineStepButton {{
+        QPushButton#TimelineStepButton, QPushButton#BackgroundSubtractButton {{
             background-color: {accent_soft};
             border-color: {accent_soft};
             color: {accent_text};
             font-weight: bold;
         }}
-        QPushButton#TimelineStepButton:disabled {{
+        QPushButton#TimelineStepButton:disabled, QPushButton#BackgroundSubtractButton:disabled {{
             background-color: transparent;
             border-color: {hairline};
             color: {muted};
@@ -2227,7 +2257,7 @@ class MainWindow(QMainWindow):
             margin-top: 10px;
             margin-bottom: 2px;
         }}
-        QLabel#TimelineStatusLabel {{
+        QLabel#TimelineStatusLabel, QLabel#BackgroundStatusLabel {{
             font-size: 11px;
             color: {muted};
             padding-top: 2px;
@@ -2271,16 +2301,16 @@ class MainWindow(QMainWindow):
             color: {muted};
         }}
         /* Stepping through the archive is this panel's primary action. */
-        QPushButton#TimelineStepButton {{
+        QPushButton#TimelineStepButton, QPushButton#BackgroundSubtractButton {{
             background-color: {accent_soft};
             border-color: {accent_soft};
             color: {accent_text};
             font-weight: 600;
         }}
-        QPushButton#TimelineStepButton:hover {{
+        QPushButton#TimelineStepButton:hover, QPushButton#BackgroundSubtractButton:hover {{
             border-color: {accent};
         }}
-        QPushButton#TimelineStepButton:disabled {{
+        QPushButton#TimelineStepButton:disabled, QPushButton#BackgroundSubtractButton:disabled {{
             background-color: transparent;
             border-color: {hairline};
             color: {muted};
@@ -2651,6 +2681,7 @@ class MainWindow(QMainWindow):
         self.tb_reset_sel.setEnabled(has_noise or can_reset_view)
         self.tb_reset_to_raw.setEnabled(has_file)
         self.tb_reset_all.setEnabled(has_file)
+        self._sync_background_controls()
         self._sync_fits_view_actions()
         self._sync_analysis_menu_actions()
         self._sync_nav_actions()
@@ -2813,6 +2844,7 @@ class MainWindow(QMainWindow):
             extent=extent,
             cmap=self.get_current_cmap(),
             gap_row_mask=self._current_gap_row_mask(),
+            levels=self._threshold_display_levels(),
             title=plot_title,
             x_label=x_label,
             y_label=y_label,
@@ -3412,7 +3444,7 @@ class MainWindow(QMainWindow):
             try:
                 arr = np.asarray(self.current_display_data, dtype=float)
                 if arr.ndim == 2 and arr.shape[1] > 0:
-                    if self.use_db:
+                    if self._display_converts_to_db():
                         cold_digits, _ = self._db_hot_cold_digits()
                         return (arr / float(self._intensity_db_scale())) + cold_digits
                     return arr
@@ -3902,6 +3934,7 @@ class MainWindow(QMainWindow):
         self.lasso_mask = None
         self.noise_vmin = None
         self.noise_vmax = None
+        self._background_applied_method = None
         self.current_display_data = None
         self._current_plot_source_data = None
         self._undo_stack.clear()
@@ -3943,15 +3976,17 @@ class MainWindow(QMainWindow):
 
         self._reset_runtime_state_for_loaded_data()
         self._reset_noise_controls_to_defaults()
+        # The thresholds are display limits on whatever is shown, which starts
+        # as the raw data — so the sliders have to reach its whole range.
+        self._fit_noise_clip_bounds_to_data(self.raw_data)
         default_preset_applied = self._apply_default_preset_for_loaded_data()
-        instrument_defaults_applied = (
-            False if default_preset_applied else self._prepare_artemis_display_defaults()
-        )
+        if not default_preset_applied:
+            self._prepare_artemis_display_defaults()
         plot_source = self.raw_data
         effective_plot_title = plot_title
-        if (default_preset_applied or instrument_defaults_applied) and self._apply_noise_clip_to_current_data():
+        if self.noise_reduced_data is not None:
             plot_source = self.noise_reduced_data
-            effective_plot_title = "Background Subtracted"
+            effective_plot_title = self.current_plot_type
         self.plot_data(plot_source, title=effective_plot_title)
         if self._selected_goes_overlay_channels():
             QTimer.singleShot(0, lambda: self._ensure_goes_overlay_for_current_data(force=True))
@@ -3987,7 +4022,6 @@ class MainWindow(QMainWindow):
         two can never disagree about what describes "the current dataset".
         """
         self.raw_data = data
-        self._invalidate_noise_cache()
         self.freqs = freqs
         self.time = time
         self.filename = str(filename or "")
@@ -4080,13 +4114,14 @@ class MainWindow(QMainWindow):
         """Rebuild the displayed product for the current ``raw_data``.
 
         An extended dataset is the same observation with the same processing
-        applied, just longer — so the background subtraction, noise clip and RFI
-        cleaning the user had active are re-derived over the new array instead
-        of silently dropping the view back to Raw.  Returns ``(data, title)``.
+        applied, just longer — so the background subtraction and RFI cleaning
+        the user had active are re-derived over the new array instead of
+        silently dropping the view back to Raw.  The thresholds are display
+        limits and carry over unchanged.  Returns ``(data, title)``.
 
         The view the user was on decides how far the chain is rebuilt: someone
-        looking at Raw with thresholds still dialled in stays on Raw rather than
-        being flipped into the background-subtracted product.
+        looking at Raw stays on Raw rather than being flipped into the
+        background-subtracted product.
         """
         wanted = self._normalize_plot_type(getattr(self, "current_plot_type", "Raw"))
 
@@ -4094,13 +4129,19 @@ class MainWindow(QMainWindow):
         self.noise_reduced_original = None
         self.noise_reduced_original_plot_type = "Background Subtracted"
 
+        rfi = dict(getattr(self, "_rfi_config", {}) or {})
+        method = getattr(self, "_background_applied_method", None)
+        self._background_applied_method = None
+
         data = self.raw_data
         title = "Raw"
-        if wanted != "Raw" and self._apply_noise_clip_to_current_data():
+        if wanted != "Raw" and method is not None and self._set_background_product(method):
             data = self.noise_reduced_data
             title = "Background Subtracted"
+            self._fit_noise_clip_bounds_to_data(data)
+        else:
+            self._fit_noise_clip_bounds_to_data(self.raw_data)
 
-        rfi = dict(getattr(self, "_rfi_config", {}) or {})
         if wanted == "RFI Cleaned" and rfi.get("applied", False) and data is not None:
             try:
                 result = clean_rfi(
@@ -4385,19 +4426,17 @@ class MainWindow(QMainWindow):
         spectrum is background subtracted for that reason, so that is the view a
         file opens in. **Edit -> Reset to Raw** still shows the stored counts.
 
-        Returns whether the thresholds were set, so the caller knows the first
-        plot is the subtracted one.
+        Returns whether the file was opened background subtracted.
         """
         if getattr(self, "_artemis_profile", None) is None:
             return False
 
-        base = self._ensure_noise_base_data()
-        if base is None:
+        if not self._set_background_product(self.background_method):
             return False
+        base = self.noise_reduced_data
 
         # Let the sliders reach the receiver's real extremes, not CALLISTO's.
-        data_min, data_max = finite_data_limits(base)
-        self._expand_noise_clip_bounds_for_values(data_min, data_max)
+        self._expand_noise_clip_bounds_for_values(*finite_data_limits(base))
 
         low, high = suggested_display_range(
             base,
@@ -4469,7 +4508,10 @@ class MainWindow(QMainWindow):
         return float(low_val), float(high_val), self._normalize_noise_clip_scale(scale)
 
     def _raw_fits_percentile_thresholds(self, data=None) -> tuple[float, float] | tuple[None, None]:
-        source = self.raw_data if data is None else data
+        # The thresholds are display limits on the data being shown, so take
+        # the percentiles there — raw-data percentiles would saturate a
+        # background-subtracted plot.
+        source = self._current_product_data() if data is None else data
         if source is None:
             return None, None
         return percentile_data_limits(
@@ -4504,6 +4546,8 @@ class MainWindow(QMainWindow):
         if reset_bounds:
             self._reset_noise_clip_bounds()
         self._set_noise_clip_state(low, high, scale=self.noise_clip_scale, sync_widgets=True)
+        if reset_bounds and self.raw_data is not None:
+            self._fit_noise_clip_bounds_to_data(self._current_product_data())
         try:
             self._active_preset_snapshot = build_preset(self.RAW_FITS_PRESET_NAME, self._preset_settings_payload())
         except Exception:
@@ -4540,6 +4584,8 @@ class MainWindow(QMainWindow):
     def _noise_clip_display_values(self) -> tuple[float, float, str]:
         low = float(self.noise_clip_low)
         high = float(self.noise_clip_high)
+        if self._background_product_is_db():
+            return low, high, "dB"
         if not self.use_db:
             return low, high, self._intensity_linear_unit()
         cold_digits, _ = self._db_hot_cold_digits()
@@ -4560,7 +4606,7 @@ class MainWindow(QMainWindow):
         if low_label is None or high_label is None:
             return
         low_disp, high_disp, unit_label = self._noise_clip_display_values()
-        if unit_label == "dB":
+        if unit_label == "dB" and not self._background_product_is_db():
             low_label.setText(self._format_noise_clip_threshold_digits(self.noise_clip_low))
             high_label.setText(self._format_noise_clip_threshold_digits(self.noise_clip_high))
             if low_sub_label is not None:
@@ -4570,7 +4616,7 @@ class MainWindow(QMainWindow):
                 high_sub_label.setText(self._format_noise_clip_value(high_disp, unit_label))
                 high_sub_label.setVisible(True)
             tooltip = (
-                f"Primary readout shows the clipping threshold in {self._intensity_linear_unit()}; "
+                f"Primary readout shows the color-scale limit in {self._intensity_linear_unit()}; "
                 f"secondary line shows the display value in dB ({self._intensity_db_reference_text()})"
             )
             low_label.setToolTip(tooltip)
@@ -4588,7 +4634,10 @@ class MainWindow(QMainWindow):
         if high_sub_label is not None:
             high_sub_label.clear()
             high_sub_label.setVisible(False)
-        tooltip = f"Clipping threshold in {self._intensity_linear_unit()}"
+        if self._background_product_is_db():
+            tooltip = "Color-scale limit in dB above the per-channel median background"
+        else:
+            tooltip = f"Color-scale limit in {self._intensity_linear_unit()}"
         low_label.setToolTip(tooltip)
         high_label.setToolTip(tooltip)
 
@@ -4638,7 +4687,7 @@ class MainWindow(QMainWindow):
 
     def _intensity_unit_label(self) -> str:
         """Unit shown on the colorbar and passed to the analysis dialogs."""
-        return "dB" if self.use_db else self._intensity_linear_unit()
+        return "dB" if (self.use_db or self._background_product_is_db()) else self._intensity_linear_unit()
 
     def _intensity_db_scale(self) -> float:
         """dB per raw intensity unit, for the receiver that wrote the file.
@@ -4729,6 +4778,7 @@ class MainWindow(QMainWindow):
 
     def _reset_sidebar_controls_to_defaults(self) -> None:
         self._reset_noise_controls_to_defaults()
+        self._set_background_method_state(self.DEFAULT_BACKGROUND_METHOD)
         self.set_units_mode(False)
         self.set_axis_to_seconds()
 
@@ -4802,7 +4852,7 @@ class MainWindow(QMainWindow):
     def _intensity_for_display(self, data):
         if data is None:
             return None
-        if not self.use_db:
+        if not self._display_converts_to_db():
             return data
         cold_digits, _ = self._db_hot_cold_digits()
         arr = np.asarray(data)
@@ -4816,7 +4866,7 @@ class MainWindow(QMainWindow):
     def _intensity_range_for_display(self, vmin, vmax):
         if vmin is None or vmax is None:
             return vmin, vmax
-        if not self.use_db:
+        if not self._display_converts_to_db():
             return vmin, vmax
         cold_digits, _ = self._db_hot_cold_digits()
         scale = self._intensity_db_scale()
@@ -5677,6 +5727,42 @@ class MainWindow(QMainWindow):
 
         return group
 
+    def _build_background_section(self) -> QGroupBox:
+        """Sidebar controls for subtracting the per-channel background."""
+        group = QGroupBox("Background Subtraction")
+        group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(6)
+
+        layout.addWidget(QLabel("Method"))
+        self.background_method_combo = QComboBox()
+        self.background_method_combo.setObjectName("BackgroundMethodCombo")
+        for method, label in self.BACKGROUND_METHODS:
+            self.background_method_combo.addItem(label, method)
+        self.background_method_combo.setToolTip(
+            "Mean or Median: subtract each channel's mean or median, keeping the raw intensity unit.\n"
+            "Median (dB): subtract each channel's median and convert to dB above "
+            "that background (the Plotutil recipe)."
+        )
+        layout.addWidget(self.background_method_combo)
+
+        self.background_subtract_btn = QPushButton("Subtract Background")
+        self.background_subtract_btn.setObjectName("BackgroundSubtractButton")
+        self.background_subtract_btn.setToolTip(
+            "Subtract the background from the raw data with the selected method. "
+            "Applying again replaces the result; it never stacks."
+        )
+        layout.addWidget(self.background_subtract_btn)
+
+        self.background_status_label = QLabel("")
+        self.background_status_label.setObjectName("BackgroundStatusLabel")
+        self.background_status_label.setWordWrap(True)
+        layout.addWidget(self.background_status_label)
+
+        self._set_background_method_state(self.background_method)
+        return group
+
     def _timeline_step_count(self) -> int:
         combo = getattr(self, "timeline_step_combo", None)
         if combo is None:
@@ -5985,40 +6071,74 @@ class MainWindow(QMainWindow):
         self.noise_smooth_timer.stop()
         self.update_noise_live()
 
-    def _invalidate_noise_cache(self):
-        self._noise_base_data = None
-        self._noise_base_source_id = None
+    # =========================
+    # Background subtraction (always computed from the raw data)
+    # =========================
+    def _normalize_sidebar_background_method(self, method) -> str:
+        try:
+            mode = normalize_background_method(method, strict=True)
+        except ValueError:
+            return self.DEFAULT_BACKGROUND_METHOD
+        known = {key for key, _label in self.BACKGROUND_METHODS}
+        return mode if mode in known else self.DEFAULT_BACKGROUND_METHOD
 
-    def _ensure_noise_base_data(self):
+    def _background_method_label(self, method) -> str:
+        return dict(self.BACKGROUND_METHODS)[self._normalize_sidebar_background_method(method)]
+
+    def _set_background_method_state(self, method) -> None:
+        """Select ``method`` in the sidebar without applying it."""
+        self.background_method = self._normalize_sidebar_background_method(method)
+        combo = getattr(self, "background_method_combo", None)
+        if combo is None:
+            return
+        index = combo.findData(self.background_method)
+        if index >= 0 and index != combo.currentIndex():
+            blocked = combo.blockSignals(True)
+            try:
+                combo.setCurrentIndex(index)
+            finally:
+                combo.blockSignals(blocked)
+
+    def _on_background_method_changed(self, _index: int) -> None:
+        self.background_method = self._normalize_sidebar_background_method(
+            self.background_method_combo.currentData()
+        )
+        self._sync_background_controls()
+
+    def _background_product_is_db(self) -> bool:
+        """Whether the processed data are Median (dB) output, already in dB."""
+        return (
+            getattr(self, "_background_applied_method", None) == BACKGROUND_METHOD_PLOTUTIL
+            and getattr(self, "noise_reduced_data", None) is not None
+        )
+
+    def _display_converts_to_db(self) -> bool:
+        return bool(self.use_db) and not self._background_product_is_db()
+
+    def _background_db_scale(self) -> float:
+        # The batch processor's constant, so the sidebar and a batch export of
+        # the same file agree; ARTEMIS files get their own receiver's scale.
+        return db_scale_for_header(getattr(self, "_fits_header0", None), PLOTUTIL_DB_SCALE)
+
+    def _background_subtracted_from_raw(self, method) -> np.ndarray | None:
         if self.raw_data is None:
             return None
-
-        source_id = id(self.raw_data)
-        if self._noise_base_data is not None and self._noise_base_source_id == source_id:
-            return self._noise_base_data
-
-        arr = np.asarray(self.raw_data, dtype=np.float32)
-        gap_row_mask = self._current_gap_row_mask()
-        self._noise_base_data = subtract_background_rows(
-            arr,
-            method="robust",
-            gap_row_mask=gap_row_mask,
-            equalize_noise=False,
+        return subtract_background(
+            self.raw_data,
+            method=self._normalize_sidebar_background_method(method),
+            gap_row_mask=self._current_gap_row_mask(),
+            db_scale=self._background_db_scale(),
         ).astype(np.float32, copy=False)
-        self._noise_base_source_id = source_id
-        return self._noise_base_data
 
-    def _compute_noise_reduced(self, low: float, high: float):
-        base = self._ensure_noise_base_data()
-        if base is None:
-            return None
-        return np.clip(base, low, high).astype(np.float32, copy=False)
+    def _set_background_product(self, method, data=None) -> bool:
+        """Make the raw data minus its background the processed product.
 
-    def _apply_noise_clip_to_current_data(self) -> bool:
-        if self.raw_data is None or not self._noise_clip_thresholds_active():
-            return False
-
-        data = self._compute_noise_reduced(float(self.noise_clip_low), float(self.noise_clip_high))
+        Always starts from ``raw_data``, so applying another method replaces
+        the previous result instead of subtracting a second background from it.
+        """
+        mode = self._normalize_sidebar_background_method(method)
+        if data is None:
+            data = self._background_subtracted_from_raw(mode)
         if data is None:
             return False
 
@@ -6026,13 +6146,148 @@ class MainWindow(QMainWindow):
         self.noise_reduced_original = data.copy()
         self.noise_reduced_original_plot_type = "Background Subtracted"
         self.noise_vmin, self.noise_vmax = finite_data_limits(data)
+        self._background_applied_method = mode
         self.current_plot_type = "Background Subtracted"
         return True
 
-    def _update_live_preview_canvas(self, data):
+    def _noise_threshold_space(self) -> str:
+        """The intensity scale the thresholds are read on: raw, subtracted or dB."""
+        method = getattr(self, "_background_applied_method", None)
+        if method is None or getattr(self, "noise_reduced_data", None) is None:
+            return "raw"
+        return "db" if method == BACKGROUND_METHOD_PLOTUTIL else "subtracted"
+
+    def _fit_noise_clip_bounds_to_data(self, data, *, reset: bool = False) -> None:
+        """Let the threshold sliders reach the whole range of ``data``."""
+        if reset:
+            self._reset_noise_clip_bounds()
+        if data is not None:
+            self._expand_noise_clip_bounds_for_values(*finite_data_limits(data))
+        self._set_noise_clip_state(
+            self.noise_clip_low,
+            self.noise_clip_high,
+            scale=self.noise_clip_scale,
+            sync_widgets=True,
+        )
+
+    def apply_background_subtraction(self, checked: bool = False, *, method=None) -> bool:
+        """Subtract the selected background from the raw data and show it."""
+        _ = checked
+        if self.raw_data is None:
+            QMessageBox.information(self, "Background Subtraction", "Load a FITS file first.")
+            return False
+
+        mode = self._normalize_sidebar_background_method(self.background_method if method is None else method)
+        self._set_background_method_state(mode)
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            data = self._background_subtracted_from_raw(mode)
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Background Subtraction",
+                f"Could not subtract the background:\n{exc}",
+            )
+            return False
+        finally:
+            QApplication.restoreOverrideCursor()
+        if data is None:
+            return False
+
+        self.noise_smooth_timer.stop()
+        self.noise_commit_timer.stop()
+        self._noise_undo_pending = False
+        self._push_undo_state()
+
+        previous_space = self._noise_threshold_space()
+        self._set_background_product(mode, data)
+
+        # RFI cleaning and an isolated burst were derived from the old product.
+        self.lasso_mask = None
+        self._rfi_preview_data = None
+        self._rfi_preview_masked = []
+        if isinstance(self._rfi_config, dict):
+            self._rfi_config["applied"] = False
+
+        if self._noise_threshold_space() != previous_space:
+            # Limits picked on another intensity scale would saturate this one.
+            self._reset_noise_clip_bounds()
+            self._set_noise_clip_state(0.0, 0.0, scale=self.noise_clip_scale, sync_widgets=True)
+        self._fit_noise_clip_bounds_to_data(self.noise_reduced_data)
+
+        self.plot_data(self.noise_reduced_data, title="Background Subtracted", keep_view=True)
+        label = self._background_method_label(mode)
+        self._log_operation(f"Subtracted the background from the raw data ({label}).")
+        self.statusBar().showMessage(f"Background subtracted ({label}).", 3000)
+        self._sync_toolbar_enabled_states()
+        return True
+
+    def _sync_background_controls(self) -> None:
+        button = getattr(self, "background_subtract_btn", None)
+        if button is None:
+            return
+        has_data = getattr(self, "raw_data", None) is not None
+        button.setEnabled(has_data)
+
+        applied = getattr(self, "_background_applied_method", None)
+        processed = getattr(self, "noise_reduced_data", None) is not None
+        plot_type = self._normalize_plot_type(getattr(self, "current_plot_type", "Raw"))
+        if not has_data:
+            text = "Load a FITS file to subtract its background."
+        elif applied is not None and processed:
+            text = f"Applied: {self._background_method_label(applied)}"
+            if plot_type not in ("Raw", "Background Subtracted"):
+                text += f" · {plot_type}"
+        elif processed:
+            text = f"Not applied — showing {plot_type}."
+        else:
+            text = "Not applied — showing the raw data."
+        label = getattr(self, "background_status_label", None)
+        if label is not None:
+            label.setText(text)
+
+        # Median (dB) output already carries its unit, so there is nothing for
+        # the Digits/dB switch to convert until the user goes back to raw.
+        is_db = self._background_product_is_db()
+        digits_radio = getattr(self, "units_digits_radio", None)
+        db_radio = getattr(self, "units_db_radio", None)
+        if digits_radio is None or db_radio is None:
+            return
+        show_db = is_db or bool(self.use_db)
+        for radio, checked in ((db_radio, show_db), (digits_radio, not show_db)):
+            blocked = radio.blockSignals(True)
+            try:
+                radio.setChecked(checked)
+                radio.setEnabled(not is_db)
+            finally:
+                radio.blockSignals(blocked)
+
+    def _threshold_display_levels(self) -> tuple[float, float] | None:
+        """The noise clipping thresholds as color-scale limits, in display units.
+
+        None when both thresholds are zero, which means "fit the data".
+        """
+        if not self._noise_clip_thresholds_active():
+            return None
+        low, high = sorted((float(self.noise_clip_low), float(self.noise_clip_high)))
+        low, high = self._intensity_range_for_display(low, high)
+        low, high = float(low), float(high)
+        if not (math.isfinite(low) and math.isfinite(high)):
+            return None
+        if high <= low:
+            # Both handles on one value: keep a hairline range rather than
+            # letting the plot fall back to autoscaling under the user.
+            high = low + max(abs(low) * 1e-6, 1e-6)
+        return low, high
+
+    def _current_product_data(self):
+        return self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
+
+    def _update_live_preview_canvas(self, data, title=None):
         if not self._hardware_mode_enabled():
             return False
-        ok = self._refresh_accel_plot(data=data, title="Background Subtracted", preserve_view=True)
+        ok = self._refresh_accel_plot(data=data, title=title, preserve_view=True)
         if ok:
             self._show_accel_canvas()
         return ok
@@ -6043,7 +6298,7 @@ class MainWindow(QMainWindow):
         if self._noise_slider_drag_active:
             return
 
-        if self.raw_data is None or self.noise_reduced_data is None:
+        if self.raw_data is None:
             self._noise_undo_pending = False
             if self._hardware_mode_enabled():
                 self._show_accel_canvas()
@@ -6051,10 +6306,11 @@ class MainWindow(QMainWindow):
                 self._show_plot_canvas()
             return
 
-        self.plot_data(self.noise_reduced_data, title="Background Subtracted", keep_view=True)
+        self.plot_data(self._current_product_data(), title=self.current_plot_type, keep_view=True)
         self._noise_undo_pending = False
 
     def update_noise_live(self):
+        """Redraw with the thresholds as color-scale limits; the data are untouched."""
         if self.raw_data is None:
             return
 
@@ -6062,29 +6318,16 @@ class MainWindow(QMainWindow):
             self._push_undo_state()
             self._noise_undo_pending = True
 
-        low = float(self.noise_clip_low)
-        high = float(self.noise_clip_high)
-
-        data = self._compute_noise_reduced(low, high)
-        if data is None:
-            return
-
-        self.noise_reduced_data = data
-        self.noise_reduced_original = data.copy()
-        self.noise_reduced_original_plot_type = "Background Subtracted"
-
-        self.noise_vmin, self.noise_vmax = finite_data_limits(data)
-        self.current_plot_type = "Background Subtracted"
-
-        if self._update_live_preview_canvas(data):
+        data = self._current_product_data()
+        title = self.current_plot_type
+        if self._update_live_preview_canvas(data, title):
             self.noise_commit_timer.start()
             if not self._noise_slider_drag_active:
                 self._commit_noise_live_update()
         else:
-            self.plot_data(data, title="Background Subtracted", keep_view=True)
+            self.plot_data(data, title=title, keep_view=True)
             self._noise_undo_pending = False
 
-        # enable tools
         self._sync_toolbar_enabled_states()
 
     def plot_data(self, data, title="Raw", keep_view=False, restore_view=None):
@@ -6534,13 +6777,7 @@ class MainWindow(QMainWindow):
 
         self._apply_view_config_visual(dict(normalized.get("visual") or {}), replot=False)
         if self.raw_data is not None:
-            if self._apply_noise_clip_to_current_data():
-                data = self.noise_reduced_data
-                title = "Background Subtracted"
-            else:
-                data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
-                title = self.current_plot_type
-            self._plot_data_internal(data, title=title, view=None)
+            self._plot_data_internal(self._current_product_data(), title=self.current_plot_type, view=None)
         range_payload = normalized.get("range")
         if isinstance(range_payload, dict):
             return self._apply_display_range_payload(range_payload, show_errors=show_errors)
@@ -6946,7 +7183,7 @@ class MainWindow(QMainWindow):
             extent=matplotlib_extent(self.freqs, self.time, default_step=self._frequency_step_mhz),
             cmap=cmap,
         )
-        vmin, vmax = finite_data_limits(display_data)
+        vmin, vmax = self._threshold_display_levels() or finite_data_limits(display_data)
         if vmin is not None and vmax is not None:
             im.set_clim(vmin, vmax)
         self._draw_frequency_gap_hatches(self.canvas.ax)
@@ -7860,9 +8097,12 @@ class MainWindow(QMainWindow):
         cax = divider.append_axes("right", size="5%", pad=0.1)
         self.current_cax = cax
 
-        # Plot with fixed vmin/vmax from noise reduction (converted to display units if needed)
+        # Keep the colors of the plot the burst was cut from: the threshold
+        # limits when set, otherwise the full range of the processed data.
         display_burst = self._intensity_for_display(burst_isolated)
-        vmin, vmax = self._intensity_range_for_display(self.noise_vmin, self.noise_vmax)
+        vmin, vmax = self._threshold_display_levels() or self._intensity_range_for_display(
+            self.noise_vmin, self.noise_vmax
+        )
 
         im = self.canvas.ax.imshow(
             masked_display_data(display_burst),
@@ -8597,7 +8837,7 @@ class MainWindow(QMainWindow):
 
         # Clear data
         self.raw_data = None
-        self._invalidate_noise_cache()
+        self._background_applied_method = None
         self.freqs = None
         self.time = None
         self.filename = ""
@@ -8669,6 +8909,7 @@ class MainWindow(QMainWindow):
             or self.lasso_active
             or bool(getattr(self, "lasso", None))
             or self._noise_clip_thresholds_active()
+            or self._background_applied_method is not None
         )
         if had_processed:
             self._push_undo_state()
@@ -8724,8 +8965,11 @@ class MainWindow(QMainWindow):
         self._rfi_preview_masked = []
         if isinstance(self._rfi_config, dict):
             self._rfi_config["applied"] = False
+        self._background_applied_method = None
 
+        self._reset_noise_clip_bounds()
         self._set_noise_clip_state(0.0, 0.0, scale=self.noise_clip_scale, sync_widgets=True)
+        self._fit_noise_clip_bounds_to_data(self.raw_data)
 
         self.plot_data(self.raw_data, title="Raw")
         if had_processed:
@@ -10305,6 +10549,8 @@ class MainWindow(QMainWindow):
             "noise_clip_low": float(self.noise_clip_low),
             "noise_clip_high": float(self.noise_clip_high),
             "noise_clip_scale": str(self.noise_clip_scale),
+            "background_method": str(self.background_method),
+            "background_applied_method": self._background_applied_method,
             "use_db": self.use_db,
             "use_utc": self.use_utc,
             "cmap": self.current_cmap_name,
@@ -10409,7 +10655,6 @@ class MainWindow(QMainWindow):
     def _restore_state(self, state):
         """Restore a previously captured application state."""
         self.raw_data = state["raw_data"]
-        self._invalidate_noise_cache()
         self.noise_reduced_data = state["noise_reduced_data"]
         self.noise_reduced_original = state["noise_reduced_original"]
         self.noise_reduced_original_plot_type = self._normalize_plot_type(
@@ -10444,13 +10689,30 @@ class MainWindow(QMainWindow):
             default_high=self.noise_clip_high,
             default_scale=self.noise_clip_scale,
         )
+        self._restore_background_state(state)
         self._set_noise_clip_state(low, high, scale=scale, sync_widgets=True)
+        if self.raw_data is not None:
+            self._fit_noise_clip_bounds_to_data(self._current_product_data())
         self._update_noise_clip_value_labels()
         self._restore_dataset_state_extras(state)
 
         if self.raw_data is not None:
             data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
             self.plot_data(data, title=self.current_plot_type, restore_view=state.get("view"))
+
+    def _restore_background_state(self, mapping) -> None:
+        """Restore the sidebar method and the method behind the processed data.
+
+        Snapshots written before the Background Subtraction section existed
+        carry neither key, so the processed data they hold are left unlabelled.
+        """
+        source = dict(mapping or {})
+        self._set_background_method_state(source.get("background_method", self.background_method))
+        applied = source.get("background_applied_method", None)
+        if applied is None or self.noise_reduced_data is None:
+            self._background_applied_method = None
+        else:
+            self._background_applied_method = self._normalize_sidebar_background_method(applied)
 
     def _restore_dataset_state_extras(self, state) -> None:
         """Restore the keys only a timeline edit records.
@@ -11213,6 +11475,12 @@ class MainWindow(QMainWindow):
             "noise_clip_low": float(self.noise_clip_low),
             "noise_clip_high": float(self.noise_clip_high),
             "noise_clip_scale": str(self.noise_clip_scale),
+            "background_method": str(
+                self._background_applied_method
+                if self._background_applied_method is not None
+                else self.background_method
+            ),
+            "background_subtracted": self._background_applied_method is not None,
             "use_db": bool(self.use_db),
             "use_utc": bool(self.use_utc),
             "cmap": str(self.current_cmap_name or "Custom"),
@@ -11325,6 +11593,7 @@ class MainWindow(QMainWindow):
 
         settings = dict((preset or {}).get("settings") or {})
         self._active_preset_snapshot = dict(preset)
+        background_changed = self._apply_preset_background(settings, push_undo=replot)
         low, high, scale = self._noise_thresholds_from_mapping(
             settings,
             default_low=self.noise_clip_low,
@@ -11387,19 +11656,69 @@ class MainWindow(QMainWindow):
             for widget, was_blocked in graph_blocks:
                 widget.blockSignals(was_blocked)
 
+        if self.raw_data is not None:
+            self._fit_noise_clip_bounds_to_data(self._current_product_data())
         if replot and self.raw_data is not None:
-            if self._apply_noise_clip_to_current_data():
-                data = self.noise_reduced_data
-                title = "Background Subtracted"
-            else:
-                data = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
-                title = self.current_plot_type
-            self.plot_data(data, title=title, keep_view=True)
+            self.plot_data(self._current_product_data(), title=self.current_plot_type, keep_view=True)
+        if background_changed:
+            self._sync_toolbar_enabled_states()
 
         if mark_dirty:
             self._mark_project_dirty()
         if log_operation:
             self._log_operation(f"Applied preset: {preset.get('name', 'Unnamed')}")
+        return True
+
+    def _apply_preset_background(self, settings: dict, *, push_undo: bool) -> bool:
+        """Bring the processed data in line with a preset's background setting.
+
+        Returns whether the data changed. Presets saved before the Background
+        Subtraction section existed record only thresholds, and back then any
+        non-zero threshold meant a background-subtracted view — so those still
+        open subtracted, with the method selected in the sidebar.
+        """
+        method = self._normalize_sidebar_background_method(
+            settings.get("background_method", self.background_method)
+        )
+        self._set_background_method_state(method)
+        if "background_subtracted" in settings:
+            wanted = bool(settings.get("background_subtracted"))
+        else:
+            wanted = any(
+                abs(float(settings.get(key, 0.0) or 0.0)) > 1e-9
+                for key in ("noise_clip_low", "noise_clip_high")
+            )
+        if self.raw_data is None:
+            return False
+
+        applied = self._background_applied_method
+        if wanted and applied == method and self.noise_reduced_data is not None:
+            return False
+        if not wanted and (applied is None or self.noise_reduced_data is None):
+            return False
+
+        if wanted:
+            data = self._background_subtracted_from_raw(method)
+            if data is None:
+                return False
+            if push_undo:
+                self._push_undo_state()
+            self._set_background_product(method, data)
+        else:
+            if push_undo:
+                self._push_undo_state()
+            self.noise_reduced_data = None
+            self.noise_reduced_original = None
+            self.noise_reduced_original_plot_type = "Background Subtracted"
+            self.noise_vmin = None
+            self.noise_vmax = None
+            self._background_applied_method = None
+            self.current_plot_type = "Raw"
+        self.lasso_mask = None
+        self._rfi_preview_data = None
+        self._rfi_preview_masked = []
+        if isinstance(self._rfi_config, dict):
+            self._rfi_config["applied"] = False
         return True
 
     def apply_saved_preset(self):
@@ -12214,6 +12533,7 @@ class MainWindow(QMainWindow):
                 "noise_clip_low": float(self.noise_clip_low),
                 "noise_clip_high": float(self.noise_clip_high),
                 "noise_clip_scale": str(self.noise_clip_scale),
+                "background_method": self._background_applied_method,
                 "cmap": self.current_cmap_name,
                 "graph": self._preset_settings_payload().get("graph", {}),
                 "active_preset": dict(self._active_preset_snapshot or {}),
@@ -13235,7 +13555,7 @@ class MainWindow(QMainWindow):
                     extent=matplotlib_extent(self.freqs, self.time, default_step=self._frequency_step_mhz),
                     cmap=self._plot_cmap(),
                 )
-                vmin, vmax = finite_data_limits(display)
+                vmin, vmax = self._threshold_display_levels() or finite_data_limits(display)
                 if vmin is not None and vmax is not None:
                     image.set_clim(vmin, vmax)
                 top_ax.set_ylabel("Frequency [MHz]")
@@ -13702,6 +14022,8 @@ class MainWindow(QMainWindow):
             "noise_clip_low": float(state.get("noise_clip_low", self.noise_clip_low)),
             "noise_clip_high": float(state.get("noise_clip_high", self.noise_clip_high)),
             "noise_clip_scale": str(state.get("noise_clip_scale", self.noise_clip_scale)),
+            "background_method": str(state.get("background_method", self.background_method)),
+            "background_applied_method": state.get("background_applied_method", None),
             "use_db": bool(state["use_db"]),
             "use_utc": bool(state["use_utc"]),
             "ut_start_sec": self.ut_start_sec,
@@ -13815,7 +14137,6 @@ class MainWindow(QMainWindow):
             self._close_analysis_windows()
 
             self.raw_data = arrays.get("raw_data", None)
-            self._invalidate_noise_cache()
             self.noise_reduced_data = arrays.get("noise_reduced_data", None)
             self.noise_reduced_original = arrays.get("noise_reduced_original", None)
             self.noise_reduced_original_plot_type = self._normalize_plot_type(
@@ -13853,6 +14174,7 @@ class MainWindow(QMainWindow):
 
             self.noise_vmin = meta.get("noise_vmin", None)
             self.noise_vmax = meta.get("noise_vmax", None)
+            self._restore_background_state(meta)
             low, high, scale = self._noise_thresholds_from_mapping(
                 meta,
                 default_low=self.noise_clip_low,
@@ -13860,6 +14182,8 @@ class MainWindow(QMainWindow):
                 default_scale=self.noise_clip_scale,
             )
             self._set_noise_clip_state(low, high, scale=scale, sync_widgets=True)
+            if self.raw_data is not None:
+                self._fit_noise_clip_bounds_to_data(self._current_product_data())
 
             self._fits_source_path = meta.get("fits_source_path", None)
             self._is_combined = bool(meta.get("is_combined", False))

@@ -433,7 +433,10 @@ def test_clicking_previous_after_next_still_extends(window):
 # -----------------------------
 # Processing state
 # -----------------------------
-def _enable_background_subtraction(win):
+def _enable_background_subtraction(win, method="median"):
+    win.background_method_combo.setCurrentIndex(win.background_method_combo.findData(method))
+    win.background_subtract_btn.click()
+    QApplication.processEvents()
     win._set_noise_clip_state(-5.0, 25.0, scale=win.NOISE_CLIP_SCALE_LINEAR, sync_widgets=True)
     win.update_noise_live()
     QApplication.processEvents()
@@ -453,16 +456,28 @@ def test_background_subtraction_survives_an_extend(window):
     assert window.canvas.ax.get_title().endswith("Background Subtracted")
 
 
-def test_noise_clip_thresholds_are_reapplied_to_the_added_data(window):
+def test_background_is_resubtracted_from_the_extended_raw_data(window):
+    _enable_background_subtraction(window, method="median")
+
+    _run_extend(window, "next")
+
+    assert window._background_applied_method == "median"
+    expected = np.asarray(window.raw_data, dtype=np.float32)
+    expected = expected - np.nanmedian(expected, axis=1, keepdims=True)
+    assert np.allclose(window.noise_reduced_data, expected, atol=1e-4)
+
+
+def test_noise_clip_thresholds_carry_over_as_display_limits(window):
     _enable_background_subtraction(window)
 
     _run_extend(window, "next")
 
     assert window.noise_clip_low == pytest.approx(-5.0)
     assert window.noise_clip_high == pytest.approx(25.0)
+    assert window._threshold_display_levels() == pytest.approx((-5.0, 25.0))
+    # The thresholds limit the color scale; they never clip the data.
     values = np.asarray(window.noise_reduced_data)
-    assert float(np.nanmin(values)) >= -5.0 - 1e-6
-    assert float(np.nanmax(values)) <= 25.0 + 1e-6
+    assert float(np.nanmin(values)) < -5.0 or float(np.nanmax(values)) > 25.0
 
 
 def test_rfi_cleaning_survives_an_extend(window):

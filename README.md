@@ -9,7 +9,7 @@ Compared with v2.8.0, this release adds the following capabilities:
 
 ### Working a burst across the archive, without leaving the plot
 - **Timeline panel:** a loaded dataset now knows which station, focus codes and observation times it came from, and the sidebar's **Timeline** section lists them. **◀ Previous** / **Next ▶** fetch the adjacent 15-minute observation and time-combine it into the spectrum in place, one to eight steps at a time. Following a type II from its onset no longer means going back to the downloader and re-importing every file.
-- **Kept work, kept processing:** annotations, the ruler measurement and drift picks survive an extension, and their time coordinates shift with the axis when an earlier observation is prepended, so they stay on the feature they were placed on. The background subtraction, noise clip and RFI cleaning that were active are re-derived over the longer array rather than dropping the view back to Raw.
+- **Kept work, kept processing:** annotations, the ruler measurement and drift picks survive an extension, and their time coordinates shift with the axis when an earlier observation is prepended, so they stay on the feature they were placed on. The background subtraction and RFI cleaning that were active are re-derived over the longer array rather than dropping the view back to Raw, and the threshold display limits carry over unchanged.
 - **Trim and undo:** **Trim Start** / **Trim End** walk the dataset back, falling through to a plain single-file load at one segment, and both extension and trimming are a single **Ctrl+Z** away — arrays, source list and annotations together.
 - **Local first, then the archive:** the adjacent observation is looked for among the loaded file's siblings on disk before any request is made, so a set already downloaded extends with no network at all. Day listings are cached per session, and adjacent files can be prefetched in the background.
 - **Available-or-not, up front:** the panel says why a direction is unavailable — end of the archive day, or a timestamp that supplies only part of the focus set — instead of failing on the click.
@@ -62,11 +62,12 @@ Compared with v2.8.0, this release adds the following capabilities:
 ### Dynamic spectrum workflow
 - Load `.fit`, `.fits`, `.fit.gz`, and `.fits.gz` files, including datasets combined across time, frequency, or both dimensions.
 - Load ARTEMIS-IV (Thermopylae, Greece) `ARTLOOK` files directly: the hours-based UT time axis is converted on load, intensities are labelled and scaled as ADC counts with the ASG's own 58.51 counts/dB conversion, and the observation opens background subtracted because the receiver's channel gains span more than an order of magnitude.
-- Extend a loaded dataset in place from the sidebar's **Timeline** section: fetch the previous or next observation from disk or the archive, time-combine it into the spectrum without leaving the plot, trim from either end, and undo any of it. Annotations, the ruler measurement and drift picks keep their place, and the active background subtraction, noise clip and RFI cleaning are re-derived over the longer array.
+- Extend a loaded dataset in place from the sidebar's **Timeline** section: fetch the previous or next observation from disk or the archive, time-combine it into the spectrum without leaving the plot, trim from either end, and undo any of it. Annotations, the ruler measurement and drift picks keep their place, and the active background subtraction and RFI cleaning are re-derived over the longer array.
 - Switch the frequency axis between **Linear** and **Log** from the sidebar's **Axis** section, with decade-anchored ticks labelled in MHz and identical behaviour in the software and hardware-accelerated renderers.
 - Download and analyze e-CALLISTO and Learmonth Station radio data, including Learmonth chunk conversion to FIT format for the main Analyzer.
 - Use hardware-accelerated plotting with live cursor readouts, rectangular zoom, lock/unlock navigation, and **Edit → Reset to Raw** controls.
-- Adjust intensity thresholds live with high-resolution sliders, value readouts, optional signed-log scaling, dB or Digits/ADU display modes, and graph-property controls.
+- Subtract the per-channel background from the sidebar's **Background Subtraction** section with **Mean**, **Median** or **Median (dB)**; it is always computed from the raw data, so re-applying replaces the result instead of stacking.
+- Adjust the contrast live with high-resolution threshold sliders that set the color-scale limits only (the data are never clipped), value readouts, optional signed-log scaling, dB or Digits/ADU display modes, and graph-property controls.
 - Apply the **Raw FITS Percentile (5-98%)** noise-clipping preset from **Processing → Presets** for a fast starting display range on raw FITS files.
 - Inspect FITS headers from the **View** menu, customize titles and labels, and export publication-ready figures from the current analysis view.
 - Generate project report PDFs that summarize the loaded dataset, processing state, analysis outputs, solar-context plots, and report-ready figures.
@@ -128,17 +129,20 @@ The dynamic spectrum appears immediately.
 
 ---
 
-# 3. Noise Reduction (Live Threshold Scrollbars)
+# 3. Noise Reduction (Background Subtraction and Live Threshold Scrollbars)
 
-Noise reduction updates **live** without pressing Apply.
+Noise reduction is two separate steps in the left sidebar:
+
+1. **Background Subtraction** — pick **Mean**, **Median** or **Median (dB)** and click **Subtract Background**. The result is always computed from the raw data, so switching method and clicking again replaces it. Median (dB) converts to dB above the per-channel median (the Plotutil recipe, matching batch processing).
+2. **Noise Clipping Thresholds** — the sliders set the color-scale limits (Vmin / Vmax) **live** without pressing Apply. They change the contrast only; the data are never clipped.
 
 Features:
 
-- High-resolution lower and upper clipping sliders for smoother Vmin / Vmax adjustment
+- High-resolution lower and upper threshold sliders for smoother Vmin / Vmax adjustment
 - Live threshold readouts next to each slider for quick feedback while dragging
 - Optional **Logarithmic Threshold Scale** checkbox for finer control near zero
-- Robust per-channel background subtraction for both single-band and frequency-combined plots
-- **Processing → Presets → Raw FITS Percentile (5-98%)** sets noise-clipping limits from the current raw data distribution
+- Per-channel mean, median, or median (dB) background subtraction for both single-band and frequency-combined plots
+- **Processing → Presets → Raw FITS Percentile (5-98%)** sets the threshold limits from the distribution of the data currently shown
 - Saved processing presets can be applied manually or selected as the default preset for future FITS loads
 - Dynamic spectrum refreshes automatically
 - No data are lost when switching x-axis units (seconds ↔ UT)

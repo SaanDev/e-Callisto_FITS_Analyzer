@@ -54,6 +54,8 @@ def normalize_background_method(method: str, *, strict: bool = False) -> str:
         "plotutil_median_(db)",
         "plotutil_median_db",
         "callisto_plotutil",
+        "median_db",
+        "median_(db)",
     }:
         return BACKGROUND_METHOD_PLOTUTIL
     if mode == BACKGROUND_METHOD_MEDIAN:
