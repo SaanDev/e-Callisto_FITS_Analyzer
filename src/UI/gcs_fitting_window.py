@@ -51,7 +51,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import numpy as np
-from PySide6.QtCore import QRect, Qt, QTimer, Signal
+from PySide6.QtCore import QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -72,6 +72,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QStyle,
+    QStyleOptionButton,
     QVBoxLayout,
     QWidget,
 )
@@ -216,6 +217,35 @@ class GCSImageStage(QWidget):
 
 
 # --- Control deck -----------------------------------------------------------------
+
+
+class LetterButton(QPushButton):
+    """A one-letter segment button (A, B, C), as narrow as its letter allows.
+
+    A fixed 30 px clipped the letter to nothing under the app theme, which pads
+    every push button 13 px a side. Leaving the width to the style instead gives
+    80 px under Fusion, its minimum for any button with text. So the width is the
+    letter plus whatever padding and frame the active style puts around a
+    button's contents, and it follows the theme when that changes.
+    """
+
+    MIN_WIDTH = 30
+
+    def __init__(self, text: str, parent: QWidget | None = None):
+        super().__init__(text, parent)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 (Qt naming)
+        height = super().sizeHint().height()
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        option.rect = QRect(0, 0, 100, max(1, height))
+        contents = self.style().subElementRect(QStyle.SE_PushButtonContents, option, self)
+        chrome = option.rect.width() - contents.width()
+        return QSize(max(self.MIN_WIDTH, self.fontMetrics().horizontalAdvance(self.text()) + chrome + 4), height)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 (Qt naming)
+        return self.sizeHint()
 
 
 class GCSCard(QFrame):
@@ -436,7 +466,7 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         group = QButtonGroup(self)
         group.setExclusive(True)
         for index, (key, text) in enumerate(labels):
-            button = QPushButton(text)
+            button = LetterButton(text) if len(text) == 1 else QPushButton(text)
             button.setCheckable(True)
             button.setChecked(key == checked)
             button.setProperty("segment_key", key)
@@ -534,7 +564,6 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
                     f"Layout: enlarge panel {PANEL_LABELS[index]}; the other two stack beside it and\n"
                     f"the controls move to the right ({index + 1})."
                 )
-                button.setFixedWidth(30)
             button.toggled.connect(lambda on, value=key: self._on_layout_button(value) if on else None)
         row.addWidget(layout_holder)
 
@@ -756,7 +785,6 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
             self.contrast_stack.addWidget(page)
         for button in self._contrast_group.buttons():
             index = int(button.property("segment_key"))
-            button.setFixedWidth(30)
             button.setToolTip(f"Colormap and contrast for panel {PANEL_LABELS[index]}.")
             button.toggled.connect(lambda on, i=index: self.contrast_stack.setCurrentIndex(i) if on else None)
         layout.addWidget(self.contrast_stack)

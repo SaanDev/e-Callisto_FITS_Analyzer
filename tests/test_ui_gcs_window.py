@@ -1437,3 +1437,44 @@ def test_the_caption_fits_even_the_smallest_panel(window):
 def test_the_window_fits_a_1280_pixel_screen(window):
     """The toolbar once pinned the minimum width at 1290 px."""
     assert window.minimumSizeHint().width() <= 1200
+
+
+def _letter_buttons(window):
+    layout = {str(b.property("segment_key")): b for b in window._layout_group.buttons()}
+    return (
+        [layout[f"focus:{i}"] for i in range(3)],
+        sorted(window._contrast_group.buttons(), key=lambda b: int(b.property("segment_key"))),
+    )
+
+
+def _letter_room(button) -> int:
+    """Width the style leaves for the label inside the button's padding and frame."""
+    from PySide6.QtWidgets import QStyle, QStyleOptionButton
+
+    option = QStyleOptionButton()
+    button.initStyleOption(option)
+    return button.style().subElementRect(QStyle.SE_PushButtonContents, option, button).width()
+
+
+@pytest.mark.parametrize("stylesheet", [
+    "",
+    # The app's modern theme pads every push button 13 px a side. A fixed 30 px
+    # button then had 2 px left and drew "A" as a sliver, in the layout toolbar
+    # and the Display card alike.
+    "QPushButton { min-height: 32px; border: 1px solid gray; border-radius: 10px; padding: 6px 13px; }",
+])
+def test_panel_letter_buttons_show_their_letters(window, stylesheet):
+    window.setStyleSheet(stylesheet)
+    window.resize(1470, 900)
+    window.show()
+    _flush(20)
+    try:
+        for buttons in _letter_buttons(window):
+            assert [button.text() for button in buttons] == ["A", "B", "C"]
+            for button in buttons:
+                assert _letter_room(button) >= button.fontMetrics().horizontalAdvance(button.text())
+                # Fusion gives any text button 80 px; these must stay compact.
+                assert button.width() < 60
+        assert window.minimumSizeHint().width() <= 1200
+    finally:
+        window.hide()
