@@ -359,7 +359,10 @@ def test_refine_uses_every_fetched_viewpoint(window):
             (float(projection.tx_arcsec[i]), float(projection.ty_arcsec[i])) for i in picked
         ]
 
-    window._params = GCSParameters(43.0, -18.0, 34.0, 7.9, 37.0, 0.27)
+    # Refinement is local: begin with a manually aligned shell. A distant seed
+    # can find a different shell with a small residual, especially behind an
+    # occulter; that does not establish reconstruction accuracy.
+    window._params = GCSParameters(36.0, -13.0, 26.0, 8.8, 33.0, 0.31)
     window._on_refine()
     _flush()
     result = window._last_refinement

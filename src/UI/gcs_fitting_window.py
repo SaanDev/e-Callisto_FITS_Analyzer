@@ -47,7 +47,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import numpy as np
-from PySide6.QtCore import QDateTime, QRect, Qt, QTimer, Signal
+from PySide6.QtCore import QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -625,7 +625,7 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(3, 1)
         grid.setRowStretch(row, 1)
-        card = GCSCard("Event & channels", body)
+        card = GCSCard("Event & channels (UTC)", body)
         card.setMinimumWidth(360)
         return card
 
@@ -673,7 +673,7 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         extras.addWidget(self.clear_points_btn)
         extras.addWidget(self.send_btn)
         layout.addLayout(extras)
-        guidance = QLabel("Align shell → pick ejecta front → refine → record")
+        guidance = QLabel("Align → pick front → refine → record")
         guidance.setToolTip(
             "Fit the same ejecta in independent, near-simultaneous views. GCS describes a flux rope,\n"
             "not the outer shock. Height is measured from Sun centre. Refinement errors are formal\n"
@@ -767,6 +767,11 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         self.tracking_panel.auto_advance_check.hide()
         self.tracking_panel.table.setMinimumHeight(90)
         self.tracking_panel.table.setMaximumHeight(130)
+        self.tracking_panel.table.setMinimumWidth(240)
+        self.tracking_panel.plot.setFixedHeight(160)
+        self.tracking_panel.fit_btn.setText("Fit height–time")
+        self.tracking_panel.clear_btn.setText("Clear fits")
+        self.tracking_panel.export_btn.setText("CSV…")
         self.tracking_panel.table.setToolTip("Recorded fits. Use Fit → Restore recorded model to revisit the current time.")
         self.tracking_panel.fit_order_combo.currentIndexChanged.connect(self._sync_kinematics_buttons)
         self.tracking_panel.table.cellDoubleClicked.connect(self._restore_fit_row)
@@ -1003,6 +1008,8 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
             )
         self._apply_style()
         self._refresh_status()
+        if hasattr(self, "menu_actions"):
+            self._sync_menu_actions()
 
     def _apply_style(self) -> None:
         for panel in self.panels:
@@ -1132,6 +1139,7 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
                 button.blockSignals(was)
 
     def _on_difference_mode(self, mode: str) -> None:
+        self._last_refinement = None
         self._set_mode_buttons(mode)
         for panel in self.panels:
             panel.set_difference_mode(mode)
@@ -1236,6 +1244,8 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         busy = any(panel.is_fetching() for panel in self.panels)
         self.load_all_btn.setEnabled(not busy)
         self.load_all_btn.setText("Loading…" if busy else "Load all")
+        if hasattr(self, "menu_actions"):
+            self._sync_menu_actions()
 
     # ------------------------------------------------------------ interaction
     def _on_parameters(self, params: GCSParameters) -> None:
@@ -1402,6 +1412,15 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
     def _sync_kinematics_buttons(self, _index: int = 0) -> None:
         self.tracking_panel.fit_btn.setEnabled(len(self._fits) >= self.tracking_panel.fit_order() + 1)
         self.tracking_panel.clear_btn.setEnabled(bool(self._fits))
+        heights = [entry.apex_height_rsun for entry in self._fits.values()]
+        if heights and max(heights) - min(heights) < 0.01:
+            # Polynomial roundoff in a constant-height series otherwise makes
+            # autorange show 15-digit ticks and visually exaggerate numerical noise.
+            centre = float(np.mean(heights))
+            padding = max(0.05, abs(centre) * 0.01)
+            self.tracking_panel.plot.setYRange(centre - padding, centre + padding, padding=0)
+        if hasattr(self, "menu_actions"):
+            self._sync_menu_actions()
 
     def _on_clear_fits(self) -> None:
         self._fits.clear()
@@ -1433,7 +1452,7 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
             return
         self.tracking_panel.show_fit(fit)
         self._set_status(
-            f"3-D model-dependent kinematics over {len(entries)} commit(s): "
+            f"3-D model-dependent (de-projected) kinematics over {len(entries)} commit(s): "
             + self.tracking_panel.fit_summary(fit, noun="commits")
         )
 
@@ -1454,6 +1473,7 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
 
     def _set_status(self, text: str) -> None:
         self.status_label.setText(str(text))
+        self.status_label.setToolTip(str(text))
 
     def _refresh_status(self) -> None:
         active = self._active_panels()

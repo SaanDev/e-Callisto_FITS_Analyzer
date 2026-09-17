@@ -28,6 +28,8 @@ def test_menu_controls_follow_visible_toolbar_state(window):
     assert not window.menu_actions["commit"].isEnabled()
     assert not window.menu_actions["export_csv"].isEnabled()
     window.panels[0].set_frames(_sequence(0.0))
+    # Shortcut actions must enable immediately, even if no menu was opened.
+    assert window.menu_actions["commit"].isEnabled()
     window.menu_actions["mode_raw"].trigger()
     assert window._difference_mode() == "raw"
     assert window.panels[0].difference_mode() == "raw"
@@ -140,6 +142,8 @@ def test_kinematic_controls_enable_only_when_selected_order_has_enough_samples(w
     window.next_frame()
     window._on_commit()
     assert window.tracking_panel.fit_btn.isEnabled()
+    lower, upper = window.tracking_panel.plot.viewRange()[1]
+    assert upper - lower >= 0.1  # constant heights must not magnify floating-point noise
     combo = window.tracking_panel.fit_order_combo
     combo.setCurrentIndex(combo.findData(2))
     assert not window.tracking_panel.fit_btn.isEnabled()

@@ -60,6 +60,7 @@ class GCSWindowActions:
 
         event_menu = self.menuBar().addMenu("&Event")
         action(event_menu, "load", "&Load all channels", self._fetch_all, "Ctrl+L")
+        action(event_menu, "cancel", "Cancel downloads", self._cancel_downloads)
         action(event_menu, "ranges", "Apply event range to all channels", self._apply_event_range_to_channels)
         action(event_menu, "jump", "Go to &UTC time…", self._jump_to_time, "Ctrl+G")
         action(event_menu, "first", "First frame", self._rewind)
@@ -119,6 +120,7 @@ class GCSWindowActions:
         points = sum(view.n_clicks for view in self._viewpoints())
         enabled = {
             "load": not any(panel.is_fetching() for panel in self.panels),
+            "cancel": any(panel.is_fetching() for panel in self.panels),
             "export_csv": bool(self._fits), "snapshot": any(panel.frames for panel in self.panels),
             "jump": has_time, "refine": has_view and points >= len(free_parameters(self._viewpoints())) + 1,
             "commit": has_time and has_view, "restore": has_record, "delete": has_record,
@@ -147,6 +149,11 @@ class GCSWindowActions:
         for panel in self.panels:
             panel.canvas.reset_map_view()
             panel.render()
+
+    def _cancel_downloads(self):
+        for panel in self.panels:
+            panel.cancel_fetch()
+        self._set_status("Download cancellation requested; waiting for current requests to finish.")
 
     def _reset_model(self):
         self.pause()
