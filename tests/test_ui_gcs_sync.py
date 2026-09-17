@@ -65,15 +65,37 @@ def test_out_of_tolerance_views_cannot_supply_points_or_geometry(window):
     window.panels[0].set_frames(_sequence(0, n=2, cadence_min=20))
     window.panels[1].set_frames(_sequence(60, n=1, start_min=12))
     assert [panel.label for panel in window._active_panels()] == ["A"]
-    assert not window.panels[1].canvas.has_gcs_overlay()
+    # The shell is still drawn on B for comparison, but B offers nothing to drag
+    # and takes no points: it is not part of the fit.
+    canvas = window.panels[1].canvas
+    assert canvas.has_gcs_overlay()
+    assert not any(handle.isVisible() for handle in canvas._gcs_handles.values())
     window._on_canvas_click("B", 5000, 1000, "left")
     assert not window._clicks["B"]
+    before = window.parameters()
+    window._on_handle("B", "apex", 5000, 1000, True)
+    assert window.parameters() == before
     assert "outside time tolerance" in window.status_label.text()
     window.sync_tolerance_spin.setValue(12)
     assert [panel.label for panel in window._active_panels()] == ["A", "B"]
-    assert window.panels[1].canvas.has_gcs_overlay()
+    assert canvas.has_gcs_overlay()
+    assert any(handle.isVisible() for handle in canvas._gcs_handles.values())
     window._on_canvas_click("B", 5000, 1000, "left")
     assert len(window._viewpoints()[1].clicks_arcsec) == 1
+
+
+def test_the_shell_is_drawn_in_every_view_at_every_shared_time(window):
+    """COR2 every 15 minutes beside LASCO every 12 leaves a view outside the
+    5-minute tolerance at most shared times; none of them may lose the shell."""
+    window.panels[0].set_frames(_sequence(-70, n=5, cadence_min=15, start_min=8))
+    window.panels[1].set_frames(_sequence(0, n=6, cadence_min=12, detector="C2"))
+    window.panels[2].set_frames(_sequence(62, n=5, cadence_min=15, start_min=9))
+    outside = 0
+    for index in range(window.time_slider.maximum() + 1):
+        window.time_slider.setValue(index)
+        assert all(panel.canvas.has_gcs_overlay() for panel in window.panels), window._shared_time
+        outside += sum(not panel.is_synchronized() for panel in window.panels)
+    assert outside  # the cadences really did put views outside the tolerance
 
 
 def test_front_points_follow_actual_image_and_return_on_revisit(window):
@@ -119,6 +141,82 @@ def test_refinement_errors_are_invalidated_when_fit_inputs_change(window, change
     else:
         window.sync_tolerance_spin.setValue(6)
     assert window._last_refinement is None
+
+
+def _record(window, index, height):
+    window.time_slider.setValue(index)
+    window._on_parameters(window.parameters().replace_values(height_rsun=height))
+    window._on_commit()
+
+
+def test_playback_draws_the_recorded_fits_and_their_evolution(window):
+    window.panels[0].set_frames(_sequence(0, n=5, cadence_min=12))
+    window.panels[1].set_frames(_sequence(60, n=5, cadence_min=12))
+    _record(window, 1, 6.0)  # 16:12
+    _record(window, 3, 10.0)  # 16:36
+    window._on_parameters(window.parameters().replace_values(height_rsun=20.0))  # not recorded
+    window._rewind()
+    expected = [
+        (6.0, "recorded fit 16:12:00 held (before first fit)"),
+        (6.0, "recorded fit 16:12:00"),
+        (8.0, "interpolated between recorded fits 16:12:00 and 16:36:00"),
+        (10.0, "recorded fit 16:36:00"),
+        (10.0, "recorded fit 16:36:00 held (after last fit)"),
+    ]
+    window.play()
+    try:
+        for index, (height, note) in enumerate(expected):
+            if index:
+                window._advance_frame()
+            assert window.time_slider.value() == index
+            assert window.parameters().height_rsun == pytest.approx(height)
+            assert window.gcs_panel.sliders["height_rsun"].value() == pytest.approx(height)
+            assert window.status_label.text().startswith(f"▶ Shell: {note} · ")
+            assert all(panel.canvas.has_gcs_overlay() for panel in window.panels[:2])
+        window._advance_frame()  # wraps to the start
+        assert window.parameters().height_rsun == pytest.approx(6.0)
+        window._advance_frame()
+        window._advance_frame()
+    finally:
+        window.pause()
+    # Paused, the shell stays where playback left it and is what the sliders edit…
+    assert window.parameters().height_rsun == pytest.approx(8.0)
+    assert "▶" not in window.status_label.text()
+    # …and stepping by hand no longer pulls in the recorded fits.
+    window.next_frame()
+    assert window.parameters().height_rsun == pytest.approx(8.0)
+    assert window._fits[BASE + timedelta(minutes=12)].apex_height_rsun == 6.0
+
+
+def test_playback_follows_every_recorded_parameter_not_only_height(window):
+    window.panels[0].set_frames(_sequence(0, n=3, cadence_min=12))
+    window.time_slider.setValue(0)
+    window._on_parameters(window.parameters().replace_values(lon_deg=10.0, tilt_deg=-20.0, kappa=0.2))
+    window._on_commit()
+    window.time_slider.setValue(2)
+    window._on_parameters(window.parameters().replace_values(lon_deg=30.0, tilt_deg=20.0, kappa=0.4))
+    window._on_commit()
+    window.time_slider.setValue(1)
+    window.play()
+    try:
+        middle = window.parameters()
+    finally:
+        window.pause()
+    assert (middle.lon_deg, middle.tilt_deg, middle.kappa) == pytest.approx((20.0, 0.0, 0.3))
+
+
+def test_playback_without_recorded_fits_keeps_the_working_model(window):
+    window.panels[0].set_frames(_sequence(0, n=3))
+    model = window.parameters().replace_values(height_rsun=12.0)
+    window._on_parameters(model)
+    window.play()
+    try:
+        window._advance_frame()
+        window._advance_frame()
+        assert window.parameters() == model
+        assert "▶" not in window.status_label.text()
+    finally:
+        window.pause()
 
 
 def test_empty_timeline_cannot_commit_old_shared_time(window):

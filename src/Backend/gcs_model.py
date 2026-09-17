@@ -182,6 +182,39 @@ class GCSParameters:
         )
 
 
+def interpolate_parameters(first: GCSParameters, second: GCSParameters, fraction: float) -> GCSParameters:
+    """The shell ``fraction`` of the way from ``first`` to ``second``, linearly.
+
+    For showing how recorded fits evolve between the times they were made — an
+    interpolated shell is a display aid, never a fit. Longitude goes the short
+    way round the Sun and tilt the short way round its 180-degree symmetry (see
+    :func:`orientation_matrix`), so the shell never swings through a direction
+    neither fit had. Angles are continued from ``first`` rather than wrapped, so
+    the readout moves smoothly too. The ends are returned exactly.
+    """
+    fraction = float(fraction)
+    if not math.isfinite(fraction) or fraction <= 0.0:
+        return first
+    if fraction >= 1.0:
+        return second
+
+    def periodic(start: float, stop: float, period: float) -> float:
+        step = (stop - start + period / 2.0) % period - period / 2.0
+        return start + fraction * step
+
+    def linear(start: float, stop: float) -> float:
+        return start + fraction * (stop - start)
+
+    return GCSParameters(
+        lon_deg=periodic(first.lon_deg, second.lon_deg, 360.0),
+        lat_deg=linear(first.lat_deg, second.lat_deg),
+        tilt_deg=periodic(first.tilt_deg, second.tilt_deg, 180.0),
+        height_rsun=linear(first.height_rsun, second.height_rsun),
+        alpha_deg=linear(first.alpha_deg, second.alpha_deg),
+        kappa=linear(first.kappa, second.kappa),
+    )
+
+
 # --- Derived radii (closed-form Thernisien relations) ---------------------
 
 

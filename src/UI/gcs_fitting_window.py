@@ -15,7 +15,8 @@ GCS is ill posed from a single vantage: a wide CME pointed at the observer and a
 narrow one travelling across the sky project almost identically, so direction
 trades off against height and width and a single-view fit looks convincing while
 meaning very little. Two well-separated views break that; a third — the classic
-STEREO-A / SOHO / STEREO-B triad — over-constrains it. That is also why there is
+STEREO-B / SOHO / STEREO-A triad, the default from left to right —
+over-constrains it. That is also why there is
 exactly one set of parameter sliders: a single shell must satisfy every
 viewpoint at once, and per-panel controls would let the three drift into three
 different CMEs.
@@ -38,6 +39,9 @@ What is shared and what is not
 Shared: the model, the wireframe style, the view mode and the time. Per channel:
 the source, the date range, the colormap and the contrast. The time is shared as
 a *timestamp*, not an index, because three spacecraft rarely share a cadence.
+The shell is drawn on every image with a usable projection, even one outside the
+time tolerance; the tolerance only decides which views take part in the fit.
+Playback with fits recorded draws the recorded shells instead of the working model.
 """
 
 from __future__ import annotations
@@ -80,6 +84,7 @@ from src.Backend.gcs_model import (
     gcs_mesh,
     handle_positions_arcsec,
     free_parameters,
+    interpolate_parameters,
     observer_separation_deg,
     refine_gcs,
     wireframe_arcsec,
@@ -335,6 +340,8 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         self._time_axis: list[datetime] = []
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._advance_frame)
+        #: While playback follows the recorded fits: which shell is drawn, for the status bar.
+        self._playback_note = ""
         #: Recorded fits, keyed by the shared time they were committed at.
         self._fits: dict[datetime, Any] = {}
         self._fit_provenance: dict[datetime, Any] = {}
@@ -454,7 +461,8 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         transport = (
             (self.rewind_btn, QStyle.SP_MediaSkipBackward, "First frame (Home)", self._rewind),
             (self.prev_btn, QStyle.SP_MediaSeekBackward, "Previous frame (←)", self.previous_frame),
-            (self.play_btn, QStyle.SP_MediaPlay, "Play (Space)", self.play),
+            (self.play_btn, QStyle.SP_MediaPlay,
+             "Play (Space). With fits recorded, the shell follows them frame by frame.", self.play),
             (self.pause_btn, QStyle.SP_MediaPause, "Pause (Space)", self.pause),
             (self.next_btn, QStyle.SP_MediaSeekForward, "Next frame (→)", self.next_frame),
         )
@@ -902,10 +910,61 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         self._play_timer.setInterval(int(1000 / max(1, int(self.fps_spin.value()))))
         self._play_timer.start()
         self._sync_transport()
+        if self._fits:
+            self._follow_recorded_fits()
+            self._sync_all()
 
     def pause(self) -> None:
         self._play_timer.stop()
         self._sync_transport()
+        if self._playback_note:
+            # The shell stays where playback left it: what is on screen is what
+            # the sliders now edit.
+            self._playback_note = ""
+            self._refresh_status()
+
+    def _follow_recorded_fits(self) -> None:
+        """While playing, make the model the recorded fits' shell for the shared time.
+
+        Playback is how the recorded fits are reviewed, so the shell evolves with
+        them instead of staying wherever the sliders were last left.
+        """
+        self._playback_note = ""
+        if not self._play_timer.isActive() or self._shared_time is None:
+            return
+        found = self._recorded_shell(self._shared_time)
+        if found is None:
+            return
+        params, self._playback_note = found
+        if params != self._params:
+            self._params = params
+            self._last_refinement = None
+
+    def _recorded_shell(self, when: datetime) -> tuple[GCSParameters, str] | None:
+        """The recorded fits' shell at ``when``, and a note saying how it was found.
+
+        The fit recorded for the images on screen when there is one. Between two
+        recorded times the two fits are interpolated in time — a display of the
+        evolution, not a fit. Before the first and after the last, the nearest
+        fit is held.
+        """
+        if not self._fits:
+            return None
+        exact = self._recorded_time_for_current_frames()
+        if exact is None and when in self._fits:
+            exact = when
+        if exact is not None:
+            return self._recorded_parameters(exact), f"recorded fit {exact:%H:%M:%S}"
+        times = sorted(self._fits)
+        if when < times[0]:
+            return self._recorded_parameters(times[0]), f"recorded fit {times[0]:%H:%M:%S} held (before first fit)"
+        if when > times[-1]:
+            return self._recorded_parameters(times[-1]), f"recorded fit {times[-1]:%H:%M:%S} held (after last fit)"
+        before = max(stamp for stamp in times if stamp < when)
+        after = min(stamp for stamp in times if stamp > when)
+        fraction = (when - before).total_seconds() / (after - before).total_seconds()
+        params = interpolate_parameters(self._recorded_parameters(before), self._recorded_parameters(after), fraction)
+        return params, f"interpolated between recorded fits {before:%H:%M:%S} and {after:%H:%M:%S}"
 
     def toggle_play(self) -> None:
         if self._play_timer.isActive():
@@ -989,20 +1048,25 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
 
         for panel in self.panels:
             canvas = panel.canvas
-            if panel.observer is None or not panel.is_synchronized():
+            if panel.observer is None:
                 canvas.clear_gcs_overlay()
                 canvas.set_measurement_overlay([], [], connect=False)
                 continue
+            # The shell goes on every image that can be projected, whatever its
+            # offset from the shared time, so the views can always be compared
+            # against the one model. Only views inside the time tolerance take
+            # part in the fit, so only they offer the handle and front points.
+            synchronized = panel.is_synchronized()
             visible = getattr(self, "wireframe_check", None)
             if visible is None or visible.isChecked():
                 x, y, _ = wireframe_arcsec(
                     params, panel.observer, mesh=mesh, ring_stride=stride, n_longitudinal=max(4, 12 - stride)
                 )
                 canvas.set_gcs_overlay(x, y)
-                canvas.set_gcs_handles(handle_positions_arcsec(params, panel.observer))
+                canvas.set_gcs_handles(handle_positions_arcsec(params, panel.observer), visible=synchronized)
             else:
                 canvas.clear_gcs_overlay()
-            points = self._clicks[panel.label] if panel.label in self._clicks else []
+            points = self._clicks.get(panel.label, []) if synchronized else []
             canvas.set_measurement_overlay(
                 [point[0] for point in points], [point[1] for point in points], connect=False
             )
@@ -1119,6 +1183,7 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
                 self._clicks[panel.label] = list(self._frame_points.get((panel.label, current), []))
                 self._last_refinement = None
             self._displayed_frames[panel.label] = current
+        self._follow_recorded_fits()
         self._sync_all()
 
     def _difference_mode(self) -> str:
@@ -1483,13 +1548,15 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         self.clear_points_btn.setEnabled(any(self._clicks.values()))
         self.send_btn.setEnabled(hasattr(getattr(self.parent(), "_measure", None), "set_gcs_parameters"))
         synchronization = self._synchronization_summary()
+        # During playback, which shell is drawn leads: it changes every frame.
+        playback = f"▶ Shell: {self._playback_note} · " if self._playback_note else ""
         if not active:
-            self._set_status("No synchronized viewpoint with valid WCS. Set the UTC event range and load channels."
-                             + synchronization)
+            self._set_status(playback + "No synchronized viewpoint with valid WCS. "
+                             "Set the UTC event range and load channels." + synchronization)
             return
         if len(active) < 2:
             self._set_status(
-                f"{len(active)} viewpoint(s) · {clicks} point(s) clicked — "
+                playback + f"{len(active)} viewpoint(s) · {clicks} point(s) clicked — "
                 "one view cannot constrain the propagation direction, so it is held fixed. "
                 "Load at least one more channel." + synchronization
             )
@@ -1513,7 +1580,7 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
                 f" — panel {', '.join(stuck)} has one frame, so it cannot difference; "
                 "widen its date range and load again"
             )
-        self._set_status(message)
+        self._set_status(playback + message)
 
     # ----------------------------------------------------------------- close
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt naming)

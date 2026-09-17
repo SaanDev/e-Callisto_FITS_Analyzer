@@ -272,6 +272,9 @@ class GCSViewpointPanel(QWidget):
         self.theme = theme
 
         self.frames: list[Any] = []
+        #: The archive's frame just before ``frames[0]``: the running-difference
+        #: reference for the first frame, which is never displayed itself.
+        self.previous_frame: Any | None = None
         self.observer: ObserverGeometry | None = None
         self._display_cache: dict[tuple[str, int], np.ndarray] = {}
         self._display_failures: dict[tuple[str, int], str] = {}
@@ -411,8 +414,12 @@ class GCSViewpointPanel(QWidget):
             self.render()
 
     # -------------------------------------------------------------- frames
-    def set_frames(self, frames: list[Any], *, harmonised: bool = False) -> None:
+    def set_frames(self, frames: list[Any], *, harmonised: bool = False, previous: Any | None = None) -> None:
         """Adopt a sequence: time-ordered, on one pixel grid, ready to difference.
+
+        ``previous`` is the frame just before the sequence, used only as the first
+        frame's running-difference reference; it is dropped unless it really is
+        earlier than every frame.
 
         Every load resets the panel to the house defaults — gray, running
         difference — so a fresh event always opens the way a CME front is easiest
@@ -426,12 +433,22 @@ class GCSViewpointPanel(QWidget):
                 ordered, dropped = hvjp2.harmonise_sequence(ordered)
             except Exception as exc:
                 self.statusChanged.emit(f"{self.label}: frames could not be aligned ({exc}).")
+            if previous is not None and ordered:
+                try:
+                    previous = hvjp2.align_to_grid(previous, ordered[0])
+                except Exception:
+                    previous = None
         if dropped:
             self.statusChanged.emit(
                 f"{self.label}: dropped {dropped} frame(s) that could not share the sequence's "
                 "pixel grid."
             )
         self.frames = ordered
+        previous_time = frame_observation_time(previous) if previous is not None else None
+        first_time = frame_observation_time(ordered[0]) if ordered else None
+        self.previous_frame = (
+            previous if previous_time is not None and first_time is not None and previous_time < first_time else None
+        )
         self._index = 0
         self._display_cache.clear()
         self._display_failures.clear()
@@ -457,8 +474,15 @@ class GCSViewpointPanel(QWidget):
         self.render()
 
     def can_difference(self) -> bool:
-        """True when this panel has enough frames to form a difference image."""
-        return len(self.frames) >= 2
+        """True when this panel has enough frames to form the selected difference.
+
+        Two frames always do. A single frame can still be running-differenced
+        against the frame loaded from before the range; a base difference of it
+        would only be a self-difference.
+        """
+        if len(self.frames) >= 2:
+            return True
+        return bool(self.frames) and self._difference_mode == "running" and self.previous_frame is not None
 
     def difference_mode(self) -> str:
         """Selected sequence mode, or ``raw`` when it cannot difference."""
@@ -466,10 +490,27 @@ class GCSViewpointPanel(QWidget):
             return "raw"
         return self._difference_mode
 
+    def difference_reference(self, index: int | None = None) -> Any | None:
+        """The frame subtracted from frame ``index`` in the current mode.
+
+        ``None`` when that image is shown raw: in raw mode, and for the first
+        frame of a base difference. The first frame of a running difference is
+        referenced to the frame before the range, when one was loaded.
+        """
+        if not self.frames:
+            return None
+        index = max(0, min(self._index if index is None else int(index), len(self.frames) - 1))
+        mode = self.difference_mode()
+        if mode == "running":
+            return self.frames[index - 1] if index > 0 else self.previous_frame
+        if mode == "base" and index > 0:
+            return self.frames[0]
+        return None
+
     def rendered_mode(self) -> str:
         """Mode of the current image, including baseline and failed references."""
         mode = self.difference_mode()
-        if self._index == 0 or (mode, self._index) in self._display_failures:
+        if self.difference_reference() is None or (mode, self._index) in self._display_failures:
             return "raw"
         return mode
 
@@ -495,19 +536,16 @@ class GCSViewpointPanel(QWidget):
             return cached
 
         frame = self.frames[index]
-        # There is no previous observation for the first frame. Displaying the
-        # next minus first image here would label a future front with the first
-        # frame's timestamp, observer position and saved-fit metadata.
-        if mode == "raw" or index == 0:
+        # Without an earlier observation the first frame is shown raw. Displaying
+        # the next minus first image instead would label a future front with the
+        # first frame's timestamp, observer position and saved-fit metadata.
+        reference = self.difference_reference(index)
+        if reference is None:
             image = np.asarray(frame.data, dtype=np.float32)
         else:
             try:
-                if mode == "running":
-                    current, reference = frame, self.frames[index - 1]
-                else:
-                    current, reference = frame, self.frames[0]
-                self._validate_difference_grid(current, reference)
-                image = hvjp2.difference_image(current, reference)
+                self._validate_difference_grid(frame, reference)
+                image = hvjp2.difference_image(frame, reference)
             except Exception as exc:
                 message = str(exc) or type(exc).__name__
                 if message != self._difference_failed:
@@ -690,12 +728,12 @@ class GCSViewpointPanel(QWidget):
             caption += f" · {dict(DIFFERENCE_MODES)[self._difference_mode].lower()} unavailable — 1 frame"
         elif self._difference_failed and mode != "raw":
             caption += f" · {dict(DIFFERENCE_MODES)[mode].lower()} failed — showing raw"
-        elif mode == "running" and index == 0:
+        elif mode == "running" and self.difference_reference(index) is None:
             caption += "\nRunning difference unavailable — no earlier frame; showing raw"
         elif mode == "base" and index == 0:
             caption += "\nBase reference frame — showing raw (self-difference is zero)"
         elif mode != "raw":
-            reference = self.frames[index - 1] if mode == "running" else self.frames[0]
+            reference = self.difference_reference(index)
             reference_time = frame_observation_time(reference)
             reference_stamp = f"{reference_time:%Y-%m-%d %H:%M:%S} UTC" if reference_time else "unknown time"
             caption += f"\n{dict(DIFFERENCE_MODES)[mode]} · reference {reference_stamp}"
@@ -835,7 +873,7 @@ class GCSViewpointPanel(QWidget):
             self.frames_label.setText("none")
             self.statusChanged.emit(f"{self.label}: nothing could be loaded.")
             return
-        self.set_frames(frames, harmonised=True)
+        self.set_frames(frames, harmonised=True, previous=getattr(sequence, "previous", None))
         notes = [f"{len(frames)} frame(s)"]
         listed = int(getattr(sequence, "listed", 0) or 0)
         if listed > len(frames):

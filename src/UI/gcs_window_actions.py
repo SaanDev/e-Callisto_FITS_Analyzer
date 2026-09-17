@@ -162,13 +162,18 @@ class GCSWindowActions:
         self._sync_all()
         self._set_status("Model reset. Recorded fits are available in the kinematics table.")
 
+    def _recorded_parameters(self, when):
+        """The model recorded at ``when``, as parameters the shell can be drawn from."""
+        entry = self._fits[when]
+        return GCSParameters(entry.lon_deg, entry.lat_deg, entry.tilt_deg,
+                             entry.apex_height_rsun, entry.alpha_deg, entry.kappa)
+
     def _restore_recorded_model(self):
-        entry = self._fits.get(self._recorded_time_for_current_frames())
-        if entry is None:
+        when = self._recorded_time_for_current_frames()
+        if when not in self._fits:
             return
         self.pause()
-        self._on_parameters(GCSParameters(entry.lon_deg, entry.lat_deg, entry.tilt_deg,
-                                         entry.apex_height_rsun, entry.alpha_deg, entry.kappa))
+        self._on_parameters(self._recorded_parameters(when))
         self._set_status("Restored recorded model. Refine again to calculate errors for the current points.")
 
     def _restore_fit_row(self, row, _column):
@@ -227,10 +232,9 @@ class GCSWindowActions:
             source = panel.source()
             reference = None
             mode = panel.rendered_mode()
-            if mode != "raw" and panel._index > 0:
+            if mode != "raw":
                 from src.Backend.solar_data_analysis import frame_observation_time
-                index = panel._index - 1 if mode == "running" else 0
-                reference = frame_observation_time(panel.frames[index])
+                reference = frame_observation_time(panel.difference_reference())
             frames.append({
                 "panel": panel.label, "source_key": source.key if source else None,
                 "instrument": panel._frame_name(frame), "observation_time_utc": stamp,
@@ -313,9 +317,11 @@ class GCSWindowActions:
             LASCO C2 and C3 share an observer; opposite viewpoints also provide weak depth constraints.</li>
             <li><b>Check timing.</b> The timeline is the union of image timestamps. Each panel shows its
             nearest image and offset. Adjust Max time offset to suit the CME's evolution; a five-minute
-            default is not an accuracy guarantee. Excluded panels do not constrain the fit.</li>
+            default is not an accuracy guarantee. Excluded panels do not constrain the fit, but the
+            shell is still drawn on them for comparison.</li>
             <li><b>Inspect the ejecta front.</b> Use raw, running or base difference and adjust contrast.
-            The first frame is raw when no earlier reference exists. A base image containing the CME
+            The first loaded frame is running-differenced against the archive frame just before the
+            range; it is raw only when no earlier frame exists. A base image containing the CME
             can obscure its front. GCS represents a flux rope, not the outer shock.</li>
             <li><b>Align one shell in every usable view.</b> Longitude and latitude are Stonyhurst;
             height is the leading edge measured from Sun centre, not altitude above the surface.
@@ -326,7 +332,9 @@ class GCSWindowActions:
             <li><b>Record successive times.</b> Record fit saves the current model and observation
             provenance. Repeat along the event and choose a polynomial order supported by the number
             of distinct times. The speed is model-dependent radial speed. Repeated image combinations
-            do not provide independent height measurements.</li>
+            do not provide independent height measurements. Play the sequence to review them: each
+            recorded fit is drawn on its own images, fits are interpolated in time between recorded
+            times (a display, not a fit) and held before the first and after the last.</li>
             <li><b>Export.</b> JSON includes all six parameters, frame times, offsets, observer geometry,
             points and archived fits. CSV contains the recorded numerical series; PNG saves the views.
             JSON is an analyzer export, not a PyThea session file.</li>

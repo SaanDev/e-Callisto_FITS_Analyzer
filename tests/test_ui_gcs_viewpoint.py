@@ -59,6 +59,73 @@ def test_first_running_frame_never_displays_a_future_front(panel):
     assert panel.rendered_mode() == "raw"
 
 
+def test_first_running_frame_is_differenced_against_the_frame_before_the_range(panel):
+    frames = _frames(4)
+    previous, sequence = frames[0], frames[1:]
+    panel.set_frames(sequence, harmonised=True, previous=previous)
+    assert panel.current_time() == datetime(2012, 7, 12, 16, 12)
+    assert panel.rendered_mode() == "running"
+    assert panel.difference_reference() is previous
+    assert np.array_equal(panel.display_array(0), hvjp2.difference_image(sequence[0], previous))
+    caption = panel.title_label.text()
+    assert "reference 2012-07-12 16:00:00 UTC" in caption and "showing raw" not in caption
+    assert panel.canvas._last_map_levels[0] == -panel.canvas._last_map_levels[1]
+    # A reference only: never a frame of its own on the timeline.
+    assert panel.frame_count() == 3 and datetime(2012, 7, 12, 16) not in panel.times()
+
+
+def test_an_unharmonised_reference_is_aligned_with_its_sequence(panel):
+    frames = _frames(3)
+    panel.set_frames(frames[1:], previous=frames[0])
+    assert panel.previous_frame is not None
+    assert panel.previous_frame.data.shape == panel.frames[0].data.shape
+    assert panel.rendered_mode() == "running"
+
+
+def test_a_reference_that_is_not_earlier_than_the_first_frame_is_ignored(panel):
+    frames = _frames(3)
+    panel.set_frames(frames[:2], harmonised=True, previous=frames[2])
+    assert panel.previous_frame is None
+    assert panel.rendered_mode() == "raw"
+    assert "no earlier frame; showing raw" in panel.title_label.text()
+
+
+def test_the_reference_does_not_make_the_first_base_frame_a_difference(panel):
+    frames = _frames(3)
+    panel.set_frames(frames[1:], harmonised=True, previous=frames[0])
+    panel.set_difference_mode("base")
+    assert panel.difference_reference() is None
+    assert panel.rendered_mode() == "raw"
+    assert "Base reference frame — showing raw" in panel.title_label.text()
+
+
+def test_a_single_frame_running_differences_against_its_reference(panel):
+    frames = _frames(2)
+    panel.set_frames(frames[1:], harmonised=True, previous=frames[0])
+    assert panel.can_difference() and panel.rendered_mode() == "running"
+    panel.set_difference_mode("base")
+    assert not panel.can_difference() and panel.difference_mode() == "raw"
+    assert "unavailable — 1 frame" in panel.title_label.text()
+
+
+def test_a_fetched_sequence_hands_its_reference_to_the_panel(panel):
+    frames = _frames(3)
+    sequence = hvjp2.JP2Sequence(source=hvjp2.source_by_key("LASCO C2"), frames=tuple(frames[1:]),
+                                 listed=2, from_cache=0, previous=frames[0])
+    panel._on_fetch_finished(sequence)
+    assert panel.previous_frame is frames[0]
+    assert panel.rendered_mode() == "running"
+
+
+def test_reloading_without_a_reference_forgets_the_old_one(panel):
+    frames = _frames(3)
+    panel.set_frames(frames[1:], harmonised=True, previous=frames[0])
+    panel.set_frames(frames[1:], harmonised=True)
+    assert panel.previous_frame is None
+    panel.set_frames([])
+    assert panel.previous_frame is None
+
+
 def test_base_reference_frame_is_visible_and_explicitly_raw(panel):
     frames = _frames()
     panel.set_frames(frames, harmonised=True)

@@ -150,18 +150,18 @@ def source_by_key(key: str) -> JP2Source | None:
 
 
 def default_viewpoints(when: datetime | date) -> tuple[JP2Source, JP2Source, JP2Source]:
-    """The classic STEREO-A / SOHO / STEREO-B triad, adapted to what existed then.
+    """The classic STEREO-B / SOHO / STEREO-A triad, left to right, adapted to what existed then.
 
-    Before 2014-09-27 that is COR2-A, LASCO C2 and COR2-B. Afterwards STEREO-B is
-    gone, so the third panel falls back to LASCO C3 — a different field of view
+    Before 2014-09-27 that is COR2-B, LASCO C2 and COR2-A. Afterwards STEREO-B is
+    gone, so the first panel falls back to LASCO C3 — a different field of view
     from the same vantage, which still helps with the height but, honestly, adds
     no new direction.
     """
-    first = _SOURCES_BY_KEY["COR2-A"]
+    first = _SOURCES_BY_KEY["COR2-B"]
     second = _SOURCES_BY_KEY["LASCO C2"]
-    third = _SOURCES_BY_KEY["COR2-B"]
-    if not third.available_on(when):
-        third = _SOURCES_BY_KEY["LASCO C3"]
+    third = _SOURCES_BY_KEY["COR2-A"]
+    if not first.available_on(when):
+        first = _SOURCES_BY_KEY["LASCO C3"]
     return first, second, third
 
 
@@ -291,6 +291,12 @@ MAX_RANGE = timedelta(days=3)
 
 #: Default cap on frames per channel for a range fetch.
 DEFAULT_MAX_FRAMES = 60
+
+#: How far before a range the frame preceding its first one is looked for. The
+#: first frame has no running-difference reference inside the range, so the
+#: archive's previous frame is loaded for it. Early-mission COR2 ran every 30-60
+#: minutes and LASCO has gaps of ~40 minutes, so three hours finds it in practice.
+PREVIOUS_FRAME_LOOKBACK = timedelta(hours=3)
 
 
 def validate_range(start: datetime, end: datetime) -> str | None:
@@ -594,6 +600,31 @@ def harmonise_sequence(frames: Sequence[Any], *, max_px: int = MAX_GRID_PX) -> t
     return aligned, dropped
 
 
+def align_to_grid(frame: Any, template: Any) -> Any | None:
+    """``frame`` brought onto ``template``'s pixel grid, or ``None`` if it cannot be.
+
+    The same treatment :func:`harmonise_sequence` gives each frame of a sequence,
+    for one extra frame against a sequence already harmonised: block-averaged
+    down when it is a whole multiple of the grid, never upsampled, then shifted
+    so its Sun centre lands on the template's.
+    """
+    if frame is None or template is None or np.ndim(getattr(frame, "data", None)) != 2:
+        return None
+    shape = tuple(template.data.shape)
+    side = int(frame.data.shape[0])
+    if side > shape[0] and side % shape[0] == 0:
+        frame = _rebinned(frame, side // shape[0])
+    if tuple(frame.data.shape) != shape:
+        return None
+    try:
+        ref_x, ref_y = _sun_centre_pixel(template)
+        x, y = _sun_centre_pixel(frame)
+    except Exception:
+        return frame  # no usable WCS to align on; same size is still differenceable
+    dx, dy = ref_x - x, ref_y - y
+    return _shifted(frame, dx, dy) if max(abs(dx), abs(dy)) > 0.05 else frame
+
+
 @dataclass(frozen=True)
 class JP2Sequence:
     """What a fetch hands back to the viewpoint panel."""
@@ -609,6 +640,10 @@ class JP2Sequence:
     skipped: tuple[str, ...] = ()
     #: Frames discarded because they could not share the sequence's pixel grid.
     dropped: int = 0
+    #: The archive's frame just before ``frames[0]``, on the same grid: the
+    #: running-difference reference for the first frame. Never displayed, and
+    #: not counted in ``listed``; ``None`` when there was none to load.
+    previous: Any | None = None
 
 
 def fetch_range(
@@ -623,7 +658,13 @@ def fetch_range(
     progress_cb: Callable[[str], None] | None = None,
     cancel_cb: Callable[[], bool] | None = None,
 ) -> JP2Sequence:
-    """List, pick, download, decode and harmonise every frame in ``[start, end]``."""
+    """List, pick, download, decode and harmonise every frame in ``[start, end]``.
+
+    The frame just before the first one is loaded too, as that frame's
+    running-difference reference (see :attr:`JP2Sequence.previous`). It comes
+    from the same listing call, which simply starts
+    :data:`PREVIOUS_FRAME_LOOKBACK` earlier.
+    """
     def report(text: str) -> None:
         if progress_cb is not None:
             try:
@@ -637,13 +678,18 @@ def fetch_range(
 
     sess = _session(session)
     report(f"Listing {source.label} frames…")
-    times = _cached_listing(source, start, end, session=sess, api_base=api_base, cancel_cb=cancel_cb)
+    listing = _cached_listing(
+        source, start - PREVIOUS_FRAME_LOOKBACK, end, session=sess, api_base=api_base, cancel_cb=cancel_cb
+    )
+    times = [when for when in listing if when >= start]
     if not times:
         raise HelioviewerJP2Error(
             f"Helioviewer has no {source.label} frames between {start:%Y-%m-%d %H:%M} and "
             f"{end:%Y-%m-%d %H:%M} UTC."
         )
     picked = pick_frames_evenly(times, max_frames)
+    earlier = [when for when in listing if when < picked[0]]
+    previous_time = earlier[-1] if earlier else None
     cached = {
         when for when in picked if cache_dir is not None and cache_path(cache_dir, source, when).is_file()
     }
@@ -652,6 +698,7 @@ def fetch_range(
 
     frames: list[Any] = []
     skipped: list[str] = []
+    previous_frame: Any = None
     done_count = 0
 
     def load(when: datetime) -> Any:
@@ -663,6 +710,8 @@ def fetch_range(
     # together, so three panels fetching at once still make at most three requests.
     with ThreadPoolExecutor(max_workers=3, thread_name_prefix="hv-jp2") as pool:
         pending = {pool.submit(load, when): when for when in picked}
+        if previous_time is not None:
+            pending[pool.submit(load, previous_time)] = previous_time
         try:
             while pending:
                 finished, _ = wait(list(pending), timeout=0.25, return_when=FIRST_COMPLETED)
@@ -670,6 +719,16 @@ def fetch_range(
                     raise HelioviewerJP2Cancelled("Cancelled.")
                 for future in finished:
                     when = pending.pop(future)
+                    if when == previous_time:
+                        # Only a reference: without it the first frame shows raw,
+                        # and says so, so a failure here is not a failed frame.
+                        try:
+                            previous_frame = future.result()
+                        except HelioviewerJP2Cancelled:
+                            raise
+                        except Exception:
+                            previous_frame = None
+                        continue
                     try:
                         frames.append(future.result())
                     except HelioviewerJP2Cancelled:
@@ -691,6 +750,12 @@ def fetch_range(
     report(f"Aligning {len(frames)} {source.label} frame(s)…")
     frames.sort(key=lambda frame: frame.date.datetime)
     harmonised, dropped = harmonise_sequence(frames)
+    previous = None
+    if previous_frame is not None and harmonised:
+        try:
+            previous = align_to_grid(previous_frame, harmonised[0])
+        except Exception:
+            previous = None
     return JP2Sequence(
         source=source,
         frames=tuple(harmonised),
@@ -698,6 +763,7 @@ def fetch_range(
         from_cache=len(cached),
         skipped=tuple(skipped),
         dropped=dropped,
+        previous=previous,
     )
 
 

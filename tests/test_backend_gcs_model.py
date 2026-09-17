@@ -35,6 +35,7 @@ from src.Backend.gcs_model import (
     handle_positions_arcsec,
     has_independent_viewpoints,
     height_for_apex_radius,
+    interpolate_parameters,
     join_polylines,
     leg_height_rsun,
     observer_separation_deg,
@@ -92,6 +93,31 @@ def test_parameters_round_trip_through_an_array():
         "alpha_deg",
         "kappa",
     )
+
+
+def test_interpolated_parameters_are_exact_at_the_ends_and_linear_between():
+    first = GCSParameters(10.0, -5.0, 20.0, 4.0, 30.0, 0.30)
+    second = GCSParameters(30.0, 5.0, 40.0, 8.0, 40.0, 0.40)
+    assert interpolate_parameters(first, second, 0.0) is first
+    assert interpolate_parameters(first, second, 1.0) is second
+    assert interpolate_parameters(first, second, -0.5) is first
+    assert interpolate_parameters(first, second, 1.5) is second
+    quarter = interpolate_parameters(first, second, 0.25)
+    assert quarter.as_array() == pytest.approx([15.0, -2.5, 25.0, 5.0, 32.5, 0.325])
+
+
+def test_interpolated_angles_take_the_short_way_round():
+    def shell(lon, tilt):
+        return GCSParameters(lon, 0.0, tilt, 6.0, 30.0, 0.3)
+
+    # Across the far side of the Sun, not back through Earth's direction.
+    lon = interpolate_parameters(shell(170.0, 0.0), shell(-170.0, 0.0), 0.5).lon_deg
+    assert math.cos(math.radians(lon)) == pytest.approx(-1.0)
+    # Tilt is only defined modulo 180 degrees, so 85 to -85 is a 10-degree turn.
+    tilt = interpolate_parameters(shell(0.0, 85.0), shell(0.0, -85.0), 0.5).tilt_deg
+    assert tilt % 180.0 == pytest.approx(90.0)
+    # Continued from the first value, so a playback readout does not jump.
+    assert interpolate_parameters(shell(0.0, 85.0), shell(0.0, -85.0), 0.25).tilt_deg == pytest.approx(87.5)
 
 
 @pytest.mark.parametrize(

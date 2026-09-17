@@ -169,11 +169,12 @@ def test_stereo_b_is_unavailable_after_it_was_lost():
     assert not cor2b.available_on(date(2015, 1, 1))
 
 
-def test_the_default_triad_falls_back_to_c3_once_stereo_b_is_gone():
+def test_the_default_triad_runs_stereo_b_soho_stereo_a_and_falls_back_to_c3():
     before = [source.key for source in hv.default_viewpoints(datetime(2012, 7, 12))]
     after = [source.key for source in hv.default_viewpoints(datetime(2024, 5, 1))]
-    assert before == ["COR2-A", "LASCO C2", "COR2-B"]
-    assert after == ["COR2-A", "LASCO C2", "LASCO C3"]
+    assert before == ["COR2-B", "LASCO C2", "COR2-A"]
+    # STEREO-B was lost in 2014, so the left panel cannot stay on it.
+    assert after == ["LASCO C3", "LASCO C2", "COR2-A"]
 
 
 def test_only_coronagraphs_are_offered_for_gcs():
@@ -417,6 +418,16 @@ def test_aligned_frames_difference_to_near_zero_where_nothing_changed():
     assert np.percentile(np.abs(aligned), 99) < 0.5 * np.percentile(unaligned, 99)
 
 
+def test_one_extra_frame_is_brought_onto_a_harmonised_grid():
+    sequence, _ = hv.harmonise_sequence([sky_map(64), sky_map(64)])
+    extra = hv.align_to_grid(sky_map(128, crpix_shift=(1.0, -1.0)), sequence[0])
+    assert extra.data.shape == (64, 64)
+    assert hv._sun_centre_pixel(extra) == pytest.approx(hv._sun_centre_pixel(sequence[0]), abs=1e-6)
+    assert hv.difference_image(extra, sequence[0]).shape == (64, 64)
+    # Never upsampled: a smaller frame cannot join the grid.
+    assert hv.align_to_grid(sky_map(32), sequence[0]) is None
+
+
 # --- Difference images --------------------------------------------------------
 
 
@@ -508,6 +519,7 @@ def test_fetch_range_loads_every_listed_frame_onto_one_grid(tmp_path: Path):
     )
     assert sequence.listed == 5 and len(sequence.frames) == 5
     assert {frame.data.shape for frame in sequence.frames} == {(64, 64)}
+    assert sequence.previous is None  # nothing listed before the range
     assert sum(1 for endpoint, _ in session.calls if endpoint == "getJPX") == 1
     assert any("Listing" in line for line in progress)
 
@@ -518,6 +530,67 @@ def test_fetch_range_loads_every_listed_frame_onto_one_grid(tmp_path: Path):
     )
     assert len(again.frames) == 5 and again.from_cache == 5
     assert session.calls == []
+
+
+class _DatedSession(_Session):
+    """Lists ``stamps`` and serves each JP2 with the requested time in its header."""
+
+    def __init__(self, stamps, make_jp2_for):
+        super().__init__({"getJPX": _Resp(payload={"frames": stamps})})
+        self._make_jp2_for = make_jp2_for
+
+    def get(self, url, params=None, timeout=None):
+        endpoint = url.rsplit("/", 2)[-2]
+        if endpoint != "getJP2Image":
+            return super().get(url, params=params, timeout=timeout)
+        self.calls.append((endpoint, dict(params or {})))
+        return _Resp(content=self._make_jp2_for(datetime.strptime(params["date"], "%Y-%m-%dT%H:%M:%SZ")))
+
+
+def _dated_lasco_jp2(when: datetime, size: int = 64) -> bytes:
+    fits = lasco_fits(
+        NAXIS1=size, NAXIS2=size, CRPIX1=size / 2 + 0.5, CRPIX2=size / 2 + 0.5,
+        CDELT1=190.4 * 64 / size, CDELT2=190.4 * 64 / size,
+        DATE_OBS=f"{when:%Y/%m/%d}", TIME_OBS=f"{when:%H:%M:%S}.000",
+    )
+    return make_jp2(np.full((size, size), 40, dtype=np.uint8), _xml(fits, helioviewer=HV_LASCO))
+
+
+def _unix(times) -> list[int]:
+    return [int(when.replace(tzinfo=timezone.utc).timestamp()) for when in times]
+
+
+def test_fetch_range_loads_the_frame_before_the_range_as_its_first_reference(tmp_path: Path):
+    """The first frame has no running-difference reference inside the range."""
+    start, end = datetime(2012, 7, 12, 16), datetime(2012, 7, 12, 17)
+    base = datetime(2012, 7, 12, 16, 0, 6)
+    times = [base + timedelta(minutes=12 * k) for k in range(-3, 5)]  # three before the range
+    # The reference arrives at double resolution, as consecutive COR2 JP2s do.
+    session = _DatedSession(_unix(times), lambda when: _dated_lasco_jp2(when, 128 if when < start else 64))
+    sequence = hv.fetch_range(hv.source_by_key("LASCO C2"), start, end, cache_dir=tmp_path, session=session)
+
+    listings = [params for endpoint, params in session.calls if endpoint == "getJPX"]
+    assert len(listings) == 1  # the look-back rides on the one listing call
+    assert listings[0]["startTime"] == hv._iso_z(start - hv.PREVIOUS_FRAME_LOOKBACK)
+    assert sequence.listed == 5 and len(sequence.frames) == 5
+    assert sequence.frames[0].date.datetime == base
+    # The latest frame before the range, not an older one, and only that one downloaded.
+    assert sequence.previous.date.datetime == times[2]
+    downloads = sorted(params["date"] for endpoint, params in session.calls if endpoint == "getJP2Image")
+    assert downloads == sorted(hv._iso_z(when) for when in times[2:])
+    assert sequence.previous.data.shape == sequence.frames[0].data.shape
+    assert hv._sun_centre_pixel(sequence.previous) == pytest.approx(hv._sun_centre_pixel(sequence.frames[0]), abs=1e-6)
+
+
+def test_a_reference_that_fails_to_load_is_not_a_failed_frame(tmp_path: Path):
+    start, end = datetime(2012, 7, 12, 16), datetime(2012, 7, 12, 17)
+    base = datetime(2012, 7, 12, 16, 0, 6)
+    times = [base + timedelta(minutes=12 * k) for k in range(-1, 5)]
+    session = _DatedSession(_unix(times), lambda when: b"not a jp2" if when < start else _dated_lasco_jp2(when))
+    sequence = hv.fetch_range(hv.source_by_key("LASCO C2"), start, end, session=session)
+    assert sequence.previous is None
+    assert sequence.skipped == ()
+    assert len(sequence.frames) == 5
 
 
 def test_fetch_range_thins_a_long_range_to_the_cap(tmp_path: Path):

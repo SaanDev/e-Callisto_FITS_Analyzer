@@ -95,6 +95,16 @@ def test_difference_export_records_reference_image_time(window):
     assert frame["difference_reference_utc"] == first.isoformat() + "Z"
 
 
+def test_first_frame_export_names_the_reference_from_before_the_range(window):
+    frames = _sequence(0.0, n=4)
+    window.panels[0].set_frames(frames[1:], previous=frames[0])
+    window._rewind()
+    frame = window._analysis_document()["current_observations"]["frames"][0]
+    assert frame["observation_time_utc"] == "2012-07-12T16:12:00Z"
+    assert frame["display_mode"] == "running"
+    assert frame["difference_reference_utc"] == "2012-07-12T16:00:00Z"
+
+
 def test_restore_and_delete_current_record_leave_other_times_unchanged(window):
     window.panels[0].set_frames(_sequence(0.0))
     window._on_commit()
