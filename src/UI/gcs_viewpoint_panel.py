@@ -243,6 +243,13 @@ class ImageCaption:
         self._text = str(text)
         self._item.setText(self._text)
 
+    def setVisible(self, visible: bool) -> None:  # noqa: N802 (Qt naming)
+        """Show or hide the banner; its text keeps updating either way."""
+        self._item.setVisible(bool(visible))
+
+    def isVisible(self) -> bool:  # noqa: N802 (Qt naming)
+        return bool(self._item.isVisible())
+
 
 class GCSViewpointPanel(QWidget):
     """One observer: its own JP2 fetch, rendering controls and image."""
@@ -677,6 +684,13 @@ class GCSViewpointPanel(QWidget):
     def set_axes_visible(self, visible: bool) -> None:
         self.canvas.set_map_chrome_visible(bool(visible))
 
+    def set_caption_visible(self, visible: bool) -> None:
+        """Show or hide the information banner drawn across the top of the image."""
+        self.title_label.setVisible(visible)
+
+    def caption_visible(self) -> bool:
+        return self.title_label.isVisible()
+
     # ------------------------------------------------------------ rendering
     def render(self) -> None:
         """Redraw the image for the current index, contrast and colormap."""
@@ -826,9 +840,12 @@ class GCSViewpointPanel(QWidget):
             self.statusChanged.emit(f"{self.label}: {problem}")
             return False
         if not (jp2_source.available_on(start) or jp2_source.available_on(end)):
-            self.statusChanged.emit(
-                f"{self.label}: {jp2_source.label} has no data for {start:%Y-%m-%d} — pick another channel."
-            )
+            reason = f"{jp2_source.label} has no data for {start:%Y-%m-%d}"
+            if not self.frames:
+                # Said on the image too: a default can be a spacecraft that was
+                # lost (STEREO-B), and a blank panel must not look like a failure.
+                self.title_label.setText(f"{self.label} · {reason}")
+            self.statusChanged.emit(f"{self.label}: {reason} — pick another channel.")
             return False
         max_frames = hvjp2.DEFAULT_MAX_FRAMES
         if self.max_frames_provider is not None:

@@ -149,19 +149,18 @@ def source_by_key(key: str) -> JP2Source | None:
     return _SOURCES_BY_KEY.get(str(key or "").strip())
 
 
-def default_viewpoints(when: datetime | date) -> tuple[JP2Source, JP2Source, JP2Source]:
-    """The classic STEREO-B / SOHO / STEREO-A triad, left to right, adapted to what existed then.
+#: The GCS window's panels, left to right: the classic STEREO-B / SOHO / STEREO-A triad.
+DEFAULT_VIEWPOINT_KEYS: tuple[str, str, str] = ("COR2-B", "LASCO C2", "COR2-A")
 
-    Before 2014-09-27 that is COR2-B, LASCO C2 and COR2-A. Afterwards STEREO-B is
-    gone, so the first panel falls back to LASCO C3 — a different field of view
-    from the same vantage, which still helps with the height but, honestly, adds
-    no new direction.
+
+def default_viewpoints() -> tuple[JP2Source, JP2Source, JP2Source]:
+    """The default source of each panel, left to right: COR2-B, LASCO C2, COR2-A.
+
+    The same for every date. After STEREO-B was lost in 2014 the first panel
+    keeps COR2-B and says it has no data, rather than silently turning into a
+    different instrument.
     """
-    first = _SOURCES_BY_KEY["COR2-B"]
-    second = _SOURCES_BY_KEY["LASCO C2"]
-    third = _SOURCES_BY_KEY["COR2-A"]
-    if not first.available_on(when):
-        first = _SOURCES_BY_KEY["LASCO C3"]
+    first, second, third = (_SOURCES_BY_KEY[key] for key in DEFAULT_VIEWPOINT_KEYS)
     return first, second, third
 
 

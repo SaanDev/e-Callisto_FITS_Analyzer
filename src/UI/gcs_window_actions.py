@@ -93,7 +93,8 @@ class GCSWindowActions:
         for key, title, widget in (("wireframe", "GCS wireframe", self.wireframe_check),
                                    ("shock", "Shock wireframe", self.shock_check),
                                    ("limb", "Solar limb", self.limb_check),
-                                   ("axes", "Arcsecond axes", self.axes_check)):
+                                   ("axes", "Arcsecond axes", self.axes_check),
+                                   ("banner", "Image banners", self.banner_check)):
             # A lambda, not widget.setChecked: PySide calls a bound method of a
             # Python QCheckBox subclass without the checked argument.
             action(view_menu, key, title, lambda checked, target=widget: target.setChecked(checked), checkable=True)
@@ -110,6 +111,7 @@ class GCSWindowActions:
         fit_menu.addSeparator()
         action(fit_menu, "pick", "Pick front points",
                lambda checked: self.pick_points_check.setChecked(checked), checkable=True)
+        action(fit_menu, "undo_point", "&Undo last front point", self._undo_last_point, "Ctrl+Z")
         action(fit_menu, "clear_points", "Clear current front points", self._clear_points)
         fit_menu.addSeparator()
         action(fit_menu, "refine", "&Refine current model", self._on_refine, "Ctrl+R")
@@ -140,6 +142,7 @@ class GCSWindowActions:
             "export_csv": bool(fits), "snapshot": any(panel.frames for panel in self.panels),
             "jump": has_time, "refine": has_view and points >= self._free_parameter_count(self._editing) + 1,
             "commit": has_time and has_view, "restore": has_record, "delete": has_record,
+            "undo_point": self._last_point_entry() is not None,
             "kinematics": len(fits) >= self.tracking_panel.fit_order() + 1,
             "send": hasattr(getattr(self.parent(), "_measure", None), "set_gcs_parameters"),
         }
@@ -149,7 +152,7 @@ class GCSWindowActions:
             actions[key].setEnabled(on)
         selected = {
             "wireframe": self.wireframe_check.isChecked(), "shock": self.shock_check.isChecked(),
-            "limb": self.limb_check.isChecked(),
+            "limb": self.limb_check.isChecked(), "banner": self.banner_check.isChecked(),
             "axes": self.axes_check.isChecked(), "pick": self.pick_points_check.isChecked(),
             "edit_" + _GCS: self._editing == _GCS, "edit_" + _SHOCK: self._editing == _SHOCK,
         }
@@ -179,6 +182,7 @@ class GCSWindowActions:
         track = self._track()
         track.params = None
         track.last_refinement = None
+        self._forget_recorded_note(self._editing)
         self._sync_all()
         self._set_status("Model reset. Recorded fits are available in the kinematics table.")
 
@@ -220,6 +224,7 @@ class GCSWindowActions:
         when = self._recorded_time_for_current_frames()
         if track.fits.pop(when, None) is not None:
             track.provenance.pop(when, None)
+            self._forget_recorded_note(self._editing)
             self._refresh_fits()
             self._set_status("Recorded fit at the current time deleted.")
 
@@ -379,15 +384,18 @@ class GCSWindowActions:
             <li><b>Align one shell in every usable view.</b> Longitude and latitude are Stonyhurst;
             height is the leading edge measured from Sun centre, not altitude above the surface.
             Adjust direction, tilt, half angle and aspect ratio before fine-tuning height.</li>
-            <li><b>Pick and refine.</b> Left-click the ejecta front in multiple views, right-click to undo.
+            <li><b>Pick and refine.</b> Left-click the ejecta front in multiple views; right-click removes that
+            panel's last point, and Undo point (Ctrl+Z) the last one clicked in any panel.
             Refine is a local nearest-mesh fit, so start close. A small residual does not establish a
             unique solution. Points belong to individual observed frames.</li>
             <li><b>Record successive times.</b> Record fit saves the current model and observation
             provenance. Repeat along the event and choose a polynomial order supported by the number
             of distinct times. The speed is model-dependent radial speed. Repeated image combinations
-            do not provide independent height measurements. Play the sequence to review them: each
-            recorded fit is drawn on its own images, fits are interpolated in time between recorded
-            times (a display, not a fit) and held before the first and after the last.</li>
+            do not provide independent height measurements. Stepping, the time slider and playback all
+            move the shells with the recorded fits: each recorded fit is drawn on its own images, fits
+            are interpolated in time between recorded times (a display, not a fit) and held before the
+            first and after the last. A model with nothing recorded keeps its sliders; commit before
+            stepping away, or uncommitted changes give way to the recorded shell.</li>
             <li><b>Fit the shock too.</b> Choose <i>Edit: Shock</i> to fit the faint outer envelope
             the CME drives with a spheroid or ellipsoid, drawn alongside the GCS shell in its own colour.
             Parameters follow PyThea: height is the apex distance, κ = b/(height − 1 R☉) sets the lateral
@@ -406,7 +414,8 @@ class GCSWindowActions:
             Helioviewer JP2 images support morphological fitting, not calibrated intensity measurements.
             Inspect sensitivity to timing and alternative plausible shells.</p>
             <p><b>Keys while an image has focus:</b> Space plays/pauses; arrows step; Home goes to the
-            first frame; 0 equalizes views; 1–3 focus A–C. Menus provide additional shortcuts.</p>
+            first frame; B shows or hides the image banners; 0 equalizes views; 1–3 focus A–C.
+            Ctrl+Z undoes the last front point. Menus provide additional shortcuts.</p>
             <p>References: <a href="https://www.pythea.org/en/docs/geometrical_models.html">PyThea model definitions</a>
             · <a href="https://arxiv.org/abs/2302.00531">GCS reconstruction uncertainty</a>
             · <a href="https://doi.org/10.3847/1538-4357/ab15d7">Kouloumvakos et al. (2019), spheroid shock model</a>

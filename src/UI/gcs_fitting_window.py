@@ -173,6 +173,9 @@ class ModelTrack:
     #: Points kept per (panel, frame id), restored when that frame is shown again.
     frame_points: dict[tuple[str, int], list[tuple[float, float]]] = field(default_factory=dict)
     last_refinement: Any = None
+    #: Every left click as (panel, frame id, point), oldest first, so the most
+    #: recent one can be undone wherever it was clicked.
+    click_order: list[tuple[str, int | None, tuple[float, float]]] = field(default_factory=list)
     #: Recorded fits and their observation provenance, keyed by shared time.
     fits: dict[datetime, Any] = field(default_factory=dict)
     provenance: dict[datetime, Any] = field(default_factory=dict)
@@ -471,8 +474,9 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         self._time_axis: list[datetime] = []
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._advance_frame)
-        #: While playback follows the recorded fits: which shells are drawn, for the status bar.
-        self._playback_note = ""
+        #: Per model, how the shell on screen came from its recorded fits (for the
+        #: status bar); dropped as soon as that model is edited.
+        self._recorded_notes: dict[str, str] = {}
         self._wireframe_colour = (255, 140, 40)
         self._shock_colour = DEFAULT_SHOCK_COLOUR
         #: Whether the user has dragged the splitter, per layout. Until they do,
@@ -504,7 +508,7 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
     # ------------------------------------------------------------------- UI
     def _build_ui(self, *, cache_dir: Any, start: datetime, end: datetime) -> None:
         self.panels: list[GCSViewpointPanel] = []
-        for label, source in zip(PANEL_LABELS, default_viewpoints(start)):
+        for label, source in zip(PANEL_LABELS, default_viewpoints()):
             panel = GCSViewpointPanel(label, source_key=source.key, cache_dir=cache_dir, theme=self.theme)
             panel.framesChanged.connect(self._on_panel_frames_changed)
             panel.statusChanged.connect(self._on_panel_status)
@@ -677,8 +681,16 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         self.axes_check.setChecked(False)
         self.axes_check.setToolTip("Show arcsec axes around each image (costs image space).")
         self.axes_check.toggled.connect(self._on_axes_toggled)
+        self.banner_check = QCheckBox("Banner")
+        self.banner_check.setChecked(True)
+        self.banner_check.setToolTip(
+            "Show the information banner across the top of each image: instrument,\n"
+            "observation time, offset from the shared time and difference reference (B)."
+        )
+        self.banner_check.toggled.connect(self._on_banner_toggled)
         row.addWidget(self.limb_check)
         row.addWidget(self.axes_check)
+        row.addWidget(self.banner_check)
         return bar
 
     def _build_event_card(self, start: datetime, end: datetime) -> GCSCard:
@@ -828,8 +840,9 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         self.pick_points_check = RoomyCheckBox("Pick front points")
         self.pick_points_check.setChecked(True)
         self.pick_points_check.setToolTip(
-            "Left-click the CME ejecta front to add a constraint; right-click removes the last.\n"
-            "Turn off to navigate without adding points. Points belong to the displayed frame."
+            "Left-click the front to add a constraint for the edited model; right-click removes that\n"
+            "panel's last point, and Undo point the last one clicked anywhere. Turn off to navigate\n"
+            "without adding points. Points belong to the displayed frame."
         )
         self.wireframe_check = RoomyCheckBox("GCS")
         self.wireframe_check.setChecked(True)
@@ -847,12 +860,19 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         layout.addLayout(interaction)
 
         extras = QHBoxLayout()
+        self.undo_point_btn = QPushButton("Undo point")
+        self.undo_point_btn.setToolTip(
+            "Remove the front point clicked last for the edited model, in whichever panel\n"
+            "it was clicked (Ctrl+Z). Only points on the displayed frames can be undone."
+        )
+        self.undo_point_btn.clicked.connect(self._undo_last_point)
         self.clear_points_btn = QPushButton("Clear points")
-        self.clear_points_btn.setToolTip("Remove the edited model's front points on the displayed frames.")
+        self.clear_points_btn.setToolTip("Remove all of the edited model's front points on the displayed frames.")
         self.clear_points_btn.clicked.connect(self._clear_points)
         self.send_btn = QPushButton("Send to analyzer")
         self.send_btn.setToolTip("Push the current GCS parameters back to the Solar Image Analysis window.")
         self.send_btn.clicked.connect(self._on_send)
+        extras.addWidget(self.undo_point_btn)
         extras.addWidget(self.clear_points_btn)
         extras.addWidget(self.send_btn)
         layout.addLayout(extras)
@@ -992,6 +1012,7 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
             ("Left", self.previous_frame),
             ("Right", self.next_frame),
             ("Home", self._rewind),
+            ("B", self.banner_check.toggle),
             ("0", lambda: self.set_layout_mode(LAYOUT_EQUAL)),
             ("1", lambda: self.set_layout_mode(LAYOUT_FOCUS, 0)),
             ("2", lambda: self.set_layout_mode(LAYOUT_FOCUS, 1)),
@@ -1105,26 +1126,26 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
             self._sync_all()
 
     def pause(self) -> None:
+        was_playing = self._play_timer.isActive()
         self._play_timer.stop()
         self._sync_transport()
-        if self._playback_note:
-            # The shell stays where playback left it: what is on screen is what
-            # the sliders now edit.
-            self._playback_note = ""
+        if was_playing and self._recorded_notes:
+            # The shell stays where playback left it and is what the sliders now
+            # edit; only the playing mark goes from the status bar.
             self._refresh_status()
 
     def _follow_recorded_fits(self) -> None:
-        """While playing, make each model the shell its recorded fits give for the shared time.
+        """Make each model the shell its recorded fits give for the shared time.
 
-        Playback is how the recorded fits are reviewed, so the flux rope and the
-        shock each evolve with their own records instead of staying wherever the
-        sliders were last left. A model with nothing recorded is left alone.
+        Called whenever the shared time moves — playback, the step buttons and
+        keys, the slider — so the grid on screen is the fitted evolution for the
+        images shown rather than wherever the sliders were last left. A model with
+        nothing recorded keeps its working parameters.
         """
-        self._playback_note = ""
-        if not self._play_timer.isActive() or self._shared_time is None:
+        self._recorded_notes = {}
+        if self._shared_time is None:
             return
-        notes: list[str] = []
-        for key, prefix in ((GCS_MODEL, "Shell"), (SHOCK_MODEL, "Shock")):
+        for key in (GCS_MODEL, SHOCK_MODEL):
             found = self._recorded_shell(self._shared_time, key)
             if found is None:
                 continue
@@ -1133,8 +1154,14 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
             if params != track.params:
                 track.params = params
                 track.last_refinement = None
-            notes.append(f"{prefix}: {note}")
-        self._playback_note = " · ".join(notes)
+            self._recorded_notes[key] = note
+
+    def _forget_recorded_note(self, key: str | None = None) -> None:
+        """A model was edited, so its shell is no longer the recorded one (all models if None)."""
+        if key is None:
+            self._recorded_notes = {}
+        else:
+            self._recorded_notes.pop(key, None)
 
     def _recorded_shell(self, when: datetime, key: str = GCS_MODEL) -> tuple[Any, str] | None:
         """A model's recorded shell at ``when``, and a note saying how it was found.
@@ -1378,6 +1405,12 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         for panel in self.panels:
             panel.set_axes_visible(bool(on))
 
+    def _on_banner_toggled(self, on: bool) -> None:
+        for panel in self.panels:
+            panel.set_caption_visible(bool(on))
+        if hasattr(self, "menu_actions"):
+            self._sync_menu_actions()
+
     def _on_hover(self, key: str, x: Any, y: Any) -> None:
         """Cursor position in helioprojective terms: arcsec, solar radii, position angle."""
         if x is None or y is None:
@@ -1400,6 +1433,7 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         for track in self._tracks.values():
             track.clicks[label] = []
             track.frame_points = {key: points for key, points in track.frame_points.items() if key[0] != label}
+            track.click_order = [entry for entry in track.click_order if entry[0] != label]
             track.last_refinement = None
         panel.set_sync_tolerance(self._sync_tolerance_seconds())
         # Every load opens the same way, whichever mode the view was left in.
@@ -1420,6 +1454,7 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         if not stamps:
             self._time_axis = []
             self._shared_time = None
+            self._forget_recorded_note()
             self.time_slider.setRange(0, 0)
             self.time_label.setText("—")
             self.pause()
@@ -1448,7 +1483,8 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         when = axis[max(0, min(int(index), len(axis) - 1))]
         if user_initiated:
             self._requested_time = when
-        if when != self._shared_time:
+        moved = when != self._shared_time
+        if moved:
             self._forget_refinements()
         self._shared_time = when
         self.time_label.setText(f"{when:%Y-%m-%d %H:%M:%S}")
@@ -1466,7 +1502,11 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
                     track.clicks[panel.label] = list(track.frame_points.get((panel.label, current), []))
                     track.last_refinement = None
             self._displayed_frames[panel.label] = current
-        self._follow_recorded_fits()
+        # Stepping, the slider and playback move the fitted shells with the
+        # images. A reload that keeps the time must not overwrite a model being
+        # edited, so only an actual move follows the records.
+        if moved or self._play_timer.isActive():
+            self._follow_recorded_fits()
         self._sync_all()
 
     def _difference_mode(self) -> str:
@@ -1526,6 +1566,7 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
                     for when in track.fits:
                         track.archived_fits.pop(when, None)
                         track.archived_provenance.pop(when, None)
+                self._forget_recorded_note()
                 self._refresh_fits()
             self._last_event_range = (start, end)
             if self._requested_time is not None and not start <= self._requested_time <= end:
@@ -1565,12 +1606,17 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
                                  target_time=when)
 
     def _apply_default_sources(self, when: datetime, *, force: bool) -> None:
-        """Grey out sources that did not exist then, and replace any chosen one
-        that did not with the classic triad's choice for that panel."""
-        for panel, fallback in zip(self.panels, default_viewpoints(when)):
+        """Grey out sources that did not exist then, and put a panel whose chosen
+        source did not back on its default.
+
+        The defaults never change with the date: panel A stays on STEREO-B COR2
+        even for an event after the spacecraft was lost, and reports that it has
+        no data when loaded, so the left-to-right order is always B, SOHO, A.
+        """
+        for panel, default in zip(self.panels, default_viewpoints()):
             panel.update_availability(when)
             if force or not panel.source_available(when):
-                panel.select_source(fallback.key)
+                panel.select_source(default.key)
 
     def _fetch_all(self) -> None:
         start, end = self.event_range()
@@ -1580,11 +1626,20 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
             return
         self._apply_default_sources(start, force=False)
         started = sum(1 for panel in self.panels if panel.start_fetch())
-        self._set_status(
+        # Each panel's own refusal reached the status bar and is about to be
+        # overwritten; keep the "no data then" ones, which the defaults can cause.
+        empty = [
+            f"{panel.label}: {panel.source().label} has no data then"
+            for panel in self.panels
+            if panel.source() is not None
+            and not any(panel.source_available(when) for when in panel.date_range())
+        ]
+        message = (
             f"Loading JPEG2000 frames for {started} channel(s), {start:%Y-%m-%d %H:%M} → {end:%H:%M} UTC…"
             if started
             else "Nothing to load — every channel is busy, has an invalid range, or has no data then."
         )
+        self._set_status(message + "".join(f" · {note}" for note in empty))
         self._sync_busy()
 
     def _sync_busy(self) -> None:
@@ -1601,6 +1656,7 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         self.pause()
         self._params = params
         self._last_refinement = None
+        self._forget_recorded_note(GCS_MODEL)
         self._sync_all()
 
     def _on_shock_parameters(self, params: ShockParameters) -> None:
@@ -1608,6 +1664,7 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         track = self._tracks[SHOCK_MODEL]
         track.params = params
         track.last_refinement = None
+        self._forget_recorded_note(SHOCK_MODEL)
         self._sync_all()
 
     def _on_handle(self, key: str, name: str, x: float, y: float, _finished: bool) -> None:
@@ -1628,6 +1685,7 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         else:
             track.params = apply_shock_apex_drag(self.shock_parameters(), panel.observer, (x, y))
         track.last_refinement = None
+        self._forget_recorded_note(model)
         self._sync_all()
 
     def _on_canvas_click(self, key: str, x: float, y: float, button: str) -> None:
@@ -1640,15 +1698,56 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
             return
         self.pause()
         track = self._track()
+        frame = self._displayed_frames[key]
         if button == "right":
             if track.clicks[key]:
-                track.clicks[key].pop()
+                point = track.clicks[key].pop()
+                self._drop_click_entry(track, key, frame, point)
         elif button == "left":
-            track.clicks[key].append((float(x), float(y)))
+            point = (float(x), float(y))
+            track.clicks[key].append(point)
+            track.click_order.append((key, frame, point))
         else:
             return
         track.last_refinement = None
         self._sync_all()
+
+    @staticmethod
+    def _drop_click_entry(track: ModelTrack, key: str, frame: int | None, point: tuple[float, float]) -> None:
+        """Forget the latest history entry for one removed point."""
+        for position in range(len(track.click_order) - 1, -1, -1):
+            if track.click_order[position] == (key, frame, point):
+                del track.click_order[position]
+                return
+
+    def _last_point_entry(self) -> int | None:
+        """Position in the edited model's history of its latest point still on screen."""
+        track = self._track()
+        for position in range(len(track.click_order) - 1, -1, -1):
+            key, frame, point = track.click_order[position]
+            if frame == self._displayed_frames.get(key) and point in track.clicks.get(key, ()):
+                return position
+        return None
+
+    def _undo_last_point(self) -> None:
+        """Remove the edited model's most recently clicked front point, in any panel.
+
+        Only points on the displayed frames are candidates: one clicked on a frame
+        that is no longer shown stays with that frame and can be undone there.
+        """
+        self.pause()
+        position = self._last_point_entry()
+        if position is None:
+            self._set_status("No front point to undo on the displayed frames.")
+            return
+        track = self._track()
+        key, _frame, point = track.click_order.pop(position)
+        points = track.clicks[key]
+        del points[len(points) - 1 - points[::-1].index(point)]
+        track.last_refinement = None
+        self._sync_all()
+        subject = "front point" if self._editing == GCS_MODEL else "shock front point"
+        self._set_status(f"Removed the last {subject}, from panel {key}.")
 
     def _clear_points(self) -> None:
         """Clear the edited model's points on the displayed frames."""
@@ -1658,6 +1757,7 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
             current = self._displayed_frames[key]
             if current is not None:
                 track.frame_points.pop((key, current), None)
+            track.click_order = [entry for entry in track.click_order if entry[:2] != (key, current)]
         track.last_refinement = None
         self._sync_all()
 
@@ -1709,6 +1809,7 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
             return
         track.last_refinement = result
         track.params = result.parameters
+        self._forget_recorded_note(model)
         self._sync_all()
         self._set_status(result.message)
 
@@ -1765,6 +1866,7 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
                 epsilon=params.epsilon, alpha=params.alpha, model=params.model, **common
             )
         track.provenance[when] = self._current_provenance(model)
+        self._forget_recorded_note(model)
         self._refresh_fits()
         subject = "" if model == GCS_MODEL else "shock "
         self._set_status(
@@ -1823,6 +1925,7 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         track = self._track()
         track.fits.clear()
         track.provenance.clear()
+        self._forget_recorded_note(self._editing)
         self._refresh_fits()
         self._set_status(f"Recorded {'GCS' if self._editing == GCS_MODEL else 'shock'} fits cleared.")
 
@@ -1885,10 +1988,15 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
             points = sum(len(self._tracks[model].clicks[panel.label]) for panel in active)
             button.setEnabled(points >= self._free_parameter_count(model) + 1)
         self.clear_points_btn.setEnabled(any(track.clicks.values()))
+        self.undo_point_btn.setEnabled(self._last_point_entry() is not None)
         self.send_btn.setEnabled(hasattr(getattr(self.parent(), "_measure", None), "set_gcs_parameters"))
         synchronization = self._synchronization_summary()
-        # During playback, which shells are drawn leads: they change every frame.
-        playback = f"▶ {self._playback_note} · " if self._playback_note else ""
+        # Which recorded shells are drawn leads: they change with every step.
+        notes = [f"{'Shell' if key == GCS_MODEL else 'Shock'}: {self._recorded_notes[key]}"
+                 for key in (GCS_MODEL, SHOCK_MODEL) if key in self._recorded_notes]
+        playback = ""
+        if notes:
+            playback = ("▶ " if self._play_timer.isActive() else "") + " · ".join(notes) + " · "
         point_text = "point(s) clicked" if self._editing == GCS_MODEL else "shock point(s) clicked"
         if not active:
             self._set_status(playback + "No synchronized viewpoint with valid WCS. "

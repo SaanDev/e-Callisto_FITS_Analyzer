@@ -433,3 +433,21 @@ def test_every_view_and_fit_toggle_in_the_menus_drives_its_check_box(window, key
         expected = not check.isChecked()
         window.menu_actions[key].trigger()
         assert check.isChecked() is expected
+
+
+def test_stepping_moves_the_shock_with_its_recorded_fits(window):
+    for panel, lon in zip(window.panels[:2], LONGITUDES):
+        panel.set_frames(_sequence(lon, n=3, cadence_min=12))
+    window.set_editing_model(SHOCK_MODEL)
+    for index, height in ((0, 7.0), (2, 11.0)):
+        window.time_slider.setValue(index)
+        window._on_shock_parameters(window.shock_parameters().replace_values(height_rsun=height))
+        window._on_commit()
+    gcs = window.parameters()
+    window.previous_frame()
+    assert window.shock_parameters().height_rsun == pytest.approx(9.0)
+    assert window.status_label.text().startswith("Shock: interpolated between recorded fits 16:00:00 and 16:24:00 · ")
+    assert window.parameters() == gcs  # nothing recorded for GCS, so it keeps its sliders
+    window._rewind()
+    assert window.shock_parameters().height_rsun == pytest.approx(7.0)
+

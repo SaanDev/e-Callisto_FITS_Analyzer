@@ -182,10 +182,65 @@ def test_playback_draws_the_recorded_fits_and_their_evolution(window):
     # Paused, the shell stays where playback left it and is what the sliders edit…
     assert window.parameters().height_rsun == pytest.approx(8.0)
     assert "▶" not in window.status_label.text()
-    # …and stepping by hand no longer pulls in the recorded fits.
+    assert window.status_label.text().startswith("Shell: interpolated between recorded fits")
+    # …and stepping by hand moves it with the recorded fits too.
     window.next_frame()
-    assert window.parameters().height_rsun == pytest.approx(8.0)
+    assert window.parameters().height_rsun == pytest.approx(10.0)
     assert window._fits[BASE + timedelta(minutes=12)].apex_height_rsun == 6.0
+
+
+def test_stepping_forward_and_back_moves_the_shell_with_the_recorded_fits(window):
+    window.panels[0].set_frames(_sequence(0, n=5, cadence_min=12))
+    window.panels[1].set_frames(_sequence(60, n=5, cadence_min=12))
+    _record(window, 1, 6.0)  # 16:12
+    _record(window, 3, 10.0)  # 16:36
+    expected = {0: 6.0, 1: 6.0, 2: 8.0, 3: 10.0, 4: 10.0}
+    notes = {
+        0: "Shell: recorded fit 16:12:00 held (before first fit) · ",
+        1: "Shell: recorded fit 16:12:00 · ",
+        2: "Shell: interpolated between recorded fits 16:12:00 and 16:36:00 · ",
+        3: "Shell: recorded fit 16:36:00 · ",
+        4: "Shell: recorded fit 16:36:00 held (after last fit) · ",
+    }
+    window._rewind()
+    for index in (0, 1, 2, 3, 4):
+        if index:
+            window.next_frame()
+        assert window.time_slider.value() == index
+        assert window.parameters().height_rsun == pytest.approx(expected[index])
+        assert window.gcs_panel.sliders["height_rsun"].value() == pytest.approx(expected[index])
+        assert window.status_label.text().startswith(notes[index])
+    for index in (3, 2, 1, 0):
+        window.previous_frame()
+        assert window.parameters().height_rsun == pytest.approx(expected[index])
+    window.time_slider.setValue(2)  # dragging the slider moves it the same way
+    assert window.parameters().height_rsun == pytest.approx(8.0)
+    assert not window._play_timer.isActive()
+
+
+def test_an_edit_replaces_the_recorded_note_and_a_reload_at_the_same_time_keeps_it(window):
+    window.panels[0].set_frames(_sequence(0, n=3, cadence_min=12))
+    window.panels[1].set_frames(_sequence(60, n=3, cadence_min=12))
+    _record(window, 0, 6.0)
+    window.next_frame()
+    assert window.status_label.text().startswith("Shell: recorded fit 16:00:00 held")
+    window._on_parameters(window.parameters().replace_values(height_rsun=7.5))
+    assert "Shell:" not in window.status_label.text()
+    # A channel finishing its load keeps the shared time: the edit must survive.
+    window.panels[2].set_frames(_sequence(-70, n=3, cadence_min=12))
+    assert window.parameters().height_rsun == pytest.approx(7.5)
+    window.next_frame()  # a real step follows the records again
+    assert window.parameters().height_rsun == pytest.approx(6.0)
+
+
+def test_stepping_without_recorded_fits_keeps_the_working_model(window):
+    window.panels[0].set_frames(_sequence(0, n=3))
+    model = window.parameters().replace_values(height_rsun=12.0)
+    window._on_parameters(model)
+    window.next_frame()
+    window.previous_frame()
+    assert window.parameters() == model
+    assert "Shell:" not in window.status_label.text()
 
 
 def test_playback_follows_every_recorded_parameter_not_only_height(window):

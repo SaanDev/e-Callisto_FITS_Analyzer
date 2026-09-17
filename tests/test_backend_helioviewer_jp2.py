@@ -169,12 +169,10 @@ def test_stereo_b_is_unavailable_after_it_was_lost():
     assert not cor2b.available_on(date(2015, 1, 1))
 
 
-def test_the_default_triad_runs_stereo_b_soho_stereo_a_and_falls_back_to_c3():
-    before = [source.key for source in hv.default_viewpoints(datetime(2012, 7, 12))]
-    after = [source.key for source in hv.default_viewpoints(datetime(2024, 5, 1))]
-    assert before == ["COR2-B", "LASCO C2", "COR2-A"]
-    # STEREO-B was lost in 2014, so the left panel cannot stay on it.
-    assert after == ["LASCO C3", "LASCO C2", "COR2-A"]
+def test_the_default_triad_is_stereo_b_soho_stereo_a_whatever_the_date():
+    """Fixed left to right; STEREO-B being lost in 2014 does not change the order."""
+    assert [source.key for source in hv.default_viewpoints()] == ["COR2-B", "LASCO C2", "COR2-A"]
+    assert list(hv.DEFAULT_VIEWPOINT_KEYS) == ["COR2-B", "LASCO C2", "COR2-A"]
 
 
 def test_only_coronagraphs_are_offered_for_gcs():

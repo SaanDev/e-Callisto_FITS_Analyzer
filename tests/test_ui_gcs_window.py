@@ -1033,35 +1033,44 @@ def test_only_jp2_coronagraph_sources_are_offered(window):
     assert keys == [source.key for source in GCS_JP2_SOURCES]
 
 
-def test_the_default_triad_follows_the_target_date():
+@pytest.mark.parametrize("when", [datetime(2012, 7, 12, 17), datetime(2021, 10, 28, 15), datetime(2026, 9, 17, 9)])
+def test_the_default_triad_is_the_same_for_every_date(when):
+    """Left to right STEREO-B COR2, LASCO C2, STEREO-A COR2 — even after STEREO-B was lost."""
     _app()
-    early = GCSFittingWindow(target_time=datetime(2012, 7, 12, 17))
-    late = GCSFittingWindow(target_time=datetime(2021, 10, 28, 15))
+    window = GCSFittingWindow(target_time=when)
     try:
-        # Left to right: STEREO-B COR2, LASCO C2, STEREO-A COR2.
-        assert [p.source().key for p in early.panels] == ["COR2-B", "LASCO C2", "COR2-A"]
-        # STEREO-B was lost in 2014, so the left panel cannot stay on it.
-        assert [p.source().key for p in late.panels] == ["LASCO C3", "LASCO C2", "COR2-A"]
+        assert [p.source().key for p in window.panels] == ["COR2-B", "LASCO C2", "COR2-A"]
     finally:
-        early.close()
-        late.close()
+        window.close()
 
 
-def test_moving_the_event_past_2014_takes_panel_a_off_stereo_b(window):
-    """A still-valid choice is left alone; one the spacecraft could not have made
-    is replaced and greyed out."""
+def test_moving_the_event_past_2014_keeps_panel_a_on_stereo_b(window):
+    """The default stays, greyed out as having no data; a still-valid choice is left
+    alone, and a chosen source the spacecraft could not have made goes back to
+    that panel's default."""
     window.event_start_edit.setDateTime(QDateTime(datetime(2012, 7, 12, 16)))
     window.event_end_edit.setDateTime(QDateTime(datetime(2012, 7, 12, 18)))
-    window.panels[0].select_source("COR2-B")  # a valid choice in 2012
-    window.panels[2].select_source("LASCO C2")
-    assert window.panels[0].source().key == "COR2-B"
+    window.panels[1].select_source("LASCO C3")  # valid in both years
+    window.panels[2].select_source("COR1-B")  # valid in 2012 only
     window.event_start_edit.setDateTime(QDateTime(datetime(2021, 10, 28, 14)))
     window.event_end_edit.setDateTime(QDateTime(datetime(2021, 10, 28, 16)))
-    assert window.panels[0].source().key == "LASCO C3"
-    assert window.panels[2].source().key == "LASCO C2"  # still valid, so left alone
+    assert [p.source().key for p in window.panels] == ["COR2-B", "LASCO C3", "COR2-A"]
     index = window.panels[0].source_combo.findData("COR2-B")
     item = window.panels[0].source_combo.model().item(index)
     assert not (item.flags() & Qt.ItemIsEnabled)
+
+
+def test_loading_a_post_2014_event_says_panel_a_has_no_data_and_loads_the_rest(window, monkeypatch):
+    launched: list = []
+    monkeypatch.setattr(GCSViewpointPanel, "_launch", lambda self, worker: launched.append((self.label, worker.source.key)))
+    window.set_time_window(datetime(2021, 10, 28, 14), datetime(2021, 10, 28, 16))
+    window._fetch_all()
+    assert launched == [("B", "LASCO C2"), ("C", "COR2-A")]
+    assert window.panels[0].source().key == "COR2-B"
+    assert "STEREO-B COR2 has no data for 2021-10-28" in window.panels[0].title_label.text()
+    status = window.status_label.text()
+    assert status.startswith("Loading JPEG2000 frames for 2 channel(s)")
+    assert "A: STEREO-B COR2 has no data then" in status
 
 
 def test_changing_the_event_after_loading_retargets_every_channel(window, monkeypatch):
