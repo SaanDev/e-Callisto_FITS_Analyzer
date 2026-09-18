@@ -255,7 +255,7 @@ def test_a_failed_shock_refine_names_the_shock(window):
     _load(window)
     window.set_editing_model(SHOCK_MODEL)
     window._on_refine()
-    assert window.status_label.text().startswith("Shock refine: Click along the shock front")
+    assert window.status_label.text().startswith("Shock refine: click at least 2 points along the shock front")
 
 
 def test_commits_build_a_separate_shock_height_time_series(window):

@@ -330,10 +330,13 @@ def test_adjusting_same_event_preserves_recorded_work(window):
 def test_nonconverged_refinement_does_not_change_model(window, monkeypatch):
     from src.UI import gcs_fitting_window as module
 
+    # A view to fit against, and enough points for the refine to run.
+    window.panels[1].set_frames(_sequence(0.0))
+    window._clicks["B"] = [(1200.0, 300.0), (1500.0, -200.0), (900.0, 650.0)]
     seed = window.parameters()
     result = SimpleNamespace(converged=False, parameters=seed.replace_values(height_rsun=15),
                              message="Iteration limit reached")
-    monkeypatch.setattr(module, "refine_gcs", lambda *_args: result)
+    monkeypatch.setattr(module, "refine_gcs", lambda *_args, **_kwargs: result)
     window._on_refine()
     assert window.parameters() == seed
     assert window._last_refinement is None

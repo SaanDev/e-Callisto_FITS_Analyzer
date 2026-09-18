@@ -106,9 +106,11 @@ class ShockParameterPanel(QWidget):
         self.refine_btn = QPushButton("Refine fit")
         self.refine_btn.setToolTip(
             "Least-squares polish of the shock against the front points you clicked: the\n"
-            "model's projected outline is pulled through them in every view. A refinement,\n"
-            "not a fit — align the shock by hand first. Errors are formal only; ε and tilt\n"
-            "are weakly constrained with fewer than three views."
+            "model's projected outline is pulled through them in every view. It fits as\n"
+            "many parameters as the points support: 2 points fit the apex height, 4 in two\n"
+            "separated views add the direction, then κ and ε (and an ellipsoid's b/c and\n"
+            "tilt). A refinement, not a fit — align the shock by hand first. Errors are\n"
+            "formal only; ε and tilt are weakly constrained with fewer than three views."
         )
         self.commit_btn = QPushButton("Commit Shock")
         self.commit_btn.setToolTip("Record this shock fit at the current time.")

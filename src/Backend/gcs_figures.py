@@ -43,6 +43,13 @@ from src.Backend.figure_export import (
 #: What each polynomial degree is called, as in the kinematics card.
 FIT_ORDER_NAMES = {1: "Linear", 2: "Quadratic", 3: "Cubic"}
 
+#: Each fit's model, with t in seconds from the first recorded time.
+FIT_EQUATIONS = {
+    1: "h(t) = h₀ + v·t",
+    2: "h(t) = h₀ + v₀·t + ½·a·t²",
+    3: "h(t) = h₀ + v₀·t + ½·a₀·t² + ⅙·j·t³",
+}
+
 #: Limb and front-point colours on the images: light enough for dark coronagraph
 #: frames, and distinct from the default orange shell and sky-blue shock.
 LIMB_COLOR = "#8fe3a0"
@@ -377,6 +384,74 @@ def kinematics_rows(fit: Any) -> list[tuple[str, str]]:
     return rows
 
 
+def fit_parameter_rows(fit: Any) -> list[tuple[str, str]]:
+    """Everything one height–time fit states: its model, coefficients and
+    kinematics, each with its 1σ error, and the degrees of freedom behind them."""
+    from src.Backend.coronagraph import RSUN_KM
+
+    order = int(fit.order)
+    count = int(fit.times_s.size)
+    dof = count - (order + 1)
+    rows = kinematics_rows(fit)
+    coefficients = np.asarray(fit.coeffs_km, dtype=float)[::-1]
+    errors = (
+        np.asarray(fit.coeff_errors_km, dtype=float)[::-1]
+        if fit.coeff_errors_km is not None
+        else np.full(order + 1, np.nan)
+    )
+    # After the time span: the model, the degrees of freedom and h₀, the one
+    # coefficient the kinematics rows do not already state.
+    extra = [
+        ("Model", f"{FIT_EQUATIONS.get(order, f'degree-{order} polynomial')}, t in s from the first recorded time"),
+        ("Degrees of freedom", str(dof)),
+        ("Height at first time h₀", _with_error(coefficients[0] / RSUN_KM, errors[0] / RSUN_KM, ".3f", "R☉")),
+    ]
+    rows[3:3] = extra
+    if dof < 1:
+        rows.append(("Errors", f"not estimable: error bars need {order + 2} or more recorded times"))
+    return rows
+
+
+def fits_by_order(series: HeightTimeSeries, orders: Sequence[int] = (1, 2, 3)) -> dict[int, Any | None]:
+    """``series`` fitted at each polynomial degree; ``None`` where too few times allow it."""
+    from dataclasses import replace
+
+    return {order: fit_series(replace(series, order=int(order))) for order in orders}
+
+
+def fit_comparison_row(fit: Any) -> tuple[str, ...]:
+    """One fit's headline values for a side-by-side table of the degrees."""
+    from src.Backend.coronagraph import RSUN_KM
+
+    order = int(fit.order)
+    height = np.asarray(fit.coeffs_km, dtype=float)[-1] / RSUN_KM
+    acceleration = fit.acceleration_km_s2 * 1000.0
+    return (
+        FIT_ORDER_NAMES.get(order, str(order)),
+        _with_error(height, np.nan, ".3f", ""),
+        _with_error(fit.speed_km_s, fit.speed_err_km_s, ",.0f", ""),
+        _with_error(fit.speed_final_km_s if order > 1 else fit.speed_km_s,
+                    fit.speed_final_err_km_s if order > 1 else fit.speed_err_km_s, ",.0f", ""),
+        _with_error(acceleration, fit.acceleration_err_km_s2 * 1000.0, "+,.1f", ""),
+        _with_error(fit.jerk_km_s3 * 1000.0, fit.jerk_err_km_s3 * 1000.0, "+,.3f", "") if order >= 3 else "—",
+        _with_error(fit.rms_residual_km / RSUN_KM, np.nan, ".3f", ""),
+        str(int(fit.times_s.size) - (order + 1)),
+    )
+
+
+#: Column titles for :func:`fit_comparison_row`.
+FIT_COMPARISON_HEADER = (
+    "Fit", "h₀ (R☉)", "v first (km/s)", "v last (km/s)", "a (m/s²)", "Jerk (m/s³)", "RMS (R☉)", "DoF",
+)
+
+
+def height_time_title(base: str, series: HeightTimeSeries) -> str:
+    """``base`` with the fit the graph draws, when it draws one."""
+    if fit_series(series) is None:
+        return base
+    return f"{base}: {FIT_ORDER_NAMES.get(series.order, str(series.order)).lower()} fit"
+
+
 def _fit_legend_label(fit: Any) -> str:
     name = FIT_ORDER_NAMES.get(int(fit.order), f"Order-{fit.order}")
     lines = [f"{name} fit"]
@@ -386,8 +461,11 @@ def _fit_legend_label(fit: Any) -> str:
         lines.append("v₀ = " + _with_error(fit.speed_km_s, fit.speed_err_km_s, ",.0f", "km/s"))
         lines.append("v_end = " + _with_error(fit.speed_final_km_s, fit.speed_final_err_km_s, ",.0f", "km/s"))
     if np.isfinite(fit.acceleration_km_s2):
+        # A cubic's acceleration changes along the track: this is its first value.
+        label = "a₀" if int(fit.order) >= 3 else "a"
         lines.append(
-            "a = " + _with_error(fit.acceleration_km_s2 * 1000.0, fit.acceleration_err_km_s2 * 1000.0, "+,.1f", "m/s²")
+            f"{label} = "
+            + _with_error(fit.acceleration_km_s2 * 1000.0, fit.acceleration_err_km_s2 * 1000.0, "+,.1f", "m/s²")
         )
     return "\n".join(lines)
 
@@ -395,12 +473,16 @@ def _fit_legend_label(fit: Any) -> str:
 def height_time_figure(
     series_list: Sequence[HeightTimeSeries],
     *,
+    title: str = "",
     y_label: str = "Height (R☉)",
     width_in: float = 6.4,
     height_in: float = 4.8,
     dpi: float = 100.0,
 ) -> Any:
-    """Recorded heights against UT with their error bars and fitted curves, Origin style."""
+    """Recorded heights against UT with their error bars and fitted curves, Origin style.
+
+    ``title`` goes above the plot; an exported graph must say what it shows.
+    """
     import matplotlib.dates as mdates
     from matplotlib.figure import Figure
     from matplotlib.ticker import AutoMinorLocator
@@ -408,7 +490,9 @@ def height_time_figure(
     with origin_style():
         fig = Figure(figsize=(width_in, height_in), dpi=dpi)
         ax = fig.add_subplot(1, 1, 1)
-        fig.subplots_adjust(left=0.14, right=0.96, bottom=0.14, top=0.95)
+        fig.subplots_adjust(left=0.14, right=0.96, bottom=0.14, top=0.89 if title else 0.95)
+        if title:
+            ax.set_title(title, fontsize=12, fontweight="bold", pad=10)
         all_times: list[datetime] = []
         for index, series in enumerate(series_list):
             if not series.times:

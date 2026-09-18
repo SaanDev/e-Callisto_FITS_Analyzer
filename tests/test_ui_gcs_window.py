@@ -23,7 +23,7 @@ pytest.importorskip("sunpy.map")
 from PySide6.QtCore import QObject, Qt, Signal, Slot
 from PySide6.QtWidgets import QApplication
 
-from src.Backend.gcs_model import GCSParameters, apex_arcsec
+from src.Backend.gcs_model import PARAMETER_NAMES, GCSParameters, apex_arcsec, gcs_mesh, project_to_arcsec
 from src.UI.gcs_fitting_window import PANEL_LABELS, GCSFittingWindow
 from src.UI.gcs_viewpoint_panel import DIFFERENCE_MODES, GCSViewpointPanel
 from src.UI.gcs_viewpoint_panel import _qdatetime_utc as QDateTime
@@ -1480,3 +1480,57 @@ def test_panel_letter_buttons_show_their_letters(window, stylesheet):
         assert window.minimumSizeHint().width() <= 1200
     finally:
         window.hide()
+
+
+# --- Refine Fit availability -----------------------------------------------------------
+
+
+def _front_points(window, panel, truth, n, seed=5):
+    """Points on ``truth``'s visible outline in ``panel``, as a user would click them."""
+    fov = next(view.fov_rsun for view in window._viewpoints() if view.observer is panel.observer)
+    projection = project_to_arcsec(gcs_mesh(truth), truth, panel.observer, fov_rsun=fov)
+    usable = np.nonzero(np.isfinite(projection.tx_arcsec))[0]
+    radius = np.hypot(projection.tx_arcsec[usable], projection.ty_arcsec[usable])
+    outer = usable[radius > np.percentile(radius, 70.0)]
+    picked = np.random.default_rng(seed).choice(outer, n, replace=False)
+    return [(float(projection.tx_arcsec[i]), float(projection.ty_arcsec[i])) for i in picked]
+
+
+def test_refine_is_available_as_soon_as_there_is_an_image(window):
+    assert not window.gcs_panel.refine_btn.isEnabled()  # nothing loaded, nothing to fit
+    window.panels[1].set_frames(_sequence(0.0))
+    _flush()
+    window._sync_menu_actions()
+    assert window.gcs_panel.refine_btn.isEnabled() and window.menu_actions["refine"].isEnabled()
+    window._on_refine()
+    assert window.status_label.text().startswith("GCS refine: click at least 2 points along the CME front")
+    assert window._last_refinement is None
+
+
+def test_two_points_refine_the_height_and_say_what_more_would_add(window):
+    window.panels[1].set_frames(_sequence(0.0))
+    _flush()
+    truth = window.parameters().replace_values(lon_deg=90.0, height_rsun=6.0)
+    window._clicks["B"] = _front_points(window, window.panels[1], truth, 2)
+    window._on_parameters(truth.replace_values(height_rsun=5.0))
+    window._on_refine()
+    result = window._last_refinement
+    assert result is not None and result.free == ("height_rsun",)
+    assert window.parameters().lon_deg == truth.lon_deg  # everything else held
+    status = window.status_label.text()
+    # One view: the direction is held, so tilt is next, one point away.
+    assert "fitted height" in status and "1 more point would also fit tilt" in status
+
+
+def test_enough_points_in_separated_views_refine_every_parameter(window):
+    for panel, lon in zip(window.panels, (-60.0, 0.0, 60.0)):
+        panel.set_frames(_sequence(lon))
+    _flush()
+    truth = window.parameters().replace_values(lon_deg=20.0, lat_deg=5.0, height_rsun=6.0)
+    for seed, panel in enumerate(window.panels[:2]):
+        window._clicks[panel.label] = _front_points(window, panel, truth, 4, seed=seed)
+    window._on_parameters(truth.replace_values(lon_deg=23.0))
+    window._on_refine()
+    result = window._last_refinement
+    assert result is not None and set(result.free) == set(PARAMETER_NAMES)
+    assert "more point" not in window.status_label.text()

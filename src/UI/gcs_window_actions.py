@@ -137,7 +137,6 @@ class GCSWindowActions:
         has_time = self._shared_time is not None and bool(self._time_axis)
         has_record = self._recorded_time_for_current_frames() is not None
         has_view = bool(self._active_panels())
-        points = sum(view.n_clicks for view in self._viewpoints())
         fits = self._track().fits
         fetching = any(panel.is_fetching() for panel in self.panels)
         loaded = any(panel.frames for panel in self.panels)
@@ -147,7 +146,7 @@ class GCSWindowActions:
             "export_csv": bool(fits), "export_graph": bool(fits), "snapshot": loaded,
             "movie": len(self._time_axis) > 1 and not fetching,
             "report": (loaded or any(track.fits for track in self._tracks.values())) and not fetching,
-            "jump": has_time, "refine": has_view and points >= self._free_parameter_count(self._editing) + 1,
+            "jump": has_time, "refine": has_view,
             "commit": has_time and has_view, "restore": has_record, "delete": has_record,
             "undo_point": self._last_point_entry() is not None,
             "kinematics": len(fits) >= self.tracking_panel.fit_order() + 1,
@@ -383,8 +382,11 @@ class GCSWindowActions:
             Adjust direction, tilt, half angle and aspect ratio before fine-tuning height.</li>
             <li><b>Pick and refine.</b> Left-click the ejecta front in multiple views; right-click removes that
             panel's last point, and Undo point (Ctrl+Z) the last one clicked in any panel.
-            Refine is a local nearest-mesh fit, so start close. A small residual does not establish a
-            unique solution. Points belong to individual observed frames.</li>
+            Refine is a local nearest-mesh fit, so start close. It fits as many parameters as the
+            points support: 2 points fit the height, 4 in two separated views add the direction,
+            then tilt, α and κ (7 points for all six); the status bar names what was fitted and
+            how many more points would free the next parameter. A small residual does not
+            establish a unique solution. Points belong to individual observed frames.</li>
             <li><b>Record successive times.</b> Record fit saves the current model and observation
             provenance. Repeat along the event and choose a polynomial order supported by the number
             of distinct times. The speed is model-dependent radial speed. Repeated image combinations

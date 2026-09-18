@@ -43,7 +43,9 @@ from src.Backend.gcs_model import (
     project_points_to_arcsec,
     project_to_arcsec,
     refine_gcs,
+    refine_plan,
     shell_centre_distance_rsun,
+    staged_parameters,
     wireframe_arcsec,
 )
 
@@ -784,3 +786,50 @@ def test_a_locked_radial_drag_holds_the_direction_exactly():
     assert moved.lon_deg == pytest.approx(103.0, abs=1e-12)
     assert moved.lat_deg == pytest.approx(10.0, abs=1e-12)
     assert moved.height_rsun > params.height_rsun
+
+
+# --- Staged refinement ---------------------------------------------------------------
+
+
+def test_refine_frees_parameters_in_stages_as_points_accumulate():
+    """Refine is useful from the second point on: height first, direction, tilt, then α and κ."""
+    allowed = PARAMETER_NAMES
+    stages = (("height_rsun",), ("lon_deg", "lat_deg"), ("tilt_deg",), ("alpha_deg",), ("kappa",))
+    expected = {
+        1: (),
+        2: ("height_rsun",),
+        3: ("height_rsun",),  # the direction arrives as a pair
+        4: ("lon_deg", "lat_deg", "height_rsun"),
+        5: ("lon_deg", "lat_deg", "tilt_deg", "height_rsun"),
+        6: ("lon_deg", "lat_deg", "tilt_deg", "height_rsun", "alpha_deg"),
+        7: PARAMETER_NAMES,
+        40: PARAMETER_NAMES,
+    }
+    for points, free in expected.items():
+        assert staged_parameters(allowed, stages, points, PARAMETER_NAMES)[0] == free, points
+    assert staged_parameters(allowed, stages, 3, PARAMETER_NAMES)[1] == ("lon_deg", "lat_deg")
+    assert staged_parameters(allowed, stages, 7, PARAMETER_NAMES)[1] == ()
+
+
+def test_refine_plan_holds_the_direction_without_two_separated_views():
+    one_view = [GCSViewpoint(VIEW_A, _synthetic_clicks(TRUTH, VIEW_A, n=6), "A")]
+    free, upcoming, points = refine_plan(one_view)
+    assert points == 6 and "lon_deg" not in free and "lat_deg" not in free
+    assert free == ("tilt_deg", "height_rsun", "alpha_deg", "kappa") and upcoming == ()
+
+
+def test_refine_plan_with_many_points_frees_what_free_parameters_allows(two_viewpoints):
+    free, upcoming, points = refine_plan(two_viewpoints)
+    assert free == free_parameters(two_viewpoints) and upcoming == () and points == 50
+
+
+def test_a_two_point_refine_fits_the_height_alone():
+    """Clicks outside a too-small shell pull its height out to the front; nothing else moves."""
+    views = [GCSViewpoint(VIEW_A, _synthetic_clicks(TRUTH, VIEW_A, n=2, noise=0.0), "A")]
+    seed = TRUTH.replace_values(height_rsun=TRUTH.height_rsun - 1.5)
+    free, _upcoming, _points = refine_plan(views)
+    result = refine_gcs(views, seed, free=free)
+    assert result.free == ("height_rsun",)
+    assert result.parameters.height_rsun > seed.height_rsun
+    for name in ("lon_deg", "lat_deg", "tilt_deg", "alpha_deg", "kappa"):
+        assert getattr(result.parameters, name) == getattr(seed, name)

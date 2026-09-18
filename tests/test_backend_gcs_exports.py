@@ -34,8 +34,11 @@ from src.Backend.gcs_figures import (
     HeightTimeSeries,
     ViewpointRender,
     WireframeStyle,
+    fit_parameter_rows,
     fit_series,
+    fits_by_order,
     height_time_figure,
+    height_time_title,
     kinematics_rows,
     viewpoints_figure,
 )
@@ -259,13 +262,23 @@ def test_report_pdf_holds_every_section_and_its_symbols(tmp_path):
         "Fit at 2012-07-12 16:00:00 UTC",
         "no longer loaded",
         "Height–time kinematics",
-        "Shock apex: height–time",
+        "Shock apex: linear fit",
+        "Not fitted: a linear fit needs at least 2 distinct recorded times; 1 recorded.",
         "Method and limitations",
     ):
         assert needle in text, needle
     # ReportLab's Helvetica has no ☉, α or κ; the report's own font must draw them.
     assert "R☉" in text and "α" in text and "κ" in text
-    assert result.figures_written >= 2  # both height–time graphs
+    # All three fits of the GCS series (three times), each with its parameters.
+    for name in ("linear", "quadratic", "cubic"):
+        assert f"GCS apex: {name} fit" in text  # (graph titles are inside the images)
+    assert "Not fitted: a cubic fit needs at least 4 distinct recorded times; 3 recorded." in text
+    assert "GCS apex: the three fits compared" in text and "Degrees of freedom" in text
+    # Every page carries the application's name and the author's.
+    for index in range(len(document)):
+        page = document[index].get_textpage().get_text_range()
+        assert "e-CALLISTO FITS Analyzer" in page and "©Sahan S Liyanage" in page and f"Page {index + 1}" in page
+    assert result.figures_written == 2  # the linear and quadratic graphs; no images in this input
 
 
 def test_report_without_fits_says_how_to_get_kinematics():
@@ -292,3 +305,26 @@ def test_formal_errors_are_shown_only_for_the_refined_parameters():
     stale = dict(gcs_parameter_pairs(moved, refinement))
     assert "±" not in stale["Longitude (Stonyhurst)"]
     assert stale["Errors"].startswith("No valid refinement")
+
+
+def test_graphs_carry_a_title_naming_the_fit():
+    series = _series(order=2)
+    title = height_time_title("GCS flux-rope apex height–time", series)
+    assert title == "GCS flux-rope apex height–time: quadratic fit"
+    figure = height_time_figure([series], title=title)
+    assert figure.axes[0].get_title() == title
+    # A series too short for its degree draws no fit, and the title does not claim one.
+    assert height_time_title("Shock apex height–time", _series(order=3, n=3)) == "Shock apex height–time"
+
+
+def test_each_fit_states_its_model_coefficients_and_freedom():
+    fits = fits_by_order(_series(n=4))
+    assert all(fits[order] is not None for order in (1, 2, 3))
+    rows = dict(fit_parameter_rows(fits[3]))
+    assert rows["Model"].startswith("h(t) = h₀ + v₀·t + ½·a₀·t² + ⅙·j·t³")
+    assert rows["Degrees of freedom"] == "0"
+    assert re.fullmatch(r"[\d.]+ R☉", rows["Height at first time h₀"])  # no error bar without freedom
+    assert rows["Errors"].startswith("not estimable")
+    linear = dict(fit_parameter_rows(fits[1]))
+    assert linear["Degrees of freedom"] == "2" and "±" in linear["Height at first time h₀"]
+    assert fits_by_order(_series(n=3))[3] is None

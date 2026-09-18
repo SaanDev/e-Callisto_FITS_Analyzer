@@ -26,9 +26,9 @@ from html import escape
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from src.version import APP_NAME
 from src.Backend.project_report import (
     ProjectReportResult,
-    _draw_header_footer,
     _fit_image,
     _import_reportlab,
     _make_styles,
@@ -38,6 +38,8 @@ from src.Backend.project_report import (
 ProgressCallback = Callable[[int, str], None]
 
 REPORT_TITLE = "GCS CME Fitting Report"
+#: The footer of every page.
+REPORT_FOOTER = "©Sahan S Liyanage"
 
 #: The report's typeface: DejaVu Sans, from matplotlib's own data directory.
 _FONT_FACES = {
@@ -148,6 +150,35 @@ class Group:
 Block = Heading | Text | KeyValues | Table | Figure | PageBreak | Group
 
 
+def _page_decorations(rl, *, title: str, header: str, footer: str, fonts: tuple[str, str]) -> Callable[..., None]:
+    """Every page: the application's name in the header, the author's in the footer."""
+    colors = rl["colors"]
+    inch = rl["inch"]
+    width, height = rl["A4"]
+    regular, bold = fonts
+
+    def draw(canvas, doc) -> None:
+        canvas.saveState()
+        rule = colors.HexColor("#d7dce3")
+        left, right = doc.leftMargin, width - doc.rightMargin
+        baseline = height - 0.42 * inch
+        canvas.setFillColor(colors.HexColor("#111827"))
+        canvas.setFont(bold, 9)
+        canvas.drawString(left, baseline, header)
+        canvas.setFillColor(colors.HexColor("#6b7280"))
+        canvas.setFont(regular, 8)
+        canvas.drawRightString(right, baseline, title)
+        canvas.setStrokeColor(rule)
+        canvas.setLineWidth(0.4)
+        canvas.line(left, baseline - 5, right, baseline - 5)
+        canvas.line(left, 0.55 * inch, right, 0.55 * inch)
+        canvas.drawString(left, 0.35 * inch, footer)
+        canvas.drawRightString(right, 0.35 * inch, f"Page {canvas.getPageNumber()}")
+        canvas.restoreState()
+
+    return draw
+
+
 def write_report_pdf(
     output_path: str | Path,
     *,
@@ -155,9 +186,14 @@ def write_report_pdf(
     subtitle_lines: Sequence[str],
     blocks: Sequence[Block],
     progress_cb: ProgressCallback | None = None,
-    author: str = "e-CALLISTO FITS Analyzer",
+    author: str = APP_NAME,
+    header: str = APP_NAME,
+    footer: str = REPORT_FOOTER,
 ) -> ProjectReportResult:
-    """Lay ``blocks`` out on A4 pages behind a title block and write the PDF."""
+    """Lay ``blocks`` out on A4 pages behind a title block and write the PDF.
+
+    Every page carries ``header`` at the top and ``footer`` at the bottom.
+    """
     path = Path(output_path).expanduser()
     if path.suffix.lower() != ".pdf":
         path = path.with_suffix(".pdf")
@@ -192,7 +228,7 @@ def write_report_pdf(
     def flowables(block: Block, grouped: bool = False) -> list[Any]:
         nonlocal figures
         if isinstance(block, Heading):
-            style = styles["Heading2"] if block.level <= 2 else styles["Heading3"]
+            style = styles[f"Heading{min(4, max(2, int(block.level)))}"]
             return [Paragraph(escape(block.text), style)]
         if isinstance(block, Text):
             style = styles["SmallText" if block.small else "Normal"]
@@ -227,7 +263,9 @@ def write_report_pdf(
         story.extend(flowables(block))
     if progress_cb is not None:
         progress_cb(92, "Writing the PDF…")
-    on_page = _draw_header_footer(title, rl)
+    # The report's own typeface (DejaVu Sans), or Helvetica if it could not be registered.
+    fonts = (styles["Normal"].fontName, styles["Heading2"].fontName)
+    on_page = _page_decorations(rl, title=title, header=header, footer=footer, fonts=fonts)
     doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
     if progress_cb is not None:
         progress_cb(100, "Report written.")
@@ -528,25 +566,65 @@ def model_series(label: str, fits: Mapping[datetime, Any], order: int) -> Any:
     )
 
 
-def _kinematics_blocks(title: str, label: str, fits: Mapping[datetime, Any], order: int) -> list[Block]:
+def _kinematics_blocks(title: str, label: str, fits: Mapping[datetime, Any]) -> list[Block]:
+    """A model's recorded heights, then its linear, quadratic and cubic fits, each
+    as a titled graph with every parameter it states, and the three side by side."""
     from src.Backend.figure_export import figure_png_bytes
-    from src.Backend.gcs_figures import FIT_ORDER_NAMES, fit_series, height_time_figure, kinematics_rows
-
-    series = model_series(label, fits, order)
-    fit = fit_series(series)
-    graph = figure_png_bytes(height_time_figure([series], y_label="Apex height (R☉)"), dpi=200)
-    caption = (
-        f"Recorded apex heights (de-projected under the model) with formal 1σ errors, and the "
-        f"{FIT_ORDER_NAMES.get(order, str(order)).lower()} height–time fit."
+    from src.Backend.gcs_figures import (
+        FIT_COMPARISON_HEADER,
+        FIT_ORDER_NAMES,
+        fit_comparison_row,
+        fit_parameter_rows,
+        fits_by_order,
+        height_time_figure,
     )
-    if fit is None:
-        caption += f" A {FIT_ORDER_NAMES.get(order, str(order)).lower()} fit needs {max(2, order + 1)} distinct recorded times."
-    # The heading stays with its table and graph rather than ending a page alone.
-    blocks: list[Block] = [
-        Group((Heading(title, 3), _series_table(fits), Figure(f"{label}: height–time", graph, caption)))
-    ]
-    if fit is not None:
-        blocks.append(KeyValues(tuple(kinematics_rows(fit))))
+
+    blocks: list[Block] = [Group((Heading(title, 3), _series_table(fits)))]
+    comparison: list[tuple[str, ...]] = []
+    base = model_series(label, fits, 1)
+    for order, fit in fits_by_order(base).items():
+        name = FIT_ORDER_NAMES[order]
+        heading = Heading(f"{label}: {name.lower()} fit", 4)
+        if fit is None:
+            reason = (
+                f"Not fitted: a {name.lower()} fit needs at least {order + 1} distinct recorded times; "
+                f"{len(fits)} recorded."
+            )
+            blocks.append(Group((heading, Text(reason, small=True))))
+            comparison.append((name,) + ("—",) * (len(FIT_COMPARISON_HEADER) - 1))
+            continue
+        series = model_series(label, fits, order)
+        graph = height_time_figure(
+            [series], title=f"{label} height–time: {name.lower()} fit", y_label="Apex height (R☉)"
+        )
+        caption = (
+            "Recorded apex heights, de-projected under the model, with formal 1σ errors, and the fitted "
+            f"{name.lower()} polynomial."
+        )
+        blocks.append(
+            Group(
+                (
+                    heading,
+                    Figure("", figure_png_bytes(graph, dpi=200), caption, max_height_in=3.7),
+                    KeyValues(tuple(fit_parameter_rows(fit))),
+                )
+            )
+        )
+        comparison.append(fit_comparison_row(fit))
+    blocks.append(
+        Group(
+            (
+                Heading(f"{label}: the three fits compared", 4),
+                Table(FIT_COMPARISON_HEADER, tuple(comparison), (1.1, 0.9, 1.3, 1.3, 1.2, 1.2, 0.9, 0.6)),
+                Text(
+                    "Speeds at the first and last recorded time; the linear fit's acceleration comes from its "
+                    "quadratic companion fit, as in the CDAW catalogue. A lower RMS from a higher degree is "
+                    "expected and does not by itself justify the extra terms.",
+                    small=True,
+                ),
+            )
+        )
+    )
     return blocks
 
 
@@ -569,7 +647,11 @@ def build_report_blocks(data: GCSReportInput) -> list[Block]:
                 ("Frames per channel (cap)", str(int(data.frame_cap))),
                 ("Recorded GCS fits", str(len(data.gcs_fits))),
                 ("Recorded shock fits", str(len(data.shock_fits))),
-                ("Height–time fit", f"{FIT_ORDER_NAMES.get(data.fit_order, str(data.fit_order))} (degree {data.fit_order})"),
+                (
+                    "Height–time fits",
+                    "Linear, quadratic and cubic; the window's kinematics card shows "
+                    f"{FIT_ORDER_NAMES.get(data.fit_order, str(data.fit_order)).lower()}",
+                ),
             )
         )
     )
@@ -675,24 +757,36 @@ def build_report_blocks(data: GCSReportInput) -> list[Block]:
     blocks.append(Heading("Height–time kinematics"))
     if not data.gcs_fits and not data.shock_fits:
         blocks.append(Text("No fits were recorded. Commit fits at two or more times for a height–time fit."))
+    else:
+        blocks.append(
+            Text(
+                "Each model's recorded apex heights are fitted with linear, quadratic and cubic polynomials in "
+                "time. Every fit is shown with its graph and all the parameters it states; values are ± 1σ "
+                "formal errors from the fit covariance.",
+                small=True,
+            )
+        )
     if data.gcs_fits:
-        blocks += _kinematics_blocks("GCS flux rope", "GCS apex", data.gcs_fits, data.fit_order)
+        blocks += _kinematics_blocks("GCS flux rope", "GCS apex", data.gcs_fits)
     if data.shock_fits:
-        blocks += _kinematics_blocks("Shock", "Shock apex", data.shock_fits, data.fit_order)
+        blocks += _kinematics_blocks("Shock", "Shock apex", data.shock_fits)
     if len(data.gcs_fits) >= 2 and len(data.shock_fits) >= 2:
+        order = data.fit_order
+        name = FIT_ORDER_NAMES.get(order, str(order)).lower()
         combined = height_time_figure(
             [
-                model_series("GCS apex", data.gcs_fits, data.fit_order),
-                model_series("Shock apex", data.shock_fits, data.fit_order),
+                model_series("GCS apex", data.gcs_fits, order),
+                model_series("Shock apex", data.shock_fits, order),
             ],
+            title=f"GCS and shock apex height–time: {name} fits",
             y_label="Apex height (R☉)",
         )
         blocks.append(
             Figure(
                 "GCS and shock apex heights",
                 figure_png_bytes(combined, dpi=200),
-                "The shock apex runs ahead of the flux-rope apex; their separation is the shock stand-off distance "
-                "under both models' assumptions.",
+                f"Both models with the {name} fit selected in the window. The shock apex runs ahead of the "
+                "flux-rope apex; their separation is the shock stand-off distance under both models' assumptions.",
             )
         )
 
@@ -776,4 +870,6 @@ def generate_gcs_report_pdf(
         blocks=build_report_blocks(data),
         progress_cb=progress_cb,
         author=data.app_name,
+        header=data.app_name,
+        footer=REPORT_FOOTER,
     )

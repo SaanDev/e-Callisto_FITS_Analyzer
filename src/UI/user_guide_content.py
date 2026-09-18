@@ -412,8 +412,10 @@ that panel's last point, <b>Undo point</b> ({_kbd('Ctrl+Z')}) removes the last p
 <b>Clear points</b> removes them all. Points belong to the image they were clicked on and return when it is shown
 again. Untick <b>Pick front points</b> to stop adding points.</li>
 <li><b>Refine.</b> <b>Refine fit</b> ({_kbd('Ctrl+R')}) makes a local least-squares adjustment through the
-points, so start close to the CME. It is available once there are more points than free parameters. Formal errors
-are withheld when the local solution is unreliable.</li>
+points, so start close to the CME. It is available as soon as images are loaded and fits as many parameters as the
+points support: 2 points fit the height, 4 in two separated views add the direction, then the tilt, &#945; and
+&#954; follow one point at a time (7 points for all six). The status bar names what was fitted and how many more
+points would free the next parameter. Formal errors are withheld when the local solution is unreliable.</li>
 <li><b>Commit.</b> <b>Commit GCS</b> ({_kbd('Ctrl+Return')}) records the fit, and the images it was made from, at
 the shared time. Step to later times and repeat to build a height&#8211;time series.</li>
 </ol>
@@ -460,8 +462,8 @@ export, not a PyThea session file.</li>
 <li><code>File &#8594; Export recorded fits CSV</code>, or <b>Export &#8594; Table as CSV</b> in the Kinematics
 card: the recorded series of the model being edited.</li>
 <li><code>File &#8594; Export height&#8211;time graph</code>, or <b>Export &#8594; Graph</b> in the Kinematics card:
-the recorded apex heights with their error bars and the fit chosen in the <b>Fit</b> dropdown, with the speed and
-acceleration in the legend.</li>
+the recorded apex heights with their error bars and the fit chosen in the <b>Fit</b> dropdown, under a title naming
+the model and the fit, with the speed and acceleration in the legend.</li>
 <li><code>File &#8594; Save viewpoint snapshot</code>: the three views as shown, with arcsec axes, the wireframes,
 the solar limb and the front points, and a note of where each drawn shell comes from. Hiding the image banners
 leaves only each panel's name above it.</li>
@@ -469,7 +471,9 @@ leaves only each panel's name above it.</li>
 included, at the playback speed set in the toolbar. MP4 needs the bundled FFmpeg; a GIF is offered otherwise.</li>
 <li><code>File &#8594; Export fitting report (PDF)</code>: the viewpoints and their separations, the model at the
 current time, every recorded fit drawn on the images it was made from with its parameters and observation details,
-the height&#8211;time graphs and kinematics of each model, and the method, its limits and references.</li>
+each model's linear, quadratic and cubic height&#8211;time fits (a titled graph and every parameter of each, then the
+three compared), and the method, its limits and references. Every page carries the application's name in the header
+and the author's in the footer.</li>
 </ul>
 <p class="note">Stepping through time for a movie or a report leaves the window as it was: the time shown, the
 working models, their formal errors and the front points all come back.</p>

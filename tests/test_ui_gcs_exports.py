@@ -182,7 +182,9 @@ def test_report_draws_each_recorded_fit_on_its_own_images(window, tmp_path):
     assert _state(window) == before
 
     result = window.write_report(tmp_path / "report.pdf")
-    assert result.figures_written >= 5  # on screen, two fits, two graphs
+    # On screen, the two recorded times, and the GCS linear graph: two GCS times
+    # fit no quadratic or cubic, and one shock time fits nothing.
+    assert result.figures_written == 4
     assert (tmp_path / "report.pdf").read_bytes().startswith(b"%PDF")
     assert _state(window) == before
 
@@ -224,8 +226,10 @@ def test_graph_follows_the_selected_fit_order_and_model(window):
     panel.fit_order_combo.setCurrentIndex(panel.fit_order_combo.findData(2))
     series = panel.graph_series()
     assert series.order == 2 and series.heights_rsun == (5.0, 6.5, 8.5)
-    labels = [text.get_text() for text in panel.graph_figure().axes[0].get_legend().get_texts()]
+    axes = panel.graph_figure().axes[0]
+    labels = [text.get_text() for text in axes.get_legend().get_texts()]
     assert labels[0] == "GCS apex (3-D)" and labels[1].startswith("Quadratic fit")
+    assert axes.get_title() == "GCS flux-rope apex height–time: quadratic fit"
     window.set_editing_model("shock")
     assert window.tracking_panel.graph_series() is None  # the shock has nothing recorded
 
@@ -243,6 +247,7 @@ def test_plane_of_sky_tracking_graph_exports_too(tmp_path):
     panel.write_graph(str(tmp_path / "picks.svg"))
     assert (tmp_path / "picks.svg").stat().st_size > 0
     assert panel.graph_series().errors_rsun is None
+    assert panel.graph_figure().axes[0].get_title() == "CME leading-edge height–time: linear fit"
     panel.close()
 
 

@@ -81,6 +81,7 @@ from src.Backend.gcs_model import (
     join_polylines,
     observer_separation_deg,
     project_points_to_arcsec,
+    staged_parameters,
 )
 
 __all__ = [
@@ -88,6 +89,7 @@ __all__ = [
     "SHOCK_MODELS",
     "SHOCK_MODEL_LABELS",
     "SHOCK_PARAMETER_NAMES",
+    "SHOCK_REFINE_STAGES",
     "SHOCK_WEAKLY_CONSTRAINED",
     "SPHEROID",
     "ShockAxes",
@@ -102,6 +104,7 @@ __all__ = [
     "shock_mesh_hgs",
     "shock_orientation_matrix",
     "shock_parameters_from_axes",
+    "shock_refine_plan",
     "shock_semi_axes",
     "shock_silhouette_arcsec",
     "shock_silhouette_hgs",
@@ -570,6 +573,30 @@ def shock_free_parameters(viewpoints: Sequence[GCSViewpoint], model: str) -> tup
     if not has_independent_viewpoints(viewpoints):
         names = [name for name in names if name not in ("lon_deg", "lat_deg")]
     return tuple(names)
+
+
+#: The order a shock refine frees parameters in as front points accumulate, as
+#: for GCS: the apex height, the direction, the lateral size κ, the eccentricity
+#: ε, and for an ellipsoid the weakly constrained b/c ratio and tilt last.
+SHOCK_REFINE_STAGES: tuple[tuple[str, ...], ...] = (
+    ("height_rsun",),
+    ("lon_deg", "lat_deg"),
+    ("kappa",),
+    ("epsilon",),
+    ("alpha",),
+    ("tilt_deg",),
+)
+
+
+def shock_refine_plan(
+    viewpoints: Sequence[GCSViewpoint], model: str
+) -> tuple[tuple[str, ...], tuple[str, ...], int]:
+    """What a shock refine of these front points fits: ``(free, next stage, points)``."""
+    total = int(sum(len(_finite_clicks(view)) for view in viewpoints))
+    free, upcoming = staged_parameters(
+        shock_free_parameters(viewpoints, model), SHOCK_REFINE_STAGES, total, SHOCK_PARAMETER_NAMES
+    )
+    return free, upcoming, total
 
 
 def _finite_clicks(viewpoint: GCSViewpoint) -> np.ndarray:

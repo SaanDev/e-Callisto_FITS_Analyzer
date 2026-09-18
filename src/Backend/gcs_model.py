@@ -1094,6 +1094,62 @@ def free_parameters(viewpoints: Sequence[GCSViewpoint]) -> tuple[str, ...]:
     return PARAMETER_NAMES
 
 
+#: The order a refine frees GCS parameters in as front points accumulate, best
+#: constrained first: any point on the front fixes the height, the direction
+#: needs points in two separated views, and the width parameters α and κ — which
+#: GCS constrains worst — come last.
+REFINE_STAGES: tuple[tuple[str, ...], ...] = (
+    ("height_rsun",),
+    ("lon_deg", "lat_deg"),
+    ("tilt_deg",),
+    ("alpha_deg",),
+    ("kappa",),
+)
+
+
+def staged_parameters(
+    allowed: Sequence[str],
+    stages: Sequence[Sequence[str]],
+    n_points: int,
+    order: Sequence[str],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The parameters ``n_points`` front points can refine, and the stage after them.
+
+    A least-squares refine needs more points than free parameters, so stages are
+    released in order while the points outnumber what is free; members the
+    viewing geometry cannot constrain (absent from ``allowed``) are skipped.
+    Returns ``(free, next_stage)`` in ``order``; ``next_stage`` is empty once
+    everything allowed is free.
+    """
+    budget = int(n_points) - 1
+    chosen: list[str] = []
+    upcoming: list[str] = []
+    for stage in stages:
+        members = [name for name in stage if name in allowed and name not in chosen]
+        if not members:
+            continue
+        if len(chosen) + len(members) > budget:
+            upcoming = members
+            break
+        chosen.extend(members)
+    return (
+        tuple(name for name in order if name in chosen),
+        tuple(name for name in order if name in upcoming),
+    )
+
+
+def refine_plan(viewpoints: Sequence[GCSViewpoint]) -> tuple[tuple[str, ...], tuple[str, ...], int]:
+    """What a GCS refine of these front points fits: ``(free, next stage, points)``.
+
+    With enough points in two separated views this is every parameter, exactly
+    :func:`free_parameters`; with fewer, the best-constrained ones, so a refine
+    is useful from the second point on.
+    """
+    total = int(sum(len(_clicks_array(view)) for view in viewpoints))
+    free, upcoming = staged_parameters(free_parameters(viewpoints), REFINE_STAGES, total, PARAMETER_NAMES)
+    return free, upcoming, total
+
+
 def _clicks_array(viewpoint: GCSViewpoint) -> np.ndarray:
     clicks = np.asarray(viewpoint.clicks_arcsec, dtype=float).reshape(-1, 2)
     return clicks[np.isfinite(clicks).all(axis=1)]

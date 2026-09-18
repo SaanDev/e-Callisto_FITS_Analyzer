@@ -718,12 +718,12 @@ class TrackingPanel(QWidget):
             )
         return "  ·  ".join(parts)
 
-    #: Series label and y-axis title of the exported graph, per tracking source.
+    #: Series label, y-axis title and graph title of the exported graph, per tracking source.
     _GRAPH_LABELS = {
-        "height_time": ("Leading edge (plane of sky)", "Height (R☉)"),
-        "circle_fit": ("Circle-fit radius", "Radius (R☉)"),
-        "gcs": ("GCS apex (3-D)", "Apex height (R☉)"),
-        "shock": ("Shock apex (3-D)", "Shock apex height (R☉)"),
+        "height_time": ("Leading edge (plane of sky)", "Height (R☉)", "CME leading-edge height–time"),
+        "circle_fit": ("Circle-fit radius", "Radius (R☉)", "CME circle-fit radius–time"),
+        "gcs": ("GCS apex (3-D)", "Apex height (R☉)", "GCS flux-rope apex height–time"),
+        "shock": ("Shock apex (3-D)", "Shock apex height (R☉)", "Shock apex height–time"),
     }
 
     def graph_series(self) -> Any | None:
@@ -733,7 +733,7 @@ class TrackingPanel(QWidget):
         entries = [entry for entry in self._entries if entry[0] is not None]
         if not entries:
             return None
-        label, _ = self._GRAPH_LABELS[self._source]
+        label = self._GRAPH_LABELS[self._source][0]
         errors = None
         if self._source in ("gcs", "shock"):
             errors = [float(entry.height_err_rsun) for entry in entries]
@@ -746,13 +746,14 @@ class TrackingPanel(QWidget):
         )
 
     def graph_figure(self) -> Any | None:
-        """The height–time graph with its fit, light mode, in the OriginPro style."""
-        from src.Backend.gcs_figures import height_time_figure
+        """The height–time graph with its fit and title, light mode, in the OriginPro style."""
+        from src.Backend.gcs_figures import height_time_figure, height_time_title
 
         series = self.graph_series()
         if series is None:
             return None
-        return height_time_figure([series], y_label=self._GRAPH_LABELS[self._source][1])
+        _label, y_label, title = self._GRAPH_LABELS[self._source]
+        return height_time_figure([series], title=height_time_title(title, series), y_label=y_label)
 
     def write_graph(self, path: str) -> str:
         """Save the graph to ``path`` in the format its suffix names."""
@@ -1119,9 +1120,11 @@ class GCSParameterPanel(QWidget):
         self.refine_btn = QPushButton("Refine fit")
         self.refine_btn.setToolTip(
             "Least-squares polish of the current fit against the points you clicked\n"
-            "along the front. It refines — it cannot find a fit from scratch, because\n"
-            "longitude, α and κ are ill-conditioned in GCS — so get the wireframe\n"
-            "roughly onto the CME first. Reported errors are formal only."
+            "along the front. It fits as many parameters as the points support: 2 points\n"
+            "fit the height, 4 in two separated views add the direction, then tilt, α\n"
+            "and κ — 7 points for all six. It refines — it cannot find a fit from\n"
+            "scratch, because longitude, α and κ are ill-conditioned in GCS — so get\n"
+            "the wireframe roughly onto the CME first. Reported errors are formal only."
         )
         self.commit_gcs_btn = QPushButton("Commit GCS")
         self.commit_gcs_btn.setToolTip("Record this frame's GCS fit in the table.")

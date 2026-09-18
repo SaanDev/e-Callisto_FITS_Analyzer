@@ -86,10 +86,10 @@ from src.Backend.gcs_model import (
     apply_apex_drag,
     gcs_mesh,
     handle_positions_arcsec,
-    free_parameters,
     interpolate_parameters,
     observer_separation_deg,
     refine_gcs,
+    refine_plan,
     wireframe_arcsec,
 )
 from src.Backend.helioviewer_jp2 import DEFAULT_MAX_FRAMES, default_viewpoints, validate_range
@@ -98,8 +98,8 @@ from src.Backend.shock_model import (
     apply_shock_apex_drag,
     interpolate_shock_parameters,
     refine_shock,
-    shock_free_parameters,
     shock_handle_positions_arcsec,
+    shock_refine_plan,
     shock_wireframe_arcsec,
 )
 from src.UI.gcs_viewpoint_panel import (
@@ -148,6 +148,13 @@ DECK_COLUMN_MAX_WIDTH = 470
 GCS_MODEL = "gcs"
 SHOCK_MODEL = "shock"
 MODEL_LABELS = {GCS_MODEL: "GCS", SHOCK_MODEL: "Shock"}
+#: How a refine names the parameters it fitted, per model.
+REFINE_PARAMETER_NAMES = {
+    GCS_MODEL: {"height_rsun": "height", "lon_deg": "longitude", "lat_deg": "latitude",
+                "tilt_deg": "tilt", "alpha_deg": "α", "kappa": "κ"},
+    SHOCK_MODEL: {"height_rsun": "height", "lon_deg": "longitude", "lat_deg": "latitude",
+                  "kappa": "κ", "epsilon": "ε", "alpha": "b/c", "tilt_deg": "tilt"},
+}
 #: The shock wireframe's colour: sky blue, which stays distinct from the orange
 #: GCS shell for colour-blind viewers too (the Okabe-Ito pair).
 DEFAULT_SHOCK_COLOUR = (86, 180, 233)
@@ -1790,24 +1797,56 @@ class GCSFittingWindow(GCSWindowActions, GCSWindowExports, QMainWindow):
             )
         return out
 
-    def _free_parameter_count(self, model: str) -> int:
+    def _refine_plan(self, model: str) -> tuple[tuple[str, ...], tuple[str, ...], int]:
+        """What refining ``model`` fits now: ``(free, next stage, points)``.
+
+        Every parameter once the points support it; before that, the best
+        constrained ones, so Refine is useful from the second point on.
+        """
         viewpoints = self._viewpoints(model)
         if model == GCS_MODEL:
-            return len(free_parameters(viewpoints))
-        return len(shock_free_parameters(viewpoints, self.shock_parameters().model))
+            return refine_plan(viewpoints)
+        return shock_refine_plan(viewpoints, self.shock_parameters().model)
+
+    def _refine_scope(self, model: str, free: tuple[str, ...], upcoming: tuple[str, ...], points: int) -> str:
+        names = REFINE_PARAMETER_NAMES[model]
+        text = f" · fitted {', '.join(names[name] for name in free)}"
+        if upcoming:
+            needed = len(free) + len(upcoming) + 1 - points
+            text += (
+                f" · {needed} more point{'s' if needed != 1 else ''} would also fit "
+                f"{' and '.join(names[name] for name in upcoming)}"
+            )
+        return text
 
     def _on_refine(self) -> None:
-        """Refine the edited model against its own front points."""
+        """Refine the edited model against its own front points.
+
+        A least-squares refine needs more points than free parameters, so with
+        few points it fits only what they can constrain (see ``refine_plan``)
+        and says which parameters that was and what more points would add.
+        """
         self.pause()
         model = self._editing
         track = self._track(model)
         name = "GCS" if model == GCS_MODEL else "Shock"
         track.last_refinement = None
+        if not self._active_panels():
+            self._set_status(f"{name} refine: load the channels first — no image is inside the time tolerance.")
+            return
+        free, upcoming, points = self._refine_plan(model)
+        if not free:
+            front = "CME" if model == GCS_MODEL else "shock"
+            self._set_status(
+                f"{name} refine: click at least 2 points along the {front} front on the images "
+                f"(left-click adds, right-click removes the panel's last) — {points} so far."
+            )
+            return
         try:
             if model == GCS_MODEL:
-                result = refine_gcs(self._viewpoints(model), self.parameters())
+                result = refine_gcs(self._viewpoints(model), self.parameters(), free=free)
             else:
-                result = refine_shock(self._viewpoints(model), self.shock_parameters())
+                result = refine_shock(self._viewpoints(model), self.shock_parameters(), free=free)
         except ValueError as exc:
             self._set_status(f"{name} refine: {exc}")
             return
@@ -1818,7 +1857,7 @@ class GCSFittingWindow(GCSWindowActions, GCSWindowExports, QMainWindow):
         track.params = result.parameters
         self._forget_recorded_note(model)
         self._sync_all()
-        self._set_status(result.message)
+        self._set_status(result.message + self._refine_scope(model, free, upcoming, points))
 
     def _on_commit(self) -> None:
         """Record the edited model's current fit at the current shared time."""
@@ -1981,9 +2020,10 @@ class GCSFittingWindow(GCSWindowActions, GCSWindowExports, QMainWindow):
         can_commit = bool(active) and self._shared_time is not None
         self.gcs_panel.commit_gcs_btn.setEnabled(can_commit)
         self.shock_panel.commit_btn.setEnabled(can_commit)
-        for model, button in ((GCS_MODEL, self.gcs_panel.refine_btn), (SHOCK_MODEL, self.shock_panel.refine_btn)):
-            points = sum(len(self._tracks[model].clicks[panel.label]) for panel in active)
-            button.setEnabled(points >= self._free_parameter_count(model) + 1)
+        # Refine is available whenever there is an image to fit against: with too
+        # few points it says what to click rather than sitting greyed out.
+        for button in (self.gcs_panel.refine_btn, self.shock_panel.refine_btn):
+            button.setEnabled(bool(active))
         self.clear_points_btn.setEnabled(any(track.clicks.values()))
         self.undo_point_btn.setEnabled(self._last_point_entry() is not None)
         synchronization = self._synchronization_summary()

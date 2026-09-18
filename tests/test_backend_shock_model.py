@@ -31,6 +31,7 @@ from src.Backend.shock_model import (
     shock_mesh_hgs,
     shock_orientation_matrix,
     shock_parameters_from_axes,
+    shock_refine_plan,
     shock_semi_axes,
     shock_silhouette_arcsec,
     shock_silhouette_hgs,
@@ -399,3 +400,31 @@ def test_an_ellipsoid_in_two_views_is_flagged_as_coupled():
 def test_refine_refuses_with_user_facing_text(views, seed, free, message):
     with pytest.raises(ValueError, match=message):
         refine_shock(views, seed, free=free)
+
+
+# --- Staged refinement ---------------------------------------------------------------
+
+
+def _clicks(params, observer, n):
+    x, y = shock_silhouette_arcsec(params, observer, samples=400)
+    visible = np.nonzero(np.isfinite(x))[0]
+    chosen = visible[np.linspace(0, len(visible) - 1, n).astype(int)]
+    return np.column_stack((x[chosen], y[chosen]))
+
+
+def test_shock_refine_frees_apex_height_then_direction_then_shape():
+    def plan(points, params=SPHERE_SHOCK):
+        views = [
+            GCSViewpoint(EARTH, _clicks(params, EARTH, points - points // 2), "C3"),
+            GCSViewpoint(STEREO_A, _clicks(params, STEREO_A, points // 2), "COR2-A"),
+        ]
+        return shock_refine_plan(views, params.model)
+
+    assert plan(2)[0] == ("height_rsun",)
+    assert plan(4)[0] == ("lon_deg", "lat_deg", "height_rsun")
+    assert plan(5)[0] == ("lon_deg", "lat_deg", "height_rsun", "kappa")
+    assert plan(6)[0] == ("lon_deg", "lat_deg", "height_rsun", "kappa", "epsilon")
+    assert plan(6)[1] == ()  # a spheroid has no b/c or tilt to add
+    ellipsoid = plan(8, ELLIPSOID_SHOCK)[0]
+    assert set(ellipsoid) == set(SHOCK_PARAMETER_NAMES)
+    assert plan(7, ELLIPSOID_SHOCK)[1] == ("tilt_deg",)
