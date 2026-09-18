@@ -442,13 +442,6 @@ def test_a_frame_without_coordinates_leaves_its_panel_dark(window):
     assert not window.panels[0].canvas.has_gcs_overlay()
 
 
-def test_send_to_analyzer_emits_the_parameters(window):
-    seen = []
-    window.parametersCommitted.connect(seen.append)
-    window._on_send()
-    assert seen and seen[0] == window.parameters()
-
-
 def test_the_analyzer_opens_and_reuses_one_window(monkeypatch):
     from src.UI.solar_data_analysis_window import SolarDataAnalysisWindow
 

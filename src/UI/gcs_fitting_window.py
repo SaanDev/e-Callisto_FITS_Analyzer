@@ -434,9 +434,6 @@ class GCSControlDeck(QScrollArea):
 class GCSFittingWindow(GCSWindowActions, QMainWindow):
     """Fit one GCS shell against up to three simultaneous viewpoints."""
 
-    #: Emitted with the fitted parameters when the user sends them onward.
-    parametersCommitted = Signal(object)
-
     # The GCS model's state, under the names it had before the shock model.
     _params = _gcs_track_attribute("params")
     _clicks = _gcs_track_attribute("clicks")
@@ -869,12 +866,8 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         self.clear_points_btn = QPushButton("Clear points")
         self.clear_points_btn.setToolTip("Remove all of the edited model's front points on the displayed frames.")
         self.clear_points_btn.clicked.connect(self._clear_points)
-        self.send_btn = QPushButton("Send to analyzer")
-        self.send_btn.setToolTip("Push the current GCS parameters back to the Solar Image Analysis window.")
-        self.send_btn.clicked.connect(self._on_send)
         extras.addWidget(self.undo_point_btn)
         extras.addWidget(self.clear_points_btn)
-        extras.addWidget(self.send_btn)
         layout.addLayout(extras)
         layout.addStretch(1)
         card = GCSCard("Model", body, header=edit_holder)
@@ -1958,16 +1951,6 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
             + self.tracking_panel.fit_summary(fit, noun="commits")
         )
 
-    def _on_send(self) -> None:
-        """Push the GCS parameters back to the Solar Image Analysis window."""
-        self.parametersCommitted.emit(self.parameters())
-        measure = getattr(self.parent(), "_measure", None)
-        if measure is not None and hasattr(measure, "set_gcs_parameters"):
-            measure.set_gcs_parameters(self.parameters())
-            self._set_status("Sent to the Solar Image Analysis window.")
-            return
-        self._set_status("Parameters ready — no analyzer window is listening.")
-
     # ---------------------------------------------------------------- status
     def _on_panel_status(self, text: str) -> None:
         self._set_status(text)
@@ -1989,7 +1972,6 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
             button.setEnabled(points >= self._free_parameter_count(model) + 1)
         self.clear_points_btn.setEnabled(any(track.clicks.values()))
         self.undo_point_btn.setEnabled(self._last_point_entry() is not None)
-        self.send_btn.setEnabled(hasattr(getattr(self.parent(), "_measure", None), "set_gcs_parameters"))
         synchronization = self._synchronization_summary()
         # Which recorded shells are drawn leads: they change with every step.
         notes = [f"{'Shell' if key == GCS_MODEL else 'Shock'}: {self._recorded_notes[key]}"

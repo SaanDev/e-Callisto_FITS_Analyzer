@@ -121,7 +121,6 @@ class GCSWindowActions:
         fit_menu.addSeparator()
         action(fit_menu, "reset_model", "Reset model parameters", self._reset_model)
         action(fit_menu, "kinematics", "Fit recorded heights over time", self._on_fit_kinematics)
-        action(fit_menu, "send", "Send GCS parameters to analyzer", self._on_send)
 
         help_menu = self.menuBar().addMenu("&Help")
         action(help_menu, "guide", "Fitting &workflow and scientific limits…", self._show_fitting_guide, "F1")
@@ -144,7 +143,6 @@ class GCSWindowActions:
             "commit": has_time and has_view, "restore": has_record, "delete": has_record,
             "undo_point": self._last_point_entry() is not None,
             "kinematics": len(fits) >= self.tracking_panel.fit_order() + 1,
-            "send": hasattr(getattr(self.parent(), "_measure", None), "set_gcs_parameters"),
         }
         for key in ("first", "previous", "next", "last", "play"):
             enabled[key] = len(self._time_axis) > 1
