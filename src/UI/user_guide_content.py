@@ -108,14 +108,14 @@ _TOC = """
 &#8226; <a href="#navigation">13. Navigation and picking</a></p>
 <p><b>Companion windows</b><br>
 &#8226; <a href="#solar-image-analysis">14. Solar Image Analysis</a><br>
-&#8226; <a href="#fits-downloader">15. FITS Downloader</a><br>
-&#8226; <a href="#context-viewers">16. Solar event context viewers</a><br>
-&#8226; <a href="#sunpy-explorer">17. SunPy Multi-Mission Explorer</a></p>
+&#8226; <a href="#gcs-fitting">15. GCS CME Fitting</a><br>
+&#8226; <a href="#fits-downloader">16. FITS Downloader</a><br>
+&#8226; <a href="#context-viewers">17. Solar event context viewers</a><br>
+&#8226; <a href="#sunpy-explorer">18. SunPy Multi-Mission Explorer</a></p>
 <p><b>Appendix</b><br>
 &#8226; <a href="#shortcuts">A. Keyboard shortcuts</a><br>
 &#8226; <a href="#file-types">B. File types</a><br>
-&#8226; <a href="#artemis">C. ARTEMIS-IV files</a><br>
-&#8226; <a href="#tips">D. Tips and troubleshooting</a></p>
+&#8226; <a href="#tips">C. Tips and troubleshooting</a></p>
 </div>
 """
 
@@ -188,7 +188,7 @@ on the right, the live cursor readout (time, frequency, intensity) and the updat
 <a name="menu-download"></a>
 <h2>5. Download menu</h2>
 <p><b>Launch FITS Downloader</b> opens the e-CALLISTO downloader window (also reachable from
-<code>Solar Events &#8594; Radio Bursts</code>). See <a href="#fits-downloader">section 15</a>.</p>
+<code>Solar Events &#8594; Radio Bursts</code>). See <a href="#fits-downloader">section 16</a>.</p>
 
 <a name="menu-solar-events"></a>
 <h2>6. Solar Events menu</h2>
@@ -199,13 +199,13 @@ on the right, the live cursor readout (time, frequency, intensity) and the updat
 <li><b>Energetic Particles &#8594; GOES SEP Proton Flux</b>: NOAA SGPS proton flux across a date range.</li>
 <li><b>Geomagnetic</b>: Kyoto Dst Index and GFZ Kp Index viewers.</li>
 <li><b>Archives &#8594; SunPy Multi-Mission Explorer</b>: search and plot external imagery and time series
-(see <a href="#sunpy-explorer">section 17</a>).</li>
+(see <a href="#sunpy-explorer">section 18</a>).</li>
 <li><b>Radio Bursts</b>: the e-CALLISTO, Learmonth, and STEREO/SWAVES loaders.</li>
 <li><b>Sync Current Time Window</b>: push the analyzer time window to supported context viewers.</li>
 <li><b>GOES Overlay</b>: draw the GOES long channel (XRS-B) and/or short channel (XRS-A) directly on the
 spectrum, with a flare-class guide (A/B/C/M/X). The overlay does not alter the data.</li>
 <li><b>SWAVES Panel</b>: show or hide the loaded STEREO/SWAVES spectrum without discarding it
-(see <a href="#swaves">section 15a</a>).</li>
+(see <a href="#swaves">section 16a</a>).</li>
 </ul>
 
 <a name="menu-view"></a>
@@ -227,6 +227,8 @@ seconds from file start, with shared, per-station, or manual color scaling, then
 <ul>
 <li><b>Solar Image Analysis</b>: open the multi-mission imaging workspace
 (see <a href="#solar-image-analysis">section 14</a>).</li>
+<li><b>GCS CME Fitting...</b>: reconstruct a CME in 3-D from three coronagraph viewpoints, starting from the
+visible time range of the spectrum (see <a href="#gcs-fitting">section 15</a>).</li>
 <li><b>Maximum Intensities &#8594; Open Maximum Intensities</b>: trace the peak frequency for each time channel
 after noise reduction or burst isolation. Inside that window you can lasso-select outliers and remove them.</li>
 <li><b>Type II Band-splitting &#8594; Open Type II Band-splitting</b>: pick points along the upper and lower
@@ -342,12 +344,133 @@ crop by ROI, detect bright active regions, fetch NOAA/HEK labels, build RGB comp
 cropped FITS, CSV, GIF, or MP4.</li>
 <li><b>Sessions</b>: save and reopen the workspace as an <code>.ecsolar</code> file
 (<code>Ctrl+S</code> / <code>Ctrl+Shift+S</code>). Press {_kbd('Esc')} to cancel an in-progress measurement pick.</li>
+<li><b>GCS CME Fitting</b>: <code>Analysis &#8594; GCS CME Fitting...</code> opens the three-viewpoint fitting window
+at the time of the displayed frame (see <a href="#gcs-fitting">section 15</a>).</li>
 </ul>
 <p class="note">Cropping is done locally after files load; metadata overlays need network access, but region
 detection works on local files.</p>
 
+<a name="gcs-fitting"></a>
+<h2>15. GCS CME Fitting</h2>
+<p class="lead">Reconstruct a CME in three dimensions by fitting one Graduated Cylindrical Shell (GCS) to three
+coronagraph views at once, and optionally a spheroid or ellipsoid to the shock it drives.</p>
+<p>Open from <code>Analysis &#8594; GCS CME Fitting...</code> in the main window or in Solar Image Analysis. The
+window downloads its own images, so nothing needs to be loaded first. From the analyzer, the visible time range of
+the spectrum becomes the event range; from Solar Image Analysis, the event is centered on the displayed frame, one
+hour either side. Choosing the menu item again reuses the open window and passes it the new time.</p>
+<p>A single view cannot separate a CME's direction from its size: a wide CME aimed at the observer and a narrow one
+crossing the sky look alike. Two well-separated views break that ambiguity and a third over-constrains it, which is
+why one set of model controls drives all three panels.</p>
+
+<h3>Load the viewpoints</h3>
+<ul>
+<li><b>Channels</b>: panels A, B and C default to STEREO-B COR2, SOHO LASCO C2 and STEREO-A COR2, left to right.
+Any panel can be switched to STEREO-A or STEREO-B COR1/COR2 or LASCO C2/C3; channels with no data for the event
+date are greyed out. The STEREO-B archive ends on 2014-09-27, so for later events panel A reports that it has no
+data. Only SOHO and STEREO-A remain as vantage points then: another channel in panel A (LASCO C3 or COR1-A) adds an
+image but not a new viewing direction.</li>
+<li><b>Event range</b>: set the UTC start and end in the <b>Event &amp; channels</b> card, up to three days.
+Changing it sets every channel's range, and each channel's range can then be adjusted on its own. A 15-minute
+e-CALLISTO file spans only one or two coronagraph images (about one every 15 minutes for COR2 and every 12 for
+LASCO C2), so widen the range to follow the CME. The frame cap (60 per channel by default) thins a longer sequence
+evenly across the event rather than cutting it short.</li>
+<li><b>Load</b>: click <b>Load all</b> ({_kbd('Ctrl+L')}) or a channel's own <b>Load</b> button. The images are
+Helioviewer JPEG2000 files, so this needs network access; downloaded frames are cached and reused.
+<code>Event &#8594; Cancel downloads</code> stops a slow load. Changing a channel's source or range discards its
+loaded images.</li>
+</ul>
+
+<h3>Read the images</h3>
+<ul>
+<li><b>Shared time</b>: the time slider runs over the image times of all channels, and each panel shows its own
+image nearest the selected time. The banner across each image gives the instrument, the actual observation time,
+its offset from the shared time and the difference reference. <b>Max time offset</b> (5 minutes by default)
+decides which panels take part in the fit; the models are still drawn on the others for comparison. Use a smaller
+offset for a fast-evolving CME.</li>
+<li><b>View</b>: <b>Raw</b>, <b>Running diff</b> (selected whenever frames load) or <b>Base diff</b> on the
+toolbar. The first image of each channel is differenced against the archive frame just before the range, and is
+shown raw only when no earlier frame exists.</li>
+<li><b>Layout</b>: <b>Equal</b> shows three equal images with the controls beneath; <b>A</b>, <b>B</b> or
+<b>C</b> enlarges that panel, stacks the other two beside it and moves the controls to the right. The toolbar also
+toggles the solar limb, arcsecond axes and the image banners.</li>
+<li><b>Display</b> card: wireframe color, width, opacity and mesh density, and each image's colormap and contrast
+(choose the image with A, B or C).</li>
+</ul>
+
+<h3>Fit the flux rope</h3>
+<ol>
+<li><b>Align the shell by eye.</b> With <b>Edit: GCS flux rope</b> selected, set the six sliders, which also accept
+typed values: <b>Lon</b> and <b>Lat</b> (Stonyhurst direction of travel), <b>Tilt</b> (rotation of the shell about
+that direction), <b>Height</b> (the leading edge's distance from Sun center in R&#9737;, not the altitude above the
+surface), <b>&#945;</b> (half angle between the legs) and <b>&#954;</b> (aspect ratio). Set the direction, tilt,
+&#945; and &#954; before fine-tuning the height. You can also drag the apex handle in any panel: moving it around
+the Sun turns the direction, and moving it outward or inward changes the height. The readout under the sliders
+gives the derived leg height, apex radius, center distance, and face-on and edge-on widths.</li>
+<li><b>Click the front.</b> Left-click points along the same ejecta front in two or more views. Right-click removes
+that panel's last point, <b>Undo point</b> ({_kbd('Ctrl+Z')}) removes the last point clicked in any panel, and
+<b>Clear points</b> removes them all. Points belong to the image they were clicked on and return when it is shown
+again. Untick <b>Pick front points</b> to stop adding points.</li>
+<li><b>Refine.</b> <b>Refine fit</b> ({_kbd('Ctrl+R')}) makes a local least-squares adjustment through the
+points, so start close to the CME. It is available once there are more points than free parameters. Formal errors
+are withheld when the local solution is unreliable.</li>
+<li><b>Commit.</b> <b>Commit GCS</b> ({_kbd('Ctrl+Return')}) records the fit, and the images it was made from, at
+the shared time. Step to later times and repeat to build a height&#8211;time series.</li>
+</ol>
+<p class="note">The status bar reports the views taking part, their separations and the number of points. With a
+single view, or no pair of views between 20&#176; and 160&#176; apart, the direction cannot be constrained and is
+held fixed.</p>
+
+<h3>Recorded fits and kinematics</h3>
+<ul>
+<li>The <b>Kinematics</b> card lists the recorded fits beside a height&#8211;time plot. Choose a Linear, Quadratic
+or Cubic fit and click <b>Fit height&#8211;time</b>; a fit of degree n needs n+1 recorded times, and n+2 before
+errors can be estimated. Heights are de-projected under the model, so the speeds are model-dependent radial speeds
+rather than plane-of-sky ones.</li>
+<li>Double-click a row to go back to its time and restore its model. The <b>Fit</b> menu also restores or deletes
+the fit recorded at the current time and resets the model.</li>
+<li>One combination of images cannot be recorded at two different times, so repeated images never count as
+independent height measurements.</li>
+<li>Stepping, dragging the time slider and playback draw the recorded shells: each fit on its own images,
+interpolated between recorded times (a display, not a fit) and held before the first and after the last. A model
+with nothing recorded keeps its slider values, so commit before stepping away.</li>
+<li>Moving the event range to a different event sets its recorded fits aside. They return when you come back to
+that event, and the JSON export includes them.</li>
+</ul>
+
+<h3>Fit the shock</h3>
+<p>Choose <b>Edit: Shock</b> to fit the shock the CME drives, its faint outer envelope, with a <b>Spheroid</b> or
+an <b>Ellipsoid</b>. It is drawn in every view alongside the GCS shell in its own color (sky blue by default; the
+shell is orange). The parameters follow PyThea: <b>Height</b> is the apex distance from Sun center,
+<b>&#954;</b> = b/(height &#8722; 1 R&#9737;) sets the lateral size, <b>&#949;</b> stretches the shock radially
+when positive and flattens it when negative, and an ellipsoid adds <b>&#945; (b/c)</b> and a <b>Tilt</b> about the
+radial axis. Click the shock front, then use <b>Refine fit</b> and <b>Commit Shock</b> as for the flux rope. The
+shock keeps its own front points, recorded fits, kinematics and CSV. With fewer than three views, &#949; and the
+tilt are weakly constrained and an ellipsoid's shape parameters trade off against each other, so prefer a
+spheroid.</p>
+
+<h3>Export</h3>
+<ul>
+<li><code>File &#8594; Export analysis JSON</code> ({_kbd('Ctrl+Shift+S')}): the current, recorded and set-aside
+parameters of both models, with the clicked points, image times, offsets and observer geometry. It is an analyzer
+export, not a PyThea session file.</li>
+<li><code>File &#8594; Export recorded fits CSV</code>, or <b>CSV...</b> in the Kinematics card: the recorded
+series of the model being edited.</li>
+<li><code>File &#8594; Save viewpoint snapshot</code>: the three views as a PNG.</li>
+</ul>
+
+<h3>Keys and limits</h3>
+<p>While an image has focus, {_kbd('Space')} plays or pauses, the arrow keys step, {_kbd('Home')} returns to the
+first frame, {_kbd('B')} toggles the image banners, {_kbd('0')} restores the equal layout and {_kbd('1')} to
+{_kbd('3')} enlarge panels A to C. {_kbd('Ctrl+G')} jumps to a typed UTC time.
+<code>Help &#8594; Fitting workflow and scientific limits</code> ({_kbd('F1')} in this window) summarizes the
+procedure.</p>
+<p class="note">GCS models the flux rope, not the shock. Formal fit errors leave out the uncertainty from choosing
+the front, non-simultaneous images, image preparation and the assumed geometry, and a small residual does not make a
+fit unique or accurate. Helioviewer JPEG2000 images are display products: suitable for fitting shapes, not for
+calibrated intensity measurements.</p>
+
 <a name="fits-downloader"></a>
-<h2>15. FITS Downloader</h2>
+<h2>16. FITS Downloader</h2>
 <p>Open from <code>Download &#8594; Launch FITS Downloader</code> or
 <code>Solar Events &#8594; Radio Bursts</code>. It has three tabs:</p>
 <ul>
@@ -363,7 +486,7 @@ median_dB baseline, with per-focus-code preview tabs, and export it.</li>
 chunks to FIT, and imports them for the same workflow used with e-CALLISTO data.</p>
 
 <a name="swaves"></a>
-<h2>15a. STEREO/SWAVES dynamic spectrum</h2>
+<h2>16a. STEREO/SWAVES dynamic spectrum</h2>
 <p>Open from <code>Solar Events &#8594; Radio Bursts &#8594; SWAVES</code>. SWAVES covers 2.6 kHz to 16 MHz from
 space, directly below the CALLISTO band, so a burst that drifts out of the ground-based range can be followed
 into the interplanetary medium on the same figure.</p>
@@ -389,7 +512,7 @@ re-downloading, and added to generated PDF reports. The drawing, lasso, drift, a
 on the CALLISTO panel only. Data-reduction controls do not yet apply to the SWAVES panel.</p>
 
 <a name="context-viewers"></a>
-<h2>16. Solar event context viewers</h2>
+<h2>17. Solar event context viewers</h2>
 <ul>
 <li><b>SOHO/LASCO CME Catalog</b>: daily CME lists, a parameter table, and associated LASCO movies.</li>
 <li><b>GOES X-Ray Flux</b>: inspect X-ray time windows and flares, choose the spacecraft, and export the plot and
@@ -401,7 +524,7 @@ PNG/CSV export.</li>
 </ul>
 
 <a name="sunpy-explorer"></a>
-<h2>17. SunPy Multi-Mission Explorer</h2>
+<h2>18. SunPy Multi-Mission Explorer</h2>
 <p>Open from <code>Solar Events &#8594; Archives</code>. Search external archives (SDO/AIA, SOHO/EIT, SOHO/LASCO C2/C3,
 STEREO-A/EUVI map products, and GOES/XRS time series), download into an app-managed cache, plot with frame
 stepping and running difference, compute ROI statistics, and export plots and summaries. Archive search and
@@ -422,54 +545,20 @@ download need network access; cached files reopen offline.</p>
 <tr><td>{_kbd('Ctrl+Shift+Z')}</td><td>Redo</td></tr>
 <tr><td>{_kbd('Esc')}</td><td>Cancel a pick (Solar Image Analysis)</td></tr>
 </table>
+<p class="note">The GCS CME Fitting window has its own keys; see <a href="#gcs-fitting">section 15</a>.</p>
 
 <a name="file-types"></a>
 <h2>B. File types</h2>
 <table>
 <tr><th>Extension</th><th>Meaning</th></tr>
-<tr><td><code>.fit .fits .fit.gz .fits.gz</code></td><td>Radio spectra loaded by the analyzer, and solar images in the imaging workspace. Upper-case suffixes (<code>.FITS</code>, as ARTEMIS-IV publishes them) open the same way.</td></tr>
+<tr><td><code>.fit .fits .fit.gz .fits.gz</code></td><td>Radio spectra loaded by the analyzer, and solar images in the imaging workspace. Upper-case suffixes (<code>.FITS</code>) open the same way.</td></tr>
 <tr><td><code>.efaproj</code></td><td>Full analyzer project (view, processing, data, and analysis session).</td></tr>
 <tr><td><code>.efaview.json</code></td><td>Portable view configuration (range, units, thresholds, colormap, styling).</td></tr>
 <tr><td><code>.ecsolar</code></td><td>Solar Image Analysis session (embeds its FITS frames).</td></tr>
 </table>
 
-<a name="artemis"></a>
-<h2>C. ARTEMIS-IV files</h2>
-<p class="lead">Files from the Greek radiospectrograph open through <code>File &#8594; Open</code> like any other,
-and the analyzer adjusts itself to the instrument.</p>
-<p>ARTEMIS-IV is the solar radiospectrograph of the University of Athens at the Thermopylae Satellite
-Telecommunication Station. Its files are written by <code>ARTLOOK</code> rather than by a CALLISTO receiver, so
-three things are handled differently, automatically:</p>
-<table>
-<tr><th>What differs</th><th>What the analyzer does</th></tr>
-<tr><td>The time axis holds UT in <b>hours</b>, not seconds from the start.</td>
-<td>Converted on load, cross-checked against <code>TIME-OBS</code>. A three-hour observation reads as three
-hours wide, and the <b>UT</b> time mode shows the real clock time.</td></tr>
-<tr><td>Intensities are raw ADC <b>counts</b>, not CALLISTO digits.</td>
-<td>The <b>Units</b> section says <b>Counts</b>, and the <b>dB</b> option uses the receiver's own scale:
-58.51 counts/dB for the ASG, from a 4096-count (12-bit) ADC full scale over the receiver's published
-70 dB dynamic range.</td></tr>
-<tr><td>Channels differ in gain by more than an order of magnitude.</td>
-<td>The file opens <b>background subtracted</b> with the method selected in the sidebar, because a raw plot
-shows the receiver's gain profile rather than the Sun. <code>Edit &#8594; Reset to Raw</code> shows the stored counts. The threshold sliders are widened
-to the receiver's real range.</td></tr>
-</table>
-<p><b>What the decibels mean.</b> ARTEMIS-IV has no absolute flux calibration &#8212; no per-file hot/cold load
-record is published, and the instrument's own literature shows relative spectra. Values are therefore
-<b>dB above the per-channel background</b>, never sfu. That is the right scale for burst contrast, drift
-rates, band-splitting ratios and light-curve shape; it is not a flux density.</p>
-<p><b>Reading the header.</b> <code>View &#8594; FITS Header</code> puts a short preamble above the raw cards
-naming the receiver, the frequency coverage, the cadence and the active calibration, and flagging the two
-header quirks worth knowing about: the hours-based time axis, and a <code>DATE</code> field whose day and
-month are exchanged (<code>2015-22-06</code> means 22 June 2015). <code>DATE-OBS</code> is well formed and is
-what the analyzer uses for the observation time.</p>
-<p><b>What is not available.</b> The sidebar's <b>Timeline</b> stepping walks the e-CALLISTO archive's
-15-minute files and does not apply &#8212; an ARTEMIS observation already covers its whole time range. Everything
-else &#8212; RFI cleaning, burst isolation, light curves, drift and shock analysis, Type II band splitting,
-annotations, projects and report export &#8212; works unchanged.</p>
-
 <a name="tips"></a>
-<h2>D. Tips and troubleshooting</h2>
+<h2>C. Tips and troubleshooting</h2>
 <ul>
 <li><b>Greyed-out buttons?</b> Load a file first. Analysis controls and the Graph Properties panel activate once
 data is present.</li>
@@ -480,8 +569,8 @@ writable, the app prompts you to choose another folder.</li>
 <li><b>Recovering after a crash?</b> Use <code>File &#8594; Recover Last Session</code> to restore the latest autosave.</li>
 <li><b>Type II magnetic-field results</b> should be confirmed against independently validated events
 before drawing scientific conclusions.</li>
-<li><b>ARTEMIS-IV intensities in dB</b> are relative to the per-channel background, not flux densities;
-see <a href="#artemis">Appendix C</a>.</li>
+<li><b>GCS panel says it has no data?</b> The STEREO-B archive ends in September 2014; switch that panel to
+another channel (see <a href="#gcs-fitting">section 15</a>).</li>
 </ul>
 
 <hr>
