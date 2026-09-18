@@ -337,7 +337,8 @@ toolbar (Ruler, Profile, Region Stats, Track CME, Circle Fit, Clear), and a play
 <b>Fit</b> dropdown for a linear, quadratic or cubic fit. Linear gives one speed (with the acceleration from a
 companion quadratic fit); the curved fits report the speed at both ends of the track, and cubic adds the jerk.
 Every value comes with a 1σ error from the fit covariance — a degree-n fit needs n+1 points, and n+2 before an
-error bar can be estimated.</li>
+error bar can be estimated. <b>Export</b> saves the table as CSV, or the graph with its fit as PNG, PDF, EPS, SVG,
+TIFF or JPG in light mode and the OriginPro style.</li>
 <li><b>Playback bar</b>: Rewind, Previous, Play, Pause, Next, a frame scrubber, a frame counter, and a speed (FPS) box.</li>
 <li><b>Common actions</b>: fetch or find archive records, load local FITS, plot frames, running/base difference,
 crop by ROI, detect bright active regions, fetch NOAA/HEK labels, build RGB composites, and export plots,
@@ -449,14 +450,29 @@ tilt are weakly constrained and an ellipsoid's shape parameters trade off agains
 spheroid.</p>
 
 <h3>Export</h3>
+<p>Images and graphs are drawn again from the data rather than copied from the screen, always on a white page
+(light mode) whatever the application theme. Graphs follow the OriginPro style. Figures can be saved as PNG, PDF,
+EPS, SVG, TIFF or JPG.</p>
 <ul>
 <li><code>File &#8594; Export analysis JSON</code> ({_kbd('Ctrl+Shift+S')}): the current, recorded and set-aside
 parameters of both models, with the clicked points, image times, offsets and observer geometry. It is an analyzer
 export, not a PyThea session file.</li>
-<li><code>File &#8594; Export recorded fits CSV</code>, or <b>CSV...</b> in the Kinematics card: the recorded
-series of the model being edited.</li>
-<li><code>File &#8594; Save viewpoint snapshot</code>: the three views as a PNG.</li>
+<li><code>File &#8594; Export recorded fits CSV</code>, or <b>Export &#8594; Table as CSV</b> in the Kinematics
+card: the recorded series of the model being edited.</li>
+<li><code>File &#8594; Export height&#8211;time graph</code>, or <b>Export &#8594; Graph</b> in the Kinematics card:
+the recorded apex heights with their error bars and the fit chosen in the <b>Fit</b> dropdown, with the speed and
+acceleration in the legend.</li>
+<li><code>File &#8594; Save viewpoint snapshot</code>: the three views as shown, with arcsec axes, the wireframes,
+the solar limb and the front points, and a note of where each drawn shell comes from. Hiding the image banners
+leaves only each panel's name above it.</li>
+<li><code>File &#8594; Export movie (GIF/MP4)</code>: every time step as playback shows it, recorded shells
+included, at the playback speed set in the toolbar. MP4 needs the bundled FFmpeg; a GIF is offered otherwise.</li>
+<li><code>File &#8594; Export fitting report (PDF)</code>: the viewpoints and their separations, the model at the
+current time, every recorded fit drawn on the images it was made from with its parameters and observation details,
+the height&#8211;time graphs and kinematics of each model, and the method, its limits and references.</li>
 </ul>
+<p class="note">Stepping through time for a movie or a report leaves the window as it was: the time shown, the
+working models, their formal errors and the front points all come back.</p>
 
 <h3>Keys and limits</h3>
 <p>While an image has focus, {_kbd('Space')} plays or pauses, the arrow keys step, {_kbd('Home')} returns to the

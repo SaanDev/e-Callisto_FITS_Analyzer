@@ -385,9 +385,30 @@ def test_export_movie_gif_streams_with_duration(monkeypatch, tmp_path):
     export_movie([FakeMap(np.arange(16).reshape(4, 4))], AiaMovieExportSpec(path=str(out_path), fps=5.0))
 
     assert captured["path"] == str(out_path)
-    assert captured["kwargs"]["duration"] == pytest.approx(0.2)   # 1/fps
-    assert "format" not in captured["kwargs"]                     # GIF, not FFMPEG
+    assert captured["kwargs"]["duration"] == pytest.approx(200.0)  # ms per frame at 5 fps
+    assert captured["kwargs"]["loop"] == 0                         # repeat, like playback
+    assert "format" not in captured["kwargs"]                      # GIF, not FFMPEG
     assert len(writer.frames) == 1 and writer.closed is True
+
+
+def test_written_gif_plays_at_the_requested_frame_rate(tmp_path):
+    """The real writer, read back: imageio takes milliseconds, and seconds wrote 0 ms frames."""
+    pytest.importorskip("imageio")
+    from PIL import Image
+
+    from src.Backend.solar_data_analysis import write_movie_frames
+
+    frames = [np.full((16, 16, 3), value, dtype=np.uint8) for value in (0, 90, 180)]
+    out_path = write_movie_frames(tmp_path / "movie.gif", iter(frames), total=3, fps=4.0)
+
+    durations = []
+    with Image.open(out_path) as image:
+        loop = image.info.get("loop")
+        for index in range(image.n_frames):
+            image.seek(index)
+            durations.append(image.info.get("duration"))
+    assert durations == [250, 250, 250]
+    assert loop == 0
 
 
 def test_export_movie_streams_progress_and_cancels(monkeypatch, tmp_path):

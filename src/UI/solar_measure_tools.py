@@ -32,6 +32,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMenu,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QSlider,
@@ -269,10 +271,20 @@ class TrackingPanel(QWidget):
         )
         self.clear_btn = QPushButton("Clear Picks")
         self.clear_btn.setEnabled(False)
-        self.export_btn = QPushButton("Export CSV")
+        # One button, two exports: a fourth button in this row would widen the
+        # panel and take the width from the image beside it.
+        self.export_btn = QPushButton("Export")
         self.export_btn.setEnabled(False)
-        self.export_btn.setToolTip("Save the tracking table (UT, t, height, PA) to a CSV file.")
-        self.export_btn.clicked.connect(self.export_csv)
+        self.export_btn.setToolTip(
+            "Save the tracking table as CSV, or the height–time graph with its fit as\n"
+            "PNG, PDF, EPS, SVG, TIFF or JPG (light mode, OriginPro style)."
+        )
+        export_menu = QMenu(self.export_btn)
+        self.export_csv_action = export_menu.addAction("Table as CSV…")
+        self.export_csv_action.triggered.connect(self.export_csv)
+        self.export_graph_action = export_menu.addAction("Graph (PNG, PDF, EPS, SVG, TIFF, JPG)…")
+        self.export_graph_action.triggered.connect(self.export_graph)
+        self.export_btn.setMenu(export_menu)
         buttons.addWidget(self.fit_btn)
         buttons.addWidget(self.clear_btn)
         buttons.addWidget(self.export_btn)
@@ -705,6 +717,76 @@ class TrackingPanel(QWidget):
                 + " m/s³"
             )
         return "  ·  ".join(parts)
+
+    #: Series label and y-axis title of the exported graph, per tracking source.
+    _GRAPH_LABELS = {
+        "height_time": ("Leading edge (plane of sky)", "Height (R☉)"),
+        "circle_fit": ("Circle-fit radius", "Radius (R☉)"),
+        "gcs": ("GCS apex (3-D)", "Apex height (R☉)"),
+        "shock": ("Shock apex (3-D)", "Shock apex height (R☉)"),
+    }
+
+    def graph_series(self) -> Any | None:
+        """The table as the exported graph plots it, fitted at the selected order."""
+        from src.Backend.gcs_figures import HeightTimeSeries
+
+        entries = [entry for entry in self._entries if entry[0] is not None]
+        if not entries:
+            return None
+        label, _ = self._GRAPH_LABELS[self._source]
+        errors = None
+        if self._source in ("gcs", "shock"):
+            errors = [float(entry.height_err_rsun) for entry in entries]
+        return HeightTimeSeries.build(
+            label,
+            [entry[0] for entry in entries],
+            [float(entry[1]) for entry in entries],
+            errors,
+            order=self.fit_order(),
+        )
+
+    def graph_figure(self) -> Any | None:
+        """The height–time graph with its fit, light mode, in the OriginPro style."""
+        from src.Backend.gcs_figures import height_time_figure
+
+        series = self.graph_series()
+        if series is None:
+            return None
+        return height_time_figure([series], y_label=self._GRAPH_LABELS[self._source][1])
+
+    def write_graph(self, path: str) -> str:
+        """Save the graph to ``path`` in the format its suffix names."""
+        from src.Backend.figure_export import save_figure
+
+        figure = self.graph_figure()
+        if figure is None:
+            raise ValueError("There is nothing recorded to plot yet.")
+        return str(save_figure(figure, path))
+
+    def export_graph(self) -> None:
+        """Ask where, then save the graph in any of the application's figure formats."""
+        if self.graph_series() is None:
+            return
+        from src.Backend.figure_export import FIGURE_EXPORT_FILTERS
+        from src.UI.gui_shared import pick_export_path
+
+        names = {
+            "gcs": "cme_gcs_height_time.png",
+            "shock": "cme_shock_height_time.png",
+            "circle_fit": "cme_circle_radius_time.png",
+        }
+        path, _ext = pick_export_path(
+            self,
+            "Export Height–Time Graph",
+            names.get(self._source, "cme_height_time.png"),
+            FIGURE_EXPORT_FILTERS,
+        )
+        if not path:
+            return
+        try:
+            self.write_graph(path)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Export failed", str(exc))
 
     def export_csv(self) -> None:
         """Save the active tracking table to CSV."""

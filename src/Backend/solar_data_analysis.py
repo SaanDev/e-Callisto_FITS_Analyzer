@@ -1015,6 +1015,39 @@ def export_movie(
     )
 
 
+def write_movie_frames(
+    path: str | Path,
+    frames: Any,
+    *,
+    total: int,
+    fps: float,
+    progress_cb: Any | None = None,
+    cancel_cb: Any | None = None,
+) -> Path | None:
+    """Write already-rendered ``(H, W, 3)`` uint8 frames as a GIF or MP4.
+
+    The writer :func:`export_movie` uses, for callers that draw their own
+    frames. ``frames`` may be a generator, consumed one frame at a time. Returns
+    the path written, or ``None`` when ``cancel_cb`` stopped it (the partial
+    file is removed).
+    """
+    out_path = Path(path).expanduser()
+    suffix = out_path.suffix.lower()
+    if suffix not in (".gif", ".mp4"):
+        raise ValueError("Movie export supports only .gif and .mp4 files.")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_movie_stream(
+        out_path,
+        frames,
+        total=int(total),
+        fps=max(0.1, float(fps or 4.0)),
+        is_mp4=(suffix == ".mp4"),
+        progress_cb=progress_cb,
+        cancel_cb=cancel_cb,
+    )
+    return out_path if out_path.exists() else None
+
+
 def _write_movie_stream(
     out_path: Path,
     frame_iter,
@@ -1040,7 +1073,10 @@ def _write_movie_stream(
         except Exception as exc:
             raise RuntimeError("MP4 export requires a working FFmpeg writer backend.") from exc
     else:
-        writer = imageio.get_writer(str(out_path), mode="I", duration=1.0 / max(0.1, float(fps)))
+        # imageio's GIF writer takes each frame's duration in *milliseconds*;
+        # passing seconds wrote 0 ms frames, which viewers play at whatever speed
+        # they like. loop=0 repeats the movie, as a playback loop does.
+        writer = imageio.get_writer(str(out_path), mode="I", duration=1000.0 / max(0.1, float(fps)), loop=0)
 
     wrote = 0
     cancelled = False

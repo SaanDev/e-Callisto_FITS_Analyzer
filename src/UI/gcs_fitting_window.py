@@ -110,6 +110,7 @@ from src.UI.gcs_viewpoint_panel import (
     _qdatetime_utc,
 )
 from src.UI.gcs_window_actions import GCSWindowActions
+from src.UI.gcs_window_exports import GCSWindowExports
 
 
 def _utc_now() -> datetime:
@@ -431,7 +432,7 @@ class GCSControlDeck(QScrollArea):
 # --- Window -------------------------------------------------------------------------
 
 
-class GCSFittingWindow(GCSWindowActions, QMainWindow):
+class GCSFittingWindow(GCSWindowActions, GCSWindowExports, QMainWindow):
     """Fit one GCS shell against up to three simultaneous viewpoints."""
 
     # The GCS model's state, under the names it had before the shock model.
@@ -970,7 +971,6 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         self.tracking_panel.plot.setFixedHeight(160)
         self.tracking_panel.fit_btn.setText("Fit height–time")
         self.tracking_panel.clear_btn.setText("Clear fits")
-        self.tracking_panel.export_btn.setText("CSV…")
         self.tracking_panel.table.setToolTip("Recorded fits. Use Fit → Restore recorded model to revisit the current time.")
         self.tracking_panel.fit_order_combo.currentIndexChanged.connect(self._sync_kinematics_buttons)
         self.tracking_panel.table.cellDoubleClicked.connect(self._restore_fit_row)
@@ -990,7 +990,6 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         # set_source restores the analyzer's longer button texts.
         panel.fit_btn.setText("Fit height–time")
         panel.clear_btn.setText("Clear fits")
-        panel.export_btn.setText("CSV…")
         self.kinematics_card.title_label.setText(f"Kinematics · {MODEL_LABELS[key]}")
         self._refresh_fits()
 
@@ -1313,14 +1312,6 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
             # An ellipsoid shows two more slider rows; let the images give them room.
             self._schedule_split()
         self._shock_layout_model = shock.model
-        mesh = self._cached_mesh(params)
-        # Slider is "density", the backend wants a ring stride, so invert.
-        density = int(round(self.density_slider.value()))
-        stride = max(1, 9 - density)
-        gcs_check = getattr(self, "wireframe_check", None)
-        show_gcs = gcs_check is None or gcs_check.isChecked()
-        shock_check = getattr(self, "shock_check", None)
-        show_shock = shock_check is not None and shock_check.isChecked()
         points_by_panel = self._track().clicks
 
         for panel in self.panels:
@@ -1334,22 +1325,17 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
             # against them. Only views inside the time tolerance take part in the
             # fit, so only they offer the edited model's handle and front points.
             synchronized = panel.is_synchronized()
-            if show_gcs:
-                x, y, _ = wireframe_arcsec(
-                    params, panel.observer, mesh=mesh, ring_stride=stride, n_longitudinal=max(4, 12 - stride)
-                )
-                canvas.set_gcs_overlay(x, y)
+            gcs_xy, shock_xy = self._panel_wireframes(panel)
+            if gcs_xy is not None:
+                canvas.set_gcs_overlay(*gcs_xy)
                 canvas.set_gcs_handles(
                     handle_positions_arcsec(params, panel.observer),
                     visible=synchronized and self._editing == GCS_MODEL,
                 )
             else:
                 canvas.clear_gcs_overlay()
-            if show_shock:
-                x, y = shock_wireframe_arcsec(
-                    shock, panel.observer, ring_stride=stride, n_meridians=max(4, 12 - stride)
-                )
-                canvas.set_gcs_overlay(x, y, layer=SHOCK_MODEL)
+            if shock_xy is not None:
+                canvas.set_gcs_overlay(*shock_xy, layer=SHOCK_MODEL)
                 canvas.set_gcs_handles(
                     shock_handle_positions_arcsec(shock, panel.observer),
                     visible=synchronized and self._editing == SHOCK_MODEL,
@@ -1365,6 +1351,34 @@ class GCSFittingWindow(GCSWindowActions, QMainWindow):
         self._refresh_status()
         if hasattr(self, "menu_actions"):
             self._sync_menu_actions()
+
+    def _panel_wireframes(self, panel: GCSViewpointPanel) -> tuple[Any, Any]:
+        """Both models projected onto ``panel`` in arcsec, ``None`` for a hidden model.
+
+        What the panel draws and what the exports draw, from one place.
+        """
+        if panel.observer is None:
+            return None, None
+        # Slider is "density", the backend wants a ring stride, so invert.
+        stride = max(1, 9 - int(round(self.density_slider.value())))
+        gcs_check = getattr(self, "wireframe_check", None)
+        shock_check = getattr(self, "shock_check", None)
+        gcs_xy = shock_xy = None
+        if gcs_check is None or gcs_check.isChecked():
+            params = self.parameters()
+            x, y, _ = wireframe_arcsec(
+                params,
+                panel.observer,
+                mesh=self._cached_mesh(params),
+                ring_stride=stride,
+                n_longitudinal=max(4, 12 - stride),
+            )
+            gcs_xy = (x, y)
+        if shock_check is not None and shock_check.isChecked():
+            shock_xy = shock_wireframe_arcsec(
+                self.shock_parameters(), panel.observer, ring_stride=stride, n_meridians=max(4, 12 - stride)
+            )
+        return gcs_xy, shock_xy
 
     def _apply_style(self) -> None:
         # Width and opacity are shared; each model keeps its own colour.

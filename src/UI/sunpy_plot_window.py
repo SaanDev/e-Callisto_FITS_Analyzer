@@ -952,6 +952,12 @@ class SunPyPlotCanvas(QWidget):
         rgb = np.asarray(self._map_lut[0][:3], dtype=float)
         return int(round(float(np.mean(rgb))))
 
+    def map_lut(self) -> np.ndarray | None:
+        """A copy of the colour table the map is drawn with, ``(N, 3|4)`` uint8."""
+        if self._map_lut is None or len(self._map_lut) == 0:
+            return None
+        return np.array(self._map_lut, dtype=np.uint8, copy=True)
+
     def set_colorbar_visible(self, visible: bool) -> None:
         self._colorbar_visible = bool(visible)
         self._update_colorbar_visibility()

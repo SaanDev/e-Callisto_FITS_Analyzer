@@ -165,14 +165,14 @@ def test_a_snapshot_without_banners_leaves_them_out(window, tmp_path, monkeypatc
     window.show()
     _flush(20)
     try:
-        from PySide6.QtWidgets import QFileDialog
-
         paths = {}
         for state in (True, False):
             window.banner_check.setChecked(state)
             _flush(5)
             path = tmp_path / f"banner_{state}.png"
-            monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, p=path, **k: (str(p), "PNG (*.png)"))
+            monkeypatch.setattr(
+                "src.UI.gcs_window_exports.pick_export_path", lambda *a, p=path, **k: (str(p), "png")
+            )
             window._save_snapshot()
             paths[state] = path
         from PySide6.QtGui import QImage

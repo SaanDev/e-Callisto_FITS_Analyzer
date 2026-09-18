@@ -705,18 +705,7 @@ class GCSViewpointPanel(QWidget):
         mode = self.difference_mode()
         rendered_mode = self.rendered_mode()
         self.low_slider.setEnabled(rendered_mode == "raw")
-        levels_key = (
-            mode,
-            index,
-            round(float(self.low_slider.value()), 3),
-            round(float(self.high_slider.value()), 3),
-            bool(self._difference_failed),
-        )
-        levels = self._levels_cache.get(levels_key)
-        if levels is None:
-            levels = self._levels(data, rendered_mode)
-            self._levels_cache[levels_key] = levels
-        vmin, vmax = levels
+        vmin, vmax = self._current_levels(index, data, mode, rendered_mode)
 
         self.canvas.set_colormap_name(self.colormap_combo.currentText())
         frame = self.frames[index]
@@ -754,6 +743,65 @@ class GCSViewpointPanel(QWidget):
         if self.observer is None:
             caption += "\nProjection unavailable — no usable solar WCS/observer"
         self.title_label.setText(caption)
+
+    def _current_levels(
+        self, index: int, data: np.ndarray, mode: str, rendered_mode: str
+    ) -> tuple[float | None, float | None]:
+        """The display range of frame ``index`` at the current sliders, cached."""
+        levels_key = (
+            mode,
+            index,
+            round(float(self.low_slider.value()), 3),
+            round(float(self.high_slider.value()), 3),
+            bool(self._difference_failed),
+        )
+        levels = self._levels_cache.get(levels_key)
+        if levels is None:
+            levels = self._levels(data, rendered_mode)
+            self._levels_cache[levels_key] = levels
+        return levels
+
+    def export_render(self) -> Any:
+        """The image on screen as data, for the exports: never a grab of the screen.
+
+        Same array, display range, colour table, placement and caption the canvas
+        draws, so an export matches the panel exactly. With hardware acceleration
+        the canvas is an OpenGL surface, which a widget grab returns blank.
+        The window adds the model overlays.
+        """
+        from src.Backend.gcs_figures import ViewpointRender
+
+        if not self.frames:
+            return ViewpointRender(label=self.label, caption=self.title_label.text() or f"{self.label} · not loaded")
+        index = max(0, min(self._index, len(self.frames) - 1))
+        data = self.display_array(index)
+        vmin, vmax = self._current_levels(index, data, self.difference_mode(), self.rendered_mode())
+        frame = self.frames[index]
+        transform = self._axis_transform(frame, data.shape)
+        extent = None
+        if transform is not None:
+            x_scale = transform["x_scale_arcsec_per_pix"]
+            y_scale = transform["y_scale_arcsec_per_pix"]
+            # The canvas's own placement (SunPyPlotCanvas._map_rect_from_transform):
+            # pixel centres on the WCS, so the image spans half a pixel beyond them.
+            x0 = transform["x_ref_arcsec"] - (transform["x_ref_pix"] + 0.5) * x_scale
+            y0 = transform["y_ref_arcsec"] - (transform["y_ref_pix"] + 0.5) * y_scale
+            extent = (x0, x0 + data.shape[1] * x_scale, y0, y0 + data.shape[0] * y_scale)
+        observer = self.observer
+        return ViewpointRender(
+            label=self.label,
+            caption=self.title_label.text(),
+            data=data,
+            extent=extent,
+            lut=self.canvas.map_lut(),
+            vmin=vmin,
+            vmax=vmax,
+            limb_radius_arcsec=(
+                float(observer.rsun_arcsec)
+                if self._limb_visible and observer is not None and observer.rsun_arcsec
+                else None
+            ),
+        )
 
     def _levels(self, data: np.ndarray, mode: str) -> tuple[float | None, float | None]:
         """Display range: percentile stretch for raw frames, symmetric for differences."""

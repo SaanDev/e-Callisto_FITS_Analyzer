@@ -39,6 +39,61 @@ ProgressCallback = Callable[[int, str], None]
 
 REPORT_TITLE = "GCS CME Fitting Report"
 
+#: The report's typeface: DejaVu Sans, from matplotlib's own data directory.
+_FONT_FACES = {
+    "DejaVuSans": "DejaVuSans.ttf",
+    "DejaVuSans-Bold": "DejaVuSans-Bold.ttf",
+    "DejaVuSans-Oblique": "DejaVuSans-Oblique.ttf",
+    "DejaVuSans-BoldOblique": "DejaVuSans-BoldOblique.ttf",
+}
+
+
+def _register_report_font() -> tuple[str, str]:
+    """Register DejaVu Sans with ReportLab; returns its regular and bold names.
+
+    ReportLab's built-in Helvetica covers Latin-1 only, so the report's "R☉",
+    "α", "κ", "σ", "→" and "″" would print as empty boxes. DejaVu Sans has them
+    all and is always present: matplotlib ships it (and so does every build).
+    """
+    import matplotlib
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    root = Path(matplotlib.get_data_path()) / "fonts" / "ttf"
+    registered = set(pdfmetrics.getRegisteredFontNames())
+    for name, filename in _FONT_FACES.items():
+        if name not in registered:
+            pdfmetrics.registerFont(TTFont(name, str(root / filename)))
+    pdfmetrics.registerFontFamily(
+        "DejaVuSans",
+        normal="DejaVuSans",
+        bold="DejaVuSans-Bold",
+        italic="DejaVuSans-Oblique",
+        boldItalic="DejaVuSans-BoldOblique",
+    )
+    return "DejaVuSans", "DejaVuSans-Bold"
+
+
+def _report_styles(rl) -> Any:
+    """The project report's paragraph styles, in a typeface with the report's symbols."""
+    styles = _make_styles(rl)
+    try:
+        regular, bold = _register_report_font()
+    except Exception:
+        return styles  # Helvetica still lays the report out; only the symbols go missing.
+    for style in styles.byName.values():
+        for attribute in ("fontName", "bulletFontName"):
+            current = str(getattr(style, attribute, "") or "")
+            if current:
+                setattr(style, attribute, bold if "Bold" in current else regular)
+    return styles
+
+
+def _add_table_style(rl, styles) -> None:
+    """A tighter cell style, so an eleven-column table keeps its headers whole."""
+    if "TableCell" not in styles.byName:
+        styles.add(rl["ParagraphStyle"](name="TableCell", parent=styles["SmallText"], fontSize=7.5, leading=9.5))
+
 
 # --- Blocks -------------------------------------------------------------------
 
@@ -83,7 +138,14 @@ class PageBreak:
     pass
 
 
-Block = Heading | Text | KeyValues | Table | Figure | PageBreak
+@dataclass(frozen=True)
+class Group:
+    """Blocks kept on one page when they fit: a recorded fit and its tables."""
+
+    blocks: tuple[Any, ...]
+
+
+Block = Heading | Text | KeyValues | Table | Figure | PageBreak | Group
 
 
 def write_report_pdf(
@@ -102,7 +164,8 @@ def write_report_pdf(
     path.parent.mkdir(parents=True, exist_ok=True)
 
     rl = _import_reportlab()
-    styles = _make_styles(rl)
+    styles = _report_styles(rl)
+    _add_table_style(rl, styles)
     colors = rl["colors"]
     inch = rl["inch"]
     Paragraph = rl["Paragraph"]
@@ -125,24 +188,21 @@ def write_report_pdf(
         Spacer(1, 0.15 * inch),
     ]
     figures = 0
-    total = max(1, len(blocks))
-    for index, block in enumerate(blocks):
-        if progress_cb is not None and index % 5 == 0:
-            progress_cb(int(90 * index / total), "Laying out the report…")
+
+    def flowables(block: Block, grouped: bool = False) -> list[Any]:
+        nonlocal figures
         if isinstance(block, Heading):
             style = styles["Heading2"] if block.level <= 2 else styles["Heading3"]
-            story.append(Paragraph(escape(block.text), style))
-        elif isinstance(block, Text):
-            story.append(Paragraph(escape(block.text).replace("\n", "<br/>"), styles["SmallText" if block.small else "Normal"]))
-            story.append(Spacer(1, 0.06 * inch))
-        elif isinstance(block, KeyValues):
-            story.append(_pair_table(rl, styles, list(block.pairs), doc.width))
-            story.append(Spacer(1, 0.12 * inch))
-        elif isinstance(block, Table):
-            story.append(_data_table(rl, styles, block, doc.width, colors))
-            story.append(Spacer(1, 0.12 * inch))
-        elif isinstance(block, Figure):
-            parts: list[Any] = [Paragraph(escape(block.title), styles["Heading3"])]
+            return [Paragraph(escape(block.text), style)]
+        if isinstance(block, Text):
+            style = styles["SmallText" if block.small else "Normal"]
+            return [Paragraph(escape(block.text).replace("\n", "<br/>"), style), Spacer(1, 0.06 * inch)]
+        if isinstance(block, KeyValues):
+            return [_pair_table(rl, styles, list(block.pairs), doc.width), Spacer(1, 0.12 * inch)]
+        if isinstance(block, Table):
+            return [_data_table(rl, styles, block, doc.width, colors), Spacer(1, 0.12 * inch)]
+        if isinstance(block, Figure):
+            parts: list[Any] = [Paragraph(escape(block.title), styles["Heading3"])] if block.title else []
             if block.png:
                 parts.append(_fit_image(rl, block.png, doc.width, block.max_height_in * inch))
                 figures += 1
@@ -151,9 +211,20 @@ def write_report_pdf(
             if block.caption:
                 parts.append(Paragraph(escape(block.caption).replace("\n", "<br/>"), styles["Caption"]))
             parts.append(Spacer(1, 0.08 * inch))
-            story.append(rl["KeepTogether"](parts))
-        elif isinstance(block, PageBreak):
-            story.append(rl["PageBreak"]())
+            # Never nest KeepTogether: an inner one reports a huge height to force
+            # a split, so the outer group would always jump to a fresh page.
+            return parts if grouped else [rl["KeepTogether"](parts)]
+        if isinstance(block, Group):
+            return [rl["KeepTogether"]([part for inner in block.blocks for part in flowables(inner, True)])]
+        if isinstance(block, PageBreak):
+            return [rl["PageBreak"]()]
+        raise TypeError(f"Unknown report block: {type(block).__name__}")
+
+    total = max(1, len(blocks))
+    for index, block in enumerate(blocks):
+        if progress_cb is not None and index % 5 == 0:
+            progress_cb(int(90 * index / total), "Laying out the report…")
+        story.extend(flowables(block))
     if progress_cb is not None:
         progress_cb(92, "Writing the PDF…")
     on_page = _draw_header_footer(title, rl)
@@ -169,10 +240,11 @@ def write_report_pdf(
 
 def _data_table(rl, styles, block: Table, width: float, colors) -> Any:
     Paragraph = rl["Paragraph"]
-    header = [Paragraph(f"<b>{escape(text)}</b>", styles["SmallText"]) for text in block.header]
-    rows = [[Paragraph(escape(str(cell)), styles["SmallText"]) for cell in row] for row in block.rows]
+    cell = styles["TableCell"]
+    header = [Paragraph(f"<b>{escape(text)}</b>", cell) for text in block.header]
+    rows = [[Paragraph(escape(str(value)), cell) for value in row] for row in block.rows]
     if not rows:
-        rows = [[Paragraph("None recorded.", styles["SmallText"])] + [""] * (len(header) - 1)]
+        rows = [[Paragraph("None recorded.", cell)] + [""] * (len(header) - 1)]
     weights = list(block.widths or [1.0] * len(header))
     scale = width / float(sum(weights))
     table = rl["Table"]([header] + rows, colWidths=[weight * scale for weight in weights], repeatRows=1, hAlign="LEFT")
@@ -240,6 +312,9 @@ class GCSReportInput:
     archived_shock: Mapping[datetime, Any] = field(default_factory=dict)
     #: Viewpoints image for each recorded time; ``None`` where it could not be drawn.
     fit_figures: Mapping[datetime, bytes | None] = field(default_factory=dict)
+    #: Where each drawn shell came from, under its image.
+    fit_figure_captions: Mapping[datetime, str] = field(default_factory=dict)
+    #: Why a recorded time has no image.
     fit_figure_notes: Mapping[datetime, str] = field(default_factory=dict)
 
 
@@ -412,8 +487,8 @@ def _fit_row(model: str, entry: Any) -> tuple[str, ...]:
     )
 
 
-_FIT_HEADER = ("Model", "Apex (R☉)", "Lon (°)", "Lat (°)", "Tilt (°)", "Shape", "RMS (″)", "Pts", "Views", "Sep. (°)", "Refined")
-_FIT_WIDTHS = (0.7, 1.2, 1.0, 1.0, 0.7, 2.3, 0.7, 0.5, 0.55, 0.65, 0.7)
+_FIT_HEADER = ("Model", "Apex (R☉)", "Lon (°)", "Lat (°)", "Tilt (°)", "Shape", "RMS (″)", "Points", "Views", "Sep. (°)", "Refined")
+_FIT_WIDTHS = (0.75, 1.25, 1.0, 1.0, 0.75, 2.1, 0.8, 0.75, 0.7, 0.8, 0.8)
 
 
 def _series_table(fits: Mapping[datetime, Any]) -> Table:
@@ -457,7 +532,6 @@ def _kinematics_blocks(title: str, label: str, fits: Mapping[datetime, Any], ord
     from src.Backend.figure_export import figure_png_bytes
     from src.Backend.gcs_figures import FIT_ORDER_NAMES, fit_series, height_time_figure, kinematics_rows
 
-    blocks: list[Block] = [Heading(title, 3), _series_table(fits)]
     series = model_series(label, fits, order)
     fit = fit_series(series)
     graph = figure_png_bytes(height_time_figure([series], y_label="Apex height (R☉)"), dpi=200)
@@ -467,7 +541,10 @@ def _kinematics_blocks(title: str, label: str, fits: Mapping[datetime, Any], ord
     )
     if fit is None:
         caption += f" A {FIT_ORDER_NAMES.get(order, str(order)).lower()} fit needs {max(2, order + 1)} distinct recorded times."
-    blocks.append(Figure(f"{label}: height–time", graph, caption))
+    # The heading stays with its table and graph rather than ending a page alone.
+    blocks: list[Block] = [
+        Group((Heading(title, 3), _series_table(fits), Figure(f"{label}: height–time", graph, caption)))
+    ]
     if fit is not None:
         blocks.append(KeyValues(tuple(kinematics_rows(fit))))
     return blocks
@@ -573,23 +650,25 @@ def build_report_blocks(data: GCSReportInput) -> list[Block]:
             )
         )
         for when in times:
-            blocks.append(Heading(f"Fit at {_utc(when)} UTC", 3))
-            blocks.append(
+            fit_blocks: list[Block] = [
+                Heading(f"Fit at {_utc(when)} UTC", 3),
                 Figure(
-                    f"Viewpoints at {_utc(when)} UTC",
+                    "",
                     data.fit_figures.get(when),
+                    data.fit_figure_captions.get(when, ""),
                     note=data.fit_figure_notes.get(when, "The images of this fit are no longer loaded."),
-                )
-            )
+                ),
+            ]
             rows = []
             if when in data.gcs_fits:
                 rows.append(_fit_row("gcs", data.gcs_fits[when]))
             if when in data.shock_fits:
                 rows.append(_fit_row("shock", data.shock_fits[when]))
-            blocks.append(Table(_FIT_HEADER, tuple(rows), _FIT_WIDTHS))
+            fit_blocks.append(Table(_FIT_HEADER, tuple(rows), _FIT_WIDTHS))
             provenance = data.gcs_provenance.get(when) or data.shock_provenance.get(when)
             if provenance:
-                blocks.append(_observation_table(provenance))
+                fit_blocks.append(_observation_table(provenance))
+            blocks.append(Group(tuple(fit_blocks)))
 
     # Kinematics.
     blocks.append(PageBreak())

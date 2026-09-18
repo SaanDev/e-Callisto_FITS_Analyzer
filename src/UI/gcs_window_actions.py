@@ -58,7 +58,11 @@ class GCSWindowActions:
         file_menu = self.menuBar().addMenu("&File")
         action(file_menu, "export_analysis", "Export analysis &JSON…", self._export_analysis, "Ctrl+Shift+S")
         action(file_menu, "export_csv", "Export recorded fits &CSV…", self.tracking_panel.export_csv)
+        action(file_menu, "export_graph", "Export height–time &graph…", self.tracking_panel.export_graph)
+        file_menu.addSeparator()
         action(file_menu, "snapshot", "Save viewpoint &snapshot…", self._save_snapshot)
+        action(file_menu, "movie", "Export &movie (GIF/MP4)…", self._export_movie)
+        action(file_menu, "report", "Export fitting &report (PDF)…", self._export_report)
         file_menu.addSeparator()
         action(file_menu, "close", "&Close window", self.close, "Ctrl+W")
 
@@ -135,10 +139,14 @@ class GCSWindowActions:
         has_view = bool(self._active_panels())
         points = sum(view.n_clicks for view in self._viewpoints())
         fits = self._track().fits
+        fetching = any(panel.is_fetching() for panel in self.panels)
+        loaded = any(panel.frames for panel in self.panels)
         enabled = {
-            "load": not any(panel.is_fetching() for panel in self.panels),
-            "cancel": any(panel.is_fetching() for panel in self.panels),
-            "export_csv": bool(fits), "snapshot": any(panel.frames for panel in self.panels),
+            "load": not fetching,
+            "cancel": fetching,
+            "export_csv": bool(fits), "export_graph": bool(fits), "snapshot": loaded,
+            "movie": len(self._time_axis) > 1 and not fetching,
+            "report": (loaded or any(track.fits for track in self._tracks.values())) and not fetching,
             "jump": has_time, "refine": has_view and points >= self._free_parameter_count(self._editing) + 1,
             "commit": has_time and has_view, "restore": has_record, "delete": has_record,
             "undo_point": self._last_point_entry() is not None,
@@ -350,15 +358,6 @@ class GCSWindowActions:
             return
         self._set_status("Analysis exported with model parameters, observation times and clicked points.")
 
-    def _save_snapshot(self):
-        self.pause()
-        path, _ = QFileDialog.getSaveFileName(self, "Save GCS viewpoints", "cme_gcs_viewpoints.png", "PNG (*.png)")
-        if path:
-            if self.stage.grab().save(path, "PNG"):
-                self._set_status("Viewpoint snapshot saved. Export analysis JSON for numerical provenance.")
-            else:
-                QMessageBox.warning(self, "Snapshot failed", "The image could not be written to that location.")
-
     def _show_fitting_guide(self):
         dialog = QDialog(self)
         dialog.setWindowTitle("GCS fitting workflow")
@@ -404,7 +403,10 @@ class GCSWindowActions:
             a spheroid.</li>
             <li><b>Export.</b> JSON includes every model parameter, frame times, offsets, observer geometry,
             points and archived fits for both models, with the shock's centre and semi-axes. CSV contains
-            the recorded series of the model shown in Kinematics; PNG saves the views.
+            the recorded series of the model shown in Kinematics, and the height–time graph saves it with
+            its fit. The snapshot saves the views, the movie every time step with its shells, and the PDF
+            report the whole fit with its images, graphs and details. Figures are redrawn from the data
+            in light mode (graphs in the OriginPro style) as PNG, PDF, EPS, SVG, TIFF or JPG.
             JSON is an analyzer export, not a PyThea session file.</li>
             </ol>
             <p><b>Scientific limits:</b> formal fit errors omit uncertainty from front selection,

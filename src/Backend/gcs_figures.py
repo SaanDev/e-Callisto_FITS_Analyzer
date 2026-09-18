@@ -162,14 +162,17 @@ def draw_viewpoint(
         cmap=_colormap(view.lut),
         vmin=vmin,
         vmax=vmax,
-        interpolation="nearest",
+        # Smooths when a movie frame shrinks a 1024-pixel image, where nearest
+        # neighbour would sparkle; the panels on screen downsample the same way.
+        interpolation="antialiased",
     )
     if view.extent is not None:
         x0, x1, y0, y1 = view.extent
         if view.limb_radius_arcsec:
             theta = np.linspace(0.0, 2.0 * math.pi, 361)
             radius = float(view.limb_radius_arcsec)
-            ax.plot(radius * np.cos(theta), radius * np.sin(theta), color=LIMB_COLOR, lw=0.8, alpha=0.9)
+            # Opaque: PostScript (EPS) cannot draw transparency.
+            ax.plot(radius * np.cos(theta), radius * np.sin(theta), color=LIMB_COLOR, lw=0.8)
         linewidth = style.linewidth_pt
         if view.shock_xy is not None:
             ax.plot(*view.shock_xy, color=style.colour(style.shock_rgb), lw=linewidth, solid_capstyle="round")
