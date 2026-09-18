@@ -1,11 +1,29 @@
-# e-CALLISTO FITS Analyzer (v3.0.0)
+# e-CALLISTO FITS Analyzer (v3.1.0-beta)
 A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data.
 
 ---
 
-## What's New in v3.0.0
+## What's New in v3.1.0-beta
 
-Compared with v2.8.0, this release adds the following capabilities:
+This beta previews the upcoming **v3.1.0** release. The features below are already implemented in the beta.
+
+### GCS fitting
+
+- **Multi-view GCS CME and shock fitting:** reconstruct the CME flux rope from synchronized SOHO/LASCO and STEREO images, and fit its outer shock separately with a spheroid or ellipsoid. Each model keeps its own front points, recorded fits, height–time series and CSV export. The fitting window includes playback, focus layouts, image-difference modes and recorded-shell overlays.
+- **Staged fit refinement:** **Refine fit** (`Ctrl+R`) now starts with just two front points, refining the height first. More points and suitable viewpoint separation allow direction and shape parameters to be fitted. For GCS, four points in two separated views add longitude and latitude; tilt, half-angle and thickness follow, reaching all six parameters at seven points. The status bar names the fitted parameters and shows how many more points are needed for the next stage. Shock refinement follows its own sequence of height, direction and shape parameters.
+- **Viewpoint snapshots and height–time graphs:** export PNG, PDF, EPS, SVG, TIFF or JPG figures with a white background. Viewpoint exports include the displayed images, model wireframes, front points and observation captions; height–time graphs include the selected fit and kinematic results. Images are rendered from the data, fixing blank exports from hardware-accelerated panels.
+- **GCS movies:** export the event sequence as GIF or MP4 with the recorded shells shown during playback. Movie exports restore the current time, working models, refinement results and front points afterward.
+- **Detailed fitting reports:** export a PDF containing the current viewpoints, viewing geometry, recorded fits with their source images and parameters, and linear, quadratic and cubic height–time fits where supported by the available measurements. Reports include kinematic comparisons, uncertainties, method limits and references, and restore the working state after export.
+
+### Background subtraction
+
+- **Separate background-subtraction controls:** choose **Mean**, **Median** or **Median (dB)** independently of the live display thresholds.
+- **Repeatable processing:** reapplying subtraction starts from the raw data, so changing methods replaces the previous result without stacking corrections.
+- **Live display thresholds:** adjust the color-scale limits independently after subtraction; threshold changes do not clip the data.
+
+## Additional features included in this beta
+
+The beta also includes these archive, instrument, visualization and solar-image analysis capabilities:
 
 ### Working a burst across the archive, without leaving the plot
 - **Timeline panel:** a loaded dataset now knows which station, focus codes and observation times it came from, and the sidebar's **Timeline** section lists them. **◀ Previous** / **Next ▶** fetch the adjacent 15-minute observation and time-combine it into the spectrum in place, one to eight steps at a time. Following a type II from its onset no longer means going back to the downloader and re-importing every file.
@@ -41,7 +59,7 @@ Compared with v2.8.0, this release adds the following capabilities:
 - **Differential-rotation compensation:** a selected region can be pinned to the rotating solar surface across a multi-hour sequence in either of two modes — *track*, which moves the cut-out window and leaves the pixel values untouched for photometry and light curves, or *reproject*, which resamples every frame onto the reference-time grid so foreshortening is corrected and differencing is meaningful.
 - **GCS CME Fitting — multi-view CME reconstruction:** open **Analysis → GCS CME Fitting…** from the main analyzer or Solar Image Analysis window. The selected UTC event/frame follows into new and reopened fitting windows. Three independently loaded Helioviewer JPEG2000 channels share one Graduated Cylindrical Shell, using the published geometry also implemented by [PyThea](https://www.pythea.org/en/docs/geometrical_models.html). The panels default, left to right, to STEREO-B COR2, LASCO C2 and STEREO-A COR2 for every event; after STEREO-B was lost in 2014 the left panel keeps STEREO-B COR2 and reports that it has no data, and any channel can still be switched by hand. Set the event range, adjust individual channel ranges if needed, and **Load all**. Every panel opens in running difference: the first image of each channel is differenced against the archive frame just before its range, and is shown explicitly as raw only when no earlier frame exists. A shared timestamp selects each channel's nearest image; captions show actual UTC times, offsets and difference-reference times. The shell is drawn in every view; **Max time offset** excludes images too far from the shared time from the fit (default 5 minutes; choose an appropriate limit for the CME's evolution). Changing a source or range invalidates old images and pending results. Clicked points follow their actual image and return when revisited.
   The **File, Event, View, Fit and Help** menus provide UTC navigation, playback, image modes, equal/focus layouts, zoom reset, overlay toggles, refinement, recording and exports. Six sliders with numeric entry control the shared model. Height is the leading edge's distance from Sun centre; intrinsic face-on and edge-on widths include the shell thickness. Trace the same ejecta front in independent views (GCS is a flux-rope model, not a shock model), align the shell manually, then use **Refine fit** for a local geometric adjustment. Empty, nearly coincident and nearly opposite viewpoints do not independently constrain direction. Formal errors are withheld when the local solution is unreliable, and become invalid after the model or observations change. [Reconstruction uncertainty](https://arxiv.org/abs/2302.00531) also includes front identification, timing and model assumptions; small residuals do not establish accuracy.
-  **Commit GCS** records the fit and actual observation provenance. Repeated image combinations cannot masquerade as independent height–time samples. Double-click a recorded row to revisit its model; moving to a different event archives earlier fits in memory. Stepping forward or back, dragging the time slider and playback all draw the recorded shells: each fit on its own images, interpolated in time between recorded times (a display, not a fit) and held beyond the first and last; a model with nothing recorded keeps its sliders, so commit before stepping away. **Undo point** (Ctrl+Z) removes the front point clicked last in any panel, and the **Banner** toggle (B) hides the information banner across the top of each image. Kinematics are model-dependent radial estimates. Export **CSV** for the active numerical series, **JSON** for current/recorded/archived parameters, points and observation provenance, or **PNG** for the displayed views. JSON is an analyzer analysis export, not a PyThea session file. **Help → Fitting workflow** explains the process and its limits.
+  **Commit GCS** records the fit and actual observation provenance. Repeated image combinations cannot masquerade as independent height–time samples. Double-click a recorded row to revisit its model; moving to a different event archives earlier fits in memory. Stepping forward or back, dragging the time slider and playback all draw the recorded shells: each fit on its own images, interpolated in time between recorded times (a display, not a fit) and held beyond the first and last; a model with nothing recorded keeps its sliders, so commit before stepping away. **Undo point** (Ctrl+Z) removes the front point clicked last in any panel, and the **Banner** toggle (B) hides the information banner across the top of each image. Kinematics are model-dependent radial estimates. Export **CSV** for the active numerical series, **JSON** for current/recorded/archived parameters, points and observation provenance, viewpoint snapshots and height–time graphs in **PNG/PDF/EPS/SVG/TIFF/JPG**, **GIF/MP4** movies, or a **PDF fitting report**. JSON is an analyzer analysis export, not a PyThea session file. **Help → Fitting workflow** explains the process and its limits.
   **Shock fitting:** choose **Edit: Shock** to fit the shock the CME drives — its faint outer envelope — with a spheroid or ellipsoid, drawn in every view alongside the GCS shell in its own colour. Parameters follow PyThea's convention exactly: apex height, κ = b/(height − 1 R☉), signed eccentricity ε (positive stretches the shock radially, negative flattens it) and, for an ellipsoid, α = b/c and a tilt about the radial axis; the centre distance and semi-axes are shown and exported under PyThea's names. Click the shock front and **Refine fit** pulls the model's exactly computed projected outline through the points in every view. With fewer than three views ε and tilt are weakly constrained, and an ellipsoid's shape parameters trade off — prefer a spheroid. Front points, recorded fits, kinematics, CSV (`cme_shock_fit.csv`), stepping and playback are kept separately for the shock, and the JSON export (schema 2) adds a `shock` section without changing the GCS keys.
 
 - **Circle Fit — CME tracking for on-disk eruptions:** a new measurement tool for events near disk centre, where the front expands as a growing circle instead of marching outward from the limb, and a single leading-edge click has no well-defined origin to measure from. Click three or more points along the front and the least-squares circle is fitted and redrawn live from the third click on; **Commit Circle** (`Ctrl+Return`) records the frame and steps to the next, so a whole sequence is measured with one arc per frame. Under the spherical-bubble assumption the fitted radius *is* the CME height, so the sequence yields a radius–time plot with speed and acceleration — with the leading-edge distance from disk centre kept alongside it for comparison against a conventional height–time track.
@@ -85,6 +103,7 @@ Compared with v2.8.0, this release adds the following capabilities:
 - Overlay GOES XRS curves directly on the main spectrum with automatic legacy/modern GOES fallback and flare-class guides.
 - Analyze SDO/AIA images from **Analysis -> Solar Data Analysis** with crop, difference, active-region, composite, and movie export tools.
 - Measure a CME frame by frame in the Solar Image Analysis window with a ruler, intensity profiles, region statistics, leading-edge height–time tracking, and circle fitting for on-disk domes — reporting linear, quadratic or cubic kinematics with a 1σ error on every speed and acceleration.
+- Reconstruct CME flux ropes and shocks in **Analysis → GCS CME Fitting…**, refine against clicked fronts, record each model over time, and export figures, movies and fitting reports.
 - Explore external archives with the SunPy Multi-Mission Explorer for SDO, SOHO, STEREO-A, and GOES products.
 - Load STEREO/SWAVES space-based dynamic spectra (2.6 kHz - 16 MHz) below the CALLISTO spectrum on a shared time axis, and follow a burst out of the ground-based band into the interplanetary medium.
 - Blend SDO, STEREO, and SOHO (EIT, LASCO) frames into one multi-instrument coronagraph composite that runs continuously from the disk out to the outer corona.
@@ -694,7 +713,7 @@ Notes:
 
 Notes:
 
-- JSOC server-side cutout requests are not part of v3.0.0; cropping is performed locally after files are loaded.
+- JSOC server-side cutout requests are not part of v3.1.0-beta; cropping is performed locally after files are loaded.
 - Metadata overlays require network access, but image-based region detection works on local files.
 
 ---
@@ -876,10 +895,10 @@ infinities and all-NaN rows.
     - `gem install --no-document fpm`
     - `PYTHON_BIN=/usr/bin/python3 PIP_INDEX_URL=https://pypi.org/simple bash src/Installation/build_deb_linux.sh`
 - Expected output on `amd64`:
-  - `dist/e-callisto-fits-analyzer_3.0.0_amd64.deb`
+  - `dist/e-callisto-fits-analyzer_3.1.0-beta_amd64.deb`
 - Install the generated local package using a path, not a bare filename:
-  - `sudo apt install -y ./dist/e-callisto-fits-analyzer_3.0.0_amd64.deb`
-  - If you are already inside `dist`, use `sudo apt install -y ./e-callisto-fits-analyzer_3.0.0_amd64.deb`
+  - `sudo apt install -y ./dist/e-callisto-fits-analyzer_3.1.0-beta_amd64.deb`
+  - If you are already inside `dist`, use `sudo apt install -y ./e-callisto-fits-analyzer_3.1.0-beta_amd64.deb`
 - Manual PyInstaller build only creates the Linux app folder, not the `.deb`:
   - `pyinstaller src/Installation/FITS_Analyzer_linux.spec`
 
@@ -889,7 +908,7 @@ infinities and all-NaN rows.
 - Build the `.app` and the disk image in one step:
   - `bash src/Installation/build_macos_dmg.sh`
 - Expected output on Apple silicon:
-  - `dist/e-callisto-fits-analyzer_3.0.0_macOS_arm64.dmg`
+  - `dist/e-callisto-fits-analyzer_3.1.0-beta_macOS_arm64.dmg`
 - Re-wrap an existing `dist/*.app` without rebuilding it:
   - `SKIP_APP=1 bash src/Installation/build_macos_dmg.sh`
 - Build the app bundle only:
