@@ -131,6 +131,35 @@ def test_specs_include_sunpy_modules_and_hook_path():
     assert hook_path.exists()
 
 
+def test_pyinstaller_specs_bundle_aiapy_with_its_data_files():
+    """AIA level 1.5 imports aiapy, which reads its CITATION.rst on import.
+
+    py2app copies such packages whole; PyInstaller needs hook-aiapy.py, or the
+    Windows/Linux builds fail level 1.5 with "Install it with: pip install aiapy".
+    """
+    spec_paths = [
+        ROOT / "src" / "Installation" / "FITS_Analyzer.spec",
+        ROOT / "src" / "Installation" / "FITS_Analyzer_linux.spec",
+        ROOT / "src" / "Installation" / "FITS_Analyzer_win.spec",
+    ]
+    for path in spec_paths:
+        text = path.read_text(encoding="utf-8")
+        assert '"aiapy"' in text
+        assert '"aiapy.calibrate"' in text
+        assert 'hookspath=[str(HERE / "pyinstaller_hooks")]' in text
+
+    hook = (ROOT / "src" / "Installation" / "pyinstaller_hooks" / "hook-aiapy.py").read_text(
+        encoding="utf-8"
+    )
+    assert "collect_data_files(" in hook
+    assert '"aiapy"' in hook
+
+    requirements = (ROOT / "src" / "Installation" / "requirements-runtime.txt").read_text(
+        encoding="utf-8"
+    )
+    assert "aiapy==" in requirements
+
+
 def test_specs_bundle_pyqtgraph_exporters():
     spec_paths = [
         ROOT / "src" / "Installation" / "FITS_Analyzer.spec",

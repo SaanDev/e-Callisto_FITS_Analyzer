@@ -256,6 +256,53 @@ def test_apply_level_requires_frames():
         apply_level([], LEVEL_1_5)
 
 
+def _break_aiapy_import(monkeypatch, exc):
+    """Make every ``aiapy`` import raise ``exc``."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "aiapy" or name.startswith("aiapy."):
+            raise exc
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+
+def test_level_1_5_asks_for_aiapy_when_it_is_not_installed(monkeypatch):
+    _break_aiapy_import(
+        monkeypatch, ModuleNotFoundError("No module named 'aiapy'", name="aiapy")
+    )
+    with pytest.raises(RuntimeError, match="pip install aiapy"):
+        apply_level([FakeMap(meta={"LVL_NUM": 1.0})], LEVEL_1_5, base_level=LEVEL_1)
+
+
+def test_level_1_5_names_the_fault_when_aiapy_is_installed_but_broken(monkeypatch):
+    """The Windows/Linux builds bundled aiapy without the CITATION.rst it reads
+    on import. That FileNotFoundError must not be reported as "pip install"."""
+    _break_aiapy_import(
+        monkeypatch,
+        FileNotFoundError(2, "No such file or directory", "_internal/aiapy/CITATION.rst"),
+    )
+    with pytest.raises(RuntimeError) as info:
+        apply_level([FakeMap(meta={"LVL_NUM": 1.0})], LEVEL_1_5, base_level=LEVEL_1)
+
+    assert "pip install" not in str(info.value)
+    assert "CITATION.rst" in str(info.value)
+
+
+def test_level_1_5_does_not_blame_aiapy_for_a_missing_dependency(monkeypatch):
+    _break_aiapy_import(
+        monkeypatch, ModuleNotFoundError("No module named 'erfa'", name="erfa")
+    )
+    with pytest.raises(RuntimeError) as info:
+        apply_level([FakeMap(meta={"LVL_NUM": 1.0})], LEVEL_1_5, base_level=LEVEL_1)
+
+    assert "pip install" not in str(info.value)
+    assert "erfa" in str(info.value)
+
+
 def test_level_option_is_local_reflects_origin():
     assert LevelOption("1.5", "x", ORIGIN_LOCAL).is_local is True
     assert LevelOption("1", "x", ORIGIN_ARCHIVE).is_local is False

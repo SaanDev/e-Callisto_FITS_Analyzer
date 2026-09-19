@@ -158,6 +158,11 @@ a = Analysis(
         "sunpy.net",
         "sunpy.timeseries",
 
+        # AIA level 1.5 in the Solar Image Analysis window. Imported lazily;
+        # hook-aiapy.py bundles the CITATION.rst that aiapy reads on import.
+        "aiapy",
+        "aiapy.calibrate",
+
         # Qt modules used by the app
         "PySide6.QtNetwork",
         "PySide6.QtPrintSupport",

@@ -277,11 +277,8 @@ def register_level_1_5(
     if register_fn is None:
         try:
             from aiapy.calibrate import register as register_fn
-        except Exception as exc:  # pragma: no cover - exercised only without aiapy
-            raise RuntimeError(
-                "Level 1.5 needs the optional 'aiapy' package.\n"
-                "Install it with: python3 -m pip install aiapy"
-            ) from exc
+        except Exception as exc:
+            raise RuntimeError(_aiapy_import_error(exc)) from exc
 
     warnings: list[str] = []
 
@@ -348,6 +345,25 @@ def register_level_1_5(
         level=LEVEL_1_5,
         warnings=warnings,
         pointing_applied=pointing_applied,
+    )
+
+
+def _aiapy_import_error(exc: BaseException) -> str:
+    """User-facing reason ``aiapy.calibrate`` could not be imported.
+
+    Only a missing ``aiapy`` gets the install hint. Anything else means it is
+    installed but broken — in a packaged build, a bundling fault such as the
+    ``CITATION.rst`` it reads on import being left out — where "pip install"
+    is the wrong advice, so the underlying error is named instead.
+    """
+    if isinstance(exc, ModuleNotFoundError) and exc.name == "aiapy":
+        return (
+            "Level 1.5 needs the optional 'aiapy' package.\n"
+            "Install it with: python3 -m pip install aiapy"
+        )
+    return (
+        "Level 1.5 is unavailable: aiapy is installed but failed to load "
+        f"({type(exc).__name__}: {exc})."
     )
 
 
