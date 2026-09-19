@@ -3,6 +3,7 @@
 import ast
 import importlib.util
 from pathlib import Path
+import re
 import runpy
 from types import SimpleNamespace
 
@@ -25,6 +26,25 @@ def test_all_application_imports_resolve():
                 modules.update(alias.name for alias in node.names if alias.name.startswith("src."))
     missing = sorted(module for module in modules if importlib.util.find_spec(module) is None)
     assert not missing, missing
+
+
+def test_documentation_links_point_at_existing_files():
+    """The guides cross-reference moved files, so a dropped one must not go unnoticed.
+
+    ``docs/build/`` in particular was ignored by an unanchored ``build/`` rule in
+    ``.gitignore``, which silently dropped the macOS guide it links to.
+    """
+    link = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
+    documents = [ROOT / "README.md", *sorted((ROOT / "docs").rglob("*.md"))]
+    broken = []
+    for document in documents:
+        for target in link.findall(document.read_text(encoding="utf-8")):
+            if target.startswith(("http://", "https://", "mailto:", "#")):
+                continue
+            relative = target.split("#", 1)[0]
+            if relative and not (document.parent / relative).exists():
+                broken.append(f"{document.relative_to(ROOT).as_posix()} -> {target}")
+    assert not broken, broken
 
 
 def test_source_resources_resolve_outside_checkout(monkeypatch, tmp_path):

@@ -21,10 +21,10 @@ env/
 *.egg-info/
 *.egg
 
-# Build artifacts
-build/
-dist/
-dmg_tmp/
+# Build artifacts (repository root only, so docs/build/ stays tracked)
+/build/
+/dist/
+/dmg_tmp/
 *.dmg
 *.spec.bak
 
