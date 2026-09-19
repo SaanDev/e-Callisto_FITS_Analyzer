@@ -1,6 +1,21 @@
 # e-CALLISTO FITS Analyzer (v3.1.0-beta)
 A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data.
 
+## Project layout
+
+- `src/backend/`: scientific processing, data sources, sessions and shared services.
+- `src/ui/`: Qt windows, dialogs and widgets grouped by feature.
+- `src/core/`: shared source and packaged-app paths.
+- `assets/`: application branding, themed icons and screenshots.
+- `packaging/`: Windows, macOS, Linux and PyInstaller build configuration.
+- `requirements/` and `scripts/`: dependencies, installation and smoke checks.
+- `tests/`: backend, UI and packaging tests with shared test helpers.
+- `docs/`: build guides, release notes and the [architecture guide](docs/architecture.md).
+
+Start the app from the repository root with `python -m src` or `python src/main.py`.
+See the [architecture guide](docs/architecture.md) for package responsibilities,
+test commands and migration details.
+
 ---
 
 ## What's New in v3.1.0-beta
@@ -824,7 +839,7 @@ painted on screen during motion is approximated.
 
 Background subtraction and RFI cleaning need several quantiles from the same
 rows. `np.nanmedian` and `np.nanpercentile` each sort internally, so the chain
-used to sort the same rows five or six times over. `src/Backend/array_stats.py`
+used to sort the same rows five or six times over. `src/backend/common/array_stats.py`
 sorts once and reads every requested quantile off the sorted rows, matching
 `np.nanpercentile(..., axis=1)` semantics exactly — including its treatment of
 infinities and all-NaN rows.
@@ -841,35 +856,35 @@ infinities and all-NaN rows.
 ### Run from Source
 - Create and activate a virtual environment.
 - Install dependencies:
-  - `python src/Installation/install_requirements.py`
+  - `python scripts/install_requirements.py`
 - Start the app:
-  - `python src/UI/main.py`
+  - `python src/main.py`
 - On Windows source runs, plotting imports are prepared before the splash appears. The first run after a dependency change may briefly print `Preparing plotting runtime...`; allow it to finish.
 - Windows: if `PySide6.QtCore` fails with `ImportError: DLL load failed`, repair the venv and reinstall the pinned runtime stack:
-  - `powershell -ExecutionPolicy Bypass -File .\src\Installation\repair_windows_venv.ps1`
-  - `.\venv\Scripts\python.exe src\UI\main.py`
+  - `powershell -ExecutionPolicy Bypass -File .\packaging\windows\repair_windows_venv.ps1`
+  - `.\venv\Scripts\python.exe src\main.py`
 - The Windows repair script requires Python 3.12 by default and will not silently fall back to Python 3.14 or another installed version. To explicitly use another tested version, pass `-PythonVersion`.
 - Start the standalone Kyoto Dst index plotter:
-  - `python src/UI/dst_index_gui.py`
+  - `python src/ui/space_weather/dst_index_gui.py`
 - Start the standalone GFZ Kp index plotter:
-  - `python src/UI/kp_index_gui.py`
+  - `python src/ui/space_weather/kp_index_gui.py`
 - Start the standalone GOES SEP proton flux plotter:
-  - `python src/UI/goes_sgps_gui.py`
+  - `python src/ui/space_weather/goes_sgps_gui.py`
 
 ### Build dependencies
 - Install runtime dependencies:
-  - `python src/Installation/install_requirements.py`
+  - `python scripts/install_requirements.py`
 - Install build tooling:
   - `python -m pip install pyinstaller pyinstaller-hooks-contrib`
   - macOS only: `python -m pip install py2app`
 
 ### Windows (PyInstaller + optional Inno Setup installer)
 - Recommended scripted build:
-  - `powershell -ExecutionPolicy Bypass -File .\src\Installation\build_windows_installer.ps1`
+  - `powershell -ExecutionPolicy Bypass -File .\packaging\windows\build_windows_installer.ps1`
 - Optional app-folder-only build:
-  - `powershell -ExecutionPolicy Bypass -File .\src\Installation\build_windows_installer.ps1 -SkipInstaller`
+  - `powershell -ExecutionPolicy Bypass -File .\packaging\windows\build_windows_installer.ps1 -SkipInstaller`
 - Manual installer script:
-  - `src/Installation/FITS_Analyzer_InnoSetup.iss`
+  - `packaging/windows/FITS_Analyzer_InnoSetup.iss`
 
 ### Linux (.deb + PyInstaller)
 - Build the `.deb` on Linux. Do not run this step on macOS or Windows: PyInstaller bundles binaries for the host OS, and `build_deb_linux.sh` uses Linux tools such as `dpkg`, `apt-get`, and `fpm`.
@@ -879,13 +894,13 @@ infinities and all-NaN rows.
   - `sudo apt-get install -y python3 python3-venv python3-pip ruby ruby-dev build-essential desktop-file-utils binutils patchelf libgl1 libegl1 libxkbcommon-x11-0 libxcb-cursor0`
   - `sudo gem install --no-document fpm`
 - Build the package:
-  - `PYTHON_BIN=/usr/bin/python3 PIP_INDEX_URL=https://pypi.org/simple bash src/Installation/build_deb_linux.sh`
+  - `PYTHON_BIN=/usr/bin/python3 PIP_INDEX_URL=https://pypi.org/simple bash packaging/linux/build_deb_linux.sh`
 - If the target Linux machine has a different Python `3.11+` interpreter, point at it explicitly:
-  - `PYTHON_BIN=/usr/bin/python3.13 PIP_INDEX_URL=https://pypi.org/simple bash src/Installation/build_deb_linux.sh`
+  - `PYTHON_BIN=/usr/bin/python3.13 PIP_INDEX_URL=https://pypi.org/simple bash packaging/linux/build_deb_linux.sh`
 - If the repository was copied from macOS/Windows or contains an existing non-Linux `.venv`, always set `PYTHON_BIN` explicitly. The Linux build script creates its own `.venv-build`, but it otherwise tries to reuse `./.venv` when present.
 - If you see `.venv-build/bin/python: bad interpreter: No such file or directory`, remove the stale build virtual environment and rerun the build:
   - `rm -rf .venv-build`
-  - `PYTHON_BIN=/usr/bin/python3 PIP_INDEX_URL=https://pypi.org/simple bash src/Installation/build_deb_linux.sh`
+  - `PYTHON_BIN=/usr/bin/python3 PIP_INDEX_URL=https://pypi.org/simple bash packaging/linux/build_deb_linux.sh`
   - Current versions of `build_deb_linux.sh` remove `.venv-build` automatically before recreating it.
 - Build from macOS with Docker:
   - `docker run --rm -it --platform linux/amd64 -v "$PWD":/work -w /work ubuntu:24.04 bash`
@@ -893,26 +908,26 @@ infinities and all-NaN rows.
     - `apt-get update`
     - `apt-get install -y python3 python3-venv python3-pip ruby ruby-dev build-essential desktop-file-utils binutils patchelf libgl1 libegl1 libxkbcommon-x11-0 libxcb-cursor0`
     - `gem install --no-document fpm`
-    - `PYTHON_BIN=/usr/bin/python3 PIP_INDEX_URL=https://pypi.org/simple bash src/Installation/build_deb_linux.sh`
+    - `PYTHON_BIN=/usr/bin/python3 PIP_INDEX_URL=https://pypi.org/simple bash packaging/linux/build_deb_linux.sh`
 - Expected output on `amd64`:
   - `dist/e-callisto-fits-analyzer_3.1.0-beta_amd64.deb`
 - Install the generated local package using a path, not a bare filename:
   - `sudo apt install -y ./dist/e-callisto-fits-analyzer_3.1.0-beta_amd64.deb`
   - If you are already inside `dist`, use `sudo apt install -y ./e-callisto-fits-analyzer_3.1.0-beta_amd64.deb`
 - Manual PyInstaller build only creates the Linux app folder, not the `.deb`:
-  - `pyinstaller src/Installation/FITS_Analyzer_linux.spec`
+  - `pyinstaller packaging/pyinstaller/FITS_Analyzer_linux.spec`
 
 ### macOS (.dmg + py2app)
 - For a non-programmer-friendly walkthrough, see
-  [Build the macOS app from source](MACOS_BUILD_GUIDE.md).
+  [Build the macOS app from source](docs/build/macos.md).
 - Build the `.app` and the disk image in one step:
-  - `bash src/Installation/build_macos_dmg.sh`
+  - `bash packaging/macos/build_macos_dmg.sh`
 - Expected output on Apple silicon:
   - `dist/e-callisto-fits-analyzer_3.1.0-beta_macOS_arm64.dmg`
 - Re-wrap an existing `dist/*.app` without rebuilding it:
-  - `SKIP_APP=1 bash src/Installation/build_macos_dmg.sh`
+  - `SKIP_APP=1 bash packaging/macos/build_macos_dmg.sh`
 - Build the app bundle only:
-  - `python src/Installation/setup.py py2app`
+  - `python packaging/macos/setup.py py2app`
 - The build needs roughly 6 GB of free disk: the bundle is about 2.2 GB, and the
   temporary read-write image adds another 3.2 GB before it is compressed. The
   script reports both numbers and falls back to a plain `hdiutil` layout when
@@ -922,24 +937,24 @@ infinities and all-NaN rows.
   their signatures, and `--deep` never descends into
   `Contents/Resources/lib/python3.13/` where PySide6's Qt frameworks live. The
   app then launches but is killed with `SIGKILL (Code Signature Invalid)` as
-  soon as it loads QtWebEngine. `src/Installation/codesign_macos_bundle.py`
+  soon as it loads QtWebEngine. `packaging/macos/codesign_macos_bundle.py`
   signs every Mach-O inside-out and is run automatically by the build script.
   Note that `codesign --verify --deep --strict` passes on an affected bundle,
   so it cannot be used to detect this.
 - Builds are ad-hoc signed and not notarized, so other machines need
   right-click -> Open on first launch. For public distribution, sign with a
   Developer ID identity:
-  - `CODESIGN_IDENTITY="Developer ID Application: ..." bash src/Installation/build_macos_dmg.sh`
+  - `CODESIGN_IDENTITY="Developer ID Application: ..." bash packaging/macos/build_macos_dmg.sh`
 - Notarization is a separate step the build script does not perform. After
   signing with a Developer ID, submit the image yourself:
   - `xcrun notarytool submit dist/<name>.dmg --keychain-profile <profile> --wait`
   - `xcrun stapler staple dist/<name>.dmg`
 - Verify a finished build:
-  - `python src/Installation/smoke_test_packaged.py --timeout 25`
+  - `python scripts/smoke_test_packaged.py --timeout 25`
 
 ### Generic cross-platform spec
 - Alternative build entry:
-  - `pyinstaller src/Installation/FITS_Analyzer.spec`
+  - `pyinstaller packaging/pyinstaller/FITS_Analyzer.spec`
 
 ---
 

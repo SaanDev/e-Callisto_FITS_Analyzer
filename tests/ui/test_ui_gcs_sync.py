@@ -1,0 +1,397 @@
+"""Regressions for UTC event handoff and observation-scoped GCS fit state."""
+
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+import pytest
+
+pytest.importorskip("PySide6")
+pytest.importorskip("sunpy.map")
+
+from tests.ui.test_ui_gcs_window import _app, _sequence
+from src.ui.gcs.gcs_fitting_window import GCSFittingWindow
+
+
+BASE = datetime(2012, 7, 12, 16)
+
+
+@pytest.fixture
+def window():
+    _app()
+    widget = GCSFittingWindow(target_time=BASE)
+    yield widget
+    widget.close()
+
+
+def test_requested_target_survives_out_of_order_channel_completions():
+    _app()
+    target = BASE + timedelta(minutes=16)
+    widget = GCSFittingWindow(target_time=target)
+    try:
+        widget.panels[0].set_frames(_sequence(0, n=2, cadence_min=40))
+        assert widget._shared_time == BASE
+        widget.panels[1].set_frames(_sequence(60, n=3, cadence_min=15))
+        assert widget._shared_time == BASE + timedelta(minutes=15)
+        assert widget._requested_time == target
+        widget.time_slider.setValue(widget.time_slider.maximum())
+        selected = widget._shared_time
+        widget.panels[2].set_frames(_sequence(-60, n=3, cadence_min=16))
+        assert widget._shared_time == selected
+    finally:
+        widget.close()
+
+
+def test_external_aware_event_times_are_converted_to_utc(window):
+    local = timezone(timedelta(hours=5, minutes=30))
+    start = datetime(2012, 7, 12, 21, 30, tzinfo=local)
+    window.set_time_window(start, start + timedelta(hours=1))
+    assert window.event_range() == (BASE, BASE + timedelta(hours=1))
+    assert all(panel.date_range() == window.event_range() for panel in window.panels)
+    assert window._requested_time == BASE + timedelta(minutes=30)
+
+
+def test_aware_initial_target_is_preserved_in_utc():
+    _app()
+    target = datetime(2012, 7, 12, 21, 30, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+    widget = GCSFittingWindow(target_time=target)
+    try:
+        assert widget.event_range() == (BASE - timedelta(hours=1), BASE + timedelta(hours=1))
+        assert widget._requested_time == BASE
+    finally:
+        widget.close()
+
+
+def test_out_of_tolerance_views_cannot_supply_points_or_geometry(window):
+    window.panels[0].set_frames(_sequence(0, n=2, cadence_min=20))
+    window.panels[1].set_frames(_sequence(60, n=1, start_min=12))
+    assert [panel.label for panel in window._active_panels()] == ["A"]
+    # The shell is still drawn on B for comparison, but B offers nothing to drag
+    # and takes no points: it is not part of the fit.
+    canvas = window.panels[1].canvas
+    assert canvas.has_gcs_overlay()
+    assert not any(handle.isVisible() for handle in canvas._gcs_handles.values())
+    window._on_canvas_click("B", 5000, 1000, "left")
+    assert not window._clicks["B"]
+    before = window.parameters()
+    window._on_handle("B", "apex", 5000, 1000, True)
+    assert window.parameters() == before
+    assert "outside time tolerance" in window.status_label.text()
+    window.sync_tolerance_spin.setValue(12)
+    assert [panel.label for panel in window._active_panels()] == ["A", "B"]
+    assert canvas.has_gcs_overlay()
+    assert any(handle.isVisible() for handle in canvas._gcs_handles.values())
+    window._on_canvas_click("B", 5000, 1000, "left")
+    assert len(window._viewpoints()[1].clicks_arcsec) == 1
+
+
+def test_the_shell_is_drawn_in_every_view_at_every_shared_time(window):
+    """COR2 every 15 minutes beside LASCO every 12 leaves a view outside the
+    5-minute tolerance at most shared times; none of them may lose the shell."""
+    window.panels[0].set_frames(_sequence(-70, n=5, cadence_min=15, start_min=8))
+    window.panels[1].set_frames(_sequence(0, n=6, cadence_min=12, detector="C2"))
+    window.panels[2].set_frames(_sequence(62, n=5, cadence_min=15, start_min=9))
+    outside = 0
+    for index in range(window.time_slider.maximum() + 1):
+        window.time_slider.setValue(index)
+        assert all(panel.canvas.has_gcs_overlay() for panel in window.panels), window._shared_time
+        outside += sum(not panel.is_synchronized() for panel in window.panels)
+    assert outside  # the cadences really did put views outside the tolerance
+
+
+def test_front_points_follow_actual_image_and_return_on_revisit(window):
+    window.panels[0].set_frames(_sequence(0, n=3, cadence_min=10))
+    window.panels[1].set_frames(_sequence(60, n=2, cadence_min=20))
+    window._on_canvas_click("A", 4000, 500, "left")
+    window._on_canvas_click("B", 4200, 600, "left")
+    window._last_refinement = object()
+    window.time_slider.setValue(1)
+    assert window._clicks["A"] == []
+    # B still displays the same actual image; its points remain associated with
+    # that image but the panel is excluded until it meets the time tolerance.
+    assert window._clicks["B"] == [(4200, 600)]
+    assert window._last_refinement is None
+    window._on_canvas_click("A", 5000, 700, "left")
+    window.time_slider.setValue(0)
+    assert window._clicks["A"] == [(4000, 500)]
+    window.time_slider.setValue(1)
+    assert window._clicks["A"] == [(5000, 700)]
+
+
+def test_reload_drops_points_even_if_observation_timestamps_match(window):
+    panel = window.panels[0]
+    panel.set_frames(_sequence(0, n=2))
+    window._on_canvas_click("A", 4000, 500, "left")
+    window._last_refinement = object()
+    panel.set_frames(_sequence(0, n=2))
+    assert window._clicks["A"] == []
+    assert not any(key[0] == "A" for key in window._frame_points)
+    assert window._last_refinement is None
+
+
+@pytest.mark.parametrize("change", ["parameters", "points", "clear", "tolerance"])
+def test_refinement_errors_are_invalidated_when_fit_inputs_change(window, change):
+    window.panels[0].set_frames(_sequence(0, n=2))
+    window._last_refinement = object()
+    if change == "parameters":
+        window._on_parameters(window.parameters().replace_values(height_rsun=9))
+    elif change == "points":
+        window._on_canvas_click("A", 5000, 1000, "left")
+    elif change == "clear":
+        window._clear_points()
+    else:
+        window.sync_tolerance_spin.setValue(6)
+    assert window._last_refinement is None
+
+
+def _record(window, index, height):
+    window.time_slider.setValue(index)
+    window._on_parameters(window.parameters().replace_values(height_rsun=height))
+    window._on_commit()
+
+
+def test_playback_draws_the_recorded_fits_and_their_evolution(window):
+    window.panels[0].set_frames(_sequence(0, n=5, cadence_min=12))
+    window.panels[1].set_frames(_sequence(60, n=5, cadence_min=12))
+    _record(window, 1, 6.0)  # 16:12
+    _record(window, 3, 10.0)  # 16:36
+    window._on_parameters(window.parameters().replace_values(height_rsun=20.0))  # not recorded
+    window._rewind()
+    expected = [
+        (6.0, "recorded fit 16:12:00 held (before first fit)"),
+        (6.0, "recorded fit 16:12:00"),
+        (8.0, "interpolated between recorded fits 16:12:00 and 16:36:00"),
+        (10.0, "recorded fit 16:36:00"),
+        (10.0, "recorded fit 16:36:00 held (after last fit)"),
+    ]
+    window.play()
+    try:
+        for index, (height, note) in enumerate(expected):
+            if index:
+                window._advance_frame()
+            assert window.time_slider.value() == index
+            assert window.parameters().height_rsun == pytest.approx(height)
+            assert window.gcs_panel.sliders["height_rsun"].value() == pytest.approx(height)
+            assert window.status_label.text().startswith(f"▶ Shell: {note} · ")
+            assert all(panel.canvas.has_gcs_overlay() for panel in window.panels[:2])
+        window._advance_frame()  # wraps to the start
+        assert window.parameters().height_rsun == pytest.approx(6.0)
+        window._advance_frame()
+        window._advance_frame()
+    finally:
+        window.pause()
+    # Paused, the shell stays where playback left it and is what the sliders edit…
+    assert window.parameters().height_rsun == pytest.approx(8.0)
+    assert "▶" not in window.status_label.text()
+    assert window.status_label.text().startswith("Shell: interpolated between recorded fits")
+    # …and stepping by hand moves it with the recorded fits too.
+    window.next_frame()
+    assert window.parameters().height_rsun == pytest.approx(10.0)
+    assert window._fits[BASE + timedelta(minutes=12)].apex_height_rsun == 6.0
+
+
+def test_stepping_forward_and_back_moves_the_shell_with_the_recorded_fits(window):
+    window.panels[0].set_frames(_sequence(0, n=5, cadence_min=12))
+    window.panels[1].set_frames(_sequence(60, n=5, cadence_min=12))
+    _record(window, 1, 6.0)  # 16:12
+    _record(window, 3, 10.0)  # 16:36
+    expected = {0: 6.0, 1: 6.0, 2: 8.0, 3: 10.0, 4: 10.0}
+    notes = {
+        0: "Shell: recorded fit 16:12:00 held (before first fit) · ",
+        1: "Shell: recorded fit 16:12:00 · ",
+        2: "Shell: interpolated between recorded fits 16:12:00 and 16:36:00 · ",
+        3: "Shell: recorded fit 16:36:00 · ",
+        4: "Shell: recorded fit 16:36:00 held (after last fit) · ",
+    }
+    window._rewind()
+    for index in (0, 1, 2, 3, 4):
+        if index:
+            window.next_frame()
+        assert window.time_slider.value() == index
+        assert window.parameters().height_rsun == pytest.approx(expected[index])
+        assert window.gcs_panel.sliders["height_rsun"].value() == pytest.approx(expected[index])
+        assert window.status_label.text().startswith(notes[index])
+    for index in (3, 2, 1, 0):
+        window.previous_frame()
+        assert window.parameters().height_rsun == pytest.approx(expected[index])
+    window.time_slider.setValue(2)  # dragging the slider moves it the same way
+    assert window.parameters().height_rsun == pytest.approx(8.0)
+    assert not window._play_timer.isActive()
+
+
+def test_an_edit_replaces_the_recorded_note_and_a_reload_at_the_same_time_keeps_it(window):
+    window.panels[0].set_frames(_sequence(0, n=3, cadence_min=12))
+    window.panels[1].set_frames(_sequence(60, n=3, cadence_min=12))
+    _record(window, 0, 6.0)
+    window.next_frame()
+    assert window.status_label.text().startswith("Shell: recorded fit 16:00:00 held")
+    window._on_parameters(window.parameters().replace_values(height_rsun=7.5))
+    assert "Shell:" not in window.status_label.text()
+    # A channel finishing its load keeps the shared time: the edit must survive.
+    window.panels[2].set_frames(_sequence(-70, n=3, cadence_min=12))
+    assert window.parameters().height_rsun == pytest.approx(7.5)
+    window.next_frame()  # a real step follows the records again
+    assert window.parameters().height_rsun == pytest.approx(6.0)
+
+
+def test_stepping_without_recorded_fits_keeps_the_working_model(window):
+    window.panels[0].set_frames(_sequence(0, n=3))
+    model = window.parameters().replace_values(height_rsun=12.0)
+    window._on_parameters(model)
+    window.next_frame()
+    window.previous_frame()
+    assert window.parameters() == model
+    assert "Shell:" not in window.status_label.text()
+
+
+def test_playback_follows_every_recorded_parameter_not_only_height(window):
+    window.panels[0].set_frames(_sequence(0, n=3, cadence_min=12))
+    window.time_slider.setValue(0)
+    window._on_parameters(window.parameters().replace_values(lon_deg=10.0, tilt_deg=-20.0, kappa=0.2))
+    window._on_commit()
+    window.time_slider.setValue(2)
+    window._on_parameters(window.parameters().replace_values(lon_deg=30.0, tilt_deg=20.0, kappa=0.4))
+    window._on_commit()
+    window.time_slider.setValue(1)
+    window.play()
+    try:
+        middle = window.parameters()
+    finally:
+        window.pause()
+    assert (middle.lon_deg, middle.tilt_deg, middle.kappa) == pytest.approx((20.0, 0.0, 0.3))
+
+
+def test_playback_without_recorded_fits_keeps_the_working_model(window):
+    window.panels[0].set_frames(_sequence(0, n=3))
+    model = window.parameters().replace_values(height_rsun=12.0)
+    window._on_parameters(model)
+    window.play()
+    try:
+        window._advance_frame()
+        window._advance_frame()
+        assert window.parameters() == model
+        assert "▶" not in window.status_label.text()
+    finally:
+        window.pause()
+
+
+def test_empty_timeline_cannot_commit_old_shared_time(window):
+    window.panels[0].set_frames(_sequence(0, n=2))
+    window.panels[0].set_frames([])
+    assert window._shared_time is None
+    assert window._time_axis == []
+    window._on_commit()
+    assert window._fits == {}
+
+
+def test_identical_nearest_frame_tuple_is_not_a_second_kinematic_sample(window):
+    window.panels[0].set_frames(_sequence(0, n=2, cadence_min=20))
+    window.panels[1].set_frames(_sequence(60, n=2, cadence_min=20, start_min=1))
+    window._on_commit()
+    assert list(window._fits) == [BASE]
+    window.time_slider.setValue(1)
+    assert window._shared_time == BASE + timedelta(minutes=1)
+    assert window._recorded_time_for_current_frames() == BASE
+    window._on_parameters(window.parameters().replace_values(height_rsun=10))
+    window._on_commit()
+    assert list(window._fits) == [BASE]
+    assert window._fits[BASE].apex_height_rsun != 10
+    assert "same observations" in window.status_label.text()
+    window.time_slider.setValue(2)
+    window._on_commit()
+    assert len(window._fits) == 2
+
+
+def test_disjoint_event_archives_fits_without_mixing_kinematics(window):
+    original_range = window.event_range()
+    window.panels[0].set_frames(_sequence(0, n=2))
+    window._on_commit()
+    original_entry = window._fits[BASE]
+    assert window._fit_provenance[BASE]["frames"][0]["observation_time_utc"] == BASE
+    tomorrow = BASE + timedelta(days=1)
+    window.set_time_window(tomorrow, tomorrow + timedelta(hours=1))
+    assert not window._fits and not window._fit_provenance
+    assert window._archived_fits[BASE] == original_entry
+    assert not any(panel.frames for panel in window.panels)
+    assert window._shared_time is None
+    window.set_time_window(*original_range)
+    assert window._fits[BASE] == original_entry
+    assert BASE in window._fit_provenance
+    assert BASE not in window._archived_fits
+
+
+def test_adjusting_same_event_preserves_recorded_work(window):
+    window.panels[0].set_frames(_sequence(0, n=2))
+    window._on_commit()
+    window.set_time_window(BASE - timedelta(minutes=10), BASE + timedelta(minutes=30))
+    assert BASE in window._fits
+    assert not window._archived_fits
+
+
+def test_nonconverged_refinement_does_not_change_model(window, monkeypatch):
+    from src.ui.gcs import gcs_fitting_window as module
+
+    # A view to fit against, and enough points for the refine to run.
+    window.panels[1].set_frames(_sequence(0.0))
+    window._clicks["B"] = [(1200.0, 300.0), (1500.0, -200.0), (900.0, 650.0)]
+    seed = window.parameters()
+    result = SimpleNamespace(converged=False, parameters=seed.replace_values(height_rsun=15),
+                             message="Iteration limit reached")
+    monkeypatch.setattr(module, "refine_gcs", lambda *_args, **_kwargs: result)
+    window._on_refine()
+    assert window.parameters() == seed
+    assert window._last_refinement is None
+    assert "did not converge" in window.status_label.text()
+
+
+def test_reopening_parent_updates_existing_window_target(monkeypatch):
+    from src.ui.solar.solar_data_analysis_window import SolarDataAnalysisWindow
+
+    _app()
+    parent = SolarDataAnalysisWindow()
+    try:
+        parent._map_frames = _sequence(0, n=3, cadence_min=10)
+        parent._current_frame_index = 0
+        parent.open_gcs_fitting_window()
+        gcs = parent._gcs_window
+        gcs.panels[0].set_frames(_sequence(0, n=3, cadence_min=10))
+        parent._current_frame_index = 2
+        parent.open_gcs_fitting_window()
+        assert parent._gcs_window is gcs
+        assert gcs._requested_time == BASE + timedelta(minutes=20)
+        assert gcs._shared_time == BASE + timedelta(minutes=20)
+        gcs.close()
+    finally:
+        parent._map_frames = []
+        parent.close()
+
+
+def test_fits_analyzer_hands_selected_event_to_new_and_existing_window(monkeypatch):
+    from src.ui.app.main_window import MainWindow
+    from src.ui.gcs import gcs_fitting_window as module
+
+    calls = []
+
+    class FittingWindow:
+        def __init__(self, parent, *, event_range):
+            calls.append(("create", event_range))
+
+        def windowTitle(self):
+            return "GCS"
+
+        def set_time_window(self, *event_range):
+            calls.append(("update", event_range))
+
+        def show(self):
+            pass
+
+        raise_ = show
+        activateWindow = show
+
+    monkeypatch.setattr(module, "GCSFittingWindow", FittingWindow)
+    first_range = (BASE, BASE + timedelta(minutes=30))
+    parent = SimpleNamespace(_gcs_window=None, _current_time_window_utc=lambda: first_range)
+    MainWindow.open_gcs_fitting_window(parent)
+    second_range = (BASE + timedelta(days=1), BASE + timedelta(days=1, minutes=30))
+    parent._current_time_window_utc = lambda: second_range
+    MainWindow.open_gcs_fitting_window(parent)
+    assert calls == [("create", first_range), ("update", second_range)]

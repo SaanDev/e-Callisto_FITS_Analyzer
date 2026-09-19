@@ -1,0 +1,857 @@
+"""
+e-CALLISTO FITS Analyzer
+Version 3.0.0
+Sahan S Liyanage (sahanslst@gmail.com)
+Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+
+pytest.importorskip("PySide6")
+pytest.importorskip("astropy")
+pytest.importorskip("matplotlib")
+
+from astropy.io import fits
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QImage
+from PySide6.QtWidgets import QApplication
+
+from src.backend.radio.multi_station_comparison import (
+    COLOR_SCALE_MANUAL,
+    NOISE_METHOD_CLIP,
+    NOISE_METHOD_MEAN,
+    NOISE_METHOD_MEDIAN,
+    NOISE_METHOD_NONE,
+    TIME_ALIGNMENT_SECONDS,
+    TIME_ALIGNMENT_UT,
+    ComparisonNoiseSettings,
+)
+from src.ui.widgets.accelerated_plot_widget import AcceleratedPlotWidget
+from src.ui.radio.dialogs.comparison_export_dialog import (
+    EXPORT_LAYOUT_GRID,
+    EXPORT_LAYOUT_VISIBLE,
+    ComparisonExportDialog,
+    ComparisonExportOptions,
+)
+from src.ui.radio.dialogs.multi_station_comparison_dialog import MultiStationComparisonDialog
+from src.ui.app.main_window import MainWindow
+
+
+def _app():
+    return QApplication.instance() or QApplication([])
+
+
+def _flush_events():
+    app = _app()
+    for _ in range(3):
+        app.processEvents()
+
+
+def _write_fit(
+    path: Path,
+    *,
+    label: str,
+    time_obs: str | None = "12:00:00",
+    base: float = 0.0,
+    freq_start: float = 100.0,
+) -> None:
+    data = (np.arange(12, dtype=np.float32).reshape(3, 4) + float(base)).astype(np.float32)
+    hdu = fits.PrimaryHDU(data=data)
+    hdr = hdu.header
+    hdr["CRVAL1"] = 0.0
+    hdr["CDELT1"] = 1.0
+    hdr["CRPIX1"] = 1.0
+    hdr["CRVAL2"] = float(freq_start)
+    hdr["CDELT2"] = -5.0
+    hdr["CRPIX2"] = 1.0
+    hdr["INSTRUME"] = label
+    if time_obs is not None:
+        hdr["TIME-OBS"] = time_obs
+    hdu.writeto(path, overwrite=True)
+
+
+def test_multi_station_action_opens_and_reuses_dialog():
+    _app()
+    win = MainWindow(theme=None)
+
+    assert win.multi_station_comparison_action.text() == "Multi-Station Comparison..."
+    win.multi_station_comparison_action.trigger()
+    _flush_events()
+    first = win._multi_station_comparison_dialog
+
+    assert first is not None
+    assert first.isVisible() is True
+
+    win.multi_station_comparison_action.trigger()
+    _flush_events()
+    assert win._multi_station_comparison_dialog is first
+
+    first.close()
+    win.close()
+
+
+def test_add_remove_files_updates_station_list_without_move_buttons(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B")
+    dialog = MultiStationComparisonDialog()
+
+    dialog.add_files([str(a), str(b)])
+    dialog._render_now()
+
+    assert dialog.file_list.count() == 2
+    assert [item.label for item in dialog._datasets] == ["A", "B"]
+    assert not hasattr(dialog, "up_btn")
+    assert not hasattr(dialog, "down_btn")
+
+    dialog.file_list.setCurrentRow(0)
+    dialog.remove_selected_files()
+    assert dialog.file_list.count() == 1
+    assert [item.label for item in dialog._datasets] == ["B"]
+    dialog.close()
+
+
+def test_time_combinable_files_render_as_combined_view(tmp_path: Path):
+    _app()
+    a = tmp_path / "STAT_20260101_120000_A.fit"
+    b = tmp_path / "STAT_20260101_121500_A.fit"
+    _write_fit(a, label="STAT", time_obs="12:00:00", base=1.0)
+    _write_fit(b, label="STAT", time_obs="12:15:00", base=20.0)
+    dialog = MultiStationComparisonDialog(plot_mode_provider=lambda: "classic")
+
+    dialog.add_files([str(a), str(b)])
+    dialog._render_now()
+
+    assert len(dialog._datasets) == 2
+    assert len(dialog._active_datasets()) == 1
+    assert dialog._active_datasets()[0].combine_type == "time"
+    assert dialog.canvas.fig.axes[0].get_title(loc="left") == "STAT - 2026-01-01"
+    assert "Combined time view" in dialog.status_label.text()
+    dialog.close()
+
+
+def test_time_frequency_grid_renders_as_one_friendly_combined_view(tmp_path: Path):
+    _app()
+    paths = [
+        tmp_path / "STAT_20260101_120000_A.fit",
+        tmp_path / "STAT_20260101_120000_B.fit",
+        tmp_path / "STAT_20260101_121500_A.fit",
+        tmp_path / "STAT_20260101_121500_B.fit",
+    ]
+    _write_fit(paths[0], label="STAT", time_obs="12:00:00", base=1.0, freq_start=100.0)
+    _write_fit(paths[1], label="STAT", time_obs="12:00:00", base=20.0, freq_start=80.0)
+    _write_fit(paths[2], label="STAT", time_obs="12:15:00", base=100.0, freq_start=100.0)
+    _write_fit(paths[3], label="STAT", time_obs="12:15:00", base=200.0, freq_start=80.0)
+    dialog = MultiStationComparisonDialog(plot_mode_provider=lambda: "classic")
+
+    dialog.add_files([str(path) for path in reversed(paths)])
+    dialog._render_now()
+
+    active = dialog._active_datasets()
+    assert len(active) == 1
+    assert active[0].combine_type == "time_frequency"
+    assert active[0].data.shape == (7, 8)
+    assert "Combined time + frequency view" in dialog.status_label.text()
+    dialog.close()
+
+
+def test_four_files_from_two_stations_render_as_two_combined_station_panels(tmp_path: Path):
+    _app()
+    sta_a = tmp_path / "STA_20260101_120000_A.fit"
+    sta_b = tmp_path / "STA_20260101_121500_A.fit"
+    stb_a = tmp_path / "STB_20260101_120000_A.fit"
+    stb_b = tmp_path / "STB_20260101_121500_A.fit"
+    _write_fit(sta_a, label="STA", time_obs="12:00:00", base=1.0)
+    _write_fit(sta_b, label="STA", time_obs="12:15:00", base=10.0)
+    _write_fit(stb_a, label="STB", time_obs="12:00:00", base=100.0)
+    _write_fit(stb_b, label="STB", time_obs="12:15:00", base=200.0)
+    dialog = MultiStationComparisonDialog(plot_mode_provider=lambda: "classic")
+
+    dialog.add_files([str(sta_a), str(sta_b), str(stb_a), str(stb_b)])
+    dialog._render_now()
+
+    active = dialog._active_datasets()
+    assert len(dialog._datasets) == 4
+    assert len(active) == 2
+    assert [dataset.label for dataset in active] == ["STA - 2026-01-01", "STB - 2026-01-01"]
+    assert [dataset.combine_type for dataset in active] == ["time", "time"]
+    assert dialog.canvas.fig.axes[0].get_title(loc="left") == "STA - 2026-01-01"
+    assert dialog.canvas.fig.axes[1].get_title(loc="left") == "STB - 2026-01-01"
+    assert "2 rendered panel(s) from 4 selected file(s)" in dialog.status_label.text()
+    assert "Combined time view" in dialog.status_label.text()
+    dialog.close()
+
+
+def test_dialog_uses_matplotlib_in_classic_mode(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B", base=100.0)
+    dialog = MultiStationComparisonDialog(plot_mode_provider=lambda: "classic")
+
+    dialog.add_files([str(a), str(b)])
+    dialog._render_now()
+
+    assert dialog.plot_stack.currentWidget() is dialog.canvas
+    assert "Matplotlib" in dialog.status_label.text()
+    dialog.close()
+
+
+def test_dialog_uses_hardware_in_modern_mode_when_available(tmp_path: Path):
+    _app()
+    probe = AcceleratedPlotWidget()
+    available = bool(probe.is_available)
+    probe.close()
+    if not available:
+        pytest.skip("pyqtgraph accelerated plotting is unavailable")
+
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B", base=100.0)
+    dialog = MultiStationComparisonDialog(plot_mode_provider=lambda: "modern")
+
+    dialog.add_files([str(a), str(b)])
+    dialog._render_now()
+
+    assert dialog.plot_stack.currentWidget() is dialog.hardware_scroll
+    assert len(dialog._hardware_canvases) == 2
+    assert "Hardware-accelerated" in dialog.status_label.text()
+    dialog.close()
+
+
+def test_load_view_config_applies_visual_settings_and_seconds_range():
+    _app()
+    dialog = MultiStationComparisonDialog()
+    dialog._set_alignment_mode(TIME_ALIGNMENT_SECONDS)
+
+    ok = dialog._apply_view_config_payload(
+        {
+            "range": {"time_start_s": 1.0, "time_stop_s": 2.0, "freq_min_mhz": 40.0, "freq_max_mhz": 80.0},
+            "visual": {"use_db": True, "use_utc": False, "cmap": "plasma", "noise_clip_low": -3.0, "noise_clip_high": 7.0},
+        },
+        apply_range=True,
+    )
+
+    assert ok is True
+    assert dialog.units_combo.currentText() == "dB"
+    assert dialog.colormap_combo.currentText() == "plasma"
+    assert dialog.noise_colormap_combo.currentText() == "plasma"
+    assert dialog.current_color_scale_mode() == COLOR_SCALE_MANUAL
+    assert dialog._display_range["time_start_s"] == pytest.approx(1.0)
+    dialog.close()
+
+
+def test_seconds_display_range_applies_to_all_comparison_panels(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B", base=100.0)
+    dialog = MultiStationComparisonDialog()
+    dialog.add_files([str(a), str(b)])
+    dialog._set_alignment_mode(TIME_ALIGNMENT_SECONDS)
+    dialog._display_range = {"time_start_s": 1.0, "time_stop_s": 3.0, "freq_min_mhz": 80.0, "freq_max_mhz": 110.0}
+
+    dialog._render_now()
+
+    assert dialog.canvas.fig.axes[0].get_xlim() == pytest.approx((1.0, 3.0))
+    assert dialog.canvas.fig.axes[0].get_ylim() == pytest.approx((80.0, 110.0))
+    assert dialog.canvas.fig.axes[1].get_xlim() == pytest.approx((1.0, 3.0))
+    assert dialog.canvas.fig.axes[1].get_ylim() == pytest.approx((80.0, 110.0))
+    dialog.close()
+
+
+def test_ut_mode_downgrades_when_a_file_has_no_time_obs(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A", time_obs="12:00:00")
+    _write_fit(b, label="B", time_obs=None)
+    dialog = MultiStationComparisonDialog()
+
+    dialog.add_files([str(a), str(b)])
+    dialog._set_alignment_mode(TIME_ALIGNMENT_UT)
+    dialog._on_alignment_changed()
+
+    assert dialog.current_alignment_mode() == TIME_ALIGNMENT_SECONDS
+    dialog.close()
+
+
+def test_export_is_disabled_until_two_valid_files_are_loaded(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B")
+    dialog = MultiStationComparisonDialog()
+
+    assert dialog.export_btn.isEnabled() is False
+    dialog.add_files([str(a)])
+    assert dialog.export_btn.isEnabled() is False
+    dialog.add_files([str(b)])
+    assert dialog.export_btn.isEnabled() is True
+    dialog.close()
+
+
+def test_noise_target_combo_tracks_visible_combined_panels(tmp_path: Path):
+    _app()
+    sta_a = tmp_path / "STA_20260101_120000_A.fit"
+    sta_b = tmp_path / "STA_20260101_121500_A.fit"
+    stb_a = tmp_path / "STB_20260101_120000_A.fit"
+    stb_b = tmp_path / "STB_20260101_121500_A.fit"
+    _write_fit(sta_a, label="STA", time_obs="12:00:00", base=1.0)
+    _write_fit(sta_b, label="STA", time_obs="12:15:00", base=10.0)
+    _write_fit(stb_a, label="STB", time_obs="12:00:00", base=100.0)
+    _write_fit(stb_b, label="STB", time_obs="12:15:00", base=200.0)
+    dialog = MultiStationComparisonDialog(plot_mode_provider=lambda: "classic")
+
+    dialog.add_files([str(sta_a), str(sta_b), str(stb_a), str(stb_b)])
+
+    assert dialog.noise_target_combo.count() == 3
+    assert dialog.noise_target_combo.itemText(0) == "All panels"
+    assert dialog.noise_target_combo.itemText(1) == "STA - 2026-01-01"
+    assert dialog.noise_target_combo.itemText(2) == "STB - 2026-01-01"
+    assert "STA_20260101_120000_A.fit" in dialog.noise_target_combo.itemData(1, Qt.ToolTipRole)
+    dialog.close()
+
+
+def test_noise_clipping_method_toggles_threshold_sliders(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B")
+    dialog = MultiStationComparisonDialog()
+    dialog.add_files([str(a), str(b)])
+
+    assert dialog.noise_clip_panel.isHidden() is True
+
+    dialog.noise_method_combo.setCurrentIndex(dialog.noise_method_combo.findData(NOISE_METHOD_CLIP))
+    assert dialog.noise_clip_panel.isHidden() is False
+    assert dialog._noise_all_settings.clip_low == pytest.approx(0.0)
+    assert dialog._noise_all_settings.clip_high == pytest.approx(0.0)
+    assert dialog.noise_low_slider.value() == dialog.noise_high_slider.value()
+
+    dialog.noise_method_combo.setCurrentIndex(dialog.noise_method_combo.findData(NOISE_METHOD_MEDIAN))
+    assert dialog.noise_clip_panel.isHidden() is True
+    dialog.close()
+
+
+def test_noise_all_settings_clear_per_panel_overrides(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B")
+    dialog = MultiStationComparisonDialog()
+    dialog.add_files([str(a), str(b)])
+
+    dialog.noise_target_combo.setCurrentIndex(2)
+    dialog.noise_method_combo.setCurrentIndex(dialog.noise_method_combo.findData(NOISE_METHOD_MEDIAN))
+    assert len(dialog._noise_overrides) == 1
+    assert [setting.method for setting in dialog._effective_noise_settings()] == [NOISE_METHOD_NONE, NOISE_METHOD_MEDIAN]
+
+    dialog.noise_target_combo.setCurrentIndex(0)
+    dialog.noise_method_combo.setCurrentIndex(dialog.noise_method_combo.findData(NOISE_METHOD_MEAN))
+
+    assert dialog._noise_overrides == {}
+    assert dialog._noise_all_settings.method == NOISE_METHOD_MEAN
+    assert [setting.method for setting in dialog._effective_noise_settings()] == [NOISE_METHOD_MEAN, NOISE_METHOD_MEAN]
+    dialog.close()
+
+
+def test_noise_method_change_affects_classic_rendered_data(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B", base=100.0)
+    dialog = MultiStationComparisonDialog(plot_mode_provider=lambda: "classic")
+    dialog.add_files([str(a), str(b)])
+    dialog._set_alignment_mode(TIME_ALIGNMENT_SECONDS)
+
+    dialog.noise_method_combo.setCurrentIndex(dialog.noise_method_combo.findData(NOISE_METHOD_MEAN))
+    result = dialog._render_matplotlib(dialog._active_datasets(), TIME_ALIGNMENT_SECONDS)
+
+    assert np.asarray(result.color_limits) == pytest.approx(np.asarray(((-1.5, 1.5), (-1.5, 1.5))))
+    dialog.close()
+
+
+def test_noise_slider_change_updates_override_with_target_preview(monkeypatch, tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B")
+    dialog = MultiStationComparisonDialog()
+    dialog.add_files([str(a), str(b)])
+    dialog._render_now()
+    dialog.noise_target_combo.setCurrentIndex(1)
+    dialog.noise_method_combo.setCurrentIndex(dialog.noise_method_combo.findData(NOISE_METHOD_CLIP))
+    dialog._redraw_timer.stop()
+    render_calls = {"count": 0}
+    preview_calls = {"count": 0}
+    original_render = dialog._render_now
+    original_preview = dialog._render_noise_target_preview
+
+    def wrapped_render():
+        render_calls["count"] += 1
+        original_render()
+
+    def wrapped_preview(*args, **kwargs):
+        preview_calls["count"] += 1
+        return original_preview(*args, **kwargs)
+
+    monkeypatch.setattr(dialog, "_render_now", wrapped_render)
+    monkeypatch.setattr(dialog, "_render_noise_target_preview", wrapped_preview)
+
+    dialog.noise_low_slider.setValue(min(dialog.noise_low_slider.maximum(), dialog.noise_low_slider.value() + 20))
+
+    key = dialog._noise_key_for_dataset(dialog._active_datasets()[0])
+    assert dialog._noise_overrides[key].method == NOISE_METHOD_CLIP
+    assert dialog._redraw_timer.isActive() is False
+    assert preview_calls["count"] == 1
+    assert render_calls["count"] == 0
+    assert "Digits" in dialog.noise_low_value_label.text()
+    dialog.close()
+
+
+def test_file_selection_maps_to_containing_noise_target_panel(tmp_path: Path):
+    _app()
+    sta_a = tmp_path / "STA_20260101_120000_A.fit"
+    sta_b = tmp_path / "STA_20260101_121500_A.fit"
+    stb_a = tmp_path / "STB_20260101_120000_A.fit"
+    stb_b = tmp_path / "STB_20260101_121500_A.fit"
+    _write_fit(sta_a, label="STA", time_obs="12:00:00", base=1.0)
+    _write_fit(sta_b, label="STA", time_obs="12:15:00", base=10.0)
+    _write_fit(stb_a, label="STB", time_obs="12:00:00", base=100.0)
+    _write_fit(stb_b, label="STB", time_obs="12:15:00", base=200.0)
+    dialog = MultiStationComparisonDialog()
+    dialog.add_files([str(sta_a), str(sta_b), str(stb_a), str(stb_b)])
+
+    dialog.file_list.setCurrentRow(2)
+
+    assert dialog.noise_target_combo.currentText() == "STB - 2026-01-01"
+    dialog.close()
+
+
+def test_noise_clipping_override_changes_only_selected_panel_data(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B", base=100.0)
+    dialog = MultiStationComparisonDialog()
+    dialog.add_files([str(a), str(b)])
+
+    dialog.noise_target_combo.setCurrentIndex(2)
+    dialog.noise_method_combo.setCurrentIndex(dialog.noise_method_combo.findData(NOISE_METHOD_CLIP))
+    processed = dialog._processed_datasets_for_render(dialog._active_datasets())
+
+    assert np.asarray(processed[0].data) == pytest.approx(np.asarray(dialog._active_datasets()[0].data))
+    assert np.asarray(processed[1].data) == pytest.approx(np.zeros_like(np.asarray(processed[1].data)))
+    assert [setting.method for setting in dialog._effective_noise_settings()] == [NOISE_METHOD_NONE, NOISE_METHOD_CLIP]
+    dialog.close()
+
+
+def test_individual_slider_preview_keeps_non_target_payload_and_levels_frozen(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B", base=100.0)
+    dialog = MultiStationComparisonDialog()
+    dialog.add_files([str(a), str(b)])
+    dialog._render_now()
+    first_key = dialog._noise_key_for_dataset(dialog._active_datasets()[0])
+    first_before = dialog._visible_panel_states[first_key].payload.display_data.copy()
+    first_levels = dialog._visible_panel_states[first_key].payload.levels
+
+    dialog.noise_target_combo.setCurrentIndex(2)
+    dialog.noise_method_combo.setCurrentIndex(dialog.noise_method_combo.findData(NOISE_METHOD_CLIP))
+    dialog.noise_high_slider.setValue(min(dialog.noise_high_slider.maximum(), dialog.noise_high_slider.value() + 80))
+
+    first_after = dialog._visible_panel_states[first_key].payload.display_data
+    assert first_after == pytest.approx(first_before)
+    assert dialog._visible_panel_states[first_key].payload.levels == pytest.approx(first_levels)
+    dialog.close()
+
+
+def test_hardware_target_preview_updates_only_selected_widget(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B", base=100.0)
+    dialog = MultiStationComparisonDialog()
+    dialog.add_files([str(a), str(b)])
+    dialog._render_now()
+
+    class _FakeHardwarePanel:
+        def __init__(self):
+            self.update_calls = 0
+
+        def set_dark(self, *_args, **_kwargs):
+            pass
+
+        def update_image(self, *_args, **_kwargs):
+            self.update_calls += 1
+
+        def set_time_mode(self, *_args, **_kwargs):
+            pass
+
+    panels = [_FakeHardwarePanel(), _FakeHardwarePanel()]
+    dialog._hardware_canvases = panels
+    dialog.plot_stack.setCurrentWidget(dialog.hardware_scroll)
+
+    dialog.noise_target_combo.setCurrentIndex(2)
+    dialog.noise_method_combo.setCurrentIndex(dialog.noise_method_combo.findData(NOISE_METHOD_CLIP))
+
+    assert panels[0].update_calls == 0
+    assert panels[1].update_calls == 1
+    dialog.close()
+
+
+def test_noise_clip_labels_show_digits_and_db_values(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B")
+    dialog = MultiStationComparisonDialog()
+    dialog.add_files([str(a), str(b)])
+
+    dialog._set_noise_target_settings(ComparisonNoiseSettings(method=NOISE_METHOD_CLIP, clip_low=0.0, clip_high=10.0))
+    dialog._sync_noise_controls_from_target()
+    dialog.units_combo.setCurrentIndex(dialog.units_combo.findData(True))
+
+    assert "Digits" in dialog.noise_low_value_label.text()
+    assert "Digits" in dialog.noise_high_value_label.text()
+    assert dialog.noise_low_sub_value_label.isHidden() is False
+    assert dialog.noise_high_sub_value_label.isHidden() is False
+    assert "dB" in dialog.noise_low_sub_value_label.text()
+    assert "dB" in dialog.noise_high_sub_value_label.text()
+    dialog.close()
+
+
+def test_noise_log_scale_is_stored_per_target(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B")
+    dialog = MultiStationComparisonDialog()
+    dialog.add_files([str(a), str(b)])
+
+    dialog.noise_target_combo.setCurrentIndex(2)
+    dialog.noise_method_combo.setCurrentIndex(dialog.noise_method_combo.findData(NOISE_METHOD_CLIP))
+    dialog.noise_log_scale_chk.setChecked(True)
+    selected_key = dialog._noise_key_for_dataset(dialog._active_datasets()[1])
+
+    dialog.noise_target_combo.setCurrentIndex(1)
+    assert dialog.noise_log_scale_chk.isChecked() is False
+    dialog.noise_target_combo.setCurrentIndex(2)
+    assert dialog.noise_log_scale_chk.isChecked() is True
+    assert dialog._noise_overrides[selected_key].clip_scale == "signed_log"
+    dialog.close()
+
+
+def test_noise_colormap_combo_syncs_with_render_colormap(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B")
+    dialog = MultiStationComparisonDialog()
+    dialog.add_files([str(a), str(b)])
+
+    dialog.noise_colormap_combo.setCurrentIndex(dialog.noise_colormap_combo.findText("plasma"))
+
+    assert dialog.colormap_combo.currentText() == "plasma"
+    assert dialog._visual_payload()["cmap"] == "plasma"
+    dialog.close()
+
+
+def test_comparison_colormap_dropdowns_include_main_app_options():
+    _app()
+    dialog = MultiStationComparisonDialog()
+    appearance_options = [dialog.colormap_combo.itemText(i) for i in range(dialog.colormap_combo.count())]
+    noise_options = [dialog.noise_colormap_combo.itemText(i) for i in range(dialog.noise_colormap_combo.count())]
+
+    for name in ("Custom", "turbo", "RdYlBu", "jet", "cubehelix", "gray", "bone_r"):
+        assert name in appearance_options
+        assert name in noise_options
+    dialog.close()
+
+
+def test_comparison_classic_ruler_measures_only_selected_panel(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B", base=100.0)
+    dialog = MultiStationComparisonDialog(plot_mode_provider=lambda: "classic")
+    dialog.add_files([str(a), str(b)])
+    dialog._render_now()
+    keys = list(dialog._visible_panel_order)
+    assert len(keys) == 2
+    ax = dialog._mpl_axes_by_key[keys[0]]
+
+    dialog.start_ruler_measurement()
+    dialog._on_measurement_mpl_click(SimpleNamespace(inaxes=ax, button=1, xdata=0.0, ydata=100.0))
+    dialog._on_measurement_mpl_click(SimpleNamespace(inaxes=ax, button=1, xdata=3.0, ydata=85.0))
+
+    assert set(dialog._measurement_results.keys()) == {keys[0]}
+    result = dialog._measurement_results[keys[0]]
+    assert result.duration_s == pytest.approx(3.0)
+    assert result.frequency_delta_mhz == pytest.approx(-15.0)
+    assert keys[1] not in dialog._measurement_artists_by_key
+    assert "Slope:" in dialog.measurement_readout.text()
+    dialog.close()
+
+
+def test_comparison_classic_ruler_second_panel_click_restarts_capture(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B", base=100.0)
+    dialog = MultiStationComparisonDialog(plot_mode_provider=lambda: "classic")
+    dialog.add_files([str(a), str(b)])
+    dialog._render_now()
+    keys = list(dialog._visible_panel_order)
+    ax_a = dialog._mpl_axes_by_key[keys[0]]
+    ax_b = dialog._mpl_axes_by_key[keys[1]]
+
+    dialog.start_ruler_measurement()
+    dialog._on_measurement_mpl_click(SimpleNamespace(inaxes=ax_a, button=1, xdata=0.0, ydata=100.0))
+    dialog._on_measurement_mpl_click(SimpleNamespace(inaxes=ax_b, button=1, xdata=1.0, ydata=90.0))
+
+    assert dialog._measurement_results == {}
+    assert dialog._measurement_capture_key == keys[1]
+    assert dialog._measurement_capture_points == [(1.0, 90.0)]
+    dialog.close()
+
+
+def test_noise_overrides_are_pruned_when_target_is_removed(tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B")
+    dialog = MultiStationComparisonDialog()
+    dialog.add_files([str(a), str(b)])
+    dialog.noise_target_combo.setCurrentIndex(2)
+    dialog.noise_method_combo.setCurrentIndex(dialog.noise_method_combo.findData(NOISE_METHOD_MEDIAN))
+
+    dialog.file_list.setCurrentRow(1)
+    dialog.remove_selected_files()
+
+    assert dialog._noise_overrides == {}
+    assert dialog.noise_target_combo.count() == 2
+    dialog.close()
+
+
+def test_hardware_render_receives_effective_noise_settings(monkeypatch, tmp_path: Path):
+    _app()
+    a = tmp_path / "a.fit"
+    b = tmp_path / "b.fit"
+    _write_fit(a, label="A")
+    _write_fit(b, label="B")
+    dialog = MultiStationComparisonDialog(plot_mode_provider=lambda: "modern")
+    dialog.add_files([str(a), str(b)])
+    dialog._noise_all_settings = ComparisonNoiseSettings(method=NOISE_METHOD_MEAN)
+    captured = {}
+
+    def fake_payloads(_datasets, **kwargs):
+        captured["datasets"] = list(_datasets)
+        captured["noise_settings"] = tuple(kwargs.get("noise_settings") or ())
+        return [], TIME_ALIGNMENT_SECONDS, ()
+
+    monkeypatch.setattr("src.ui.radio.dialogs.multi_station_comparison_dialog.comparison_panel_payloads", fake_payloads)
+    dialog._ensure_hardware_canvases = lambda _count: None
+    dialog._hardware_canvases = []
+
+    dialog._render_hardware(dialog._active_datasets(), TIME_ALIGNMENT_SECONDS)
+
+    assert captured["noise_settings"] == ()
+    assert np.asarray(captured["datasets"][0].data) == pytest.approx(np.asarray([[-1.5, -0.5, 0.5, 1.5]] * 3))
+    assert np.asarray(captured["datasets"][1].data) == pytest.approx(np.asarray([[-1.5, -0.5, 0.5, 1.5]] * 3))
+    dialog.close()
+
+
+def test_visible_comparison_export_supports_main_output_formats(tmp_path: Path):
+    _app()
+    dialog = MultiStationComparisonDialog()
+    image = QImage(120, 80, QImage.Format_ARGB32)
+    image.fill(QColor("#2f6fed"))
+    dialog._capture_visible_plot_image = lambda: image
+
+    outputs = {
+        "png": tmp_path / "comparison.png",
+        "pdf": tmp_path / "comparison.pdf",
+        "eps": tmp_path / "comparison.eps",
+        "svg": tmp_path / "comparison.svg",
+        "tiff": tmp_path / "comparison.tiff",
+    }
+    for ext, path in outputs.items():
+        dialog._export_visible_plot(str(path), ext)
+        assert path.exists()
+        assert path.stat().st_size > 0
+
+    assert "<image" in outputs["svg"].read_text(encoding="utf-8")
+    dialog.close()
+
+
+def test_comparison_export_options_dialog_switches_layouts():
+    _app()
+    dialog = ComparisonExportDialog(
+        initial_options=ComparisonExportOptions(
+            layout=EXPORT_LAYOUT_GRID,
+            columns=3,
+            title="Publication Grid",
+            dpi=450,
+        )
+    )
+
+    assert dialog.grid_radio.isChecked() is True
+    assert dialog.grid_group.isEnabled() is True
+    assert dialog.selected_options() == ComparisonExportOptions(
+        layout=EXPORT_LAYOUT_GRID,
+        columns=3,
+        title="Publication Grid",
+        dpi=450,
+    )
+
+    dialog.visible_radio.setChecked(True)
+    assert dialog.grid_group.isEnabled() is False
+    assert dialog.selected_options().layout == EXPORT_LAYOUT_VISIBLE
+    dialog.close()
+
+
+@pytest.mark.parametrize("layout", [EXPORT_LAYOUT_VISIBLE, EXPORT_LAYOUT_GRID])
+def test_export_comparison_routes_selected_layout(monkeypatch, tmp_path: Path, layout: str):
+    _app()
+    dialog = MultiStationComparisonDialog()
+    dialog._datasets = [SimpleNamespace(), SimpleNamespace()]
+    dialog._comparison_export_options = ComparisonExportOptions(title="Remembered title")
+    output = tmp_path / f"{layout}.png"
+    calls = []
+
+    class _FakeOptionsDialog:
+        def __init__(self, **_kwargs):
+            pass
+
+        def exec(self):
+            return 1
+
+        def selected_options(self):
+            return ComparisonExportOptions(layout=layout, columns=3, title="Export title", dpi=300)
+
+    monkeypatch.setattr("src.ui.radio.dialogs.multi_station_comparison_dialog.ComparisonExportDialog", _FakeOptionsDialog)
+    monkeypatch.setattr(
+        "src.ui.radio.dialogs.multi_station_comparison_dialog.pick_export_path",
+        lambda *_args, **_kwargs: (str(output), "png"),
+    )
+    monkeypatch.setattr(
+        "src.ui.radio.dialogs.multi_station_comparison_dialog.QMessageBox.information",
+        lambda *_args, **_kwargs: None,
+    )
+    dialog._export_visible_plot = lambda path, ext: calls.append(("visible", path, ext))
+    dialog._export_grid_plot = lambda path, ext, options: calls.append(("grid", path, ext, options.columns))
+
+    dialog.export_comparison()
+
+    if layout == EXPORT_LAYOUT_GRID:
+        assert calls == [("grid", str(output), "png", 3)]
+    else:
+        assert calls == [("visible", str(output), "png")]
+    dialog.close()
+
+
+def test_hardware_visible_export_uses_panel_composition_not_dark_scroll_surface():
+    _app()
+    dialog = MultiStationComparisonDialog(plot_mode_provider=lambda: "modern")
+    dark = QImage(160, 100, QImage.Format_ARGB32)
+    dark.fill(QColor("#282828"))
+    content = QImage(160, 100, QImage.Format_ARGB32)
+    content.fill(QColor("#2f6fed"))
+
+    class _FakePanel:
+        def isVisible(self):
+            return True
+
+    dialog._hardware_canvases = [_FakePanel()]
+    dialog.plot_stack.setCurrentWidget(dialog.hardware_scroll)
+    dialog._compose_hardware_panel_images = lambda: content
+
+    assert dialog._image_looks_blank(dark) is True
+    captured = dialog._capture_visible_plot_image()
+    assert captured.isNull() is False
+    assert captured.pixelColor(10, 10).name().lower() == "#2f6fed"
+    dialog.close()
+
+
+def test_opening_comparison_dialog_does_not_mutate_main_window_data_or_view(tmp_path: Path):
+    _app()
+    path = tmp_path / "main.fit"
+    _write_fit(path, label="Main", time_obs="12:00:00")
+    win = MainWindow(theme=None)
+    win.load_fits_into_main(str(path))
+    _flush_events()
+
+    original_data = win.raw_data.copy()
+    original_freqs = win.freqs.copy()
+    original_time = win.time.copy()
+    original_view = win._capture_view()
+    original_dirty = win._project_dirty
+
+    win.open_multi_station_comparison_dialog()
+    _flush_events()
+
+    assert np.array_equal(win.raw_data, original_data)
+    assert np.array_equal(win.freqs, original_freqs)
+    assert np.array_equal(win.time, original_time)
+    assert win._capture_view()["xlim"] == pytest.approx(original_view["xlim"])
+    assert win._capture_view()["ylim"] == pytest.approx(original_view["ylim"])
+    assert win._project_dirty is original_dirty
+
+    win._multi_station_comparison_dialog.close()
+    win.close()
+
+
+def test_open_comparison_dialog_accepts_downloaded_initial_paths(tmp_path: Path):
+    _app()
+    path_a = tmp_path / "BIR_20240102_000000_01.fit"
+    path_b = tmp_path / "GREENLAND_20240102_000000_01.fit"
+    _write_fit(path_a, label="BIR")
+    _write_fit(path_b, label="GREENLAND")
+
+    win = MainWindow(theme=None)
+    win.open_multi_station_comparison_dialog([str(path_a), str(path_b)])
+    _flush_events()
+
+    dialog = win._multi_station_comparison_dialog
+    assert dialog is not None
+    assert dialog.file_list.count() == 2
+
+    path_c = tmp_path / "Arecibo-observatory_20240102_000000_01.fit"
+    _write_fit(path_c, label="Arecibo-observatory")
+    win.open_multi_station_comparison_dialog([str(path_c)])
+    _flush_events()
+
+    assert win._multi_station_comparison_dialog is dialog
+    assert dialog.file_list.count() == 3
+
+    dialog.close()
+    win.close()

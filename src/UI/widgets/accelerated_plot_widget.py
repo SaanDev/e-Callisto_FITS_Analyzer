@@ -1,0 +1,2136 @@
+"""
+e-CALLISTO FITS Analyzer
+Version 3.0.0
+Sahan S Liyanage (sahanslst@gmail.com)
+Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont
+from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+
+from src.backend.radio.frequency_axis import (
+    axis_edges,
+    finite_data_limits,
+    format_frequency_mhz,
+    invalid_row_mask,
+    log_frequency_ticks_mhz,
+    resample_row_mask_to_log_frequency,
+    resample_rows_to_log_frequency,
+)
+from src.backend.space_weather.goes_overlay import GOES_OVERLAY_CHANNEL_ORDER, goes_class_ticks_for_limits, goes_flux_axis_limits
+from src.backend.radio.swaves import format_log_frequency, log_frequency_ticks
+from src.ui.common.font_utils import normalize_font_family
+
+try:
+    import pyqtgraph as pg
+except Exception:
+    pg = None
+
+
+_GAP_FILL_RGBA = np.rint(np.array([0.70, 0.70, 0.70, 0.78]) * 255.0).astype(np.ubyte)
+_GAP_STRIPE_RGBA = np.rint(np.array([0.42, 0.42, 0.42, 0.90]) * 255.0).astype(np.ubyte)
+
+# One-entry identity caches. A slider drag re-renders with the same colormap
+# object every frame, so rebuilding the lookup tables each time was pure waste.
+_LOOKUP_CACHE: dict[str, object] = {"cmap": None, "color_map": None, "lut": None}
+_RGBA_LUT_CACHE: dict[str, object] = {"cmap": None, "lut": None}
+
+
+def _mpl_cmap_to_lookup(cmap):
+    if pg is None or cmap is None:
+        return None, None
+    if _LOOKUP_CACHE["cmap"] is cmap:
+        return _LOOKUP_CACHE["color_map"], _LOOKUP_CACHE["lut"]
+    try:
+        sample = np.linspace(0.0, 1.0, 256)
+        rgba = np.asarray(cmap(sample), dtype=float)
+        rgba = np.clip(rgba, 0.0, 1.0)
+        rgba = (rgba * 255.0).astype(np.ubyte)
+        colors = [tuple(int(v) for v in row[:4]) for row in rgba]
+        color_map = pg.ColorMap(sample, colors)
+        lut = color_map.getLookupTable(0.0, 1.0, 256)
+    except Exception:
+        return None, None
+
+    _LOOKUP_CACHE.update({"cmap": cmap, "color_map": color_map, "lut": lut})
+    return color_map, lut
+
+
+def _rgba_lut_for_cmap(cmap):
+    """A (N, 4) uint8 colour table equivalent to calling ``cmap`` per element.
+
+    Matplotlib colormaps hold exactly ``cmap.N`` distinct colours and accept an
+    integer array as direct lookup indices, so the table is exact for them. Any
+    other callable is sampled on [0, 1] instead, which the uint8 output can
+    represent to within one level.
+    """
+    if cmap is None:
+        return None
+    if _RGBA_LUT_CACHE["cmap"] is cmap:
+        return _RGBA_LUT_CACHE["lut"]
+
+    try:
+        levels = int(getattr(cmap, "N", 0) or 0)
+        if levels > 0:
+            samples = np.arange(levels)
+        else:
+            levels = 256
+            samples = np.linspace(0.0, 1.0, levels)
+        rgba = np.asarray(cmap(samples), dtype=float).reshape(levels, -1)
+        if rgba.shape[1] < 4:
+            return None
+        lut = np.rint(np.clip(rgba[:, :4], 0.0, 1.0) * 255.0).astype(np.ubyte)
+    except Exception:
+        return None
+
+    _RGBA_LUT_CACHE.update({"cmap": cmap, "lut": lut})
+    return lut
+
+
+def _lut_gather(work: np.ndarray, lut: np.ndarray, vmin: float, scale: float) -> np.ndarray:
+    levels = lut.shape[0]
+    index = (work - np.float32(vmin)) * np.float32(levels / scale)
+    np.nan_to_num(index, copy=False, nan=0.0, posinf=float(levels), neginf=0.0)
+    np.clip(index, 0.0, float(levels - 1), out=index)
+    index_dtype = np.uint8 if levels <= 256 else np.intp
+    # np.take is about twice as fast as fancy indexing for the same gather.
+    return np.take(lut, index.astype(index_dtype), axis=0)
+
+
+def _rgba_image_from_cmap(
+    arr: np.ndarray,
+    cmap,
+    *,
+    vmin: float,
+    vmax: float,
+    gap_row_mask: np.ndarray | None = None,
+) -> np.ndarray:
+    work = np.asarray(arr, dtype=np.float32)
+    scale = max(float(vmax) - float(vmin), 1e-12)
+
+    lut = _rgba_lut_for_cmap(cmap)
+    if lut is None:
+        # Unknown callable: fall back to evaluating it per element.
+        norm = np.clip((work - float(vmin)) / scale, 0.0, 1.0)
+        rgba_f = np.asarray(cmap(norm.reshape(-1)), dtype=float).reshape(work.shape + (4,))
+        rgba = np.rint(np.clip(rgba_f, 0.0, 1.0) * 255.0).astype(np.ubyte)
+    else:
+        # Index the table directly in uint8. Evaluating the colormap per element
+        # instead allocated several float64 arrays the size of the image, which
+        # is what made this the dominant cost of a live-preview frame.
+        rgba = _lut_gather(work, lut, float(vmin), scale)
+
+    alpha = np.isfinite(work)
+
+    explicit_gap_rows = None
+    if gap_row_mask is not None:
+        try:
+            candidate = np.asarray(gap_row_mask, dtype=bool).ravel()
+            if candidate.shape[0] == work.shape[0]:
+                explicit_gap_rows = candidate
+        except Exception:
+            explicit_gap_rows = None
+
+    if explicit_gap_rows is not None and np.any(explicit_gap_rows):
+        gap_indices = np.flatnonzero(explicit_gap_rows)
+        columns = np.arange(work.shape[1])
+        # Only the gap rows need the hatch pattern, so build it at that size
+        # rather than over the whole image.
+        stripes = ((gap_indices[:, None] + columns[None, :]) % 6) < 3
+        rgba[gap_indices] = np.where(stripes[..., None], _GAP_STRIPE_RGBA, _GAP_FILL_RGBA)
+        alpha[explicit_gap_rows, :] = True
+
+    row_mask = invalid_row_mask(work, None)
+    if row_mask.size == work.shape[0] and np.any(row_mask):
+        invalid_non_gap = row_mask.copy()
+        if explicit_gap_rows is not None and explicit_gap_rows.shape[0] == invalid_non_gap.shape[0]:
+            invalid_non_gap &= ~explicit_gap_rows
+        alpha[invalid_non_gap, :] = False
+
+    rgba[..., 3] = np.where(alpha, rgba[..., 3], np.ubyte(0))
+    return np.ascontiguousarray(rgba)
+
+
+if pg is not None:
+    class _TimeAxisItem(pg.AxisItem):
+        def __init__(self, orientation="bottom", parent=None):
+            super().__init__(orientation=orientation, parent=parent)
+            self._use_utc = False
+            self._ut_start_sec = None
+
+        def set_time_mode(self, use_utc: bool, ut_start_sec):
+            self._use_utc = bool(use_utc)
+            self._ut_start_sec = ut_start_sec if ut_start_sec is not None else None
+            self.picture = None
+            self.update()
+
+        def tickStrings(self, values, scale, spacing):
+            if not self._use_utc or self._ut_start_sec is None:
+                return super().tickStrings(values, scale, spacing)
+
+            try:
+                show_seconds = float(spacing) <= 30.0
+            except Exception:
+                show_seconds = False
+
+            out = []
+            for val in values:
+                try:
+                    total_seconds = int(round(float(self._ut_start_sec) + float(val)))
+                except Exception:
+                    out.append("")
+                    continue
+
+                hours = int(total_seconds // 3600) % 24
+                minutes = int((total_seconds % 3600) // 60)
+                seconds = int(total_seconds % 60)
+                if show_seconds:
+                    out.append(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
+                else:
+                    out.append(f"{hours:02d}:{minutes:02d}")
+            return out
+
+
+    class _LogFluxAxisItem(pg.AxisItem):
+        def tickStrings(self, values, scale, spacing):
+            return ["" for _ in values]
+
+
+    class _LogFreqAxisItem(pg.AxisItem):
+        """Renders a log10(kHz) axis coordinate as a human frequency."""
+
+        def tickStrings(self, values, scale, spacing):
+            return [format_log_frequency(value) for value in values]
+
+        def tickValues(self, minVal, maxVal, size):
+            ticks = log_frequency_ticks(float(minVal), float(maxVal))
+            if not ticks:
+                return super().tickValues(minVal, maxVal, size)
+            spacing = abs(ticks[1] - ticks[0]) if len(ticks) > 1 else 1.0
+            return [(spacing, ticks)]
+
+
+    class _PassiveViewBox(pg.ViewBox):
+        def mouseDragEvent(self, ev, axis=None):
+            ev.ignore()
+
+        def mouseClickEvent(self, ev):
+            ev.ignore()
+
+        def wheelEvent(self, ev, axis=None):
+            ev.ignore()
+else:
+    class _TimeAxisItem:
+        pass
+
+
+    class _LogFluxAxisItem:
+        pass
+
+
+    class _LogFreqAxisItem:
+        pass
+
+
+    class _PassiveViewBox:
+        pass
+
+
+GOES_OVERLAY_CHANNEL_COLORS = {
+    "xrsa": "#67f2ff",
+    "xrsb": "#ffffff",
+}
+GOES_OVERLAY_LINE_WIDTH = 3.0
+# Shared left-axis width for the CALLISTO/SWAVES split view.
+_SPLIT_LEFT_AXIS_WIDTH = 78
+
+
+class _SceneEventFilter(QObject):
+    def __init__(self, owner):
+        super().__init__(owner)
+        self._owner = owner
+
+    def eventFilter(self, obj, event):
+        try:
+            return bool(self._owner._handle_scene_event(event))
+        except Exception:
+            return False
+
+
+class AcceleratedPlotWidget(QWidget):
+    mousePositionChanged = Signal(float, float, bool)
+    plotClicked = Signal(float, float)
+    lassoFinished = Signal(list)
+    driftPointAdded = Signal(float, float)
+    driftCaptureFinished = Signal(list)
+    measurementCaptureFinished = Signal(list)
+    annotationCaptureFinished = Signal(str, object)
+    annotationCaptureCancelled = Signal(str)
+    viewInteractionFinished = Signal(dict, dict)
+    rectZoomFinished = Signal(dict, dict)
+
+    def __init__(self, parent=None, *, use_opengl: bool = True):
+        super().__init__(parent)
+        self._available = pg is not None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._graphics = None
+        self._plot = None
+        self._viewbox = None
+        self._image = None
+        self._color_bar = None
+        self._bottom_axis = None
+        self._goes_axis = None
+        self._goes_view = None
+        self._goes_curve_items = {}
+        self._goes_curve_item = None
+        self._goes_overlay_payload = None
+        self._goes_visible_channels = ()
+        self._goes_overlay_rect_zoom_hidden = False
+        self._goes_axis_label = "GOES X-Ray Class"
+        self._swaves_plot = None
+        self._swaves_viewbox = None
+        self._swaves_image = None
+        self._swaves_color_bar = None
+        self._swaves_axis = None
+        self._swaves_bottom_axis = None
+        self._swaves_region = None
+        self._swaves_title = ""
+        self._swaves_colorbar_label = ""
+        self._title = ""
+        self._log_freq = False
+        self._axis_ylim = None
+        self._x_label = "Time [s]"
+        self._y_label = "Frequency [MHz]"
+        self._colorbar_label = ""
+        self._fg = "#101010"
+        self._full_view = None
+        self._block_range_signals = False
+        self._interaction_start_view = None
+        self._navigation_locked = False
+        self._rect_zoom_once = False
+
+        self._font_family = ""
+        self._tick_font_px = 11
+        self._axis_label_font_px = 12
+        self._title_font_px = 14
+        self._title_bold = False
+        self._title_italic = False
+        self._axis_bold = False
+        self._axis_italic = False
+        self._ticks_bold = False
+        self._ticks_italic = False
+
+        self._interaction_mode = None  # None | lasso | drift | measurement
+        self._lasso_points = []
+        self._lasso_line_item = None
+        self._lasso_drag_active = False
+        self._drift_points = []
+        self._drift_scatter_item = None
+        self._drift_line_item = None
+        self._measurement_points = []
+        self._measurement_scatter_item = None
+        self._measurement_line_item = None
+        self._measurement_text_item = None
+        self._light_curve_item = None
+        self._light_curve_items = []
+        self._light_curve_label_items = []
+        self._annotation_items = []
+        self._annotation_capture_points = []
+        self._annotation_capture_line_item = None
+        self._annotation_capture_vertex_item = None
+        self._annotation_capture_drag_active = False
+        self._annotation_capture_press_scene_pos = None
+        self._annotation_capture_press_xy = None
+        self._annotation_capture_drag_last_xy = None
+        self._annotation_capture_suppress_next_click = False
+        self._scene_filter = None
+
+        self._interaction_timer = QTimer(self)
+        self._interaction_timer.setSingleShot(True)
+        self._interaction_timer.setInterval(140)
+        self._interaction_timer.timeout.connect(self._emit_interaction_finished)
+
+        if not self._available:
+            label = QLabel("Hardware-accelerated plotting unavailable.")
+            label.setStyleSheet("padding: 6px;")
+            layout.addWidget(label)
+            return
+
+        try:
+            pg.setConfigOptions(useOpenGL=bool(use_opengl), antialias=False, imageAxisOrder="row-major")
+        except Exception:
+            pass
+
+        self._graphics = pg.GraphicsLayoutWidget()
+        self.setMouseTracking(True)
+        try:
+            self._graphics.setMouseTracking(True)
+        except Exception:
+            pass
+        try:
+            viewport = self._graphics.viewport()
+            if viewport is not None:
+                viewport.setMouseTracking(True)
+        except Exception:
+            pass
+        layout.addWidget(self._graphics)
+
+        self._bottom_axis = _TimeAxisItem(orientation="bottom")
+        self._plot = self._graphics.addPlot(axisItems={"bottom": self._bottom_axis})
+        self._plot.hideButtons()
+        self._plot.setMenuEnabled(False)
+        # Keep Y increasing upward so axis ticks match Matplotlib ordering.
+        self._plot.invertY(False)
+        self._plot.setLabel("left", "Frequency [MHz]")
+        self._plot.setLabel("bottom", "Time [s]")
+
+        self._viewbox = self._plot.getViewBox()
+        self._viewbox.sigRangeChanged.connect(self._on_range_changed)
+        try:
+            self._viewbox.sigResized.connect(self._sync_goes_overlay_geometry)
+        except Exception:
+            pass
+
+        self._image = pg.ImageItem(axisOrder="row-major")
+        self._plot.addItem(self._image)
+
+        try:
+            self._goes_axis = _LogFluxAxisItem("right")
+            self._plot.layout.addItem(self._goes_axis, 2, 3)
+            self._goes_view = _PassiveViewBox(enableMenu=False)
+            self._goes_view.setMouseEnabled(x=False, y=False)
+            self._goes_view.setZValue(10)
+            try:
+                self._goes_view.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            except Exception:
+                pass
+            try:
+                self._goes_view.setAcceptHoverEvents(False)
+            except Exception:
+                pass
+            self._plot.scene().addItem(self._goes_view)
+            self._goes_axis.linkToView(self._goes_view)
+            self._goes_view.setXLink(self._viewbox)
+            for idx, key in enumerate(GOES_OVERLAY_CHANNEL_ORDER, start=1):
+                curve_item = pg.PlotCurveItem(
+                    pen=pg.mkPen(color=GOES_OVERLAY_CHANNEL_COLORS.get(key, "#ffffff"), width=GOES_OVERLAY_LINE_WIDTH + (0.2 if key == "xrsb" else 0.0)),
+                    antialias=True,
+                )
+                curve_item.setZValue(11 + idx)
+                try:
+                    curve_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                except Exception:
+                    pass
+                try:
+                    curve_item.setAcceptHoverEvents(False)
+                except Exception:
+                    pass
+                self._goes_view.addItem(curve_item)
+                self._goes_curve_items[key] = curve_item
+            self._goes_curve_item = self._goes_curve_items.get("xrsb") or next(iter(self._goes_curve_items.values()), None)
+            self._goes_axis.hide()
+            self._sync_goes_overlay_geometry()
+        except Exception:
+            self._goes_axis = None
+            self._goes_view = None
+            self._goes_curve_items = {}
+            self._goes_curve_item = None
+
+        self._plot.setMouseEnabled(x=True, y=True)
+        try:
+            self._viewbox.setMouseMode(pg.ViewBox.PanMode)
+        except Exception:
+            pass
+
+        try:
+            cmap = pg.colormap.get("viridis")
+            self._color_bar = pg.ColorBarItem(values=(0.0, 1.0), colorMap=cmap, interactive=False)
+            self._color_bar.setImageItem(self._image, insert_in=self._plot)
+        except Exception:
+            self._color_bar = None
+
+        scene = self._graphics.scene()
+        self._scene_filter = _SceneEventFilter(self)
+        scene.installEventFilter(self._scene_filter)
+        scene.sigMouseMoved.connect(self._on_scene_mouse_moved)
+        scene.sigMouseClicked.connect(self._on_scene_mouse_clicked)
+
+    # ------------------------------------------------------------------
+    # Frequency axis scale
+    #
+    # pyqtgraph places an ImageItem with a plain rectangle, so it cannot warp
+    # an image onto a log axis the way matplotlib does. Log mode therefore
+    # re-samples the rows onto a uniform log10 grid and works in log10(MHz)
+    # plot coordinates. That is an implementation detail: every public method
+    # and signal on this widget stays in MHz, converted at the boundary below.
+    # ------------------------------------------------------------------
+    def _to_axis_y(self, values):
+        """MHz -> plot coordinates."""
+        if not self._log_freq:
+            return values
+        arr = np.asarray(values, dtype=float)
+        out = np.full(arr.shape, np.nan, dtype=float)
+        usable = np.isfinite(arr) & (arr > 0.0)
+        out[usable] = np.log10(arr[usable])
+        return out
+
+    def _to_data_y(self, values):
+        """Plot coordinates -> MHz."""
+        if not self._log_freq:
+            return values
+        return np.power(10.0, np.asarray(values, dtype=float))
+
+    def _axis_y_scalar(self, value: float) -> float:
+        if not self._log_freq:
+            return float(value)
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return float("nan")
+        return float(np.log10(v)) if v > 0.0 else float("nan")
+
+    def _data_y_scalar(self, value: float) -> float:
+        if not self._log_freq:
+            return float(value)
+        try:
+            return float(10.0 ** float(value))
+        except (TypeError, ValueError, OverflowError):
+            return float("nan")
+
+    def _apply_log_frequency_ticks(self) -> None:
+        """Label the log10 axis with real frequencies (or restore automatic ticks).
+
+        The tick frequencies come from the backend, which the matplotlib canvas
+        also uses, so the two renderers put their labels in the same places.
+        """
+        try:
+            axis = self._plot.getAxis("left")
+        except Exception:
+            return
+        if not self._log_freq or self._axis_ylim is None:
+            try:
+                axis.setTicks(None)
+            except Exception:
+                pass
+            return
+        try:
+            lo, hi = self._axis_ylim
+            labelled, minor = log_frequency_ticks_mhz(10.0 ** float(lo), 10.0 ** float(hi))
+            if not labelled:
+                axis.setTicks(None)
+                return
+            axis.setTicks([
+                [(float(np.log10(f)), format_frequency_mhz(f)) for f in labelled],
+                [(float(np.log10(f)), "") for f in minor],
+            ])
+        except Exception:
+            pass
+
+    @property
+    def is_available(self) -> bool:
+        return bool(self._available and self._plot is not None and self._image is not None and self._viewbox is not None)
+
+    def _views_close(self, a, b, tol: float = 1e-6) -> bool:
+        if not a or not b:
+            return False
+        try:
+            ax0, ax1 = a.get("xlim")
+            ay0, ay1 = a.get("ylim")
+            bx0, bx1 = b.get("xlim")
+            by0, by1 = b.get("ylim")
+            return (
+                abs(float(ax0) - float(bx0)) <= tol
+                and abs(float(ax1) - float(bx1)) <= tol
+                and abs(float(ay0) - float(by0)) <= tol
+                and abs(float(ay1) - float(by1)) <= tol
+            )
+        except Exception:
+            return False
+
+    def get_view(self):
+        if not self.is_available:
+            return None
+        try:
+            x_range, y_range = self._viewbox.viewRange()
+            return {
+                "xlim": (float(x_range[0]), float(x_range[1])),
+                "ylim": (
+                    self._data_y_scalar(y_range[0]),
+                    self._data_y_scalar(y_range[1]),
+                ),
+            }
+        except Exception:
+            return None
+
+    def set_view(self, view) -> None:
+        if not self.is_available or not view:
+            return
+        try:
+            xlim = view.get("xlim")
+            ylim = view.get("ylim")
+            if xlim is None or ylim is None:
+                return
+            self._block_range_signals = True
+            y_lo = self._axis_y_scalar(ylim[0])
+            y_hi = self._axis_y_scalar(ylim[1])
+            if not (np.isfinite(y_lo) and np.isfinite(y_hi)):
+                if self._axis_ylim is not None:
+                    y_lo, y_hi = self._axis_ylim
+                else:
+                    return
+            self._viewbox.setRange(
+                xRange=(float(xlim[0]), float(xlim[1])),
+                yRange=(float(y_lo), float(y_hi)),
+                padding=0.0,
+            )
+        except Exception:
+            pass
+        finally:
+            self._block_range_signals = False
+        try:
+            self._sync_goes_overlay_geometry()
+        except Exception:
+            pass
+
+    def set_navigation_locked(self, locked: bool) -> None:
+        if not self.is_available:
+            return
+        self._navigation_locked = bool(locked)
+        if self._navigation_locked and not self._rect_zoom_once:
+            self._plot.setMouseEnabled(x=False, y=False)
+        else:
+            self._plot.setMouseEnabled(x=True, y=True)
+            try:
+                self._viewbox.setMouseMode(pg.ViewBox.PanMode)
+            except Exception:
+                pass
+
+    def _set_goes_overlay_rect_zoom_hidden(self, hidden: bool) -> None:
+        hidden = bool(hidden)
+        self._goes_overlay_rect_zoom_hidden = hidden
+        if not self.is_available:
+            return
+        if hidden:
+            if self._goes_axis is not None:
+                try:
+                    self._goes_axis.hide()
+                except Exception:
+                    pass
+            if self._goes_view is not None:
+                try:
+                    self._goes_view.hide()
+                except Exception:
+                    pass
+            for curve_item in self._goes_curve_items.values():
+                try:
+                    curve_item.hide()
+                except Exception:
+                    pass
+            return
+
+        payload = self._goes_overlay_payload
+        channels = self._goes_visible_channels
+        if payload is not None and channels:
+            self.set_goes_overlay(payload, visible_channels=channels)
+            return
+
+        if self._goes_view is not None:
+            try:
+                self._goes_view.show()
+            except Exception:
+                pass
+
+    def start_rect_zoom_once(self) -> None:
+        if not self.is_available:
+            return
+        self._rect_zoom_once = True
+        self._interaction_start_view = self.get_view()
+        self._set_goes_overlay_rect_zoom_hidden(True)
+        self._plot.setMouseEnabled(x=True, y=True)
+        try:
+            self._viewbox.setMouseMode(pg.ViewBox.RectMode)
+        except Exception:
+            pass
+
+    def cancel_rect_zoom(self) -> None:
+        if not self.is_available:
+            return
+        self._rect_zoom_once = False
+        self._interaction_start_view = None
+        self._interaction_timer.stop()
+        try:
+            self._viewbox.setMouseMode(pg.ViewBox.PanMode)
+        except Exception:
+            pass
+        self._set_goes_overlay_rect_zoom_hidden(False)
+        if self._navigation_locked:
+            self._plot.setMouseEnabled(x=False, y=False)
+
+    def set_time_mode(self, use_utc: bool, ut_start_sec) -> None:
+        if not self.is_available:
+            return
+        try:
+            self._bottom_axis.set_time_mode(use_utc, ut_start_sec)
+        except Exception:
+            pass
+
+    def set_text_style(
+        self,
+        *,
+        font_family: str = "",
+        tick_font_px: int = 11,
+        axis_label_font_px: int = 12,
+        title_font_px: int = 14,
+        title_bold: bool = False,
+        title_italic: bool = False,
+        axis_bold: bool = False,
+        axis_italic: bool = False,
+        ticks_bold: bool = False,
+        ticks_italic: bool = False,
+    ) -> None:
+        self._font_family = normalize_font_family(font_family)
+        self._tick_font_px = max(1, int(tick_font_px))
+        self._axis_label_font_px = max(1, int(axis_label_font_px))
+        self._title_font_px = max(1, int(title_font_px))
+        self._title_bold = bool(title_bold)
+        self._title_italic = bool(title_italic)
+        self._axis_bold = bool(axis_bold)
+        self._axis_italic = bool(axis_italic)
+        self._ticks_bold = bool(ticks_bold)
+        self._ticks_italic = bool(ticks_italic)
+        self._apply_text_style()
+
+    def _build_font(self, px: int, bold: bool, italic: bool) -> QFont:
+        font = QFont()
+        if self._font_family:
+            font.setFamily(self._font_family)
+        font.setPixelSize(max(1, int(px)))
+        font.setBold(bool(bold))
+        font.setItalic(bool(italic))
+        return font
+
+    def _axis_label_style(self):
+        style = {
+            "color": self._fg,
+            "font-size": f"{int(self._axis_label_font_px)}px",
+            "font-weight": "bold" if self._axis_bold else "normal",
+            "font-style": "italic" if self._axis_italic else "normal",
+        }
+        if self._font_family:
+            style["font-family"] = self._font_family
+        return style
+
+    def _title_style(self):
+        style = {
+            "color": self._fg,
+            "size": f"{int(self._title_font_px)}px",
+        }
+        return style
+
+    def _apply_text_style(self):
+        if not self.is_available:
+            return
+
+        tick_font = self._build_font(self._tick_font_px, self._ticks_bold, self._ticks_italic)
+        label_style = self._axis_label_style()
+        for axis_name in ("left", "bottom"):
+            axis = self._plot.getAxis(axis_name)
+            axis.setTextPen(self._fg)
+            axis.setPen(self._fg)
+            try:
+                axis.setStyle(tickFont=tick_font)
+            except Exception:
+                pass
+            try:
+                if axis_name == "left":
+                    text = self._y_label
+                elif self._swaves_plot is not None:
+                    # Split view: the lower panel carries the time label.
+                    text = ""
+                else:
+                    text = self._x_label
+                axis.setLabel(text, **label_style)
+            except Exception:
+                pass
+
+        if self._color_bar is not None:
+            cbar_axis = self._color_bar.axis
+            try:
+                cbar_axis.setTextPen(self._fg)
+                cbar_axis.setPen(self._fg)
+                cbar_axis.setStyle(tickFont=tick_font)
+                cbar_axis.setLabel(self._colorbar_label, **label_style)
+            except Exception:
+                pass
+
+        if self._goes_axis is not None:
+            try:
+                self._goes_axis.setTextPen(self._fg)
+                self._goes_axis.setPen(pg.mkPen(color=self._fg, width=1.25) if pg is not None else self._fg)
+                self._goes_axis.setStyle(tickFont=tick_font, tickLength=10)
+                self._goes_axis.setLabel(self._goes_axis_label, **label_style)
+            except Exception:
+                pass
+
+        if self._swaves_plot is not None:
+            for axis_name in ("left", "bottom"):
+                try:
+                    axis = self._swaves_plot.getAxis(axis_name)
+                    axis.setTextPen(self._fg)
+                    axis.setPen(self._fg)
+                    axis.setStyle(tickFont=tick_font)
+                    text = "Frequency" if axis_name == "left" else self._x_label
+                    axis.setLabel(text, **label_style)
+                except Exception:
+                    pass
+            if self._swaves_color_bar is not None:
+                try:
+                    swaves_cbar_axis = self._swaves_color_bar.axis
+                    swaves_cbar_axis.setTextPen(self._fg)
+                    swaves_cbar_axis.setPen(self._fg)
+                    swaves_cbar_axis.setStyle(tickFont=tick_font)
+                    swaves_cbar_axis.setLabel(self._swaves_colorbar_label, **label_style)
+                except Exception:
+                    pass
+            try:
+                self._swaves_plot.setTitle(self._swaves_title, **self._title_style())
+                swaves_title_font = self._build_font(
+                    max(9, self._title_font_px - 3), self._title_bold, self._title_italic
+                )
+                self._swaves_plot.titleLabel.item.setFont(swaves_title_font)
+                self._swaves_plot.titleLabel.item.setDefaultTextColor(QColor(self._fg))
+            except Exception:
+                pass
+            if self._swaves_region is not None:
+                try:
+                    self._swaves_region.setPen(
+                        pg.mkPen(color=self._fg, width=1.2, style=Qt.DashLine)
+                    )
+                except Exception:
+                    pass
+
+        self._plot.setTitle(self._title, **self._title_style())
+        try:
+            title_font = self._build_font(self._title_font_px, self._title_bold, self._title_italic)
+            self._plot.titleLabel.item.setFont(title_font)
+            self._plot.titleLabel.item.setDefaultTextColor(QColor(self._fg))
+        except Exception:
+            pass
+
+    def set_dark(self, is_dark: bool) -> None:
+        if not self.is_available:
+            return
+        bg = "#111111" if is_dark else "#ffffff"
+        self._fg = "#f2f2f2" if is_dark else "#101010"
+        self._graphics.setBackground(bg)
+        self._apply_text_style()
+
+    def _sync_goes_overlay_geometry(self):
+        if not self.is_available or self._goes_view is None or self._goes_axis is None:
+            return
+        try:
+            self._goes_view.setGeometry(self._viewbox.sceneBoundingRect())
+            self._goes_view.linkedViewChanged(self._viewbox, self._goes_view.XAxis)
+        except Exception:
+            pass
+
+    def _payload_field(self, payload, name: str, default=None):
+        if payload is None:
+            return default
+        if isinstance(payload, dict):
+            return payload.get(name, default)
+        return getattr(payload, name, default)
+
+    def _goes_series_arrays(self, series):
+        xs = np.asarray(self._payload_field(series, "x_seconds", []), dtype=float)
+        ys = np.asarray(self._payload_field(series, "flux_wm2", []), dtype=float)
+        if xs.size == 0 or ys.size == 0 or xs.size != ys.size:
+            return None, None
+        mask = np.isfinite(xs) & np.isfinite(ys) & (ys > 0.0)
+        if not np.any(mask):
+            return None, None
+        return np.asarray(xs[mask], dtype=float), np.asarray(ys[mask], dtype=float)
+
+    def _goes_payload_series(self, payload, visible_channels=None):
+        series_map = self._payload_field(payload, "series", {}) or {}
+        if not series_map:
+            return []
+        selected = tuple(visible_channels or GOES_OVERLAY_CHANNEL_ORDER)
+        out = []
+        for key in GOES_OVERLAY_CHANNEL_ORDER:
+            if key in selected and key in series_map:
+                out.append((key, series_map[key]))
+        for key, series in series_map.items():
+            if key in selected and key not in {item[0] for item in out}:
+                out.append((key, series))
+        return out
+
+    def _goes_log_limits(self, flux):
+        flux_limits = goes_flux_axis_limits(flux)
+        if flux_limits is None:
+            return None
+        return float(np.log10(flux_limits[0])), float(np.log10(flux_limits[1]))
+
+    def _goes_axis_ticks(self, limits):
+        try:
+            flux_min = float(10.0 ** float(limits[0]))
+            flux_max = float(10.0 ** float(limits[1]))
+        except Exception:
+            return []
+        major = [(float(np.log10(value)), label) for value, label in goes_class_ticks_for_limits(flux_min, flux_max)]
+        minor = []
+        lo_exp = int(np.floor(float(limits[0])))
+        hi_exp = int(np.ceil(float(limits[1])))
+        for exponent in range(lo_exp, hi_exp + 1):
+            base = 10.0 ** exponent
+            for factor in range(2, 10):
+                value = float(factor) * base
+                if flux_min <= value <= flux_max:
+                    minor.append((float(np.log10(value)), ""))
+        return [major, minor]
+
+    def clear_goes_overlay(self) -> None:
+        self._goes_overlay_payload = None
+        self._goes_visible_channels = ()
+        for curve_item in self._goes_curve_items.values():
+            try:
+                curve_item.setData([], [])
+            except Exception:
+                pass
+        if self._goes_axis is not None:
+            try:
+                self._goes_axis.setTicks([])
+                self._goes_axis.hide()
+            except Exception:
+                pass
+
+    def set_goes_overlay(self, payload, visible_channels=None) -> None:
+        self._goes_overlay_payload = payload
+        self._goes_visible_channels = tuple(visible_channels or ())
+        if not self.is_available or self._goes_view is None or self._goes_axis is None or not self._goes_curve_items:
+            return
+        plot_series = []
+        flux_arrays = []
+        for key, series in self._goes_payload_series(payload, visible_channels=self._goes_visible_channels):
+            xs, flux = self._goes_series_arrays(series)
+            if xs is None or flux is None:
+                continue
+            plot_series.append((key, xs, flux))
+            flux_arrays.append(flux)
+        if not plot_series or not flux_arrays:
+            self.clear_goes_overlay()
+            return
+
+        limits = self._goes_log_limits(np.concatenate(flux_arrays))
+        if limits is None:
+            self.clear_goes_overlay()
+            return
+
+        self._goes_axis_label = "GOES X-Ray Class"
+        self._apply_text_style()
+        for key, curve_item in self._goes_curve_items.items():
+            curve_item.setData([], [])
+        for key, xs, flux in plot_series:
+            curve_item = self._goes_curve_items.get(key)
+            if curve_item is None:
+                continue
+            curve_item.setData(xs, np.log10(flux))
+        try:
+            self._goes_view.enableAutoRange(x=False, y=False)
+        except Exception:
+            pass
+        try:
+            self._goes_view.setRange(yRange=(float(limits[0]), float(limits[1])), padding=0.0)
+        except Exception:
+            pass
+        try:
+            self._goes_axis.setTicks(self._goes_axis_ticks(limits))
+        except Exception:
+            pass
+        self._sync_goes_overlay_geometry()
+        if self._goes_overlay_rect_zoom_hidden:
+            for curve_item in self._goes_curve_items.values():
+                try:
+                    curve_item.hide()
+                except Exception:
+                    pass
+            try:
+                self._goes_view.hide()
+            except Exception:
+                pass
+            try:
+                self._goes_axis.hide()
+            except Exception:
+                pass
+            return
+        try:
+            self._goes_view.show()
+        except Exception:
+            pass
+        for curve_item in self._goes_curve_items.values():
+            try:
+                x_data, y_data = curve_item.getData()
+                x_count = 0 if x_data is None else int(len(x_data))
+                y_count = 0 if y_data is None else int(len(y_data))
+                curve_item.setVisible(bool(x_count and y_count))
+            except Exception:
+                pass
+        try:
+            self._goes_axis.show()
+        except Exception:
+            pass
+
+    def _clear_lasso_overlay(self):
+        self._lasso_points = []
+        self._lasso_drag_active = False
+        if self._lasso_line_item is not None:
+            try:
+                self._plot.removeItem(self._lasso_line_item)
+            except Exception:
+                pass
+            self._lasso_line_item = None
+
+    def _apply_navigation_state(self):
+        if not self.is_available:
+            return
+        if self._navigation_locked:
+            self._plot.setMouseEnabled(x=False, y=False)
+        else:
+            self._plot.setMouseEnabled(x=True, y=True)
+            try:
+                self._viewbox.setMouseMode(pg.ViewBox.PanMode)
+            except Exception:
+                pass
+
+    def _clear_drift_overlay(self):
+        self._drift_points = []
+        if self._drift_scatter_item is not None:
+            try:
+                self._plot.removeItem(self._drift_scatter_item)
+            except Exception:
+                pass
+            self._drift_scatter_item = None
+        if self._drift_line_item is not None:
+            try:
+                self._plot.removeItem(self._drift_line_item)
+            except Exception:
+                pass
+            self._drift_line_item = None
+
+    def clear_measurement(self) -> None:
+        if not self.is_available:
+            return
+        self._measurement_points = []
+        for attr in ("_measurement_scatter_item", "_measurement_line_item", "_measurement_text_item"):
+            item = getattr(self, attr, None)
+            if item is not None:
+                try:
+                    self._plot.removeItem(item)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+
+    def clear_light_curve_overlay(self) -> None:
+        if not self.is_available:
+            return
+        for item in list(getattr(self, "_light_curve_items", []) or []):
+            try:
+                self._plot.removeItem(item)
+            except Exception:
+                pass
+        for item in list(getattr(self, "_light_curve_label_items", []) or []):
+            try:
+                self._plot.removeItem(item)
+            except Exception:
+                pass
+        self._light_curve_items = []
+        self._light_curve_label_items = []
+        self._light_curve_item = None
+
+    def _light_curve_pen(self, color: str, width: float, opacity: float, line_style: str):
+        qcolor = QColor(str(color or "#00e5ff"))
+        if not qcolor.isValid():
+            qcolor = QColor("#00e5ff")
+        try:
+            qcolor.setAlphaF(min(max(float(opacity), 0.0), 1.0))
+        except Exception:
+            qcolor.setAlphaF(0.95)
+
+        style = Qt.PenStyle.SolidLine
+        style_text = str(line_style or "solid").lower()
+        if style_text == "dashed":
+            style = Qt.PenStyle.DashLine
+        elif style_text == "dotted":
+            style = Qt.PenStyle.DotLine
+        try:
+            return pg.mkPen(color=qcolor, width=max(0.5, float(width)), style=style)
+        except Exception:
+            return pg.mkPen(color=qcolor, width=2.0)
+
+    def set_light_curve_overlay(self, x_values, y_values, *, color: str = "#00e5ff") -> None:
+        self.set_light_curve_overlays(
+            [
+                {
+                    "time": x_values,
+                    "y": y_values,
+                    "color": color,
+                    "line_width": 2.0,
+                    "opacity": 0.95,
+                    "line_style": "solid",
+                    "show_label": False,
+                }
+            ]
+        )
+
+    def set_light_curve_overlays(self, curves) -> None:
+        if not self.is_available:
+            return
+
+        curve_payloads = list(curves or [])
+        if not curve_payloads:
+            self.clear_light_curve_overlay()
+            return
+
+        self.clear_light_curve_overlay()
+        for curve in curve_payloads:
+            if not isinstance(curve, dict):
+                continue
+            try:
+                xs = np.asarray(curve.get("time"), dtype=float).reshape(-1)
+                ys = np.asarray(curve.get("y"), dtype=float).reshape(-1)
+            except Exception:
+                continue
+            if xs.size == 0 or ys.size == 0 or xs.size != ys.size:
+                continue
+
+            item = pg.PlotDataItem(
+                pen=self._light_curve_pen(
+                    str(curve.get("color") or "#00e5ff"),
+                    float(curve.get("line_width", 2.0)),
+                    float(curve.get("opacity", 0.95)),
+                    str(curve.get("line_style") or "solid"),
+                )
+            )
+            item.setZValue(19)
+            item.setData(xs, self._to_axis_y(ys))
+            self._plot.addItem(item)
+            self._light_curve_items.append(item)
+
+            if bool(curve.get("show_label", False)):
+                label = str(curve.get("label") or "").strip()
+                if label:
+                    try:
+                        text_item = pg.TextItem(
+                            text=label,
+                            color=str(curve.get("color") or "#00e5ff"),
+                            anchor=(0.0, 1.0),
+                        )
+                        text_item.setZValue(20)
+                        text_item.setPos(
+                            float(curve.get("label_x", xs[0])),
+                            self._axis_y_scalar(curve.get("label_y", ys[0])),
+                        )
+                        self._plot.addItem(text_item)
+                        self._light_curve_label_items.append(text_item)
+                    except Exception:
+                        pass
+
+        self._light_curve_item = self._light_curve_items[0] if self._light_curve_items else None
+        if not self._light_curve_items:
+            self.clear_light_curve_overlay()
+
+    def _annotation_capture_kind(self) -> str | None:
+        mode = str(self._interaction_mode or "")
+        if not mode.startswith("annotation:"):
+            return None
+        return mode.split(":", 1)[1] or None
+
+    def _clear_annotation_capture_overlay(self) -> None:
+        self._annotation_capture_points = []
+        self._annotation_capture_drag_active = False
+        self._annotation_capture_press_scene_pos = None
+        self._annotation_capture_press_xy = None
+        self._annotation_capture_drag_last_xy = None
+        if self._annotation_capture_line_item is not None:
+            try:
+                self._plot.removeItem(self._annotation_capture_line_item)
+            except Exception:
+                pass
+            self._annotation_capture_line_item = None
+        if self._annotation_capture_vertex_item is not None:
+            try:
+                self._plot.removeItem(self._annotation_capture_vertex_item)
+            except Exception:
+                pass
+            self._annotation_capture_vertex_item = None
+
+    def _ensure_annotation_capture_items(self) -> None:
+        if self._annotation_capture_line_item is None:
+            self._annotation_capture_line_item = pg.PlotDataItem(
+                pen=pg.mkPen(0, 212, 255, 220, width=2)
+            )
+            self._plot.addItem(self._annotation_capture_line_item)
+        if self._annotation_capture_vertex_item is None:
+            self._annotation_capture_vertex_item = pg.ScatterPlotItem(
+                size=8,
+                brush=pg.mkBrush(0, 212, 255, 230),
+                pen=pg.mkPen(255, 255, 255, 220, width=1),
+            )
+            self._plot.addItem(self._annotation_capture_vertex_item)
+
+    def _points_close(self, a, b, tol: float = 1e-6) -> bool:
+        try:
+            return ((float(a[0]) - float(b[0])) ** 2 + (float(a[1]) - float(b[1])) ** 2) <= tol
+        except Exception:
+            return False
+
+    def _append_annotation_capture_point(self, xy) -> bool:
+        try:
+            point = (float(xy[0]), float(xy[1]))
+        except Exception:
+            return False
+        if self._annotation_capture_points and self._points_close(self._annotation_capture_points[-1], point):
+            return False
+        self._annotation_capture_points.append(point)
+        return True
+
+    def _update_annotation_capture_overlay(self, cursor_xy=None) -> None:
+        if not self.is_available:
+            return
+        kind = self._annotation_capture_kind()
+        if kind is None:
+            return
+
+        line_points: list[tuple[float, float]] = []
+        vertex_points = list(self._annotation_capture_points)
+
+        if kind == "polygon":
+            line_points = list(self._annotation_capture_points)
+            if cursor_xy is not None and self._annotation_capture_points:
+                try:
+                    line_points.append((float(cursor_xy[0]), float(cursor_xy[1])))
+                    if len(self._annotation_capture_points) >= 2:
+                        line_points.append(self._annotation_capture_points[0])
+                except Exception:
+                    pass
+        elif kind == "line":
+            if self._annotation_capture_points:
+                if cursor_xy is not None:
+                    try:
+                        line_points = [
+                            self._annotation_capture_points[0],
+                            (float(cursor_xy[0]), float(cursor_xy[1])),
+                        ]
+                    except Exception:
+                        line_points = []
+                vertex_points = self._annotation_capture_points[:1]
+        elif kind == "text":
+            if cursor_xy is not None:
+                try:
+                    vertex_points = [(float(cursor_xy[0]), float(cursor_xy[1]))]
+                except Exception:
+                    vertex_points = []
+            else:
+                vertex_points = []
+
+        self._ensure_annotation_capture_items()
+
+        if line_points:
+            xs = [p[0] for p in line_points]
+            ys = self._to_axis_y([p[1] for p in line_points])
+            self._annotation_capture_line_item.setData(xs, ys)
+        else:
+            self._annotation_capture_line_item.setData([], [])
+
+        if vertex_points:
+            xs = [p[0] for p in vertex_points]
+            ys = self._to_axis_y([p[1] for p in vertex_points])
+            self._annotation_capture_vertex_item.setData(xs, ys)
+        else:
+            self._annotation_capture_vertex_item.setData([], [])
+
+    def _finish_annotation_capture(self, kind: str, payload) -> None:
+        kind_norm = str(kind or "").strip().lower()
+        if kind_norm == "polygon":
+            out = [(float(x), float(y)) for x, y in list(payload or [])]
+        elif kind_norm == "line":
+            out = [(float(x), float(y)) for x, y in list(payload or [])[:2]]
+        else:
+            x, y = payload
+            out = (float(x), float(y))
+
+        self._interaction_mode = None
+        self._clear_annotation_capture_overlay()
+        self._apply_navigation_state()
+        self.annotationCaptureFinished.emit(kind_norm, out)
+
+    def _cancel_annotation_capture(self, kind: str | None = None) -> None:
+        kind_norm = str(kind or self._annotation_capture_kind() or "").strip().lower()
+        if not kind_norm:
+            return
+        self._interaction_mode = None
+        self._clear_annotation_capture_overlay()
+        self._apply_navigation_state()
+        self.annotationCaptureCancelled.emit(kind_norm)
+
+    def clear_overlays(self) -> None:
+        if not self.is_available:
+            return
+        self._clear_lasso_overlay()
+        self._clear_drift_overlay()
+        self.clear_measurement()
+        self._clear_annotation_capture_overlay()
+
+    def clear(self) -> None:
+        if not self.is_available:
+            return
+        self._image.clear()
+        self._plot.setTitle("")
+        self._interaction_mode = None
+        self._clear_lasso_overlay()
+        self._clear_drift_overlay()
+        self.clear_measurement()
+        self.clear_light_curve_overlay()
+        self._clear_annotation_capture_overlay()
+        self._clear_annotation_overlay()
+        self.clear_goes_overlay()
+        self.clear_swaves_panel()
+
+    def export_plot_item(self):
+        if not self.is_available:
+            return None
+        return self._plot
+
+    def export_scene(self):
+        """Whole-scene export target, so a split view exports both panels."""
+        if not self.is_available or self._graphics is None:
+            return None
+        try:
+            return self._graphics.scene()
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
+    # STEREO/SWAVES companion panel
+    # ------------------------------------------------------------------
+
+    @property
+    def has_swaves_panel(self) -> bool:
+        return bool(self.is_available and self._swaves_plot is not None)
+
+    def _ensure_swaves_panel(self) -> bool:
+        """Create the linked second row on first use."""
+        if not self.is_available:
+            return False
+        if self._swaves_plot is not None:
+            return True
+
+        try:
+            self._swaves_bottom_axis = _TimeAxisItem(orientation="bottom")
+            self._swaves_axis = _LogFreqAxisItem(orientation="left")
+            self._swaves_plot = self._graphics.addPlot(
+                row=1,
+                col=0,
+                axisItems={"bottom": self._swaves_bottom_axis, "left": self._swaves_axis},
+            )
+            self._swaves_plot.hideButtons()
+            self._swaves_plot.setMenuEnabled(False)
+            self._swaves_plot.invertY(False)
+            self._swaves_plot.setLabel("left", "Frequency")
+
+            self._swaves_viewbox = self._swaves_plot.getViewBox()
+            # One X link is the entire time sync between the two panels.
+            self._swaves_viewbox.setXLink(self._viewbox)
+            self._swaves_viewbox.setMouseEnabled(x=True, y=False)
+
+            self._swaves_image = pg.ImageItem(axisOrder="row-major")
+            self._swaves_plot.addItem(self._swaves_image)
+
+            try:
+                cmap = pg.colormap.get("viridis")
+                self._swaves_color_bar = pg.ColorBarItem(values=(0.0, 1.0), colorMap=cmap, interactive=False)
+                self._swaves_color_bar.setImageItem(self._swaves_image, insert_in=self._swaves_plot)
+            except Exception:
+                self._swaves_color_bar = None
+
+            try:
+                self._graphics.ci.layout.setRowStretchFactor(0, 1)
+                self._graphics.ci.layout.setRowStretchFactor(1, 1)
+            except Exception:
+                pass
+
+            # pyqtgraph maps a linked X range through each view's geometry, so
+            # the two plot areas must be the same width or the shared time axis
+            # drifts between panels. Pin both left axes to one width.
+            try:
+                self._plot.getAxis("left").setWidth(_SPLIT_LEFT_AXIS_WIDTH)
+                self._swaves_axis.setWidth(_SPLIT_LEFT_AXIS_WIDTH)
+            except Exception:
+                pass
+            return True
+        except Exception:
+            self.clear_swaves_panel()
+            return False
+
+    def clear_swaves_panel(self) -> None:
+        if not self.is_available:
+            return
+        plot = self._swaves_plot
+        self._swaves_plot = None
+        self._swaves_viewbox = None
+        self._swaves_image = None
+        self._swaves_color_bar = None
+        self._swaves_axis = None
+        self._swaves_bottom_axis = None
+        self._swaves_region = None
+        self._swaves_title = ""
+        self._swaves_colorbar_label = ""
+        if plot is not None:
+            try:
+                self._graphics.removeItem(plot)
+            except Exception:
+                pass
+        # The main panel takes its time axis and automatic left-axis width back.
+        try:
+            self._plot.getAxis("bottom").setStyle(showValues=True)
+            self._plot.setLabel("bottom", self._x_label)
+            self._plot.getAxis("left").setWidth(None)
+        except Exception:
+            pass
+        self._apply_text_style()
+
+    def set_swaves_panel(
+        self,
+        payload,
+        cmap,
+        *,
+        levels=None,
+        span=None,
+        title: str = "",
+        x_label: str = "Time [s]",
+        colorbar_label: str = "",
+        use_utc: bool = False,
+        ut_start_sec=None,
+    ) -> bool:
+        """Mirror the Matplotlib SWAVES panel onto the hardware canvas."""
+        if not self.is_available:
+            return False
+        if payload is None:
+            if self.has_swaves_panel:
+                self.clear_swaves_panel()
+            return False
+        if not self._ensure_swaves_panel():
+            return False
+
+        arr = np.asarray(payload.intensity_db, dtype=np.float32)
+        if arr.ndim != 2 or arr.size == 0:
+            return False
+        # Rows arrive highest-frequency-first for Matplotlib's origin="upper";
+        # this canvas uses a Cartesian Y axis, so flip them back.
+        arr = np.ascontiguousarray(arr[::-1, :])
+
+        try:
+            x0, x1, y0, y1 = (float(v) for v in payload.pyqtgraph_extent())
+        except Exception:
+            return False
+
+        vmin, vmax = finite_data_limits(arr)
+        if levels is not None:
+            try:
+                low, high = float(levels[0]), float(levels[1])
+                if np.isfinite(low) and np.isfinite(high) and high > low:
+                    vmin, vmax = low, high
+            except Exception:
+                pass
+        if vmin is None or vmax is None:
+            return False
+
+        color_map, lut = _mpl_cmap_to_lookup(cmap)
+        has_invalid = bool(np.any(~np.isfinite(arr)))
+
+        try:
+            if has_invalid:
+                rgba = _rgba_image_from_cmap(arr, cmap, vmin=vmin, vmax=vmax)
+                self._swaves_image.setLookupTable(None, update=False)
+                self._swaves_image.setImage(rgba, autoLevels=False)
+            else:
+                if lut is not None:
+                    self._swaves_image.setLookupTable(lut, update=False)
+                self._swaves_image.setImage(arr, autoLevels=False, levels=(vmin, vmax))
+                self._swaves_image.setLevels((vmin, vmax))
+            self._swaves_image.setRect(QRectF(x0, y0, x1 - x0, y1 - y0))
+        except Exception:
+            return False
+
+        if self._swaves_color_bar is not None:
+            try:
+                self._swaves_color_bar.setLevels((vmin, vmax))
+                if color_map is not None:
+                    self._swaves_color_bar.setColorMap(color_map)
+            except Exception:
+                pass
+
+        try:
+            self._swaves_viewbox.setYRange(min(y0, y1), max(y0, y1), padding=0.0)
+        except Exception:
+            pass
+
+        self._set_swaves_span(span)
+
+        if self._swaves_bottom_axis is not None:
+            try:
+                self._swaves_bottom_axis.set_time_mode(bool(use_utc), ut_start_sec)
+            except Exception:
+                pass
+
+        self._swaves_title = str(title or "")
+        self._swaves_colorbar_label = str(colorbar_label or "")
+        self._x_label = str(x_label or "")
+
+        # In split view only the lower panel shows the time ticks and label.
+        try:
+            self._plot.getAxis("bottom").setStyle(showValues=False)
+            self._plot.setLabel("bottom", "")
+        except Exception:
+            pass
+
+        self._apply_text_style()
+        return True
+
+    def _set_swaves_span(self, span) -> None:
+        """Mark the CALLISTO interval inside the wider SWAVES context window."""
+        if self._swaves_plot is None:
+            return
+        if self._swaves_region is not None:
+            try:
+                self._swaves_plot.removeItem(self._swaves_region)
+            except Exception:
+                pass
+            self._swaves_region = None
+        if not span:
+            return
+        try:
+            low, high = float(span[0]), float(span[1])
+            if not (np.isfinite(low) and np.isfinite(high)) or high <= low:
+                return
+            region = pg.LinearRegionItem(
+                values=(low, high),
+                movable=False,
+                brush=pg.mkBrush(255, 255, 255, 26),
+                pen=pg.mkPen(color=self._fg, width=1.2, style=Qt.DashLine),
+            )
+            region.setZValue(20)
+            try:
+                region.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            except Exception:
+                pass
+            self._swaves_plot.addItem(region)
+            self._swaves_region = region
+        except Exception:
+            self._swaves_region = None
+
+    def update_image(
+        self,
+        data: np.ndarray,
+        extent,
+        cmap,
+        gap_row_mask: np.ndarray | None = None,
+        levels: tuple[float, float] | None = None,
+        title: str = "",
+        x_label: str = "Time [s]",
+        y_label: str = "Frequency [MHz]",
+        colorbar_label: str = "",
+        view=None,
+        freqs=None,
+        log_freq: bool = False,
+    ) -> None:
+        if not self.is_available or data is None:
+            return
+
+        arr = np.asarray(data)
+        if arr.ndim != 2 or arr.size == 0:
+            return
+
+        x0, x1, y0, y1 = (float(extent[0]), float(extent[1]), float(extent[2]), float(extent[3]))
+
+        # Log mode needs uniformly log-spaced rows, because the image is placed
+        # with a plain rectangle that maps rows linearly onto the axis.
+        self._log_freq = False
+        if log_freq and freqs is not None:
+            # Fill the band the extent already describes -- the channel edges --
+            # so this canvas frames exactly what the matplotlib axis frames.
+            # The bottom edge sits half a channel below the lowest frequency and
+            # can reach zero, which no log axis can show; the channel centres
+            # are the fallback for that case.
+            edge_lo, edge_hi = min(y0, y1), max(y0, y1)
+            bounds = (edge_lo, edge_hi) if edge_lo > 0.0 and edge_hi > edge_lo else None
+            try:
+                resampled, log_rows = resample_rows_to_log_frequency(arr, freqs, bounds=bounds)
+            except Exception:
+                resampled, log_rows = None, None
+            if resampled is not None:
+                arr = resampled
+                # The rectangle has to keep the row order the linear branch
+                # gets from ``pyqtgraph_extent``: y0 is where row 0 lands.
+                # Taking min/max here instead flips a descending CALLISTO axis
+                # and draws the whole spectrum upside down.
+                if bounds is None:
+                    log_edges = axis_edges(log_rows)
+                    y0, y1 = float(log_edges[0]), float(log_edges[-1])
+                else:
+                    low, high = float(np.log10(edge_lo)), float(np.log10(edge_hi))
+                    y0, y1 = (high, low) if log_rows[0] > log_rows[-1] else (low, high)
+                # Row-indexed data has to follow the rows to their new places.
+                gap_row_mask = resample_row_mask_to_log_frequency(
+                    gap_row_mask, freqs, bounds=bounds
+                )
+                self._log_freq = True
+
+        arr = np.ascontiguousarray(arr, dtype=np.float32)
+        image_rect = QRectF(x0, y0, x1 - x0, y1 - y0)
+        self._image.setRect(image_rect)
+        self._axis_ylim = (min(y0, y1), max(y0, y1))
+        self._full_view = {
+            "xlim": (min(x0, x1), max(x0, x1)),
+            "ylim": (
+                self._data_y_scalar(min(y0, y1)),
+                self._data_y_scalar(max(y0, y1)),
+            ),
+        }
+        self._apply_log_frequency_ticks()
+
+        vmin, vmax = finite_data_limits(arr)
+        if levels is not None:
+            try:
+                level_min, level_max = float(levels[0]), float(levels[1])
+                if np.isfinite(level_min) and np.isfinite(level_max) and level_max > level_min:
+                    vmin, vmax = level_min, level_max
+            except Exception:
+                pass
+        row_mask = invalid_row_mask(arr, gap_row_mask)
+        has_invalid = bool(np.any(row_mask) or np.any(~np.isfinite(arr)))
+        color_map, lut = _mpl_cmap_to_lookup(cmap)
+
+        if vmin is None or vmax is None:
+            self._image.clear()
+        elif has_invalid:
+            rgba = _rgba_image_from_cmap(arr, cmap, vmin=vmin, vmax=vmax, gap_row_mask=gap_row_mask)
+            try:
+                self._image.setLookupTable(None, update=False)
+            except Exception:
+                pass
+            self._image.setImage(rgba, autoLevels=False)
+        else:
+            if lut is not None:
+                self._image.setLookupTable(lut, update=False)
+            try:
+                self._image.setImage(arr, autoLevels=False, levels=(vmin, vmax))
+            except TypeError:
+                self._image.setImage(arr, autoLevels=False)
+                self._image.setLevels((vmin, vmax))
+            else:
+                self._image.setLevels((vmin, vmax))
+
+        try:
+            self._image.setRect(image_rect)
+        except Exception:
+            pass
+
+        if vmin is not None and vmax is not None and self._color_bar is not None:
+            try:
+                self._color_bar.setLevels((vmin, vmax))
+            except Exception:
+                pass
+
+        if has_invalid:
+            try:
+                self._image.setLookupTable(None, update=False)
+            except Exception:
+                pass
+        if self._color_bar is not None and color_map is not None:
+            try:
+                self._color_bar.setColorMap(color_map)
+            except Exception:
+                pass
+        if self._color_bar is not None and colorbar_label:
+            try:
+                self._color_bar.axis.setLabel(colorbar_label)
+            except Exception:
+                pass
+
+        self._title = str(title or "")
+        self._x_label = str(x_label or "")
+        self._y_label = str(y_label or "")
+        self._colorbar_label = str(colorbar_label or "")
+        self._apply_text_style()
+
+        if view:
+            self.set_view(view)
+        elif self._full_view is not None:
+            self.set_view(self._full_view)
+        self._sync_goes_overlay_geometry()
+
+    def begin_lasso_capture(self) -> None:
+        if not self.is_available:
+            return
+        self._interaction_mode = "lasso"
+        self._clear_lasso_overlay()
+        self._clear_annotation_capture_overlay()
+        # Avoid panning while drawing freehand lasso
+        self._plot.setMouseEnabled(x=False, y=False)
+
+    def begin_drift_capture(self) -> None:
+        if not self.is_available:
+            return
+        self._interaction_mode = "drift"
+        self._clear_drift_overlay()
+        self._clear_annotation_capture_overlay()
+
+    def begin_measurement_capture(self) -> None:
+        if not self.is_available:
+            return
+        self._interaction_mode = "measurement"
+        self.clear_measurement()
+        self._clear_lasso_overlay()
+        self._clear_annotation_capture_overlay()
+        self._plot.setMouseEnabled(x=False, y=False)
+
+    def begin_annotation_capture(self, kind: str) -> None:
+        if not self.is_available:
+            return
+        kind_norm = str(kind or "").strip().lower()
+        if kind_norm not in {"polygon", "line", "text"}:
+            return
+        self._interaction_mode = f"annotation:{kind_norm}"
+        self._annotation_capture_suppress_next_click = False
+        self._clear_lasso_overlay()
+        self._clear_annotation_capture_overlay()
+        self._plot.setMouseEnabled(x=False, y=False)
+
+    def stop_interaction_capture(self) -> None:
+        was_measurement = self._interaction_mode == "measurement"
+        self._interaction_mode = None
+        self._annotation_capture_suppress_next_click = False
+        self._clear_lasso_overlay()
+        self._clear_annotation_capture_overlay()
+        if was_measurement:
+            self.clear_measurement()
+        self._apply_navigation_state()
+
+    def show_drift_points(self, points, with_segments: bool = False) -> None:
+        if not self.is_available:
+            return
+        pts = np.asarray(points, dtype=float) if points is not None else np.empty((0, 2), dtype=float)
+        if pts.size == 0:
+            self._clear_drift_overlay()
+            return
+
+        if self._drift_scatter_item is None:
+            self._drift_scatter_item = pg.ScatterPlotItem(
+                size=10,
+                brush=pg.mkBrush(255, 255, 255, 230),
+                pen=pg.mkPen(40, 40, 40, 240),
+            )
+            self._plot.addItem(self._drift_scatter_item)
+        ys = self._to_axis_y(pts[:, 1])
+        self._drift_scatter_item.setData(pts[:, 0], ys)
+
+        if with_segments:
+            if self._drift_line_item is None:
+                self._drift_line_item = pg.PlotDataItem(pen=pg.mkPen(40, 255, 120, width=2))
+                self._plot.addItem(self._drift_line_item)
+            self._drift_line_item.setData(pts[:, 0], ys)
+        elif self._drift_line_item is not None:
+            self._drift_line_item.setData([], [])
+
+    def show_measurement(self, points, label: str = "") -> None:
+        if not self.is_available:
+            return
+        pts = np.asarray(points, dtype=float) if points is not None else np.empty((0, 2), dtype=float)
+        if pts.ndim != 2 or pts.shape[1] != 2 or pts.size == 0:
+            self.clear_measurement()
+            return
+        pts = pts[np.isfinite(pts[:, 0]) & np.isfinite(pts[:, 1])]
+        if pts.size == 0:
+            self.clear_measurement()
+            return
+        self._measurement_points = [(float(x), float(y)) for x, y in pts[:2]]
+
+        if self._measurement_scatter_item is None:
+            self._measurement_scatter_item = pg.ScatterPlotItem(
+                size=11,
+                brush=pg.mkBrush(255, 255, 255, 235),
+                pen=pg.mkPen(24, 180, 255, 250, width=2),
+            )
+            self._measurement_scatter_item.setZValue(35)
+            self._plot.addItem(self._measurement_scatter_item)
+        axis_ys = self._to_axis_y(pts[:, 1])
+        self._measurement_scatter_item.setData(pts[:, 0], axis_ys)
+
+        if pts.shape[0] >= 2:
+            if self._measurement_line_item is None:
+                self._measurement_line_item = pg.PlotDataItem(pen=pg.mkPen(24, 180, 255, width=2))
+                self._measurement_line_item.setZValue(34)
+                self._plot.addItem(self._measurement_line_item)
+            self._measurement_line_item.setData(pts[:2, 0], axis_ys[:2])
+        elif self._measurement_line_item is not None:
+            self._measurement_line_item.setData([], [])
+
+        text = str(label or "").strip()
+        if text and pts.shape[0] >= 2:
+            if self._measurement_text_item is None:
+                self._measurement_text_item = pg.TextItem(text="", color="#ffffff", anchor=(0, 1))
+                self._measurement_text_item.setZValue(36)
+                self._plot.addItem(self._measurement_text_item)
+            self._measurement_text_item.setText(text)
+            self._measurement_text_item.setPos(float(pts[-1, 0]), float(axis_ys[-1]))
+        elif self._measurement_text_item is not None:
+            self._measurement_text_item.setText("")
+
+    def _clear_annotation_overlay(self) -> None:
+        if not self.is_available:
+            return
+        for item in self._annotation_items:
+            try:
+                self._plot.removeItem(item)
+            except Exception:
+                pass
+        self._annotation_items = []
+
+    def set_annotations(self, serialized_annotations) -> None:
+        """Render non-interactive annotation overlays."""
+        if not self.is_available:
+            return
+        self._clear_annotation_overlay()
+
+        for ann in serialized_annotations or []:
+            try:
+                if not isinstance(ann, dict):
+                    continue
+                if not bool(ann.get("visible", True)):
+                    continue
+
+                kind = str(ann.get("kind", "")).strip().lower()
+                points = ann.get("points") or []
+                color = str(ann.get("color") or "#00d4ff")
+                width = float(ann.get("line_width", 1.5))
+                pen = pg.mkPen(color=color, width=max(1.0, width))
+
+                if kind in {"polygon", "line"}:
+                    if len(points) < 2:
+                        continue
+                    xs = [float(p[0]) for p in points]
+                    ys = [float(p[1]) for p in points]
+                    if kind == "polygon":
+                        xs.append(xs[0])
+                        ys.append(ys[0])
+                    item = pg.PlotDataItem(xs, ys, pen=pen)
+                    item.setZValue(20)
+                    self._plot.addItem(item)
+                    self._annotation_items.append(item)
+                    continue
+
+                if kind == "text":
+                    if not points:
+                        continue
+                    x, y = points[0]
+                    txt = str(ann.get("text") or "")
+                    item = pg.TextItem(text=txt, color=color, anchor=(0, 1))
+                    font = QFont()
+                    font_family = normalize_font_family(str(ann.get("font_family") or "").strip())
+                    if font_family:
+                        font.setFamily(font_family)
+                    try:
+                        font.setPixelSize(max(6, int(ann.get("font_size", 12))))
+                    except Exception:
+                        font.setPixelSize(12)
+                    font.setBold(bool(ann.get("font_bold", False)))
+                    font.setItalic(bool(ann.get("font_italic", False)))
+                    try:
+                        item.setFont(font)
+                    except Exception:
+                        try:
+                            item.textItem.setFont(font)
+                        except Exception:
+                            pass
+                    item.setPos(float(x), float(y))
+                    item.setZValue(20)
+                    self._plot.addItem(item)
+                    self._annotation_items.append(item)
+            except Exception:
+                continue
+
+    def _scene_to_plot_xy(self, scene_pos):
+        if not self.is_available:
+            return None
+        try:
+            if not self._plot.sceneBoundingRect().contains(scene_pos):
+                return None
+            point = self._viewbox.mapSceneToView(scene_pos)
+            return float(point.x()), self._data_y_scalar(point.y())
+        except Exception:
+            return None
+
+    def _on_scene_mouse_moved(self, scene_pos):
+        xy = self._scene_to_plot_xy(scene_pos)
+        if xy is None:
+            self.mousePositionChanged.emit(0.0, 0.0, False)
+            return
+        self.mousePositionChanged.emit(xy[0], xy[1], True)
+        if self._annotation_capture_kind() is not None:
+            self._update_annotation_capture_overlay(cursor_xy=xy)
+
+    def _update_lasso_curve(self):
+        if self._lasso_line_item is None:
+            self._lasso_line_item = pg.PlotDataItem(pen=pg.mkPen(0, 212, 255, width=2))
+            self._plot.addItem(self._lasso_line_item)
+        if not self._lasso_points:
+            self._lasso_line_item.setData([], [])
+            return
+        xs = [p[0] for p in self._lasso_points]
+        ys = self._to_axis_y([p[1] for p in self._lasso_points])
+        self._lasso_line_item.setData(xs, ys)
+
+    def _handle_annotation_drag_scene_event(self, event, annotation_kind: str) -> bool:
+        if not self.is_available or annotation_kind != "line":
+            return False
+
+        etype = event.type()
+        if etype == QEvent.Type.GraphicsSceneMousePress:
+            if event.button() == Qt.MouseButton.RightButton:
+                self._annotation_capture_suppress_next_click = True
+                self._cancel_annotation_capture(annotation_kind)
+                return True
+            if event.button() != Qt.MouseButton.LeftButton:
+                return False
+            xy = self._scene_to_plot_xy(event.scenePos())
+            if xy is None:
+                return False
+            self._annotation_capture_press_scene_pos = QPointF(event.scenePos())
+            self._annotation_capture_press_xy = (float(xy[0]), float(xy[1]))
+            self._annotation_capture_drag_last_xy = self._annotation_capture_press_xy
+            self._annotation_capture_drag_active = False
+            return False
+
+        if etype == QEvent.Type.GraphicsSceneMouseMove:
+            if self._annotation_capture_press_scene_pos is None or self._annotation_capture_press_xy is None:
+                return False
+            dx = float(event.scenePos().x() - self._annotation_capture_press_scene_pos.x())
+            dy = float(event.scenePos().y() - self._annotation_capture_press_scene_pos.y())
+            if not self._annotation_capture_drag_active and (dx * dx + dy * dy) < 16.0:
+                return False
+            self._annotation_capture_drag_active = True
+            xy = self._scene_to_plot_xy(event.scenePos())
+            if xy is None:
+                return True
+            self._annotation_capture_drag_last_xy = (float(xy[0]), float(xy[1]))
+            self._annotation_capture_points = [self._annotation_capture_press_xy]
+            self._update_annotation_capture_overlay(cursor_xy=self._annotation_capture_drag_last_xy)
+            return True
+
+        if etype == QEvent.Type.GraphicsSceneMouseRelease:
+            if event.button() != Qt.MouseButton.LeftButton:
+                return False
+            if self._annotation_capture_press_scene_pos is None or self._annotation_capture_press_xy is None:
+                return False
+
+            origin = self._annotation_capture_press_xy
+            drag_point = self._scene_to_plot_xy(event.scenePos()) or self._annotation_capture_drag_last_xy
+            was_drag = bool(self._annotation_capture_drag_active)
+
+            self._annotation_capture_press_scene_pos = None
+            self._annotation_capture_press_xy = None
+            self._annotation_capture_drag_active = False
+            self._annotation_capture_drag_last_xy = None
+
+            if not was_drag:
+                return False
+
+            self._annotation_capture_suppress_next_click = True
+            if drag_point is None or self._points_close(origin, drag_point):
+                self._clear_annotation_capture_overlay()
+                return True
+            self._finish_annotation_capture(annotation_kind, [origin, drag_point])
+            return True
+
+        return False
+
+    def _handle_scene_event(self, event) -> bool:
+        if not self.is_available:
+            return False
+
+        annotation_kind = self._annotation_capture_kind()
+        if annotation_kind == "line":
+            return self._handle_annotation_drag_scene_event(event, annotation_kind)
+        if self._interaction_mode != "lasso":
+            return False
+
+        etype = event.type()
+        if etype == QEvent.Type.GraphicsSceneMousePress:
+            if event.button() == Qt.MouseButton.LeftButton:
+                xy = self._scene_to_plot_xy(event.scenePos())
+                if xy is None:
+                    return False
+                self._lasso_drag_active = True
+                self._lasso_points = [xy]
+                self._update_lasso_curve()
+                return True
+            if event.button() == Qt.MouseButton.RightButton:
+                self._interaction_mode = None
+                self._clear_lasso_overlay()
+                self._apply_navigation_state()
+                return True
+
+        if etype == QEvent.Type.GraphicsSceneMouseMove:
+            if not self._lasso_drag_active:
+                return False
+            xy = self._scene_to_plot_xy(event.scenePos())
+            if xy is None:
+                return True
+            if self._lasso_points:
+                last_x, last_y = self._lasso_points[-1]
+                if ((xy[0] - last_x) ** 2 + (xy[1] - last_y) ** 2) < 1e-6:
+                    return True
+            self._lasso_points.append(xy)
+            self._update_lasso_curve()
+            return True
+
+        if etype == QEvent.Type.GraphicsSceneMouseRelease:
+            if event.button() != Qt.MouseButton.LeftButton or not self._lasso_drag_active:
+                return False
+
+            self._lasso_drag_active = False
+            xy = self._scene_to_plot_xy(event.scenePos())
+            if xy is not None:
+                self._lasso_points.append(xy)
+                self._update_lasso_curve()
+
+            self._finish_lasso()
+            return True
+
+        return False
+
+    def _finish_lasso(self):
+        if len(self._lasso_points) >= 3:
+            out = [(float(p[0]), float(p[1])) for p in self._lasso_points]
+            self.lassoFinished.emit(out)
+        self._interaction_mode = None
+        self._clear_lasso_overlay()
+        self._apply_navigation_state()
+
+    def _finish_drift(self):
+        out = [(float(p[0]), float(p[1])) for p in self._drift_points]
+        self.driftCaptureFinished.emit(out)
+        self._interaction_mode = None
+
+    def _finish_measurement(self):
+        out = [(float(p[0]), float(p[1])) for p in self._measurement_points[:2]]
+        self.measurementCaptureFinished.emit(out)
+        self._interaction_mode = None
+        self._apply_navigation_state()
+
+    def _on_scene_mouse_clicked(self, ev):
+        if self._annotation_capture_suppress_next_click:
+            self._annotation_capture_suppress_next_click = False
+            return
+
+        xy = self._scene_to_plot_xy(ev.scenePos())
+        if xy is None:
+            return
+
+        button = ev.button()
+        try:
+            is_double = bool(ev.double())
+        except Exception:
+            is_double = False
+
+        x, y = xy
+
+        annotation_kind = self._annotation_capture_kind()
+        if annotation_kind is not None:
+            if button == Qt.MouseButton.RightButton:
+                if annotation_kind == "polygon" and len(self._annotation_capture_points) >= 3:
+                    self._finish_annotation_capture(annotation_kind, list(self._annotation_capture_points))
+                else:
+                    self._cancel_annotation_capture(annotation_kind)
+                return
+
+            if button != Qt.MouseButton.LeftButton:
+                return
+
+            if annotation_kind == "text":
+                self._finish_annotation_capture(annotation_kind, (x, y))
+                return
+
+            self._append_annotation_capture_point((x, y))
+            self._update_annotation_capture_overlay(cursor_xy=(x, y))
+
+            if annotation_kind == "line" and len(self._annotation_capture_points) >= 2:
+                self._finish_annotation_capture(annotation_kind, self._annotation_capture_points[:2])
+            elif annotation_kind == "polygon" and is_double and len(self._annotation_capture_points) >= 3:
+                self._finish_annotation_capture(annotation_kind, list(self._annotation_capture_points))
+            return
+
+        if self._interaction_mode == "drift":
+            if button == Qt.MouseButton.LeftButton:
+                self._drift_points.append((x, y))
+                self.show_drift_points(self._drift_points, with_segments=False)
+                self.driftPointAdded.emit(x, y)
+                if is_double and len(self._drift_points) >= 2:
+                    self._finish_drift()
+            elif button == Qt.MouseButton.RightButton:
+                self._finish_drift()
+            return
+
+        if self._interaction_mode == "measurement":
+            if button == Qt.MouseButton.RightButton:
+                self._interaction_mode = None
+                self.clear_measurement()
+                self._apply_navigation_state()
+                return
+            if button != Qt.MouseButton.LeftButton:
+                return
+            self._measurement_points.append((x, y))
+            self.show_measurement(self._measurement_points)
+            if len(self._measurement_points) >= 2:
+                self._finish_measurement()
+            return
+
+        if self._interaction_mode is None and button == Qt.MouseButton.LeftButton:
+            self.plotClicked.emit(float(x), float(y))
+
+    def _on_range_changed(self, *_):
+        if self._block_range_signals:
+            return
+        if self._interaction_start_view is None:
+            self._interaction_start_view = self.get_view()
+        self._interaction_timer.start()
+
+    def _emit_interaction_finished(self):
+        start = self._interaction_start_view
+        end = self.get_view()
+        self._interaction_start_view = None
+        if not start or not end or self._views_close(start, end):
+            return
+
+        if self._rect_zoom_once:
+            self._rect_zoom_once = False
+            try:
+                self._viewbox.setMouseMode(pg.ViewBox.PanMode)
+            except Exception:
+                pass
+            if self._navigation_locked:
+                self._plot.setMouseEnabled(x=False, y=False)
+            self._set_goes_overlay_rect_zoom_hidden(False)
+            self.rectZoomFinished.emit(start, end)
+            return
+
+        self.viewInteractionFinished.emit(start, end)

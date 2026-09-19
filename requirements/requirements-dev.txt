@@ -1,0 +1,3 @@
+# Install after requirements-runtime.txt for the complete test suite.
+pytest==9.0.2
+pytest-timeout==2.4.0

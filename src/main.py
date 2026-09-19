@@ -1,0 +1,508 @@
+"""
+e-CALLISTO FITS Analyzer
+Version 3.0.0
+Sahan S Liyanage (sahanslst@gmail.com)
+Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
+"""
+
+
+import argparse
+import faulthandler
+import importlib
+import os
+import platform
+import site
+import sys
+import threading
+
+
+def _force_software_opengl() -> bool:
+    raw = os.environ.get("CALLISTO_FORCE_SOFTWARE_OPENGL", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+FORCE_SOFTWARE_OPENGL = _force_software_opengl()
+
+
+def _linux_qt_xcb_requested() -> bool:
+    raw = os.environ.get("CALLISTO_PREFER_QT_XCB", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _prefer_xcb_for_linux_wayland() -> None:
+    if not sys.platform.startswith("linux"):
+        return
+    if os.environ.get("QT_QPA_PLATFORM", "").strip():
+        return
+    if not _linux_qt_xcb_requested():
+        return
+
+    session_type = os.environ.get("XDG_SESSION_TYPE", "").strip().lower()
+    wayland_display = os.environ.get("WAYLAND_DISPLAY", "").strip()
+    x_display = os.environ.get("DISPLAY", "").strip()
+    if not x_display or not (session_type == "wayland" or wayland_display):
+        return
+
+    os.environ["QT_QPA_PLATFORM"] = "xcb;wayland"
+
+
+def _suppress_macos_tsm_warnings_enabled() -> bool:
+    raw = os.environ.get("CALLISTO_SUPPRESS_MACOS_TSM_WARNINGS", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _install_macos_stderr_filter() -> None:
+    if sys.platform != "darwin" or not _suppress_macos_tsm_warnings_enabled():
+        return
+
+    patterns = (
+        b"TSMSendMessageToUIServer",
+        b"com.apple.tsm.uiserver",
+    )
+    try:
+        original_stderr_fd = os.dup(2)
+        read_fd, write_fd = os.pipe()
+        os.dup2(write_fd, 2)
+        os.close(write_fd)
+    except Exception:
+        return
+
+    def _pump() -> None:
+        pending = b""
+        try:
+            while True:
+                chunk = os.read(read_fd, 4096)
+                if not chunk:
+                    break
+                pending += chunk
+                while b"\n" in pending:
+                    line, pending = pending.split(b"\n", 1)
+                    line_out = line + b"\n"
+                    if any(pattern in line_out for pattern in patterns):
+                        continue
+                    os.write(original_stderr_fd, line_out)
+            if pending and not any(pattern in pending for pattern in patterns):
+                os.write(original_stderr_fd, pending)
+        except Exception:
+            try:
+                if pending:
+                    os.write(original_stderr_fd, pending)
+            except Exception:
+                pass
+        finally:
+            try:
+                os.close(read_fd)
+            except Exception:
+                pass
+            try:
+                os.close(original_stderr_fd)
+            except Exception:
+                pass
+
+    thread = threading.Thread(target=_pump, name="macos-stderr-filter", daemon=True)
+    thread.start()
+
+
+def _is_cme_helper_mode_argv(argv: list[str]) -> bool:
+    tokens = [str(item or "").strip() for item in list(argv or [])]
+    for idx, token in enumerate(tokens):
+        if token.startswith("--mode="):
+            return token.split("=", 1)[1].strip() == "cme-helper"
+        if token == "--mode" and idx + 1 < len(tokens):
+            return tokens[idx + 1].strip() == "cme-helper"
+    return False
+
+
+def _project_base_path() -> str:
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            return os.path.realpath(os.path.abspath(meipass))
+
+        exe_dir = os.path.realpath(os.path.abspath(os.path.dirname(sys.executable)))
+        if sys.platform == "darwin":
+            return os.path.realpath(os.path.abspath(os.path.join(exe_dir, "..", "Resources")))
+        return exe_dir
+
+    return os.path.realpath(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+
+def _configure_platform_env() -> None:
+    if sys.platform.startswith("linux"):
+        _prefer_xcb_for_linux_wayland()
+        helper_mode = _is_cme_helper_mode_argv(sys.argv)
+        if FORCE_SOFTWARE_OPENGL:
+            os.environ.setdefault("QT_OPENGL", "software")
+            os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
+        if helper_mode:
+            os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
+            extra = (
+                "--disable-gpu "
+                "--disable-gpu-compositing "
+                "--disable-features=VaapiVideoDecoder "
+                "--disable-dev-shm-usage "
+            )
+            os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
+                (os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "") + " " + extra).strip()
+            )
+        return
+
+    if sys.platform == "darwin" and getattr(sys, "frozen", False):
+        app_root = os.path.abspath(os.path.join(os.path.dirname(sys.executable), ".."))
+        frameworks_dir = os.path.join(app_root, "Frameworks")
+        if os.path.isdir(frameworks_dir):
+            current = os.environ.get("DYLD_FALLBACK_LIBRARY_PATH", "")
+            parts = [p for p in current.split(":") if p]
+            if frameworks_dir not in parts:
+                parts.insert(0, frameworks_dir)
+                os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = ":".join(parts)
+
+
+_WINDOWS_DLL_DIRECTORY_HANDLES = []
+
+
+def _configure_windows_dll_search_path() -> None:
+    if not sys.platform.startswith("win") or not hasattr(os, "add_dll_directory"):
+        return
+
+    site_paths: list[str] = []
+    try:
+        site_paths.extend(site.getsitepackages())
+    except Exception:
+        pass
+    try:
+        site_paths.append(site.getusersitepackages())
+    except Exception:
+        pass
+    site_paths.extend(path for path in sys.path if path)
+
+    candidates = []
+    for base in site_paths:
+        candidates.append(os.path.join(base, "PySide6"))
+        candidates.append(os.path.join(base, "shiboken6"))
+
+    seen = set()
+    for path in candidates:
+        norm = os.path.normcase(os.path.abspath(path))
+        if norm in seen or not os.path.isdir(path):
+            continue
+        seen.add(norm)
+        try:
+            _WINDOWS_DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(path))
+        except OSError:
+            continue
+
+
+def _preflight_windows_development_runtime() -> None:
+    if not sys.platform.startswith("win") or getattr(sys, "frozen", False):
+        return
+
+    print(
+        "Preparing plotting runtime for Windows source startup. "
+        "The first run after installation may take longer...",
+        flush=True,
+    )
+    try:
+        import hashlib
+        import uuid
+
+        hashlib.sha256(b"e-callisto-startup-check").digest()
+        uuid.UUID(int=0)
+        for module_name in (
+            "matplotlib.backends.backend_qtagg",
+            "matplotlib.figure",
+            "matplotlib.path",
+            "matplotlib.ticker",
+            "matplotlib.widgets",
+            "mpl_toolkits.axes_grid1",
+        ):
+            importlib.import_module(module_name)
+    except Exception as exc:
+        raise RuntimeError(
+            "The Windows Python plotting runtime could not be prepared. "
+            "Recreate the development environment with Python 3.12 by running:\n"
+            "  powershell -ExecutionPolicy Bypass -File "
+            ".\\packaging\\windows\\repair_windows_venv.ps1"
+        ) from exc
+    print("Plotting runtime ready.", flush=True)
+
+
+def _configure_network_env() -> None:
+    """Point TLS verification at certifi's CA bundle for packaged builds.
+
+    ``requests`` (Fido search), ``aiohttp``/``parfive`` (SunPy download), and
+    ``urllib`` (the fallback downloader) all need a CA bundle to verify HTTPS.
+    In frozen builds — notably on Windows — the bundled interpreter may not
+    locate a usable system CA store, which silently breaks downloads while the
+    same code works from source and on Linux/macOS. Pointing the standard
+    OpenSSL/requests environment variables at certifi (which is bundled) makes
+    every HTTPS client share one trusted bundle.
+
+    Must run before sunpy/aiohttp/requests are imported. Only acts when frozen,
+    never overrides values the user/system already set, and is a no-op if
+    certifi is unavailable.
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        import certifi
+
+        ca_bundle = certifi.where()
+    except Exception:
+        return
+    if not ca_bundle or not os.path.exists(ca_bundle):
+        return
+
+    os.environ.setdefault("SSL_CERT_FILE", ca_bundle)
+    os.environ.setdefault("REQUESTS_CA_BUNDLE", ca_bundle)
+    os.environ.setdefault("SSL_CERT_DIR", os.path.dirname(ca_bundle))
+
+
+BASE_PATH = _project_base_path()
+if BASE_PATH not in sys.path:
+    sys.path.insert(0, BASE_PATH)
+
+_configure_platform_env()
+_configure_network_env()
+_configure_windows_dll_search_path()
+_install_macos_stderr_filter()
+
+# Now import from src (after sys.path is configured)
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import QApplication
+from src.ui.common.font_utils import sanitize_application_font
+from src.core.paths import find_startup_logo_path
+from src.version import APP_NAME, APP_VERSION
+
+
+# Must be set before QApplication is created.
+QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
+if sys.platform.startswith("linux") and FORCE_SOFTWARE_OPENGL:
+    QApplication.setAttribute(Qt.AA_UseSoftwareOpenGL, True)
+
+
+def _load_app_icon() -> QIcon:
+    candidates = [
+        os.path.join(BASE_PATH, "assets", "branding", "icon.ico"),
+        os.path.join(BASE_PATH, "assets", "branding", "FITS_analyzer.png"),
+    ]
+
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(sys.executable)
+        candidates.extend(
+            [
+                os.path.join(exe_dir, "icon.ico"),
+                os.path.join(getattr(sys, "_MEIPASS", ""), "icon.ico"),
+                sys.executable,
+            ]
+        )
+    else:
+        candidates.extend(
+            [
+                os.path.join(BASE_PATH, "icon.ico"),
+                os.path.join(BASE_PATH, "assets", "icon.ico"),
+            ]
+        )
+
+    for path in candidates:
+        if not path:
+            continue
+        if os.path.exists(path):
+            icon = QIcon(path)
+            if not icon.isNull():
+                return icon
+
+    return QIcon()
+
+
+def _find_startup_logo_path() -> str:
+    return find_startup_logo_path(base_path=BASE_PATH)
+
+
+def _parse_cli_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--mode", choices=["main", "cme-helper", "goes-overlay-helper"], default="main")
+    parser.add_argument("--movie-url", default="")
+    parser.add_argument("--movie-title", default="")
+    parser.add_argument("--movie-direct-url", default="")
+    parser.add_argument("--ipc-name", default="")
+    parser.add_argument("--request-file", default="")
+    parser.add_argument("--response-file", default="")
+    return parser.parse_known_args(argv[1:])
+
+
+def _run_main_mode(app: QApplication) -> int:
+    if sys.platform.startswith("win"):
+        app.setStyle("Fusion")
+        app_icon = _load_app_icon()
+        if not app_icon.isNull():
+            app.setWindowIcon(app_icon)
+
+    from src.ui.app.startup_loading import StartupLoadingScreen
+
+    startup_loading = StartupLoadingScreen(
+        app_name=APP_NAME,
+        version=APP_VERSION,
+        logo_path=_find_startup_logo_path(),
+    )
+    if not app.windowIcon().isNull():
+        startup_loading.setWindowIcon(app.windowIcon())
+    startup_loading.present()
+    startup_loading.set_progress(15, "Loading analysis modules...")
+
+    try:
+        from src.ui.app.main_window import MainWindow
+        from src.ui.common.mpl_style import apply_origin_style
+        from src.ui.common.theme_manager import AppTheme
+
+        startup_loading.set_progress(45, "Applying interface styling...")
+        apply_origin_style()
+        theme = AppTheme(app)
+        app.setProperty("theme_manager", theme)
+
+        startup_loading.set_progress(80, "Preparing the main workspace...")
+        window = MainWindow(theme=theme)
+        if sys.platform.startswith("win"):
+            app_icon = app.windowIcon()
+            if not app_icon.isNull():
+                window.setWindowIcon(app_icon)
+        startup_loading.set_progress(100, "Opening analyzer...")
+
+        # Register the main window as visible before closing the splash so Qt
+        # does not treat splash dismissal as the last window closing.
+        window.showMaximized()
+        startup_loading.dismiss()
+        window.raise_()
+        window.activateWindow()
+        app.processEvents()
+    except BaseException:
+        startup_loading.dismiss()
+        raise
+
+    startup_loading.deleteLater()
+    QTimer.singleShot(1500, window.check_for_startup_updates)
+    return app.exec()
+
+
+def _run_cme_helper_mode(
+    app: QApplication,
+    movie_url: str,
+    movie_title: str,
+    movie_direct_url: str,
+    ipc_name: str,
+) -> int:
+    from src.ui.cme.cme_movie_helper import launch_cme_movie_helper
+    from src.ui.common.mpl_style import apply_origin_style
+    from src.ui.common.theme_manager import AppTheme
+
+    if sys.platform.startswith("win"):
+        app.setStyle("Fusion")
+        app_icon = _load_app_icon()
+        if not app_icon.isNull():
+            app.setWindowIcon(app_icon)
+
+    apply_origin_style()
+    theme = AppTheme(app)
+    app.setProperty("theme_manager", theme)
+
+    return launch_cme_movie_helper(
+        app,
+        movie_url=movie_url,
+        movie_title=movie_title,
+        direct_movie_url=movie_direct_url,
+        theme=theme,
+        ipc_name=ipc_name,
+    )
+
+
+def _run_goes_overlay_helper_mode(request_file: str, response_file: str) -> int:
+    from src.backend.space_weather.goes_overlay import run_goes_overlay_helper_cli
+
+    return run_goes_overlay_helper_cli(request_file, response_file)
+
+
+def _configure_science_warnings() -> None:
+    """Show each repeated FITS-metadata complaint once instead of per frame.
+
+    SOHO/LASCO archive products carry no observer keywords
+    (``DSUN_OBS``/``HGLN_OBS``/``HGLT_OBS``), so sunpy warns that it is assuming
+    an Earth-based observer. SOHO orbits L1 at about 0.99 AU, so that assumption
+    is accurate to roughly 1% — fine for display and overlay registration, and
+    nothing the user can supply. The same files also carry unprintable characters
+    in their own HISTORY cards, which astropy flags on every read.
+
+    Both fire on every frame and on every property access that rebuilds a WCS, so
+    a normal session emits thousands of identical lines and buries anything that
+    actually matters.
+
+    The observer warning needs an exact-message filter rather than "once".
+    sunpy builds the message from ``set(keys) - self.meta.keys()``
+    (``mapbase.py``), so the missing-keyword list comes out in a different order
+    on each call — and Python's once-registry is keyed on message *text*, so
+    every reordering counts as a brand new warning and prints again. Matching the
+    stable prefix suppresses only this one non-actionable message; any other
+    SunpyMetadataWarning still surfaces normally, and the Overlay Layers build
+    reports the Earth-observer assumption once in its own notes.
+    """
+    import warnings
+
+    try:
+        from astropy.io.fits.verify import VerifyWarning
+
+        warnings.filterwarnings("once", category=VerifyWarning)
+    except Exception:
+        pass
+    try:
+        from sunpy.util.exceptions import SunpyMetadataWarning
+
+        # Order matters: filterwarnings inserts at the FRONT of the list and the
+        # first match wins, so the broad rule is registered first and the
+        # specific one second, leaving the specific one ahead of it.
+        warnings.filterwarnings("once", category=SunpyMetadataWarning)
+        warnings.filterwarnings(
+            "ignore", message="Missing metadata for observer", category=SunpyMetadataWarning
+        )
+    except Exception:
+        pass
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(argv or sys.argv)
+    args, qt_args = _parse_cli_args(argv)
+
+    if platform.system() != "Windows":
+        faulthandler.enable()
+
+    _configure_science_warnings()
+
+    if args.mode == "goes-overlay-helper":
+        return _run_goes_overlay_helper_mode(
+            request_file=str(args.request_file or ""),
+            response_file=str(args.response_file or ""),
+        )
+
+    if args.mode == "main":
+        # Warm the slow first-run plotting imports before QApplication and before
+        # showing the splash. Windows may spend noticeable time generating Python
+        # bytecode and Matplotlib caches immediately after dependencies install.
+        _preflight_windows_development_runtime()
+
+    qt_argv = [argv[0], *qt_args]
+    app = QApplication(qt_argv)
+    sanitize_application_font(app)
+
+    if args.mode == "cme-helper":
+        return _run_cme_helper_mode(
+            app,
+            movie_url=str(args.movie_url or ""),
+            movie_title=str(args.movie_title or ""),
+            movie_direct_url=str(args.movie_direct_url or ""),
+            ipc_name=str(args.ipc_name or ""),
+        )
+
+    return _run_main_mode(app)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
