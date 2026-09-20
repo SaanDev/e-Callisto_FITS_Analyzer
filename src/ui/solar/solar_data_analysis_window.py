@@ -1592,11 +1592,11 @@ class SolarMatplotlibCanvas(QWidget):
 
     #: Colour and width per PFSS class, matching SunPyPlotCanvas.PFSS_STYLES so a
     #: renderer switch does not change what the overlay means.
-    PFSS_STYLES: dict[str, tuple[str, float]] = {
-        "open_positive": ("#ff5f5f", 1.0),
-        "open_negative": ("#5f9bff", 1.0),
-        "closed": ("#c8c8c8", 0.7),
-        "open_boundaries": ("#96ff78", 1.6),
+    PFSS_STYLES: dict[str, tuple[str, float, float]] = {
+        "open_positive": ("#ff5f5f", 1.0, 0.95),
+        "open_negative": ("#5f9bff", 1.0, 0.95),
+        "closed": ("#cdcdcd", 0.7, 0.55),
+        "open_boundaries": ("#96ff78", 1.6, 0.95),
     }
 
     def set_pfss_overlay(self, overlay: Any | None, *, visible: bool = True) -> None:
@@ -1650,7 +1650,7 @@ class SolarMatplotlibCanvas(QWidget):
             )
             self._overlay_artists.append(line)
         if self._pfss_overlay is not None:
-            for name, (colour, width) in self.PFSS_STYLES.items():
+            for name, (colour, width, alpha) in self.PFSS_STYLES.items():
                 polyline = getattr(self._pfss_overlay, name, None)
                 if polyline is None:
                     continue
@@ -1663,7 +1663,7 @@ class SolarMatplotlibCanvas(QWidget):
                 # NaN separators break the curve between field lines and where a
                 # vertex is hidden behind the disk.
                 (line,) = self.ax.plot(
-                    xs, ys, color=colour, linewidth=width, alpha=0.9, zorder=3
+                    xs, ys, color=colour, linewidth=width, alpha=alpha, zorder=3
                 )
                 self._overlay_artists.append(line)
         if self._graticule_visible and self._graticule_polylines:

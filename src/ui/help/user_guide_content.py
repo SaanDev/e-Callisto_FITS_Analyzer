@@ -382,8 +382,11 @@ more field. <b>Radial cells</b> is the radial grid resolution; 35 is the usual c
 way to show coronal-hole connectivity without closed loops dominating the picture. <i>Current crop</i>
 concentrates lines inside the crop rectangle. <i>Clicked points</i> traces one line per click, and needs the
 PyQtGraph renderer, which is the only one that reports clicks.</li>
-<li><b>Density</b> sets how many lines are traced, and is therefore also the speed control: tracing costs roughly
-1.6 ms per line, so a solve takes a few seconds at most.</li>
+<li><b>Density</b> sets how many lines are traced, and is therefore both the speed control and the legibility
+control: tracing costs roughly 1.6 ms per line, so a solve takes a few seconds at most, but past about 150 lines
+the field lines start painting over the image you are trying to compare them against. The default of 12 traces
+roughly 150 lines; raise it to study one region, and prefer <i>Open-field regions</i> seeding over a high density
+if what you want is coronal-hole connectivity.</li>
 <li><b>Show</b> toggles each layer without recomputing. Open field lines are coloured by the sign of the radial
 field at their footpoint (red outward, blue inward), closed loops are grey, and <b>Open-field boundaries</b>
 outlines the model's coronal holes to compare against the dark areas in 193/211 Å.</li>

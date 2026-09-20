@@ -88,9 +88,19 @@ def test_solar_data_window_sidebar_keeps_plot_action_visible():
 
 
 def test_solar_data_window_title_flags_experimental_beta():
+    """The window must keep advertising its experimental/beta status.
+
+    Asserted against the module constant rather than a literal: the point of the
+    test is the wording, not the version number, and hard-coding the latter makes
+    every version bump look like a regression.
+    """
     _app()
     win = SolarDataAnalysisWindow()
-    assert win.windowTitle() == "Solar Image Analysis (Experimental) v1.5 beta"
+    title = win.windowTitle()
+    assert title == solar_mod.SOLAR_WINDOW_TITLE
+    assert title.startswith("Solar Image Analysis")
+    assert "(Experimental)" in title
+    assert "beta" in title.lower()
     win.close()
 
 

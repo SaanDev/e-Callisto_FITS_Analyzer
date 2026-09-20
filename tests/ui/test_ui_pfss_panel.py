@@ -574,3 +574,44 @@ def test_the_diagnostics_window_is_reused_not_stacked(window, monkeypatch):
     window._on_pfss_diagnostics()
     _flush()
     assert len(created) == 1, "a second click must reuse the open window"
+
+
+# --------------------------------------------------------------------------- #
+# Overlay legibility
+# --------------------------------------------------------------------------- #
+
+def test_closed_loops_are_drawn_quieter_than_open_field(window):
+    """The overlay exists to be compared against the EUV image beneath it.
+
+    A solve returns several times more closed loops than open lines, so at equal
+    weight they paint over the disk and hide what is being compared. Checked on a
+    real AIA 193 frame: 550 lines at full brightness obscured the image almost
+    completely.
+    """
+    for canvas in window._all_plot_canvases():
+        styles = canvas.PFSS_STYLES
+        closed_width, closed_alpha = styles["closed"][1], styles["closed"][2]
+        for name in ("open_positive", "open_negative"):
+            open_width, open_alpha = styles[name][1], styles[name][2]
+            assert closed_alpha < open_alpha, f"{name} vs closed on {type(canvas).__name__}"
+            assert closed_width <= open_width
+
+
+def test_both_renderers_agree_on_the_overlay_classes(window):
+    """A renderer switch must not change what a colour means."""
+    pyqt, mpl = window.pyqt_canvas, window.matplotlib_canvas
+    assert set(pyqt.PFSS_STYLES) == set(mpl.PFSS_STYLES)
+    for name in pyqt.PFSS_STYLES:
+        assert len(pyqt.PFSS_STYLES[name]) == len(mpl.PFSS_STYLES[name]) == 3
+
+
+def test_the_default_density_stays_legible(window):
+    """Tracing cost is linear in this, and so is how much of the disk is hidden.
+
+    ~12 gives roughly 150 field lines, which shows the topology and still lets
+    the image read through; 24 gave ~550 and did not.
+    """
+    from src.backend.solar.pfss_model import DEFAULT_SEED_DENSITY
+
+    assert DEFAULT_SEED_DENSITY <= 16
+    assert window.pfss_density_spin.value() == DEFAULT_SEED_DENSITY

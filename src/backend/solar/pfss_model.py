@@ -88,7 +88,10 @@ OVERLAY_CLASSES: tuple[str, ...] = (CLASS_OPEN_POSITIVE, CLASS_OPEN_NEGATIVE, CL
 # long-standing conventional choices, and what the sunkit_magex examples use.
 DEFAULT_NRHO = 35
 DEFAULT_RSS = 2.5
-DEFAULT_SEED_DENSITY = 24
+# Chosen by looking at the result over a real AIA 193 image: 24 traces ~550
+# field lines, which paints over the disk almost completely, while 12 gives
+# ~150 -- enough to show the topology and still read the image underneath.
+DEFAULT_SEED_DENSITY = 12
 DEFAULT_SEED_RADIUS_RSUN = 1.01
 DEFAULT_STEP_SIZE = 1.0
 

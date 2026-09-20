@@ -1158,11 +1158,15 @@ class SunPyPlotCanvas(QWidget):
     #: coronal-hole comparison. Closed loops are deliberately the quietest of the
     #: three: a solve usually returns far more of them, and they are the
     #: background against which the open field is being judged.
-    PFSS_STYLES: dict[str, tuple[tuple[int, int, int], float]] = {
-        "open_positive": ((255, 95, 95), 1.3),
-        "open_negative": ((95, 155, 255), 1.3),
-        "closed": ((200, 200, 200), 0.9),
-        "open_boundaries": ((150, 255, 120), 2.0),
+    #: (colour, width, alpha). Closed loops are deliberately the quietest: a
+    #: solve returns several times more of them than open lines, and at full
+    #: brightness they paint over the EUV image the overlay exists to be
+    #: compared against.
+    PFSS_STYLES: dict[str, tuple[tuple[int, int, int], float, float]] = {
+        "open_positive": ((255, 95, 95), 1.3, 0.95),
+        "open_negative": ((95, 155, 255), 1.3, 0.95),
+        "closed": ((205, 205, 205), 0.8, 0.55),
+        "open_boundaries": ((150, 255, 120), 2.0, 0.95),
     }
     #: Between the graticule (18-20) and the GCS wireframe (29-31): a CME fit
     #: drawn at the same time should stay on top of the field model.
@@ -1181,8 +1185,10 @@ class SunPyPlotCanvas(QWidget):
             curves = self._pfss_curves = {}
         curve = curves.get(name)
         if curve is None:
-            colour, width = self.PFSS_STYLES.get(name, ((255, 255, 255), 1.0))
-            curve = pg.PlotCurveItem(pen=pg.mkPen(colour, width=width), antialias=True)
+            colour, width, alpha = self.PFSS_STYLES.get(name, ((255, 255, 255), 1.0, 0.9))
+            red, green, blue = colour
+            pen = pg.mkPen((red, green, blue, int(round(alpha * 255))), width=width)
+            curve = pg.PlotCurveItem(pen=pen, antialias=True)
             curve.setZValue(self.PFSS_Z)
             curve.hide()
             self.map_plot.addItem(curve)
