@@ -5,7 +5,7 @@ Usage:
   powershell -ExecutionPolicy Bypass -File .\packaging\windows\build_windows_installer.ps1
 
 Optional:
-  powershell -ExecutionPolicy Bypass -File .\packaging\windows\build_windows_installer.ps1 -Root "C:\path\to\repo" -Version "3.0.0"
+  powershell -ExecutionPolicy Bypass -File .\packaging\windows\build_windows_installer.ps1 -Root "C:\path\to\repo" -Version "3.1.0"
   powershell -ExecutionPolicy Bypass -File .\packaging\windows\build_windows_installer.ps1 -SkipInstaller
 #>
 

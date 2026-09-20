@@ -1,7 +1,7 @@
-# e-CALLISTO FITS Analyzer (v3.1.0-beta)
+# e-CALLISTO FITS Analyzer (v3.1.0)
 A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data and other solar physics related data.
 
-## What's New in v3.1.0-beta
+## What's New in v3.1.0
 
 This beta previews the upcoming **v3.1.0** release. The features below are already implemented in the beta.
 
@@ -704,7 +704,7 @@ Notes:
 
 Notes:
 
-- JSOC server-side cutout requests are not part of v3.1.0-beta; cropping is performed locally after files are loaded.
+- JSOC server-side cutout requests are not part of v3.1.0; cropping is performed locally after files are loaded.
 - Metadata overlays require network access, but image-based region detection works on local files.
 
 ---
@@ -886,10 +886,10 @@ infinities and all-NaN rows.
     - `gem install --no-document fpm`
     - `PYTHON_BIN=/usr/bin/python3 PIP_INDEX_URL=https://pypi.org/simple bash packaging/linux/build_deb_linux.sh`
 - Expected output on `amd64`:
-  - `dist/e-callisto-fits-analyzer_3.1.0-beta_amd64.deb`
+  - `dist/e-callisto-fits-analyzer_3.1.0_amd64.deb`
 - Install the generated local package using a path, not a bare filename:
-  - `sudo apt install -y ./dist/e-callisto-fits-analyzer_3.1.0-beta_amd64.deb`
-  - If you are already inside `dist`, use `sudo apt install -y ./e-callisto-fits-analyzer_3.1.0-beta_amd64.deb`
+  - `sudo apt install -y ./dist/e-callisto-fits-analyzer_3.1.0_amd64.deb`
+  - If you are already inside `dist`, use `sudo apt install -y ./e-callisto-fits-analyzer_3.1.0_amd64.deb`
 - Manual PyInstaller build only creates the Linux app folder, not the `.deb`:
   - `pyinstaller packaging/pyinstaller/FITS_Analyzer_linux.spec`
 
@@ -899,7 +899,7 @@ infinities and all-NaN rows.
 - Build the `.app` and the disk image in one step:
   - `bash packaging/macos/build_macos_dmg.sh`
 - Expected output on Apple silicon:
-  - `dist/e-callisto-fits-analyzer_3.1.0-beta_macOS_arm64.dmg`
+  - `dist/e-callisto-fits-analyzer_3.1.0_macOS_arm64.dmg`
 - Re-wrap an existing `dist/*.app` without rebuilding it:
   - `SKIP_APP=1 bash packaging/macos/build_macos_dmg.sh`
 - Build the app bundle only:

@@ -5,7 +5,7 @@ set -euo pipefail
 # Usage:
 #   bash packaging/macos/build_macos_dmg.sh
 # Optional overrides:
-#   ROOT=/path/to/repo VERSION=3.0.0 PYTHON_BIN=/path/to/python3 \
+#   ROOT=/path/to/repo VERSION=3.1.0 PYTHON_BIN=/path/to/python3 \
 #   SKIP_APP=1 bash packaging/macos/build_macos_dmg.sh
 #
 # SKIP_APP=1 reuses an existing dist/*.app and only rebuilds the disk image.

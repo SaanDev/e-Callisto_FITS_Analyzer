@@ -1,4 +1,4 @@
-# e-CALLISTO FITS Analyzer v3.1.0-beta — Windows
+# e-CALLISTO FITS Analyzer v3.1.0 — Windows
 
 This Windows beta introduces multi-view GCS CME fitting and improves background subtraction for solar radio spectra. It also adds staged fit refinement and expands the figure, movie and report exports available from the GCS fitting window.
 
@@ -33,7 +33,7 @@ This Windows beta introduces multi-view GCS CME fitting and improves background 
 
 ## Windows installation
 
-**Installer:** `e-CALLISTO_FITS_Analyzer_v3.1.0-beta_Setup.exe`
+**Installer:** `e-CALLISTO_FITS_Analyzer_v3.1.0_Setup.exe`
 
 1. Download the Windows installer from the release assets.
 2. Close any running instance of e-CALLISTO FITS Analyzer.

@@ -5,7 +5,7 @@ set -euo pipefail
 # Usage:
 #   bash packaging/linux/build_deb_linux.sh
 # Optional overrides:
-#   ROOT=/path/to/repo VERSION=3.0.0 bash packaging/linux/build_deb_linux.sh
+#   ROOT=/path/to/repo VERSION=3.1.0 bash packaging/linux/build_deb_linux.sh
 
 ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 APP_ID="e-callisto-fits-analyzer"
