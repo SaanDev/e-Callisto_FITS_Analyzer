@@ -160,6 +160,51 @@ def test_pyinstaller_specs_bundle_aiapy_with_its_data_files():
     assert "aiapy==" in requirements
 
 
+def test_pyinstaller_specs_bundle_sunkit_magex_with_its_compiled_tracer():
+    """PFSS needs sunkit-magex, which hard-depends on the compiled streamtracer.
+
+    Both are imported lazily from src.backend.solar.pfss_model, so the specs need
+    explicit hidden imports. streamtracer's shared library additionally needs
+    collect_dynamic_libs, or a bundled build imports sunkit_magex successfully and
+    then dies on the first solve -- reported to the user as though the optional
+    package were simply not installed.
+    """
+    spec_paths = [
+        ROOT / "packaging" / "pyinstaller" / "FITS_Analyzer.spec",
+        ROOT / "packaging" / "pyinstaller" / "FITS_Analyzer_linux.spec",
+        ROOT / "packaging" / "pyinstaller" / "FITS_Analyzer_win.spec",
+    ]
+    for path in spec_paths:
+        text = path.read_text(encoding="utf-8")
+        assert '"sunkit_magex"' in text
+        assert '"sunkit_magex.pfss"' in text
+        assert '"sunkit_magex.pfss.tracing"' in text
+        assert '"streamtracer"' in text
+        assert '"skimage.measure"' in text
+        assert 'hookspath=[str(HERE / "hooks")]' in text
+
+    hook = (
+        ROOT / "packaging" / "pyinstaller" / "hooks" / "hook-sunkit_magex.py"
+    ).read_text(encoding="utf-8")
+    assert "collect_data_files(" in hook
+    assert "collect_dynamic_libs(" in hook
+    assert '"streamtracer"' in hook
+
+    macos_setup = (ROOT / "packaging" / "macos" / "setup.py").read_text(encoding="utf-8")
+    # py2app copies these whole: sunkit_magex ships data, streamtracer is
+    # compiled, and scikit-image resolves submodules through lazy_loader stubs.
+    assert '"sunkit_magex"' in macos_setup
+    assert '"streamtracer"' in macos_setup
+    assert '"skimage"' in macos_setup
+
+    requirements = (ROOT / "requirements" / "requirements-runtime.txt").read_text(
+        encoding="utf-8"
+    )
+    assert "sunkit-magex==" in requirements
+    assert "streamtracer==" in requirements
+    assert "scikit-image==" in requirements
+
+
 def test_specs_bundle_pyqtgraph_exporters():
     spec_paths = [
         ROOT / "packaging" / "pyinstaller" / "FITS_Analyzer.spec",

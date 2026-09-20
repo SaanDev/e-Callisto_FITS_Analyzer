@@ -108,6 +108,7 @@ _TOC = """
 &#8226; <a href="#navigation">13. Navigation and picking</a></p>
 <p><b>Companion windows</b><br>
 &#8226; <a href="#solar-image-analysis">14. Solar Image Analysis</a><br>
+&#8226; <a href="#pfss">&nbsp;&nbsp;&nbsp;&nbsp;14.1 Potential field extrapolation (PFSS)</a><br>
 &#8226; <a href="#gcs-fitting">15. GCS CME Fitting</a><br>
 &#8226; <a href="#fits-downloader">16. FITS Downloader</a><br>
 &#8226; <a href="#context-viewers">17. Solar event context viewers</a><br>
@@ -347,9 +348,60 @@ cropped FITS, CSV, GIF, or MP4.</li>
 (<code>Ctrl+S</code> / <code>Ctrl+Shift+S</code>). Press {_kbd('Esc')} to cancel an in-progress measurement pick.</li>
 <li><b>GCS CME Fitting</b>: <code>Analysis &#8594; GCS CME Fitting...</code> opens the three-viewpoint fitting window
 at the time of the displayed frame (see <a href="#gcs-fitting">section 15</a>).</li>
+<li><b>Potential Field (PFSS)</b>: extrapolate the coronal magnetic field from a synoptic magnetogram and draw
+the field lines over the disk (see <a href="#pfss">Potential field extrapolation</a> below).</li>
 </ul>
 <p class="note">Cropping is done locally after files load; metadata overlays need network access, but region
 detection works on local files.</p>
+
+<a name="pfss"></a>
+<h3>14.1 Potential field extrapolation (PFSS)</h3>
+<p class="lead">An EUV image shows where the plasma is, not where the field is. The <b>Potential Field (PFSS)</b>
+card extrapolates the coronal magnetic field from a photospheric magnetogram and draws the result over the disk,
+so modelled loop topology and coronal holes can be compared against what the image actually shows.</p>
+<p>The model solves for the current-free field between the photosphere and a spherical <i>source surface</i> a
+few solar radii out, where the field is forced radial to stand in for the solar wind dragging it open. Field
+lines that reach that surface are <b>open</b> (they feed the solar wind); the rest are <b>closed</b> loops.</p>
+<p class="note"><b>Read this before trusting an overlay.</b> AIA images carry no magnetic field information, so
+the boundary condition comes from a <i>synoptic</i> magnetogram — a full-Sun chart assembled from the central
+meridian over an entire solar rotation. It therefore describes the <i>global</i> field around your observation,
+never the instantaneous field, and the far side is always at least two weeks out of date. The card shows how far
+the map's date sits from the displayed frame; that offset is the number to judge the result by.</p>
+<ul>
+<li><b>Magnetogram</b>: <i>GONG synoptic</i> is ground-based, updated daily and needs no registration — the usual
+choice. <i>HMI synoptic</i> is SDO's own, so it matches AIA instrumentally; searching JSOC is free, but downloading
+stages an export there and needs the registered e-mail set in Data Source, and the series is published about one
+Carrington rotation behind, so the most recent few weeks are not covered. <i>GONG ADAPT</i> runs a flux-transport model
+that estimates the unobserved far side instead of leaving it stale, usually improving open-field predictions; one
+file holds 12 realizations, chosen with the <b>Realization</b> box. <i>Local FITS file</i> takes a synoptic map you
+already have. Downloads are cached, so re-solving does not fetch again.</li>
+<li><b>Source surface</b> (default 2.5 R☉) is the height at which the field is forced radial. Lowering it opens
+more field. <b>Radial cells</b> is the radial grid resolution; 35 is the usual choice.</li>
+<li><b>Seeds</b> decides where field lines start. <i>Uniform grid</i> samples the visible hemisphere evenly.
+<i>Open-field regions</i> traces a coarse survey first and then re-seeds only where the field is open — the clean
+way to show coronal-hole connectivity without closed loops dominating the picture. <i>Current crop</i>
+concentrates lines inside the crop rectangle. <i>Clicked points</i> traces one line per click, and needs the
+PyQtGraph renderer, which is the only one that reports clicks.</li>
+<li><b>Density</b> sets how many lines are traced, and is therefore also the speed control: tracing costs roughly
+1.6 ms per line, so a solve takes a few seconds at most.</li>
+<li><b>Show</b> toggles each layer without recomputing. Open field lines are coloured by the sign of the radial
+field at their footpoint (red outward, blue inward), closed loops are grey, and <b>Open-field boundaries</b>
+outlines the model's coronal holes to compare against the dark areas in 193/211 Å.</li>
+<li><b>Near side only</b> is on by default and worth understanding. A field line rooted on the far side is not
+hidden once it rises above the limb — nothing blocks the line of sight to it — so without this it would be drawn
+as an arc outside the disk with no visible footpoint. Clear it for the geometrically complete picture.</li>
+<li><b>Diagnostics…</b> opens a four-panel window: the input magnetogram with its provenance, the radial field at
+the source surface with its neutral line (where the heliospheric current sheet leaves the model, the most directly
+checkable prediction it makes), the open/closed footpoint map in Carrington projection, and the solution
+statistics including open flux and open-area fraction. The figure can be saved as PNG, PDF or SVG.</li>
+</ul>
+<p>Stepping through a sequence re-projects the same solution onto each frame rather than re-solving, which is
+correct: the magnetogram is valid across the rotation while the observer's view changes frame to frame. Saving a
+session stores the PFSS settings, not the solution — reopening restores the controls and one click reproduces
+the overlay.</p>
+<p class="note">PFSS needs the optional <code>sunkit-magex</code> package. Without it the card stays visible but
+disabled and shows the install command. Unmeasured pixels in a magnetogram — GONG leaves gaps over the poles —
+are filled with zero so the solve can run, and the count is reported in the card and the diagnostics window.</p>
 
 <a name="gcs-fitting"></a>
 <h2>15. GCS CME Fitting</h2>

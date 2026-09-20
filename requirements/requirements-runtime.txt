@@ -33,6 +33,15 @@ mpl-animators==1.2.4
 # composites and difference imaging. Optional at runtime: the analyzer falls
 # back gracefully when it is absent.
 aiapy==0.10.2
+# PFSS potential-field extrapolation in the Solar Image Analysis window.
+# Optional at runtime: the PFSS section disables itself with an install hint
+# when these are absent, and the rest of the app is unaffected. streamtracer is
+# a compiled extension and scikit-image ships lazy_loader .pyi stubs, so both
+# need packaging entries as well as a pin.
+sunkit-magex==1.2.0
+streamtracer==2.6.0
+scikit-image==0.26.0
+lazy-loader==0.5
 imageio==2.37.3
 imageio-ffmpeg==0.6.0
 charset-normalizer==3.4.4

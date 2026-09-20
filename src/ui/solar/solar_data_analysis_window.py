@@ -121,6 +121,8 @@ from src.backend.session.solar_session import (
     session_frame_count,
     session_pick_count,
     write_solar_session,
+    deserialize_pfss_state,
+    serialize_pfss_state,
 )
 from src.backend.solar.solar_grid import (
     FRAME_DISPLAY_NAMES as SOLAR_FRAME_DISPLAY_NAMES,
@@ -168,6 +170,7 @@ from src.ui.common.font_utils import preferred_monospace_font_family
 from src.ui.common.gui_shared import fit_window_to_screen, pick_export_path, screen_available_geometry
 from src.ui.solar.sunpy_plot_window import SunPyPlotCanvas, _rgb_to_uint8
 from src.ui.solar.sunpy_solar_viewer import SunPyWorker, _default_cache_dir, _get_theme
+from src.ui.solar.solar_pfss_controls import PfssControlsMixin, PfssSolveWorker
 from src.ui.widgets.collapsible_sections import (
     is_group_expanded,
     make_groups_collapsible,
@@ -180,7 +183,7 @@ SIDEBAR_SECTIONS_SETTINGS_KEY = "ui/sidebar_sections_solar"
 # The solar image analysis window is a young, experimental feature; the title
 # and About dialog flag it as a beta so users calibrate their expectations and
 # know where to report problems.
-SOLAR_WINDOW_VERSION = "v1.5 beta"
+SOLAR_WINDOW_VERSION = "v1.6 beta"
 SOLAR_WINDOW_TITLE = f"Solar Image Analysis (Experimental) {SOLAR_WINDOW_VERSION}"
 SOLAR_ISSUES_URL = "https://github.com/SaanDev/e-Callisto_FITS_Analyzer/issues"
 
@@ -1215,6 +1218,7 @@ class SolarMatplotlibCanvas(QWidget):
         self._limb_visible = False
         self._vector_geometry: Any | None = None
         self._gcs_xy: tuple[np.ndarray, np.ndarray] | None = None
+        self._pfss_overlay: Any | None = None
         self._graticule_polylines: list[tuple[np.ndarray, np.ndarray]] = []
         self._graticule_labels: list[tuple[str, float, float]] = []
         self._graticule_visible = False
@@ -1586,6 +1590,34 @@ class SolarMatplotlibCanvas(QWidget):
     def has_gcs_overlay(self) -> bool:
         return self._gcs_xy is not None
 
+    #: Colour and width per PFSS class, matching SunPyPlotCanvas.PFSS_STYLES so a
+    #: renderer switch does not change what the overlay means.
+    PFSS_STYLES: dict[str, tuple[str, float]] = {
+        "open_positive": ("#ff5f5f", 1.0),
+        "open_negative": ("#5f9bff", 1.0),
+        "closed": ("#c8c8c8", 0.7),
+        "open_boundaries": ("#96ff78", 1.6),
+    }
+
+    def set_pfss_overlay(self, overlay: Any | None, *, visible: bool = True) -> None:
+        """Draw a PFSS field-line overlay on the publication renderer.
+
+        Stored and then drawn from ``_draw_overlays``, never plotted directly:
+        that method clears every artist it owns and rebuilds, so an overlay
+        painted outside it is wiped by the next frame render.
+        """
+        self._pfss_overlay = overlay if visible else None
+        self._draw_overlays()
+        self.canvas.draw_idle()
+
+    def clear_pfss_overlay(self) -> None:
+        self._pfss_overlay = None
+        self._draw_overlays()
+        self.canvas.draw_idle()
+
+    def has_pfss_overlay(self) -> bool:
+        return self._pfss_overlay is not None
+
     def has_solar_graticule(self) -> bool:
         return bool(self._graticule_visible and self._graticule_polylines)
 
@@ -1617,6 +1649,23 @@ class SolarMatplotlibCanvas(QWidget):
                 gcs_x, gcs_y, color="#ff824b", linewidth=0.9, alpha=0.95, zorder=4
             )
             self._overlay_artists.append(line)
+        if self._pfss_overlay is not None:
+            for name, (colour, width) in self.PFSS_STYLES.items():
+                polyline = getattr(self._pfss_overlay, name, None)
+                if polyline is None:
+                    continue
+                xs = np.asarray(polyline[0], dtype=float)
+                ys = np.asarray(polyline[1], dtype=float)
+                if xs.size < 2 or xs.size != ys.size:
+                    continue
+                if not np.any(np.isfinite(xs) & np.isfinite(ys)):
+                    continue
+                # NaN separators break the curve between field lines and where a
+                # vertex is hidden behind the disk.
+                (line,) = self.ax.plot(
+                    xs, ys, color=colour, linewidth=width, alpha=0.9, zorder=3
+                )
+                self._overlay_artists.append(line)
         if self._graticule_visible and self._graticule_polylines:
             for xs, ys in self._graticule_polylines:
                 if xs.size < 2 or xs.size != ys.size or not np.any(np.isfinite(xs) & np.isfinite(ys)):
@@ -1864,7 +1913,7 @@ class RegionLightcurveDialog(QDialog):
         self.canvas.draw_idle()
 
 
-class SolarDataAnalysisWindow(QMainWindow):
+class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(SOLAR_WINDOW_TITLE)
@@ -1962,7 +2011,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         from src.ui.solar.solar_measure_tools import MeasurementController
 
         self._measure = MeasurementController(self)
-        self.pyqt_canvas.set_click_callback(self._measure.on_canvas_click)
+        self.pyqt_canvas.set_click_callback(self._on_plot_canvas_click)
         self._connect_signals()
         self._restore_jsoc_settings()
         self.jsoc_email_edit.editingFinished.connect(self._save_jsoc_settings)
@@ -2044,6 +2093,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._build_overlay_group(controls_layout)
         self._build_hi_group(controls_layout)
         self._build_vector_field_group(controls_layout)
+        self._build_pfss_group(controls_layout)
         self._build_region_group(controls_layout)
         controls_layout.addStretch(1)
 
@@ -2271,6 +2321,12 @@ class SolarDataAnalysisWindow(QMainWindow):
         splitter.setSizes([560, 1040])
         self.main_splitter = splitter
         self._make_sidebar_groups_collapsible()
+        # Wrapping a group in a card restores its saved expanded state through
+        # setContentWidget, which shows every direct child and does not fire the
+        # on_expand callback. A card that comes up already expanded therefore
+        # needs its per-source widgets re-derived once, here.
+        self._on_pfss_source_changed()
+        self._sync_pfss_seed_modes()
         self._apply_sidebar_style()
 
     def _build_playback_bar(self) -> QWidget:
@@ -2355,6 +2411,11 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._apply_instrument_visibility()
         self._on_frame_size_changed()
         self._sync_nrgf_enabled()
+        # Expanding a card re-shows its content's direct children, undoing the
+        # source-specific hiding done when the PFSS card was built, so the
+        # per-source widgets have to be re-derived here.
+        self._on_pfss_source_changed()
+        self._sync_pfss_seed_modes()
 
     def _set_sidebar_collapsed(self, collapsed: bool, *, animate: bool = True) -> None:
         """Slide the controls sidebar away (or back) to maximise the plot area."""
@@ -3879,6 +3940,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.vector_threshold_spin.valueChanged.connect(lambda _value: self._refresh_vector_overlay())
         self.grid_check.toggled.connect(self._on_grid_toggled)
         self.grid_frame_combo.currentTextChanged.connect(lambda _text: self._refresh_graticule_overlay())
+        self._connect_pfss_signals()
         self.colorbar_check.toggled.connect(self._on_colorbar_toggled)
         self.region_overlay_check.toggled.connect(self._refresh_region_overlays)
         self.export_plot_btn.clicked.connect(self.export_plot)
@@ -3922,6 +3984,44 @@ class SolarDataAnalysisWindow(QMainWindow):
             return self.matplotlib_canvas
         return self.pyqt_canvas
 
+    def _pfss_widget_enabled(self, widget: Any) -> bool:
+        """Keep PFSS widgets disabled when the optional stack is missing.
+
+        _set_loaded_state enables its whole list once frames exist, which would
+        otherwise undo the dependency gating.
+        """
+        pfss_widgets = (
+            getattr(self, "pfss_compute_btn", None),
+            getattr(self, "pfss_clear_btn", None),
+            getattr(self, "pfss_diagnostics_btn", None),
+            getattr(self, "pfss_seed_combo", None),
+        )
+        if widget in pfss_widgets:
+            return bool(getattr(self, "_pfss_available", False))
+        return True
+
+    def _on_plot_canvas_click(self, x_arcsec: float, y_arcsec: float, button: str) -> None:
+        """Fan a map click out to the measurement tools and to PFSS seeding.
+
+        The measurement tools ignore clicks unless a tool is armed, and PFSS
+        ignores them unless click-to-seed is the active mode, so the two never
+        compete for the same click.
+        """
+        if hasattr(self, "_measure"):
+            try:
+                self._measure.on_canvas_click(x_arcsec, y_arcsec, button)
+            except Exception:
+                pass
+        measuring = getattr(getattr(self, "_measure", None), "mode", None) is not None
+        if measuring:
+            return
+        if button == "left":
+            self._on_pfss_canvas_click(x_arcsec, y_arcsec)
+        elif button == "right" and self._pfss_seed_mode() == "click":
+            self._pfss_clicked = []
+            self._sync_pfss_density_hint()
+            self.pfss_status_label.setText("Seed points cleared.")
+
     def _all_plot_canvases(self) -> tuple[Any, ...]:
         return (self.pyqt_canvas, self.matplotlib_canvas)
 
@@ -3933,6 +4033,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         active.set_colorbar_visible(self.colorbar_check.isChecked())
         active.set_colormap_name(self._resolved_colormap_name())
         active.set_grid_visible(self.grid_check.isChecked()) if hasattr(active, "set_grid_visible") else None
+        self._sync_pfss_seed_modes()
         self._render_current_frame()
 
     def _sdo_only_widgets(self) -> tuple[QWidget, ...]:
@@ -4007,8 +4108,12 @@ class SolarDataAnalysisWindow(QMainWindow):
             self.export_plot_btn,
             self.level_combo,
             self.apply_level_btn,
+            self.pfss_compute_btn,
+            self.pfss_clear_btn,
+            self.pfss_diagnostics_btn,
+            self.pfss_seed_combo,
         ):
-            widget.setEnabled(bool(loaded))
+            widget.setEnabled(bool(loaded) and self._pfss_widget_enabled(widget))
         if not loaded:
             self._set_crop_mode_checked(False)
             self.calibration_group.setVisible(False)
@@ -4082,6 +4187,9 @@ class SolarDataAnalysisWindow(QMainWindow):
         self.load_local_btn.setEnabled(not busy)
         self.vector_load_btn.setEnabled(not busy)
         self.vector_download_btn.setEnabled(not busy)
+        pfss_ready = (not busy) and bool(getattr(self, '_pfss_available', False))
+        self.pfss_compute_btn.setEnabled(pfss_ready and bool(self._map_frames))
+        self.pfss_clear_btn.setEnabled(pfss_ready and bool(self._map_frames))
         # SDO-only download controls (source/e-mail/frame-size/cutout/high-res)
         # are gated by observable as well as busy state.
         self._apply_observable_download_gating()
@@ -4676,6 +4784,13 @@ class SolarDataAnalysisWindow(QMainWindow):
             if hasattr(worker, "no_records"):
                 worker.no_records.connect(self._on_vector_no_records)
                 worker.no_records.connect(thread.quit)
+        elif isinstance(worker, PfssSolveWorker):
+            worker.finished.connect(self._on_pfss_solved)
+            worker.failed.connect(self._on_worker_failed)
+            worker.cancelled.connect(self._on_worker_cancelled)
+            worker.finished.connect(thread.quit)
+            worker.failed.connect(thread.quit)
+            worker.cancelled.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(self._on_worker_stopped)
@@ -5519,6 +5634,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._refresh_region_overlays()
         self._refresh_graticule_overlay()
         self._refresh_vector_overlay()
+        self._refresh_pfss_overlay()
         if hasattr(self, "_measure"):
             self._measure.on_frame_changed()
 
@@ -5597,6 +5713,10 @@ class SolarDataAnalysisWindow(QMainWindow):
         cls = self._effective_instrument_class()
         self.vector_group.setVisible(cls == MAGNETOGRAPH)
         self.region_group.setVisible(cls in (DISK_EUV, MAGNETOGRAPH, UNKNOWN))
+        # PFSS applies to disk imagers and magnetographs. UNKNOWN is included
+        # deliberately: a synoptic magnetogram loaded from disk classifies as
+        # UNKNOWN, and that is exactly where the model is wanted.
+        self.pfss_group.setVisible(cls in (DISK_EUV, MAGNETOGRAPH, UNKNOWN))
         self.coronagraph_group.setVisible(cls == CORONAGRAPH)
         # Overlay layers nest other instruments into a coronagraph's occulted
         # field of view, so they only make sense for a coronagraph base.
@@ -7625,6 +7745,9 @@ class SolarDataAnalysisWindow(QMainWindow):
             "source": source,
             "view": view,
             "overlay_layers": overlay,
+            # Settings only; see serialize_pfss_state for why the solution
+            # itself is not stored.
+            "pfss": serialize_pfss_state(self._collect_pfss_state()),
             "measurements": {
                 "height_time_picks": serialize_picks(picks),
                 "circle_fits": serialize_circle_fits(circles),
@@ -7736,6 +7859,7 @@ class SolarDataAnalysisWindow(QMainWindow):
         self._restore_source_widgets(source)
         self._restore_view_widgets(view)
         self._restore_overlay_layers(meta.get("overlay_layers"))
+        self._restore_pfss_state(deserialize_pfss_state(meta.get("pfss")))
 
         # Frames always reload uncropped, so re-apply the saved crop.
         if view.get("crop_applied"):
@@ -8115,7 +8239,10 @@ class SolarDataAnalysisWindow(QMainWindow):
             # in _on_worker_stopped once the worker thread has actually stopped.
             self._pending_close = True
             worker = self._active_worker
-            if isinstance(worker, SunPyWorker):
+            # Any worker exposing cancel(), matching stop_active_operation. Only
+            # SunPyWorker was cancelled here before, so closing the window during
+            # a calibration, derotation or PFSS solve waited for it to finish.
+            if worker is not None and hasattr(worker, "cancel"):
                 try:
                     worker.cancel()
                 except Exception:

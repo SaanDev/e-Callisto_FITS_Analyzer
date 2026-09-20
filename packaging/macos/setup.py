@@ -103,6 +103,12 @@ OPTIONS = {
         "PIL",
         "imageio",
         "imageio_ffmpeg",
+        # Copied whole: sunkit_magex ships data files, streamtracer is a compiled
+        # extension, and scikit-image resolves submodules at runtime through
+        # lazy_loader .pyi stubs that a module-level include would miss.
+        "sunkit_magex",
+        "streamtracer",
+        "skimage",
     ],
 
     "includes": [
@@ -119,6 +125,11 @@ OPTIONS = {
         "PySide6.QtSvgWidgets",
         "matplotlib.backends.backend_qtagg",
         "pyqtgraph",
+        "sunkit_magex.pfss",
+        "sunkit_magex.pfss.tracing",
+        "sunkit_magex.pfss.utils",
+        "skimage.measure",
+        "lazy_loader",
         "pyqtgraph.exporters",
         "pyqtgraph.exporters.ImageExporter",
         "pyqtgraph.exporters.SVGExporter",

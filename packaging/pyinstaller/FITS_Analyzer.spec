@@ -167,6 +167,18 @@ a = Analysis(
         "aiapy",
         "aiapy.calibrate",
 
+        # PFSS modelling in the Solar Image Analysis window. Imported lazily, so
+        # static analysis cannot see it; hook-sunkit_magex.py also collects the
+        # compiled streamtracer library that the field-line tracer needs.
+        "sunkit_magex",
+        "sunkit_magex.pfss",
+        "sunkit_magex.pfss.tracing",
+        "sunkit_magex.pfss.utils",
+        "streamtracer",
+        "skimage",
+        "skimage.measure",
+        "lazy_loader",
+
         "PySide6.QtNetwork",
         "PySide6.QtPrintSupport",
         "PySide6.QtSvg",

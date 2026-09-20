@@ -214,6 +214,68 @@ def deserialize_circle_fits(raw: Any) -> dict[int, tuple]:
 # --- GCS fits ---------------------------------------------------------------
 
 
+def serialize_pfss_state(state: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Flatten the PFSS section's settings for a saved session.
+
+    Settings only -- never the solution. A solve takes a couple of seconds and
+    depends on a magnetogram that lives in the shared cache, so storing the
+    traced field would bloat the session for something cheap to reproduce. The
+    magnetogram's identity is kept so a restored session says which boundary
+    condition the numbers came from.
+
+    Stored under a new key, deliberately not behind a schema bump: an unknown key
+    is ignored by an older reader, whereas bumping ``SOLAR_SCHEMA_VERSION`` makes
+    every existing session file be *rejected* rather than read.
+
+    Every value is cast to a JSON-native type here, because the session writer
+    calls ``json.dumps`` without a ``default=`` handler -- a stray ``numpy``
+    scalar would abort the whole save.
+    """
+    if not isinstance(state, Mapping):
+        return {}
+    out: dict[str, Any] = {
+        "source": str(state.get("source") or ""),
+        "nrho": _safe_int(state.get("nrho"), 35),
+        "rss": _safe_float(state.get("rss")),
+        "seed_mode": str(state.get("seed_mode") or ""),
+        "seed_density": _safe_int(state.get("seed_density"), 24),
+        "realization": _safe_int(state.get("realization"), 0),
+        "show_open": bool(state.get("show_open", True)),
+        "show_closed": bool(state.get("show_closed", True)),
+        "show_boundaries": bool(state.get("show_boundaries", True)),
+        "near_side_only": bool(state.get("near_side_only", True)),
+    }
+    for key in ("magnetogram_path", "magnetogram_label", "carrington_rotation"):
+        value = state.get(key)
+        if value in (None, ""):
+            continue
+        out[key] = _safe_int(value, 0) if key == "carrington_rotation" else str(value)
+    clicked = state.get("clicked_arcsec")
+    if isinstance(clicked, Sequence):
+        points: list[list[float]] = []
+        for item in clicked:
+            if isinstance(item, Sequence) and len(item) >= 2:
+                points.append([_safe_float(item[0]) or 0.0, _safe_float(item[1]) or 0.0])
+        if points:
+            out["clicked_arcsec"] = points
+    return out
+
+
+def deserialize_pfss_state(payload: Any) -> dict[str, Any]:
+    """Read back :func:`serialize_pfss_state`, tolerating a missing key."""
+    if not isinstance(payload, Mapping):
+        return {}
+    out = dict(payload)
+    clicked = out.get("clicked_arcsec")
+    if isinstance(clicked, Sequence):
+        out["clicked_arcsec"] = [
+            (float(item[0]), float(item[1]))
+            for item in clicked
+            if isinstance(item, Sequence) and len(item) >= 2
+        ]
+    return out
+
+
 def serialize_gcs_fits(fits: Mapping[int, Sequence[Any]] | None) -> list[dict[str, Any]]:
     """Flatten the controller's ``{frame_index: GCSFitEntry}`` GCS fits.
 

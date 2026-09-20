@@ -1151,6 +1151,77 @@ class SunPyPlotCanvas(QWidget):
     def has_solar_graticule(self) -> bool:
         return bool(getattr(self, "_graticule_items", []))
 
+    # ------------------------------------------------------------- PFSS overlay
+    #: Pen colour and width per PFSS overlay class. Open field lines are split by
+    #: the sign of Br at their footpoint -- the two magnetic hemispheres of the
+    #: solar wind -- because that split is the first thing read off a
+    #: coronal-hole comparison. Closed loops are deliberately the quietest of the
+    #: three: a solve usually returns far more of them, and they are the
+    #: background against which the open field is being judged.
+    PFSS_STYLES: dict[str, tuple[tuple[int, int, int], float]] = {
+        "open_positive": ((255, 95, 95), 1.3),
+        "open_negative": ((95, 155, 255), 1.3),
+        "closed": ((200, 200, 200), 0.9),
+        "open_boundaries": ((150, 255, 120), 2.0),
+    }
+    #: Between the graticule (18-20) and the GCS wireframe (29-31): a CME fit
+    #: drawn at the same time should stay on top of the field model.
+    PFSS_Z = 28
+
+    def _pfss_curve(self, name: str) -> Any:
+        """The persistent curve item for one PFSS class, created on first use.
+
+        Persistent items rather than the graticule's create-and-destroy approach:
+        this overlay is re-projected on every frame step, and churning graphics
+        items per update is exactly what makes the GCS wireframe feel sluggish
+        (see the note on ``_gcs_curve``).
+        """
+        curves = getattr(self, "_pfss_curves", None)
+        if curves is None:
+            curves = self._pfss_curves = {}
+        curve = curves.get(name)
+        if curve is None:
+            colour, width = self.PFSS_STYLES.get(name, ((255, 255, 255), 1.0))
+            curve = pg.PlotCurveItem(pen=pg.mkPen(colour, width=width), antialias=True)
+            curve.setZValue(self.PFSS_Z)
+            curve.hide()
+            self.map_plot.addItem(curve)
+            curves[name] = curve
+        return curve
+
+    def set_pfss_overlay(self, overlay: Any | None, *, visible: bool = True) -> None:
+        """Draw a PFSS field-line overlay (arcsec view coordinates).
+
+        ``overlay`` is a ``src.backend.solar.pfss_model.PfssOverlay``: one
+        NaN-separated ``(x, y)`` pair per class, covering every field line of that
+        class, so each class is a single ``setData`` regardless of how many lines
+        were traced. Read duck-typed so the canvas does not import the backend.
+        """
+        for name in self.PFSS_STYLES:
+            polyline = getattr(overlay, name, None) if overlay is not None else None
+            curve = self._pfss_curve(name)
+            if not visible or polyline is None:
+                curve.setData([], [])
+                curve.hide()
+                continue
+            x = np.asarray(polyline[0], dtype=float)
+            y = np.asarray(polyline[1], dtype=float)
+            if x.size < 2 or x.size != y.size or not np.any(np.isfinite(x) & np.isfinite(y)):
+                curve.setData([], [])
+                curve.hide()
+                continue
+            curve.setData(x, y, connect="finite")
+            curve.show()
+
+    def clear_pfss_overlay(self) -> None:
+        """Hide every PFSS class without destroying the curve items."""
+        self.set_pfss_overlay(None, visible=False)
+
+    def has_pfss_overlay(self) -> bool:
+        return any(
+            curve.isVisible() for curve in (getattr(self, "_pfss_curves", {}) or {}).values()
+        )
+
     def enable_roi_selector(self):
         """Show an interactive ROI box (default: central quarter) and emit its
         pixel bounds through the ROI callback."""
