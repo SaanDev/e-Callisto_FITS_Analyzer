@@ -36,7 +36,11 @@ from src.backend.radio.spectral_overview import (
     build_spectral_overview,
     render_spectral_overview_figure,
 )
-from src.ui.common.gui_shared import fit_window_to_screen, pick_export_path
+from src.ui.common.gui_shared import (
+    fit_window_to_screen,
+    pick_export_path,
+    screen_for_widget,
+)
 from src.ui.radio.burst_list_tab import BurstListTab
 
 from PySide6.QtCore import (
@@ -1085,7 +1089,7 @@ class CallistoDownloaderApp(QDialog):
         return row
 
     def _fit_to_available_screen(self) -> None:
-        screen = self.screen() or QApplication.primaryScreen()
+        screen = screen_for_widget(self)
         if screen is None:
             self.setMinimumSize(640, 480)
             self.resize(1200, 800)

@@ -347,7 +347,11 @@ class BurstListTab(QWidget):
         worker.progress.connect(self._progress)
         worker.finished.connect(receiver)
         worker.finished.connect(self._thread.quit)
-        worker.finished.connect(worker.deleteLater)
+        # The worker is deliberately NOT wired to its own deleteLater: that runs
+        # on the worker thread, during the same teardown in which this thread
+        # drops its reference, and the two racing destructions of one Shiboken
+        # wrapper deadlock or crash. _worker_finished frees it here instead,
+        # after joining the thread.
         self._thread.finished.connect(self._worker_finished)
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setFormat("%p%")
@@ -360,9 +364,19 @@ class BurstListTab(QWidget):
 
     @Slot()
     def _worker_finished(self):
-        self._thread.deleteLater()
+        thread = self._thread
+        if thread is not None:
+            # QThread emits finished() from inside its own teardown, so the OS
+            # thread is still winding down when this slot runs. Join it before
+            # releasing anything: destroying a QThread that is still running, or
+            # freeing the worker from here while the worker thread is still
+            # touching it, is a use-after-free that surfaces as a hung run or an
+            # access violation somewhere unrelated rather than a clean error.
+            thread.wait()
         self._thread = None
         self._worker = None
+        if thread is not None:
+            thread.deleteLater()
         self._finish_progress()
         self._sync_actions()
         self.busy_changed.emit(False)

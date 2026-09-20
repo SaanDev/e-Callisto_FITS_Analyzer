@@ -67,16 +67,43 @@ def start_combine(self):
     QTimer.singleShot(100, self.combine_files)  # delays execution and avoids UI freeze
 
 
+def screen_for_widget(widget=None):
+    """The QScreen *widget* is (or will be) shown on, without poisoning Qt.
+
+    Never call ``QWidget.screen()`` or ``QWindow.screen()``: PySide6 registers
+    the returned ``QScreen`` as a Shiboken child of the widget, so when the
+    widget is destroyed Shiboken deletes the C++ ``QScreen`` too — even though
+    Qt owns it and keeps it in ``QGuiApplication.screens()``. Qt is then left
+    holding a dangling screen, and the next internal screen query (DPI lookups
+    during painting, window placement) reads freed memory and takes the process
+    down with an access violation. It does not bite in a normal app run, where
+    windows outlive the session, but a test suite that lets windows be garbage
+    collected crashes a few paints later, far from the real cause.
+
+    ``screenAt()``, ``screens()`` and ``primaryScreen()`` hand back the same
+    screen without that parenting, so resolve through them instead.
+    """
+    if widget is not None:
+        try:
+            # screenAt() takes global coordinates, and frameGeometry() is only
+            # global for a top-level widget, so resolve through the window.
+            top_level = widget.window() or widget
+            point = top_level.frameGeometry().center()
+        except Exception:
+            point = None
+        if point is not None:
+            try:
+                screen = QGuiApplication.screenAt(point)
+            except Exception:
+                screen = None
+            if screen is not None:
+                return screen
+    return QGuiApplication.primaryScreen()
+
+
 def screen_available_geometry(widget=None):
     """Available geometry of the screen the widget is (or will be) shown on."""
-    screen = None
-    try:
-        if widget is not None:
-            screen = widget.screen()
-    except Exception:
-        screen = None
-    if screen is None:
-        screen = QGuiApplication.primaryScreen()
+    screen = screen_for_widget(widget)
     return screen.availableGeometry() if screen is not None else None
 
 

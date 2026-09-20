@@ -81,7 +81,12 @@ from src.ui.radio.dialogs.comparison_export_dialog import (
     ComparisonExportOptions,
 )
 from src.ui.radio.dialogs.display_range_dialog import DisplayRangeDialog
-from src.ui.common.gui_shared import MplCanvas, fit_window_to_screen, pick_export_path
+from src.ui.common.gui_shared import (
+    MplCanvas,
+    fit_window_to_screen,
+    pick_export_path,
+    screen_for_widget,
+)
 from src.ui.widgets.measurement_readout import MeasurementReadout
 
 
@@ -412,7 +417,7 @@ class MultiStationComparisonDialog(QDialog):
         super().showEvent(event)
         if not bool(getattr(self, "_maximized_once", False)):
             self._maximized_once = True
-            screen = self.screen() or QApplication.primaryScreen()
+            screen = screen_for_widget(self)
             if screen is not None:
                 self.setGeometry(screen.availableGeometry())
             self.setWindowState(self.windowState() | Qt.WindowMaximized)
