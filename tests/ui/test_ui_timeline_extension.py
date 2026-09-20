@@ -15,7 +15,7 @@ pytest.importorskip("matplotlib")
 
 from astropy.io import fits
 from PySide6.QtCore import QThread
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from src.ui.app.main_window import MainWindow
 from src.ui.widgets.collapsible_sections import section_for
@@ -76,7 +76,31 @@ def offline(monkeypatch):
 
 
 @pytest.fixture
-def window(archive, offline):
+def dialogs(monkeypatch):
+    """Record modal message boxes instead of showing them.
+
+    A modal QMessageBox never returns without someone to click it, so an
+    un-patched one does not fail its own test: it wedges the whole headless
+    run until the timeout kills the process, and the report points at pytest
+    rather than at the dialog. Recording the calls keeps the explanatory paths
+    assertable.
+    """
+    seen: list[tuple[str, str, str]] = []
+
+    def _recorder(kind):
+        def _show(_parent, title, text, *_args, **_kwargs):
+            seen.append((kind, str(title), str(text)))
+            return 0
+
+        return _show
+
+    for kind in ("information", "warning", "critical"):
+        monkeypatch.setattr(QMessageBox, kind, _recorder(kind))
+    return seen
+
+
+@pytest.fixture
+def window(archive, offline, dialogs):
     _app()
     win = MainWindow(theme=None)
     win.timeline_prefetch_action.setChecked(False)
@@ -374,10 +398,12 @@ def test_trimming_to_one_observation_becomes_a_plain_single_file(window):
     assert window.timeline_trim_end_btn.isEnabled() is False
 
 
-def test_trim_is_a_no_op_on_a_single_observation(window):
+def test_trim_is_a_no_op_on_a_single_observation(window, dialogs):
     window.trim_timeline("end")
     QApplication.processEvents()
 
+    # Nothing to drop, so the dataset is untouched and the reason is explained.
+    assert [(kind, title) for kind, title, _text in dialogs] == [("information", "Timeline")]
     assert _segment_labels(window) == ["10:15   01"]
     assert window.raw_data.shape == (NROWS, NCOLS)
 

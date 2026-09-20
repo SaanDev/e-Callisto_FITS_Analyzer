@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.ui.common.gui_shared import fit_window_to_screen
+from src.ui.common.gui_shared import fit_window_to_screen, screen_for_widget
 
 
 def _safe_text(value: Any) -> str:
@@ -2275,11 +2275,7 @@ class SunPyPlotWindow(QMainWindow):
             self._ensure_window_in_screen(self._available_screen_geometry())
 
     def _available_screen_geometry(self):
-        screen = self.windowHandle().screen() if self.windowHandle() is not None else None
-        if screen is None:
-            screen = QGuiApplication.screenAt(self.frameGeometry().center())
-        if screen is None:
-            screen = QGuiApplication.primaryScreen()
+        screen = screen_for_widget(self)
         if screen is None:
             return None
         return screen.availableGeometry()
