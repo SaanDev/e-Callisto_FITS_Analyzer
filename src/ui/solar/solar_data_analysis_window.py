@@ -2958,7 +2958,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         return self.palette().color(self.backgroundRole()).lightness() < 128
 
     def _build_data_source_group(self, parent_layout: QVBoxLayout) -> None:
-        group = QGroupBox("1 · Data Source")
+        group = QGroupBox("Data Source")
         self.data_source_group = group
         layout = QGridLayout(group)
         layout.setHorizontalSpacing(8)
@@ -3135,7 +3135,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         layout.addWidget(self.live_preview_btn, row, 0, 1, 2)
 
     def _build_archive_results_group(self, parent_layout: QVBoxLayout) -> None:
-        self.archive_results_group = QGroupBox("2 · Archive Results")
+        self.archive_results_group = QGroupBox("Archive Results")
         self.archive_results_group.setMinimumHeight(300)
         self.archive_results_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         layout = QVBoxLayout(self.archive_results_group)
@@ -3197,7 +3197,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         layout.addWidget(self.download_load_btn)
 
     def _build_mode_group(self, parent_layout: QVBoxLayout) -> None:
-        group = QGroupBox("3 · Analysis")
+        group = QGroupBox("Analysis")
         self.mode_group = group
         layout = QGridLayout(group)
         layout.setHorizontalSpacing(8)
