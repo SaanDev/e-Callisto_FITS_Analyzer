@@ -1,22 +1,5 @@
 # e-CALLISTO FITS Analyzer (v3.1.0-beta)
-A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data.
-
-## Project layout
-
-- `src/backend/`: scientific processing, data sources, sessions and shared services.
-- `src/ui/`: Qt windows, dialogs and widgets grouped by feature.
-- `src/core/`: shared source and packaged-app paths.
-- `assets/`: application branding, themed icons and screenshots.
-- `packaging/`: Windows, macOS, Linux and PyInstaller build configuration.
-- `requirements/` and `scripts/`: dependencies, installation and smoke checks.
-- `tests/`: backend, UI and packaging tests with shared test helpers.
-- `docs/`: build guides, release notes and the [architecture guide](docs/architecture.md).
-
-Start the app from the repository root with `python -m src` or `python src/main.py`.
-See the [architecture guide](docs/architecture.md) for package responsibilities,
-test commands and migration details.
-
----
+A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data and other solar physics related data.
 
 ## What's New in v3.1.0-beta
 
@@ -46,13 +29,6 @@ The beta also includes these archive, instrument, visualization and solar-image 
 - **Trim and undo:** **Trim Start** / **Trim End** walk the dataset back, falling through to a plain single-file load at one segment, and both extension and trimming are a single **Ctrl+Z** away — arrays, source list and annotations together.
 - **Local first, then the archive:** the adjacent observation is looked for among the loaded file's siblings on disk before any request is made, so a set already downloaded extends with no network at all. Day listings are cached per session, and adjacent files can be prefetched in the background.
 - **Available-or-not, up front:** the panel says why a direction is unavailable — end of the archive day, or a timestamp that supplies only part of the focus set — instead of failing on the click.
-
-### ARTEMIS-IV (Thermopylae, Greece) files
-- **Opens like any other file, and reads correctly.** ARTEMIS-IV writes its FITS through `ARTLOOK`, not through a CALLISTO receiver, and the differences are the kind that fail quietly. The time axis holds **UT in hours** rather than seconds from the start, so a three-hour observation would otherwise render three seconds wide with every UT label wrong; it is converted on load and cross-checked against `TIME-OBS`, so the axis carries real clock time. Upper-case `.FITS` suffixes — how the archive publishes them — are in the open dialog's filter.
-- **The receiver's own intensity scale.** The **Units** section reads **Counts** instead of Digits, and **dB** uses **58.51 counts/dB** for the ASG: a 4096-count (12-bit) ADC full scale over the receiver's published 70 dB dynamic range. The CALLISTO constant describes a different receiver chain and would overstate a burst by more than twenty times. ARTEMIS-IV publishes no absolute flux calibration, so the result is stated for what it is — **dB above the per-channel background**, not sfu.
-- **A first view you can read.** ARTEMIS channels differ in gain by more than an order of magnitude, so a raw plot shows the receiver's gain profile rather than the Sun — which is why every published ARTEMIS dynamic spectrum is background subtracted. Files open that way, with the threshold sliders widened to the receiver's real range instead of CALLISTO's ±100; **Edit → Reset to Raw** still shows the stored counts.
-- **Header quirks named, not silently worked around.** `View → FITS Header` puts a preamble above the raw cards giving the receiver, coverage, cadence and active calibration, and flagging the hours-based time axis, the descending frequency axis, the `BLANK` value, and a `DATE` field whose day and month are exchanged (`2015-22-06` is 22 June 2015). `DATE-OBS` is well formed and is what the analyzer uses.
-- Batch processing resolves the counts-to-dB constant per file, so a folder of ARTEMIS files and a folder of CALLISTO files both export with the right scale and the right unit on the colorbar.
 
 ### Linear and logarithmic frequency axis
 - **New Axis section** in the sidebar switches the dynamic spectrum between **Linear** and **Log**. A logarithmic frequency axis spreads the decametric end of the band, where type II and type III bursts spend most of their drift, and makes a harmonic pair sit at a constant separation.
