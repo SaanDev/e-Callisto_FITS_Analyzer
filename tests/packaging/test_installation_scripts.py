@@ -189,6 +189,12 @@ def test_pyinstaller_specs_bundle_sunkit_magex_with_its_compiled_tracer():
     assert "collect_data_files(" in hook
     assert "collect_dynamic_libs(" in hook
     assert '"streamtracer"' in hook
+    # streamtracer/version.py calls importlib.metadata.version("streamtracer")
+    # at import, and PyInstaller bundles .dist-info only when a hook asks.
+    # Without this the frozen app dies with PackageNotFoundError the moment
+    # sunkit_magex.pfss is imported -- proven with an onedir probe, which failed
+    # identically with and without the rest of this hook until it was added.
+    assert "copy_metadata(" in hook
 
     macos_setup = (ROOT / "packaging" / "macos" / "setup.py").read_text(encoding="utf-8")
     # py2app copies these whole: sunkit_magex ships data, streamtracer is

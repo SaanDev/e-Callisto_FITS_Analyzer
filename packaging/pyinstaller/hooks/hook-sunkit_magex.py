@@ -12,6 +12,15 @@ Two things here are not automatic:
   library has to be collected explicitly with ``collect_dynamic_libs``, or
   ``import sunkit_magex.pfss`` fails at runtime with a missing-module error that
   looks exactly like "the package was not installed".
+* ``streamtracer`` also reads **its own installed metadata** at import time:
+  ``streamtracer/version.py`` calls ``importlib.metadata.version("streamtracer")``
+  on line 5. PyInstaller bundles a package's ``.dist-info`` only when a hook asks
+  via ``copy_metadata``, so without it the frozen app raises
+  ``PackageNotFoundError: No package metadata was found for streamtracer`` the
+  moment ``sunkit_magex.pfss`` is imported. Verified 2026-09-21 with a minimal
+  onedir probe: the bundle failed identically with and without the rest of this
+  hook until ``copy_metadata`` was added. ``sunkit_magex`` itself needs no
+  equivalent -- its version is a static ``_version.py`` written at build time.
 * sunkit-magex ships data files alongside its modules, and PyInstaller bundles
   none unless a hook asks.
 
@@ -27,6 +36,7 @@ from PyInstaller.utils.hooks import (
     collect_data_files,
     collect_dynamic_libs,
     collect_submodules,
+    copy_metadata,
 )
 
 
@@ -46,3 +56,6 @@ hiddenimports = collect_submodules("sunkit_magex", filter=_not_tests) + [
 # The compiled tracer. Without this the bundled app imports sunkit_magex and
 # then dies on the first solve.
 binaries = collect_dynamic_libs("streamtracer")
+
+# streamtracer reads its own dist-info on import; see the note above.
+datas += copy_metadata("streamtracer")
