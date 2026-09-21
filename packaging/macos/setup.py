@@ -80,6 +80,50 @@ from src.version import APP_VERSION
 
 APP = [R("src", "main.py")]
 
+def STREAMTRACER_METADATA():
+    """Bundle streamtracer's ``.dist-info`` into the application's import path.
+
+    ``streamtracer/version.py`` calls ``importlib.metadata.version("streamtracer")``
+    at import time. py2app copies package *directories*, but a distribution's
+    ``.dist-info`` sits **alongside** the package rather than inside it, so it is
+    left behind -- and the frozen app then raises ``PackageNotFoundError`` the
+    moment ``sunkit_magex.pfss`` is imported, disabling PFSS in the shipped .app.
+
+    This is the one case where py2app does *not* mask a PyInstaller packaging
+    gap: the PyInstaller side needs ``copy_metadata`` in
+    ``packaging/pyinstaller/hooks/hook-sunkit_magex.py`` for exactly the same
+    reason. Verified 2026-09-21 with minimal probes for both freezers.
+
+    Returns an empty list when streamtracer is absent, so a build without the
+    optional PFSS stack still succeeds.
+    """
+    try:
+        import importlib.metadata as _md
+
+        dist = _md.distribution("streamtracer")
+    except Exception:
+        return []
+
+    info_dir = getattr(dist, "_path", None)
+    if info_dir is None or not os.path.isdir(str(info_dir)):
+        return []
+    info_dir = str(info_dir)
+
+    files = [
+        os.path.join(info_dir, name)
+        for name in sorted(os.listdir(info_dir))
+        if os.path.isfile(os.path.join(info_dir, name))
+    ]
+    if not files:
+        return []
+
+    # Destinations are relative to Contents/Resources, and that lib directory is
+    # on the bundled interpreter's sys.path, which is where importlib.metadata
+    # looks for distributions.
+    lib = "lib/python{0}.{1}".format(*sys.version_info[:2])
+    return [(f"{lib}/{os.path.basename(info_dir)}", files)]
+
+
 DATA_FILES = [
     ("assets/branding", [
         R("assets", "branding", "icon.icns"),
@@ -89,7 +133,7 @@ DATA_FILES = [
     ("assets/icons_dark", SVG_FILES("icons_dark")),
     ("assets/band_splitting_icons/light", SVG_FILES(os.path.join("band_splitting_icons", "light"))),
     ("assets/band_splitting_icons/dark", SVG_FILES(os.path.join("band_splitting_icons", "dark"))),
-]
+] + STREAMTRACER_METADATA()
 
 OPTIONS = {
     "argv_emulation": False,
