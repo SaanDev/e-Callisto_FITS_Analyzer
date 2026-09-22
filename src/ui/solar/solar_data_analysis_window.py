@@ -4786,6 +4786,9 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
                 worker.no_records.connect(thread.quit)
         elif isinstance(worker, PfssSolveWorker):
             worker.finished.connect(self._on_pfss_solved)
+            # Before _on_worker_failed, whose dialog is modal: a broken PFSS
+            # stack disables the card before the error is shown, not after.
+            worker.failed.connect(self._on_pfss_failed)
             worker.failed.connect(self._on_worker_failed)
             worker.cancelled.connect(self._on_worker_cancelled)
             worker.finished.connect(thread.quit)

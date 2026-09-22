@@ -10,6 +10,10 @@ works on plain arrays. Tests are grouped the same way: everything below
 
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -32,6 +36,7 @@ from src.backend.solar.pfss_model import (
 )
 
 OBSTIME = "2020-09-01T13:00:00"
+ROOT = Path(__file__).resolve().parents[2]
 
 
 # --------------------------------------------------------------------------- #
@@ -174,14 +179,68 @@ def test_broken_install_does_not_advise_pip():
     assert "bad symbol" in message
 
 
-def test_import_error_is_a_pfss_unavailable_error(monkeypatch):
+def test_the_availability_check_does_not_import_the_stack():
+    """The Solar Image Analysis window asks while it is being built, on the GUI
+    thread. Importing sunkit_magex.pfss there took ~3 s on every opening."""
+    code = (
+        "import sys; "
+        "from src.backend.solar.pfss_model import pfss_available; "
+        "pfss_available(); "
+        "loaded = sorted(m for m in sys.modules if m.split('.')[0] in "
+        "('sunkit_magex', 'streamtracer', 'skimage', 'sunpy')); "
+        "assert not loaded, loaded"
+    )
+    subprocess.check_call([sys.executable, "-c", code], cwd=ROOT)
+
+
+def test_a_missing_package_is_reported_by_name(monkeypatch):
     import src.backend.solar.pfss_model as module
 
-    monkeypatch.setattr(
-        module, "import_pfss",
-        lambda: (_ for _ in ()).throw(PfssUnavailableError("nope")),
-    )
+    monkeypatch.setattr(module, "_import_failure", None)
+    monkeypatch.setattr(module, "_is_installed", lambda name: name != "streamtracer")
     assert module.pfss_available() is False
+    reason = module.pfss_unavailable_reason()
+    assert "streamtracer" in reason
+    assert PFSS_INSTALL_HINT in reason
+
+
+def test_a_failed_import_is_remembered_with_its_real_reason(monkeypatch):
+    """Installed but broken -- the frozen-build failure -- passes the package
+    check, so the failure found by the first solve has to stick."""
+    import builtins
+
+    import src.backend.solar.pfss_model as module
+
+    real_import = builtins.__import__
+
+    def broken_import(name, *args, **kwargs):
+        if name.split(".")[0] == "sunkit_magex":
+            raise ImportError("bad symbol")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(module, "_import_failure", None)
+    monkeypatch.setattr(module, "_is_installed", lambda name: True)
+    assert module.pfss_available() is True
+
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "__import__", broken_import)
+        with pytest.raises(PfssUnavailableError):
+            module.import_pfss()
+
+    assert module.pfss_available() is False
+    reason = module.pfss_unavailable_reason()
+    assert "bad symbol" in reason
+    assert PFSS_INSTALL_HINT not in reason
+
+
+def test_a_successful_import_clears_a_remembered_failure(monkeypatch):
+    pytest.importorskip("sunkit_magex.pfss")
+    import src.backend.solar.pfss_model as module
+
+    monkeypatch.setattr(module, "_import_failure", "stale failure")
+    assert module.pfss_available() is False
+    module.import_pfss()
+    assert module.pfss_available() is True
 
 
 # --------------------------------------------------------------------------- #

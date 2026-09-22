@@ -51,6 +51,8 @@ No Qt here, so the module stays unit-testable.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
+import sys
 import time
 import warnings
 from dataclasses import dataclass, replace
@@ -114,6 +116,14 @@ class PfssUnavailableError(RuntimeError):
 # Optional dependency
 # --------------------------------------------------------------------------- #
 
+#: Top-level packages a solve imports. ``sunkit_magex`` pulls in the rest, but
+#: each is listed because each is a separate thing a frozen build can leave out.
+PFSS_PACKAGES: tuple[str, ...] = ("sunkit_magex", "streamtracer", "skimage", "scipy", "lazy_loader")
+
+#: Why the last real import of the stack failed, or None. See pfss_available.
+_import_failure: str | None = None
+
+
 def _format_pfss_dependency_error(exc: BaseException) -> str:
     """User-facing reason the PFSS stack could not be imported.
 
@@ -122,8 +132,7 @@ def _format_pfss_dependency_error(exc: BaseException) -> str:
     or ``scikit-image`` left out of the bundle -- where "pip install" is the
     wrong advice, so the underlying error is named instead.
     """
-    missing = {"sunkit_magex", "streamtracer", "skimage", "scipy", "lazy_loader"}
-    if isinstance(exc, ModuleNotFoundError) and (exc.name or "").split(".")[0] in missing:
+    if isinstance(exc, ModuleNotFoundError) and (exc.name or "").split(".")[0] in PFSS_PACKAGES:
         name = (exc.name or "").split(".")[0]
         detail = "" if name == "sunkit_magex" else f" (its '{name}' dependency is missing)"
         return (
@@ -137,21 +146,61 @@ def _format_pfss_dependency_error(exc: BaseException) -> str:
 
 
 def import_pfss() -> Any:
-    """Return the ``sunkit_magex.pfss`` module, or raise with a usable message."""
+    """Return the ``sunkit_magex.pfss`` module, or raise with a usable message.
+
+    The first call is slow: it imports ``sunpy.map``, ``reproject``, ``dask`` and
+    ``scikit-image`` along the way, seconds even from a warm disk cache. Call it
+    from a worker thread, never while building UI.
+    """
+    global _import_failure
     try:
         from sunkit_magex import pfss
-    except Exception as exc:  # pragma: no cover - exercised via the formatter
-        raise PfssUnavailableError(_format_pfss_dependency_error(exc)) from exc
+    except Exception as exc:
+        _import_failure = _format_pfss_dependency_error(exc)
+        raise PfssUnavailableError(_import_failure) from exc
+    _import_failure = None
     return pfss
 
 
-def pfss_available() -> bool:
-    """Whether a PFSS solve can be attempted at all (used to gate the UI)."""
+def _is_installed(name: str) -> bool:
+    """Whether the top-level module ``name`` can be found, without importing it."""
+    if name in sys.modules:
+        return sys.modules[name] is not None
     try:
-        import_pfss()
-    except PfssUnavailableError:
+        return importlib.util.find_spec(name) is not None
+    except Exception:
+        # Runs while the window is built: a misbehaving finder must not stop it.
         return False
-    return True
+
+
+def pfss_unavailable_reason() -> str | None:
+    """Why a PFSS solve cannot be attempted, or None when it can.
+
+    A failed :func:`import_pfss` takes precedence: it has the real error, where
+    the package check can only see what is missing.
+    """
+    if _import_failure is not None:
+        return _import_failure
+    for name in PFSS_PACKAGES:
+        if not _is_installed(name):
+            return _format_pfss_dependency_error(
+                ModuleNotFoundError(f"No module named {name!r}", name=name)
+            )
+    return None
+
+
+def pfss_available() -> bool:
+    """Whether a PFSS solve can be attempted at all (used to gate the UI).
+
+    Answered without importing the stack. The Solar Image Analysis window asks
+    while it is being built, on the GUI thread, and importing
+    ``sunkit_magex.pfss`` there held every opening of the window up for seconds.
+    The check is therefore "installed", not "loads": a stack that is present
+    but broken -- a compiled dependency left out of a frozen build -- passes
+    here, fails the first solve in :func:`import_pfss`, and is reported as
+    unavailable from then on.
+    """
+    return pfss_unavailable_reason() is None
 
 
 # --------------------------------------------------------------------------- #

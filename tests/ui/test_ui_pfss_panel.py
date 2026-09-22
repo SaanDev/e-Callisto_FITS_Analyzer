@@ -14,6 +14,12 @@ toggle must never trigger a recompute.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -40,6 +46,8 @@ from src.backend.solar.pfss_model import (
 )
 from src.ui.solar.solar_data_analysis_window import SolarDataAnalysisWindow
 from src.ui.widgets.collapsible_sections import collapsible_sections, section_for
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def _app():
@@ -229,6 +237,101 @@ def test_the_dependency_gate_survives_frames_being_loaded(window, monkeypatch):
     window._set_loaded_state(True)
     _flush()
     assert not window.pfss_compute_btn.isEnabled()
+
+
+def test_building_the_window_does_not_import_the_pfss_stack(tmp_path):
+    """The dependency gate used to import sunkit_magex.pfss on the GUI thread
+    while the window was built, pulling in sunpy.map, reproject, dask and
+    scikit-image with it: ~3 s added to every opening of the window.
+
+    A fresh interpreter, because other tests may already have imported the
+    stack into this one, which would make the check vacuous.
+    """
+    ini = str(tmp_path / "settings.ini")
+    code = textwrap.dedent(
+        f"""
+        import os, sys
+        from PySide6.QtCore import QSettings
+        from PySide6.QtWidgets import QApplication
+        from src.ui.solar import sunpy_solar_viewer
+        from src.ui.solar.solar_data_analysis_window import SolarDataAnalysisWindow
+
+        sunpy_solar_viewer._make_settings = lambda: QSettings({ini!r}, QSettings.IniFormat)
+        app = QApplication([])
+        window = SolarDataAnalysisWindow()
+        loaded = sorted(
+            m for m in sys.modules
+            if m.split(".")[0] in ("sunkit_magex", "streamtracer", "skimage")
+        )
+        assert not loaded, loaded
+        sys.stdout.flush()
+        os._exit(0)  # skip Qt teardown; only construction is under test
+        """
+    )
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
+    subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env, check=True, timeout=180)
+
+
+def test_a_broken_stack_fails_the_solve_before_any_download(monkeypatch):
+    """The window only checks that the stack is installed, so a frozen build
+    missing a compiled piece is first caught by a solve. It must be caught
+    before the magnetogram search and download, not after them."""
+    import src.ui.solar.solar_pfss_controls as controls
+    from src.backend.solar.pfss_model import PfssParameters, PfssUnavailableError
+
+    def broken():
+        raise PfssUnavailableError("installed but failed to load")
+
+    def no_network(*_args, **_kwargs):
+        raise AssertionError("searched for a magnetogram with a broken PFSS stack")
+
+    monkeypatch.setattr(controls, "import_pfss", broken)
+    monkeypatch.setattr(controls, "search_magnetograms", no_network)
+    worker = controls.PfssSolveWorker(PfssParameters(), frame_time="2020-09-01T13:00:00")
+    failures: list[str] = []
+    worker.failed.connect(failures.append)
+    worker.run()
+    assert failures == ["installed but failed to load"]
+
+
+def test_a_solve_that_finds_the_stack_broken_disables_the_card(window, monkeypatch):
+    """Where the old import-at-build check left the card, but with the real
+    reason: pip advice is wrong for a package that is installed."""
+    import src.backend.solar.pfss_model as model
+
+    reason = (
+        "PFSS modelling is unavailable: sunkit-magex is installed but failed to "
+        "load (ImportError: bad symbol)."
+    )
+    monkeypatch.setattr(model, "_import_failure", reason)
+    window._on_pfss_failed(reason)
+    _flush()
+
+    assert window._pfss_available is False
+    assert not window.pfss_compute_btn.isEnabled()
+    assert not window.pfss_source_combo.isEnabled()
+    assert window.pfss_status_label.text() == reason
+
+
+def test_an_ordinary_solve_failure_leaves_the_card_usable(window, monkeypatch):
+    import src.ui.solar.solar_pfss_controls as controls
+
+    monkeypatch.setattr(controls, "pfss_available", lambda: True)
+    window._apply_pfss_availability()
+    window._on_pfss_failed("No GONG synoptic magnetogram was found near this observation.")
+    _flush()
+
+    assert window._pfss_available is True
+    assert window.pfss_source_combo.isEnabled()
+
+
+def test_a_failed_solve_updates_the_card_before_the_error_dialog():
+    """_on_worker_failed blocks in a modal dialog."""
+    import inspect
+
+    source = inspect.getsource(SolarDataAnalysisWindow._start_worker)
+    branch = source[source.index("isinstance(worker, PfssSolveWorker)"):]
+    assert branch.index("self._on_pfss_failed") < branch.index("self._on_worker_failed")
 
 
 # --------------------------------------------------------------------------- #

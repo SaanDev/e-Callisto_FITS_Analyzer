@@ -76,7 +76,9 @@ from src.backend.solar.pfss_model import (
     PfssUnavailableError,
     build_seeds,
     field_lines_arcsec,
+    import_pfss,
     pfss_available,
+    pfss_unavailable_reason,
     solve_pfss,
     trace_field_lines,
 )
@@ -167,6 +169,15 @@ class PfssSolveWorker(QObject):
     @Slot()
     def run(self) -> None:
         try:
+            if self._cancel.is_set():
+                self.cancelled.emit()
+                return
+
+            # Load the solver before searching and downloading, not after: the
+            # window only checks that the stack is installed, so a stack that is
+            # installed but broken should fail here, not after a download.
+            self.progress.emit(None, "Loading the PFSS solver...")
+            import_pfss()
             if self._cancel.is_set():
                 self.cancelled.emit()
                 return
@@ -438,7 +449,13 @@ class PfssControlsMixin:
 
     # ----------------------------------------------------------- availability
     def _apply_pfss_availability(self) -> None:
-        """Disable the section with an install hint when sunkit-magex is absent."""
+        """Disable the section with an install hint when sunkit-magex is absent.
+
+        Runs while the window is being built, so it must stay cheap:
+        ``pfss_available`` only checks that the packages are installed. A stack
+        that is installed but broken is caught by the first solve instead; see
+        ``_on_pfss_failed``.
+        """
         available = pfss_available()
         self._pfss_available = available
         for widget in (
@@ -460,9 +477,19 @@ class PfssControlsMixin:
             widget.setEnabled(available)
         if not available:
             self.pfss_status_label.setText(
-                "PFSS modelling needs the optional 'sunkit-magex' package.\n"
+                pfss_unavailable_reason()
+                or "PFSS modelling needs the optional 'sunkit-magex' package.\n"
                 "Install it with: python3 -m pip install sunkit-magex"
             )
+
+    def _on_pfss_failed(self, _message: str) -> None:
+        """Disable the section if the solve failed because the stack is broken.
+
+        Connected ahead of the window's generic failure dialog, which reports
+        the error itself; this only brings the section into line with it.
+        """
+        if not pfss_available():
+            self._apply_pfss_availability()
 
     def _pfss_seed_mode(self) -> str:
         return str(self.pfss_seed_combo.currentData() or SEED_MODES[0])
