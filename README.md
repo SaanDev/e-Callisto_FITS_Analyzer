@@ -5,6 +5,17 @@ A desktop application for visualizing, processing, and analyzing e-CALLISTO sola
 
 This beta previews the upcoming **v3.1.0** release. The features below are already implemented in the beta.
 
+### Radio burst analysis
+
+- **Automatic ridge tracking:** the Maximum Intensities window has a **Track Ridge** button that follows the burst's peak frequency column by column, instead of taking the brightest channel at every time. It starts from the brightest point of the burst, or from a point you click with **Pick Start**, and looks only a few channels around where the ridge was in the previous column. It bridges short dropouts, stops once the signal has stayed in the noise, and refines each peak to sub-channel frequency. A channel that is bright for most of the file is treated as RFI and is not chosen as the start. The tracked points replace the per-column maxima, so outlier removal and **Analyze Burst** work on them as before, and **Edit → Restore Per-Column Maxima** brings the originals back. The search window, threshold, allowed gap and a "drift to lower frequency only" option are under **Analyze → Ridge Tracking Settings…**.
+- **Selectable power-law time origin (t₀):** the Analyzer fits f = a·(t − t₀)^−b, with t₀ chosen next to **Best Fit**: **File start** (the default, and the previous behaviour), **Burst onset** (one sample before the first point) or a **Custom time**, entered in UT when the file's start time is known. Without it, the fitted exponent, drift rate and shock parameters depend on where the file happened to start. Changing t₀ re-runs the fit, and the graph keeps its usual time axis.
+- **Choice of coronal density model:** shock heights and speeds can use **Newkirk** (the default, with unchanged results), **Saito**, **Leblanc**, **Baumbach–Allen** or **Mann**, each with the 1–4 fold multiplier. A comparison table under the shock parameters lists the initial and average shock speed and height from all five models side by side, with the selected model in bold. The non-Newkirk models are evaluated between the photosphere and 1 AU, and a frequency a model cannot reach there is shown as "—" instead of an extrapolated height. The chosen model and t₀ are saved in projects, named in the project report, and added as the last two columns of the Excel export.
+
+### Opening files
+
+- **Drag and drop:** drop FITS files or an `.efaproj` project anywhere on the main window, including onto the plot. One FITS file opens on its own; several are combined exactly as with **File → Open**.
+- **Recent Files and Recent Projects:** **File → Recent Files** reopens the last ten FITS selections, and **File → Recent Projects** the last ten projects. A combined set is remembered as one entry and combined again when reopened. Each list has its own Clear action, and an entry whose file has since been moved or deleted is removed with a message when chosen.
+
 ### GCS fitting
 
 - **Multi-view GCS CME and shock fitting:** reconstruct the CME flux rope from synchronized SOHO/LASCO and STEREO images, and fit its outer shock separately with a spheroid or ellipsoid. Each model keeps its own front points, recorded fits, height–time series and CSV export. The fitting window includes playback, focus layouts, image-difference modes and recorded-shell overlays.
@@ -75,7 +86,7 @@ The beta also includes these archive, instrument, visualization and solar-image 
 ## ✨ Current Feature Highlights
 
 ### Dynamic spectrum workflow
-- Load `.fit`, `.fits`, `.fit.gz`, and `.fits.gz` files, including datasets combined across time, frequency, or both dimensions.
+- Load `.fit`, `.fits`, `.fit.gz`, and `.fits.gz` files, including datasets combined across time, frequency, or both dimensions. Drop files or a project onto the window, and reopen earlier work from **File → Recent Files** and **File → Recent Projects**.
 - Load ARTEMIS-IV (Thermopylae, Greece) `ARTLOOK` files directly: the hours-based UT time axis is converted on load, intensities are labelled and scaled as ADC counts with the ASG's own 58.51 counts/dB conversion, and the observation opens background subtracted because the receiver's channel gains span more than an order of magnitude.
 - Extend a loaded dataset in place from the sidebar's **Timeline** section: fetch the previous or next observation from disk or the archive, time-combine it into the spectrum without leaving the plot, trim from either end, and undo any of it. Annotations, the ruler measurement and drift picks keep their place, and the active background subtraction and RFI cleaning are re-derived over the longer array.
 - Switch the frequency axis between **Linear** and **Log** from the sidebar's **Axis** section, with decade-anchored ticks labelled in MHz and identical behaviour in the software and hardware-accelerated renderers.
@@ -89,7 +100,8 @@ The beta also includes these archive, instrument, visualization and solar-image 
 
 ### Processing and analysis
 - Apply deterministic RFI cleaning with preview/apply/reset controls for median smoothing, hot-channel masking, masked-channel repair, and percentile clipping.
-- Isolate radio bursts with lasso masking aligned to the rendered spectrum path, extract maximum intensities, remove outliers manually or automatically, run best-fit / shock-parameter analysis, and perform Type II band-splitting analysis for magnetic-field estimates from noise-reduced data.
+- Isolate radio bursts with lasso masking aligned to the rendered spectrum path, extract maximum intensities or track the burst ridge automatically, remove outliers manually or automatically, run best-fit / shock-parameter analysis, and perform Type II band-splitting analysis for magnetic-field estimates from noise-reduced data.
+- Fit the burst drift with a selectable power-law time origin (t₀), and derive shock speed and height from the Newkirk, Saito, Leblanc, Baumbach–Allen or Mann density model, with all five compared side by side.
 - Plot one or more light curves on top of the dynamic spectrum by entering a frequency or clicking directly on the plot, with configurable color, width, opacity, labels, and line style.
 - Combine frequency bands with improved gap-filling and overlap-handling options before importing the merged spectrum.
 - Keep polygon, line, and text annotations inside the accelerated view, with editable text styling and project persistence.
@@ -143,6 +155,13 @@ This supports observers who work directly with uncompressed raw data.
 
 Choose **File → Open** or click the **Open** icon on the toolbar.  
 The dynamic spectrum appears immediately.
+
+Other ways to open data:
+
+- **Drag and drop:** drop FITS files onto the main window, including onto the plot. One file opens on its own; several are combined the same way as a multi-file **File → Open**. Dropping an `.efaproj` project opens the project. Other file types are refused.
+- **File → Recent Files:** reopens one of the last ten FITS selections. A combined set is one entry and is combined again when reopened; hover over an entry to see its files. An entry whose files are no longer available is removed from the list with a message. **Clear Recent Files** empties the list.
+
+If the current work has unsaved project changes, you are asked whether to save them first, as with **File → Open**.
 
 ---
 
@@ -311,6 +330,26 @@ Use **Analysis → Maximum Intensities → Open Maximum Intensities** to compute
 ### Example: Maximum Intensities
 ![Maximum Intensities](assets/screenshots/maximum_intensity.png)
 
+### Automatic Ridge Tracking
+
+The per-column maximum takes the brightest channel at every time, so RFI, a second burst or noise leave scattered points to remove by hand. **Track Ridge** follows the burst itself instead:
+
+1. Click **Track Ridge**. Tracking starts from the brightest point of the burst and follows it forwards and backwards in time, searching only a few channels around where the ridge was in the previous column. A channel that is bright for most of the file is treated as RFI and is not chosen as the start.
+2. To follow a different feature, click **Pick Start**, click a point on that burst in the plot (it is marked with a star), then click **Track Ridge**. Tracking reports an error if the chosen point is not above the background.
+3. The tracked points replace the per-column maxima, refined to sub-channel frequency. Outlier removal, the Fundamental/Harmonic choice and **Analyze Burst** work on them as before.
+4. **Edit → Restore Per-Column Maxima** brings back the points the tracking replaced.
+
+Tracking bridges short dropouts in the burst. After a gap it only continues once two consecutive columns show signal, so a single noise spike cannot extend the ridge, and it stops once the signal has stayed below the threshold for the allowed gap.
+
+**Analyze → Ridge Tracking Settings…** sets:
+
+- **Search window (channels):** how far the ridge may move between two consecutive time columns (default 3)
+- **Threshold (σ):** how far above the background a peak must stand, in robust standard deviations (default 3.0)
+- **Allowed gap (columns):** columns below the threshold before tracking stops (default 8)
+- **Only follow drift to lower frequency:** keeps the ridge moving towards lower frequency with time, as in type II and type III bursts
+
+Tracking follows the dynamic spectrum currently shown in the main window: the background-subtracted, RFI-cleaned or isolated-burst data, whichever is on show.
+
 ---
 
 # 11. Outlier Removal
@@ -341,10 +380,23 @@ Calculation updates in v2.6.0:
 - Saved analysis summaries retain both the converted calculation values and observed-frequency reference fields
 - Drift summaries are computed from valid, time-ordered segments and ignore zero-duration point pairs
 
-Newkirk model option:
+Power-law time origin (t₀):
 
-- **Newkirk fold number** can be selected as:
-  - **1, 2, 3, 4**
+The backbone is fitted as f = a·(t − t₀)^−b. Choose t₀ from the **t₀** list next to **Best Fit**:
+
+- **File start** (default): time is measured from the start of the loaded data, as in earlier versions
+- **Burst onset:** one time sample before the first fitted point, so every point stays on the curve
+- **Custom time:** a time you enter, in UT when the file's start time is known, otherwise in seconds from the start of the file
+
+A power law depends on where t = 0 lies, so the fitted exponent, drift rate and shock parameters change with t₀. Changing t₀ re-runs the fit automatically. The graph keeps the data's own time axis, and the equation shows (x − t₀) whenever t₀ is not the file start.
+
+Density model and fold:
+
+- **Density model:** Newkirk (default), Saito (Saito, Poland & Munro 1977), Leblanc (Leblanc, Dulk & Bougeret 1998), Baumbach–Allen (Baumbach 1937; Allen 1947) or Mann (Mann et al. 1999). Changing the model recalculates the shock parameters immediately.
+- **Fold number:** **1, 2, 3, 4**, a multiplier on the model density for any model. Press **Calculate** after changing it.
+- Newkirk results are the same as in earlier versions.
+- The **Density model comparison** table under the shock parameters shows the initial shock speed (v₀), initial height (h₀), average speed (v̄) and average height (h̄) from every model at the current fold, with the selected model in bold.
+- The non-Newkirk models are evaluated between the photosphere (1 R☉) and 1 AU. A frequency a model cannot reach in that range, such as Saito above about 116 MHz at 1-fold, is shown as "—" instead of an extrapolated height.
 
 Optional additional plots:
 
@@ -360,8 +412,8 @@ The **Best Fit** graph is drawn in the OriginPro style on screen: filled black s
 Export options:
 
 - **Save Graph** writes whichever plot is on show (maximum intensities, best fit or an additional plot) as an OriginPro-style graph on a white page (PNG, PDF, EPS, SVG, TIFF, JPG)
-- Data summary to Excel
-- Multiple additional plots
+- Data summary to Excel, with the density model and t₀ (in seconds from the start of the file) as the last two columns
+- Multiple additional plots, drawn with the selected density model
 
 ---
 
@@ -384,6 +436,10 @@ Workflow:
   - Alfven speed
   - Magnetic field
 - **Save Plot** writes the lanes over the spectrum, or the B-versus-R fit, as an OriginPro-style graph (PNG, PDF, EPS, SVG, TIFF, JPG), keeping the lane colours and fonts from the graph settings
+
+Density model note:
+
+- The shock speed comes from the Analyzer, so it follows the density model selected there. The shock heights for the magnetic-field-versus-height profile always use the Newkirk model, with the Analyzer's fold number.
 
 Important validation note:
 
@@ -492,12 +548,14 @@ Path:
 - **File → Save Project**
 - **File → Save Project As...**
 - **File → Open Project...**
+- **File → Recent Projects:** reopens one of the last ten projects you opened or saved; **Clear Recent Projects** empties the list
+- Drop an `.efaproj` file onto the main window to open it
 
 Project format:
 
 - **e-CALLISTO Project:** `*.efaproj`
 
-Saved state includes plot view, thresholds, units, colormap, graph properties, loaded/combined data, and analysis-session state.
+Saved state includes plot view, thresholds, units, colormap, graph properties, loaded/combined data, and analysis-session state, including the Analyzer's density model and t₀ choice. Projects saved before these options existed open with Newkirk and the file start as t₀, matching how they were calculated.
 
 ---
 
@@ -558,7 +616,7 @@ The report can include:
 - Raw dynamic spectrum
 - Background-subtracted dynamic spectrum
 - Light curves with the dynamic spectrum
-- Maximum-intensity fit
+- Maximum-intensity fit, with the fit equation (including t₀ when it is not the file start) and the density model used for the shock parameters
 - Type II band-splitting output
 - Available GOES X-ray, GOES SGPS proton flux, Dst, and Kp context plots
 

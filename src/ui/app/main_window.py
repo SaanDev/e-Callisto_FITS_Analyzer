@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QFormLayout,
+    QGraphicsView,
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
@@ -137,6 +138,19 @@ from src.backend.space_weather.goes_overlay import (
 from src.backend.session.measurements import MeasurementPoint, MeasurementResult, calculate_two_point_measurement
 from src.backend.radio.burst_processor import combine_compatible, combined_combine_options
 from src.backend.radio.callisto_timeline import describe_timeline, trimmed_paths
+from src.backend.radio.density_models import DEFAULT_DENSITY_MODEL, density_model_label, normalize_density_model
+from src.ui.app.recent_files import (
+    add_recent_fits,
+    add_recent_project,
+    classify_dropped_paths,
+    clear_recent_fits,
+    clear_recent_projects,
+    fits_entry_label,
+    recent_fits_entries,
+    recent_projects,
+    remove_recent_fits,
+    remove_recent_project,
+)
 from src.backend.session.presets import (
     PRESET_SCHEMA_VERSION,
     build_preset,
@@ -1018,6 +1032,9 @@ class MainWindow(QMainWindow):
         self.open_action = QAction("Open", self)
         file_menu.addAction(self.open_action)
 
+        self.recent_files_menu = QMenu("Recent Files", self)
+        file_menu.addMenu(self.recent_files_menu)
+
         self.combine_fits_action = QAction("Combine FITS Files...", self)
         file_menu.addAction(self.combine_fits_action)
 
@@ -1027,6 +1044,10 @@ class MainWindow(QMainWindow):
         self.open_project_action = QAction("Open Project...", self)
         self.open_project_action.setShortcut("Ctrl+Shift+O")
         file_menu.addAction(self.open_project_action)
+
+        self.recent_projects_menu = QMenu("Recent Projects", self)
+        file_menu.addMenu(self.recent_projects_menu)
+        self._rebuild_recent_menu()
 
         self.save_project_action = QAction("Save Project", self)
         self.save_project_action.setShortcut("Ctrl+S")
@@ -1527,7 +1548,144 @@ class MainWindow(QMainWindow):
         self._sync_hardware_preview_action()
         self.set_hardware_live_preview_enabled(self.use_hw_live_preview)
         self._refresh_analysis_summary_panel()
+        self._enable_file_drops()
         QTimer.singleShot(300, self._prompt_recovery_if_needed)
+
+    # =========================
+    # Drag and drop, recent files
+    # =========================
+    def _enable_file_drops(self) -> None:
+        """Let FITS files and projects be dropped anywhere on the window.
+
+        pyqtgraph's graphics views accept drops themselves and would swallow a
+        file dropped on the hardware canvas, so they hand drops up to the window.
+        """
+        self.setAcceptDrops(True)
+        for view in self.findChildren(QGraphicsView):
+            view.setAcceptDrops(False)
+            view.viewport().setAcceptDrops(False)
+
+    @staticmethod
+    def _local_paths_from_mime(mime) -> list[str]:
+        if mime is None or not mime.hasUrls():
+            return []
+        paths = [url.toLocalFile() for url in mime.urls() if url.isLocalFile()]
+        return [path for path in paths if path]
+
+    def dragEnterEvent(self, event):
+        kind, _value = classify_dropped_paths(self._local_paths_from_mime(event.mimeData()))
+        if kind is not None:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        self.dragEnterEvent(event)
+
+    def dropEvent(self, event):
+        paths = self._local_paths_from_mime(event.mimeData())
+        kind, _value = classify_dropped_paths(paths)
+        if kind is None:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        # Opening may show dialogs; do it after the drop has finished.
+        QTimer.singleShot(0, lambda: self.open_dropped_paths(paths))
+
+    def open_dropped_paths(self, paths) -> bool:
+        """Open dropped files: one project, or FITS files (several are combined)."""
+        kind, value = classify_dropped_paths(paths)
+        if kind is None:
+            QMessageBox.information(self, "Open Files", str(value))
+            return False
+        if not self._maybe_prompt_save_dirty():
+            return False
+        if kind == "project":
+            return self.open_project_path(value)
+        return self._open_fits_paths_reporting_errors(value)
+
+    def _open_fits_paths_reporting_errors(self, paths) -> bool:
+        try:
+            return bool(self.open_fits_paths(paths))
+        except Exception as exc:
+            QMessageBox.critical(self, "Open FITS Failed", f"Could not open the FITS file(s):\n{exc}")
+            return False
+
+    def _rebuild_recent_menu(self) -> None:
+        """Refill File > Recent Files and File > Recent Projects from the settings."""
+        files_menu = getattr(self, "recent_files_menu", None)
+        if files_menu is not None:
+            files_menu.clear()
+            fits_entries = recent_fits_entries(self._ui_settings)
+            for paths in fits_entries:
+                action = files_menu.addAction(fits_entry_label(paths))
+                action.setToolTip("\n".join(paths))
+                action.triggered.connect(lambda _checked=False, p=list(paths): self.open_recent_fits(p))
+            if fits_entries:
+                files_menu.addSeparator()
+                files_menu.addAction("Clear Recent Files").triggered.connect(self.clear_recent_files)
+            else:
+                files_menu.addAction("No Recent Files").setEnabled(False)
+
+        projects_menu = getattr(self, "recent_projects_menu", None)
+        if projects_menu is not None:
+            projects_menu.clear()
+            projects = recent_projects(self._ui_settings)
+            for path in projects:
+                action = projects_menu.addAction(os.path.basename(path))
+                action.setToolTip(path)
+                action.triggered.connect(lambda _checked=False, p=path: self.open_recent_project(p))
+            if projects:
+                projects_menu.addSeparator()
+                projects_menu.addAction("Clear Recent Projects").triggered.connect(self.clear_recent_projects)
+            else:
+                projects_menu.addAction("No Recent Projects").setEnabled(False)
+
+    def _remember_recent_fits(self, paths) -> None:
+        add_recent_fits(self._ui_settings, paths)
+        self._rebuild_recent_menu()
+
+    def _remember_recent_project(self, path) -> None:
+        add_recent_project(self._ui_settings, path)
+        self._rebuild_recent_menu()
+
+    def open_recent_fits(self, paths) -> bool:
+        missing = [path for path in paths if not os.path.isfile(path)]
+        if missing:
+            remove_recent_fits(self._ui_settings, paths)
+            self._rebuild_recent_menu()
+            QMessageBox.warning(
+                self,
+                "Open Recent",
+                "These files are no longer available and were removed from the recent list:\n"
+                + "\n".join(missing),
+            )
+            return False
+        if not self._maybe_prompt_save_dirty():
+            return False
+        return self._open_fits_paths_reporting_errors(paths)
+
+    def open_recent_project(self, path) -> bool:
+        if not os.path.isfile(path):
+            remove_recent_project(self._ui_settings, path)
+            self._rebuild_recent_menu()
+            QMessageBox.warning(
+                self,
+                "Open Recent",
+                f"This project is no longer available and was removed from the recent list:\n{path}",
+            )
+            return False
+        if not self._maybe_prompt_save_dirty():
+            return False
+        return self.open_project_path(path)
+
+    def clear_recent_files(self) -> None:
+        clear_recent_fits(self._ui_settings)
+        self._rebuild_recent_menu()
+
+    def clear_recent_projects(self) -> None:
+        clear_recent_projects(self._ui_settings)
+        self._rebuild_recent_menu()
 
     # =========================
     # Frequency axis scale
@@ -3366,9 +3524,11 @@ class MainWindow(QMainWindow):
         type_ii_results = dict(type_ii.get("results") or {})
 
         lines = ["Session restored and synced."]
+        t0_s = float(analyzer.get("t0_s") or 0.0)
         if fit.get("a") is not None and fit.get("b") is not None:
             try:
-                lines.append(f"Fit: f(x) = {float(fit['a']):.2f} * x^-{abs(float(fit['b'])):.2f}")
+                variable = "x" if t0_s == 0.0 else f"(x - {t0_s:.2f})"
+                lines.append(f"Fit: f(x) = {float(fit['a']):.2f} * {variable}^-{abs(float(fit['b'])):.2f}")
             except Exception:
                 pass
         if fit.get("r2") is not None:
@@ -3376,6 +3536,9 @@ class MainWindow(QMainWindow):
                 lines.append(f"R2: {float(fit['r2']):.4f}")
             except Exception:
                 pass
+        density_model = normalize_density_model(analyzer.get("density_model"))
+        if density_model != DEFAULT_DENSITY_MODEL:
+            lines.append(f"Density model: {density_model_label(density_model)}")
         lines.append(f"Fold: {fold}")
         if shock.get("avg_shock_speed_km_s") is not None:
             try:
@@ -3692,6 +3855,13 @@ class MainWindow(QMainWindow):
                 pass
             self._max_intensity_dialog.show()
 
+        # Track Ridge follows the spectrum on show, the same one the maxima came from.
+        try:
+            self._max_intensity_dialog.set_ridge_source(
+                self._current_dynamic_spectrum_source_data(), self.freqs, self.time
+            )
+        except Exception:
+            pass
         self._max_intensity_dialog.raise_()
         self._max_intensity_dialog.activateWindow()
         self._on_analysis_session_changed(candidate, source="max", log_message=False, mark_dirty=False)
@@ -3759,6 +3929,11 @@ class MainWindow(QMainWindow):
                 pass
             self._analyze_dialog.show()
 
+        # Lets a custom power-law t0 be entered in UT.
+        try:
+            self._analyze_dialog.set_ut_start_sec(self.ut_start_sec)
+        except Exception:
+            pass
         self._analyze_dialog.raise_()
         self._analyze_dialog.activateWindow()
         return self._analyze_dialog
@@ -4271,6 +4446,18 @@ class MainWindow(QMainWindow):
         if not file_paths:
             return
 
+        self.open_fits_paths(file_paths)
+
+    def open_fits_paths(self, file_paths) -> bool:
+        """Open FITS files as File > Open does: one is loaded, several are combined.
+
+        Used by the Open dialog, by drops and by the recent-files menu, which
+        ask about unsaved changes themselves first.
+        """
+        file_paths = [str(path) for path in list(file_paths or []) if str(path or "").strip()]
+        if not file_paths:
+            return False
+
         if len(file_paths) == 1:
             file_path = file_paths[0]
             res = load_callisto_fits(file_path, memmap=False)
@@ -4287,7 +4474,8 @@ class MainWindow(QMainWindow):
                 plot_title="Raw",
                 log_message=f"Loaded FITS file: {os.path.basename(file_path)}",
             )
-            return
+            self._remember_recent_fits(file_paths)
+            return True
 
         from src.backend.radio.burst_processor import combine_compatible, inspect_combination
 
@@ -4302,7 +4490,7 @@ class MainWindow(QMainWindow):
                     "Valid selections are consecutive time segments, distinct frequency bands at one "
                     "timestamp, or a complete consecutive timestamp × focus-code grid.",
                 )
-                return
+                return False
 
             combine_type = inspection.get("combine_type")
             options = {}
@@ -4312,7 +4500,7 @@ class MainWindow(QMainWindow):
                     relation=inspection.get("frequency_relation"),
                 )
                 if options is None:
-                    return
+                    return False
             combined = combine_compatible(file_paths, **options)
 
             self.load_combined_into_main(combined)
@@ -4320,7 +4508,9 @@ class MainWindow(QMainWindow):
             self._log_operation(f"Loaded combined FITS set ({len(file_paths)} files).")
         except Exception as e:
             QMessageBox.critical(self, "Combine Error", f"An error occurred while combining files:\n{e}")
-            return
+            return False
+        self._remember_recent_fits(file_paths)
+        return True
 
     def _choose_frequency_combine_options(self, file_paths, relation=None):
         try:
@@ -14177,6 +14367,7 @@ class MainWindow(QMainWindow):
         self._set_project_clean(self._project_path)
         self.statusBar().showMessage(f"Project saved: {os.path.basename(self._project_path)}", 5000)
         self._log_operation(f"Saved project: {os.path.basename(self._project_path)}")
+        self._remember_recent_project(self._project_path)
         return True
 
     def save_project_as(self) -> bool:
@@ -14213,6 +14404,7 @@ class MainWindow(QMainWindow):
         self._set_project_clean(path)
         self.statusBar().showMessage(f"Project saved: {os.path.basename(path)}", 5000)
         self._log_operation(f"Saved project: {os.path.basename(path)}")
+        self._remember_recent_project(path)
         return True
 
     def open_project(self):
@@ -14234,19 +14426,25 @@ class MainWindow(QMainWindow):
         if not path:
             return
 
+        self.open_project_path(path)
+
+    def open_project_path(self, path) -> bool:
+        """Load a project file; callers have already asked about unsaved changes."""
         try:
             payload = read_project(path)
         except ProjectFormatError as e:
             QMessageBox.critical(self, "Open Project Failed", str(e))
-            return
+            return False
         except Exception as e:
             QMessageBox.critical(self, "Open Project Failed", f"Could not open project:\n{e}")
-            return
+            return False
 
         self._apply_project_payload(payload.meta, payload.arrays)
         self._set_project_clean(path)
         self.statusBar().showMessage(f"Project loaded: {os.path.basename(path)}", 5000)
         self._log_operation(f"Loaded project: {os.path.basename(path)}")
+        self._remember_recent_project(path)
+        return True
 
     def open_fits_header_viewer(self):
         if getattr(self, "raw_data", None) is None:

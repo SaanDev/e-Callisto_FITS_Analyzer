@@ -244,3 +244,33 @@ def test_validate_session_accepts_type_ii_only_payload():
     ok, reason = validate_session_for_source(session, current_shape=(100, 5))
     assert ok is True
     assert reason == ""
+
+
+def test_new_analyzer_fields_default_to_the_historical_behaviour():
+    from src.backend.session.analysis_session import normalize_session
+
+    session = normalize_session(
+        {
+            "max_intensity": {"time_channels": [1.0, 2.0], "freqs": [80.0, 70.0]},
+            "analyzer": {"fit_params": {"a": 20.0, "b": 0.4}},
+        }
+    )
+
+    analyzer = session["analyzer"]
+    assert analyzer["density_model"] == "newkirk"
+    assert analyzer["t0_mode"] == "file_start"
+    assert analyzer["t0_s"] == 0.0
+
+
+def test_new_analyzer_fields_survive_normalisation():
+    from src.backend.session.analysis_session import normalize_session
+
+    session = normalize_session(
+        {
+            "max_intensity": {"time_channels": [1.0, 2.0], "freqs": [80.0, 70.0]},
+            "analyzer": {"density_model": "leblanc", "t0_mode": "custom", "t0_s": 12.5},
+        }
+    )
+
+    analyzer = session["analyzer"]
+    assert (analyzer["density_model"], analyzer["t0_mode"], analyzer["t0_s"]) == ("leblanc", "custom", 12.5)

@@ -17,6 +17,8 @@ from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
+from src.backend.radio.density_models import density_model_label
+
 
 ProgressCallback = Callable[[int, str], None]
 
@@ -301,12 +303,18 @@ def _available_pairs(mapping: Mapping[str, Any], keys: Sequence[tuple[str, str]]
     return [(label, src.get(key)) for label, key in keys]
 
 
-def _fit_equation_text(fit: Mapping[str, Any]) -> str | None:
+def _fit_equation_text(fit: Mapping[str, Any], t0_s: Any = 0.0) -> str | None:
     try:
         a = float(fit.get("a"))
         b = abs(float(fit.get("b")))
     except Exception:
         return None
+    try:
+        t0 = float(t0_s or 0.0)
+    except (TypeError, ValueError):
+        t0 = 0.0
+    if t0:
+        return f"f(x) = {_fmt_number(a)} * (x - {_fmt_number(t0)})^-{_fmt_number(b)}"
     return f"f(x) = {_fmt_number(a)} * x^-{_fmt_number(b)}"
 
 
@@ -318,9 +326,10 @@ def _analysis_pairs(report: ProjectReportInput) -> list[tuple[str, Any]]:
     shock = _as_mapping(analyzer.get("shock_summary"))
     pairs = [
         ("Analysis run ID", sess.get("analysis_run_id")),
-        ("Fit equation", _fit_equation_text(fit)),
+        ("Fit equation", _fit_equation_text(fit, analyzer.get("t0_s"))),
         ("R2", fit.get("r2", row.get("fit_r2"))),
         ("RMSE", fit.get("rmse", row.get("fit_rmse"))),
+        ("Density model", density_model_label(analyzer.get("density_model"))),
         ("Fold", analyzer.get("fold", row.get("fold"))),
         ("Fundamental", _as_mapping(sess.get("max_intensity")).get("fundamental", row.get("fundamental"))),
         ("Harmonic", _as_mapping(sess.get("max_intensity")).get("harmonic", row.get("harmonic"))),

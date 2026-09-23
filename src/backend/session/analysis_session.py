@@ -14,6 +14,8 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
+from src.backend.radio.density_models import normalize_density_model
+
 SESSION_SCHEMA_VERSION = 1
 
 SHOCK_SUMMARY_FIELDS = (
@@ -239,6 +241,22 @@ def _normalize_fit_params(raw: Mapping[str, Any] | None) -> dict[str, Any] | Non
     }
 
 
+#: Where the power-law time origin t0 sits. "file_start" is the historical
+#: behaviour (t measured from the start of the loaded data).
+T0_MODES = ("file_start", "burst_onset", "custom")
+DEFAULT_T0_MODE = "file_start"
+
+
+def normalize_t0_mode(value: Any) -> str:
+    mode = str(value or "").strip().lower()
+    return mode if mode in T0_MODES else DEFAULT_T0_MODE
+
+
+def _normalize_t0_seconds(value: Any) -> float:
+    t0 = _safe_float(value)
+    return float(t0) if t0 is not None and np.isfinite(t0) else 0.0
+
+
 def _normalize_shock_summary(raw: Mapping[str, Any] | None, *, fold: int, fundamental: bool, harmonic: bool) -> dict[str, Any]:
     src = dict(raw or {})
     out: dict[str, Any] = {}
@@ -444,6 +462,9 @@ def normalize_session(session: Mapping[str, Any] | None) -> dict[str, Any] | Non
             "fit_params": fit_params,
             "fold": fold,
             "shock_summary": shock_summary,
+            "density_model": normalize_density_model(analyzer_raw.get("density_model")),
+            "t0_mode": normalize_t0_mode(analyzer_raw.get("t0_mode")),
+            "t0_s": _normalize_t0_seconds(analyzer_raw.get("t0_s")),
         },
         "type_ii": type_ii,
         "ui": {

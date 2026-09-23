@@ -18,19 +18,25 @@ from PySide6.QtCore import Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QCheckBox,
     QDialog,
+    QDialogButtonBox,
+    QDoubleSpinBox,
     QFileDialog,
+    QFormLayout,
     QHBoxLayout,
     QMenuBar,
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QSpinBox,
     QStatusBar,
     QVBoxLayout,
 )
 
 from src.backend.common.figure_export import FIGURE_EXPORT_FILTERS, save_figure
 from src.backend.radio.radio_figures import fit_graph_figure
+from src.backend.radio.ridge_tracking import DRIFT_ANY, DRIFT_FALLING, RidgeSettings, track_ridge
 from src.ui.radio.dialogs.analyze_dialog import AnalyzeDialog
 from src.ui.common.gui_shared import MplCanvas, fit_window_to_screen, pick_export_path
 from src.ui.common.mpl_style import style_axes
@@ -66,6 +72,13 @@ class MaxIntensityPlotDialog(QDialog):
         self.freqs = np.asarray(max_freqs, dtype=float).reshape(-1)
         self.selected_mask = np.zeros_like(self.time_channels, dtype=bool)
         self.lasso = None
+        # Ridge tracking: the spectrum to follow, where to start, and the
+        # per-column maxima it replaced (so they can be brought back).
+        self._ridge_source = None
+        self._ridge_settings = RidgeSettings()
+        self._ridge_seed = None
+        self._ridge_seed_cid = None
+        self._pre_ridge_points = None
 
         # Canvas
         self.canvas = MplCanvas(self, width=10, height=6)
@@ -98,10 +111,23 @@ class MaxIntensityPlotDialog(QDialog):
         self.harmonic_radio.toggled.connect(self._on_mode_toggled)
         self.analyze_button.clicked.connect(self.open_analyze_window)
 
+        self.track_ridge_button = QPushButton("Track Ridge")
+        self.track_ridge_button.setToolTip(
+            "Follow the burst's peak frequency column by column, starting from the brightest point\n"
+            "(or from the point picked with 'Pick Start'), and use it in place of the per-column maxima."
+        )
+        self.ridge_start_button = QPushButton("Pick Start")
+        self.ridge_start_button.setCheckable(True)
+        self.ridge_start_button.setToolTip("Click a point on the burst to start tracking there instead of the brightest point.")
+        self.track_ridge_button.clicked.connect(self.track_ridge)
+        self.ridge_start_button.toggled.connect(self._on_ridge_start_toggled)
+
         # Layouts
         button_layout = QHBoxLayout()
         button_layout.addWidget(self.select_button)
         button_layout.addWidget(self.remove_button)
+        button_layout.addWidget(self.track_ridge_button)
+        button_layout.addWidget(self.ridge_start_button)
         button_layout.addWidget(self.fundamental_radio)
         button_layout.addWidget(self.harmonic_radio)
         button_layout.addWidget(self.analyze_button)
@@ -126,11 +152,18 @@ class MaxIntensityPlotDialog(QDialog):
         reset_action = QAction("Reset All", self)
         edit_menu.addAction(reset_action)
         reset_action.triggered.connect(self.reset_all)
+        self.restore_maxima_action = QAction("Restore Per-Column Maxima", self)
+        self.restore_maxima_action.setEnabled(False)
+        edit_menu.addAction(self.restore_maxima_action)
+        self.restore_maxima_action.triggered.connect(self.restore_per_column_maxima)
 
         analyze_menu = menubar.addMenu("Analyze")
         analyze_action = QAction("Open Analyzer", self)
         analyze_menu.addAction(analyze_action)
         analyze_action.triggered.connect(self.open_analyze_window)
+        self.ridge_settings_action = QAction("Ridge Tracking Settings...", self)
+        analyze_menu.addAction(self.ridge_settings_action)
+        self.ridge_settings_action.triggered.connect(self.edit_ridge_settings)
 
         about_menu = menubar.addMenu("About")
         about_action = QAction("About", self)
@@ -145,6 +178,8 @@ class MaxIntensityPlotDialog(QDialog):
         layout.addWidget(self.canvas)
         layout.addWidget(self.status)
         self.setLayout(layout)
+
+        self._sync_ridge_controls()
 
         # Restore optional session state
         if isinstance(session, dict):
@@ -246,7 +281,159 @@ class MaxIntensityPlotDialog(QDialog):
         if emit_change:
             self._emit_session_changed()
 
+    # ---- ridge tracking ------------------------------------------------------
+    def set_ridge_source(self, data, freqs, time_seconds) -> None:
+        """The dynamic spectrum Track Ridge follows: (frequency, time) data and its axes."""
+        source = None
+        try:
+            arr = np.asarray(data, dtype=float)
+            freq_arr = np.asarray(freqs, dtype=float).reshape(-1)
+            time_arr = np.asarray(time_seconds, dtype=float).reshape(-1)
+            if arr.ndim == 2 and arr.shape == (freq_arr.size, time_arr.size) and arr.size:
+                source = (arr, freq_arr, time_arr)
+        except Exception:
+            source = None
+        self._ridge_source = source
+        self._sync_ridge_controls()
+
+    def _sync_ridge_controls(self) -> None:
+        available = self._ridge_source is not None
+        self.track_ridge_button.setEnabled(available)
+        self.ridge_start_button.setEnabled(available)
+        if not available:
+            self.ridge_start_button.setChecked(False)
+        self.restore_maxima_action.setEnabled(self._pre_ridge_points is not None)
+
+    def _on_ridge_start_toggled(self, checked: bool) -> None:
+        if self._ridge_seed_cid is not None:
+            self.canvas.mpl_disconnect(self._ridge_seed_cid)
+            self._ridge_seed_cid = None
+        if checked:
+            if self.lasso:
+                self.lasso.disconnect_events()
+                self.lasso = None
+            self._ridge_seed_cid = self.canvas.mpl_connect("button_press_event", self._on_ridge_seed_click)
+            self.status.showMessage("Click a point on the burst to start tracking from there.", 5000)
+
+    def _on_ridge_seed_click(self, event) -> None:
+        if event.inaxes is not self.canvas.ax or event.xdata is None or event.ydata is None:
+            return
+        self._ridge_seed = (float(event.xdata), float(event.ydata))
+        self.ridge_start_button.setChecked(False)
+        self._draw_ridge_seed()
+        self.status.showMessage(
+            f"Tracking will start near t = {self._ridge_seed[0]:.2f} s, f = {self._ridge_seed[1]:.2f} MHz. "
+            "Press Track Ridge.",
+            6000,
+        )
+
+    def _draw_ridge_seed(self) -> None:
+        if self._ridge_seed is None:
+            return
+        self.canvas.ax.plot(
+            [self._ridge_seed[0]], [self._ridge_seed[1]], marker="*", markersize=14,
+            color="#1f77b4", markeredgecolor="black", linestyle="none", zorder=5,
+        )
+        self.canvas.draw()
+
+    def _ridge_seed_index(self):
+        """The picked start as a (frequency row, time column) of the source spectrum."""
+        if self._ridge_seed is None or self._ridge_source is None:
+            return None
+        _data, freq_arr, time_arr = self._ridge_source
+        column = int(np.nanargmin(np.abs(time_arr - self._ridge_seed[0])))
+        row = int(np.nanargmin(np.abs(freq_arr - self._ridge_seed[1])))
+        return row, column
+
+    def track_ridge(self) -> bool:
+        """Replace the points with the burst ridge followed through the spectrum."""
+        if self._ridge_source is None:
+            self.status.showMessage("Ridge tracking needs the dynamic spectrum; reopen this window from the main plot.", 5000)
+            return False
+        data, freq_arr, time_arr = self._ridge_source
+        try:
+            result = track_ridge(data, freq_arr, seed=self._ridge_seed_index(), settings=self._ridge_settings)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Track Ridge", str(exc))
+            return False
+
+        if self._pre_ridge_points is None:
+            self._pre_ridge_points = (self.time_channels.copy(), self.time_seconds.copy(), self.freqs.copy())
+        self.time_channels = np.asarray(result.time_indices, dtype=float)
+        self.time_seconds = np.asarray(time_arr[result.time_indices], dtype=float)
+        self.freqs = np.asarray(result.freqs_mhz, dtype=float)
+        self.selected_mask = np.zeros_like(self.time_channels, dtype=bool)
+        self._analyzer_state = None
+
+        self._redraw_points("Tracked Burst Ridge")
+        self._draw_ridge_seed()
+        self._sync_ridge_controls()
+        message = (
+            f"Tracked {result.count} points from t = {self.time_seconds[0]:.2f} s "
+            f"to {self.time_seconds[-1]:.2f} s."
+        )
+        if result.warnings:
+            message += " " + " ".join(result.warnings)
+        self.status.showMessage(message, 6000)
+        self._emit_session_changed()
+        return True
+
+    def restore_per_column_maxima(self) -> None:
+        """Bring back the per-column maxima that Track Ridge replaced."""
+        if self._pre_ridge_points is None:
+            return
+        self.time_channels, self.time_seconds, self.freqs = (arr.copy() for arr in self._pre_ridge_points)
+        self._pre_ridge_points = None
+        self.selected_mask = np.zeros_like(self.time_channels, dtype=bool)
+        self._analyzer_state = None
+        self._redraw_points("Maximum Intensity for Each Time Channel")
+        self._sync_ridge_controls()
+        self.status.showMessage("Restored the per-column maxima.", 3000)
+        self._emit_session_changed()
+
+    def edit_ridge_settings(self) -> bool:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Ridge Tracking Settings")
+        form = QFormLayout(dialog)
+
+        window_spin = QSpinBox(dialog)
+        window_spin.setRange(1, 100)
+        window_spin.setValue(int(self._ridge_settings.search_channels))
+        window_spin.setToolTip("How many channels the ridge may move between two consecutive time columns.")
+        threshold_spin = QDoubleSpinBox(dialog)
+        threshold_spin.setRange(0.0, 50.0)
+        threshold_spin.setDecimals(1)
+        threshold_spin.setSingleStep(0.5)
+        threshold_spin.setValue(float(self._ridge_settings.threshold_sigma))
+        threshold_spin.setToolTip("A column counts when its peak is this many robust standard deviations above the background.")
+        gap_spin = QSpinBox(dialog)
+        gap_spin.setRange(0, 1000)
+        gap_spin.setValue(int(self._ridge_settings.max_gap))
+        gap_spin.setToolTip("Columns in a row below the threshold before tracking stops.")
+        falling_check = QCheckBox("Only follow drift to lower frequency", dialog)
+        falling_check.setChecked(self._ridge_settings.drift == DRIFT_FALLING)
+
+        form.addRow("Search window (channels):", window_spin)
+        form.addRow("Threshold (σ):", threshold_spin)
+        form.addRow("Allowed gap (columns):", gap_spin)
+        form.addRow(falling_check)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return False
+        self._ridge_settings = RidgeSettings(
+            search_channels=int(window_spin.value()),
+            threshold_sigma=float(threshold_spin.value()),
+            max_gap=int(gap_spin.value()),
+            drift=DRIFT_FALLING if falling_check.isChecked() else DRIFT_ANY,
+        )
+        return True
+
     def activate_lasso(self):
+        self.ridge_start_button.setChecked(False)
         self.canvas.ax.set_title("Draw around outliers to remove")
         self.canvas.draw()
 
@@ -301,6 +488,8 @@ class MaxIntensityPlotDialog(QDialog):
     def reset_all(self):
         self.selected_mask = np.zeros_like(self.time_channels, dtype=bool)
         self._analyzer_state = None
+        self._ridge_seed = None
+        self.ridge_start_button.setChecked(False)
         self._redraw_points("Maximum Intensity for Each Time Channel")
         self.status.showMessage("Reset selections.", 3000)
         self._emit_session_changed()

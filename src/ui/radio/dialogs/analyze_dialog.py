@@ -12,27 +12,58 @@ import re
 import sys
 
 import numpy as np
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTime, Signal
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QFileDialog,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
     QStatusBar,
+    QTableWidget,
+    QTableWidgetItem,
+    QTimeEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from src.backend.common.figure_export import FIGURE_EXPORT_FILTERS, save_figure
+from src.backend.radio.density_models import (
+    DEFAULT_DENSITY_MODEL,
+    DENSITY_MODEL_ORDER,
+    DENSITY_MODELS,
+    density_model_label,
+    normalize_density_model,
+    shock_parameters,
+)
 from src.backend.radio.radio_figures import draw_fit_graph, fit_graph_figure, origin_graph_style, power_law_label
+from src.backend.session.analysis_session import DEFAULT_T0_MODE, normalize_t0_mode
 from src.ui.common.gui_shared import MplCanvas, fit_window_to_screen, pick_export_path
 from src.ui.common.mpl_style import style_axes
+
+#: t0 choices offered by the Analyzer: (session value, label).
+T0_CHOICES = (
+    ("file_start", "File start"),
+    ("burst_onset", "Burst onset"),
+    ("custom", "Custom time"),
+)
+#: Columns of the density-model comparison table: (summary key, header, tooltip, digits).
+_COMPARISON_COLUMNS = (
+    ("initial_shock_speed_km_s", "v₀ (km/s)", "Initial shock speed", 1),
+    ("initial_shock_height_rs", "h₀ (R☉)", "Initial shock height", 3),
+    ("avg_shock_speed_km_s", "v̄ (km/s)", "Average shock speed", 1),
+    ("avg_shock_height_rs", "h̄ (R☉)", "Average shock height", 3),
+)
+
 
 class AnalyzeDialog(QDialog):
     sessionChanged = Signal(dict)
@@ -68,6 +99,11 @@ class AnalyzeDialog(QDialog):
         self._type_ii_state = None
         self._suppress_emit = False
         self._fit_mask = np.isfinite(self.time) & np.isfinite(self.freq)
+        #: UT of the first data sample (seconds of day), for a custom t0 in UT.
+        self._ut_start_sec = None
+        #: The t0 (seconds from file start) the current fit was made with.
+        self._fit_t0_s = 0.0
+        self._model_comparison = {}
 
         # Canvas
         self.canvas = MplCanvas(self, width=8, height=5)
@@ -102,6 +138,35 @@ class AnalyzeDialog(QDialog):
         plot_button_layout.addWidget(self.max_button)
         plot_button_layout.addWidget(self.fit_button)
 
+        # --- Power-law time origin t0: f(t) = a (t - t0)^-b ---
+        self.t0_label = QLabel("t₀:")
+        self.t0_combo = QComboBox()
+        for value, label in T0_CHOICES:
+            self.t0_combo.addItem(label, value)
+        self.t0_combo.setToolTip(
+            "Time origin of the power-law fit f = a·(t − t₀)^−b.\n"
+            "File start: t measured from the start of the loaded data (the previous behaviour).\n"
+            "Burst onset: one sample before the first fitted point.\n"
+            "Custom time: a time you enter."
+        )
+        self.t0_time_edit = QTimeEdit()
+        self.t0_time_edit.setDisplayFormat("HH:mm:ss.zzz")
+        self.t0_time_edit.setToolTip("Custom t₀ in UT")
+        self.t0_seconds_spin = QDoubleSpinBox()
+        self.t0_seconds_spin.setDecimals(2)
+        self.t0_seconds_spin.setRange(-86400.0, 86400.0)
+        self.t0_seconds_spin.setSuffix(" s")
+        self.t0_seconds_spin.setToolTip("Custom t₀ in seconds from the start of the loaded data")
+        self.t0_combo.currentIndexChanged.connect(self._on_t0_mode_changed)
+        self.t0_time_edit.editingFinished.connect(self._on_t0_value_edited)
+        self.t0_seconds_spin.editingFinished.connect(self._on_t0_value_edited)
+        plot_button_layout.addSpacing(12)
+        plot_button_layout.addWidget(self.t0_label)
+        plot_button_layout.addWidget(self.t0_combo)
+        plot_button_layout.addWidget(self.t0_time_edit)
+        plot_button_layout.addWidget(self.t0_seconds_spin)
+        plot_button_layout.addStretch(1)
+
         left_layout = QVBoxLayout()
         left_layout.addLayout(plot_button_layout)
         left_layout.addWidget(self.canvas)
@@ -131,6 +196,40 @@ class AnalyzeDialog(QDialog):
         self.fold_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.fold_combo.setMinimumWidth(max(70, self.fold_combo.sizeHint().width()))
 
+        # --- Coronal density model ---
+        self.density_model_label = QLabel("Density model:")
+        self.density_model_combo = QComboBox()
+        for key in DENSITY_MODEL_ORDER:
+            model = DENSITY_MODELS[key]
+            self.density_model_combo.addItem(model.label, key)
+            self.density_model_combo.setItemData(
+                self.density_model_combo.count() - 1, model.reference, Qt.ItemDataRole.ToolTipRole
+            )
+        self.density_model_combo.setToolTip("Density model used to turn frequency and drift into shock height and speed.")
+        self.density_model_combo.currentIndexChanged.connect(self._on_density_model_changed)
+        self.model_row_widget = QWidget()
+        model_row_layout = QHBoxLayout(self.model_row_widget)
+        model_row_layout.setContentsMargins(0, 0, 0, 0)
+        model_row_layout.addWidget(self.density_model_label)
+        model_row_layout.addWidget(self.density_model_combo, 1)
+
+        # --- Side-by-side comparison of every density model ---
+        self.comparison_header = QLabel("<b>Density model comparison:</b>")
+        self.comparison_table = QTableWidget(len(DENSITY_MODEL_ORDER), len(_COMPARISON_COLUMNS))
+        self.comparison_table.setVerticalHeaderLabels([DENSITY_MODELS[key].label for key in DENSITY_MODEL_ORDER])
+        for column, (_key, header, tooltip, _digits) in enumerate(_COMPARISON_COLUMNS):
+            item = QTableWidgetItem(header)
+            item.setToolTip(tooltip)
+            self.comparison_table.setHorizontalHeaderItem(column, item)
+        self.comparison_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.comparison_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.comparison_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.comparison_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.comparison_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.comparison_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.comparison_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._fit_comparison_table_height()
+
         self.equation_label = QLabel("Best Fit Equation:")
         self.equation_display = QLabel("")
         self.equation_display.setTextFormat(Qt.RichText)
@@ -150,6 +249,7 @@ class AnalyzeDialog(QDialog):
         self.avg_shock_height_display = QLabel("")
 
         self.labels = [
+            self.model_row_widget,
             self.fold_row_widget,
             self.equation_label, self.equation_display,
             self.stats_header, self.r2_display, self.rmse_display,
@@ -157,6 +257,7 @@ class AnalyzeDialog(QDialog):
             self.avg_freq_display, self.drift_display, self.start_freq_display,
             self.initial_shock_speed_display, self.initial_shock_height_display,
             self.avg_shock_speed_display, self.avg_shock_height_display,
+            self.comparison_header, self.comparison_table,
             self.save_plot_button, self.save_data_button, self.existing_excel_checkbox,
             self.extra_plot_label, self.extra_plot_combo, self.extra_plot_button
         ]
@@ -186,6 +287,8 @@ class AnalyzeDialog(QDialog):
         main_with_status.addLayout(main_layout)
         main_with_status.addWidget(self.status)
         self.setLayout(main_with_status)
+        self._sync_t0_widgets()
+        self._refresh_comparison_table()
 
         if isinstance(session, dict):
             try:
@@ -239,6 +342,170 @@ class AnalyzeDialog(QDialog):
         y = np.asarray(freq_values, dtype=float).reshape(-1)
         return np.isfinite(x) & np.isfinite(y) & (x > 0) & (y > 0)
 
+    # ---- power-law time origin t0 -------------------------------------------
+    def set_ut_start_sec(self, ut_start_sec) -> None:
+        """UT (seconds of day) of the first data sample, so a custom t₀ can be entered in UT."""
+        try:
+            value = float(ut_start_sec)
+        except (TypeError, ValueError):
+            value = None
+        if value is not None and not np.isfinite(value):
+            value = None
+        custom_t0 = self._custom_t0_seconds()
+        self._ut_start_sec = value
+        self._set_custom_t0_seconds(custom_t0)
+        self._sync_t0_widgets()
+
+    def _t0_mode(self) -> str:
+        return normalize_t0_mode(self.t0_combo.currentData())
+
+    def _set_t0_mode(self, mode) -> None:
+        index = self.t0_combo.findData(normalize_t0_mode(mode))
+        blocked = self.t0_combo.blockSignals(True)
+        try:
+            self.t0_combo.setCurrentIndex(max(0, index))
+        finally:
+            self.t0_combo.blockSignals(blocked)
+        self._sync_t0_widgets()
+
+    def _custom_t0_seconds(self) -> float:
+        """The custom t₀ in seconds from the start of the loaded data."""
+        if self._ut_start_sec is not None:
+            seconds_of_day = self.t0_time_edit.time().msecsSinceStartOfDay() / 1000.0
+            offset = seconds_of_day - float(self._ut_start_sec)
+            # A burst that runs past midnight UT.
+            if offset < -43200.0:
+                offset += 86400.0
+            elif offset > 43200.0:
+                offset -= 86400.0
+            return float(offset)
+        return float(self.t0_seconds_spin.value())
+
+    def _set_custom_t0_seconds(self, seconds) -> None:
+        try:
+            value = float(seconds)
+        except (TypeError, ValueError):
+            value = 0.0
+        if not np.isfinite(value):
+            value = 0.0
+        for widget in (self.t0_seconds_spin, self.t0_time_edit):
+            widget.blockSignals(True)
+        try:
+            self.t0_seconds_spin.setValue(value)
+            if self._ut_start_sec is not None:
+                msecs = int(round(((float(self._ut_start_sec) + value) % 86400.0) * 1000.0))
+                self.t0_time_edit.setTime(QTime(0, 0).addMSecs(msecs))
+        finally:
+            for widget in (self.t0_seconds_spin, self.t0_time_edit):
+                widget.blockSignals(False)
+
+    def _burst_onset_t0(self) -> float:
+        """One sample before the first point, so the power law stays finite there."""
+        times = np.asarray(self.time, dtype=float).reshape(-1)
+        freqs = np.asarray(self.freq, dtype=float).reshape(-1)
+        if times.shape != freqs.shape:
+            return 0.0
+        valid = np.isfinite(times) & np.isfinite(freqs) & (freqs > 0.0)
+        if not np.any(valid):
+            return 0.0
+        ordered = np.unique(times[valid])
+        steps = np.diff(ordered)
+        steps = steps[steps > 0.0]
+        step = float(np.median(steps)) if steps.size else 0.25
+        return float(ordered[0] - step)
+
+    def _resolved_t0(self) -> float:
+        mode = self._t0_mode()
+        if mode == "burst_onset":
+            return self._burst_onset_t0()
+        if mode == "custom":
+            return self._custom_t0_seconds()
+        return 0.0
+
+    def _sync_t0_widgets(self) -> None:
+        custom = self._t0_mode() == "custom"
+        self.t0_time_edit.setVisible(custom and self._ut_start_sec is not None)
+        self.t0_seconds_spin.setVisible(custom and self._ut_start_sec is None)
+
+    def _on_t0_mode_changed(self, _index=0):
+        if self._t0_mode() == "custom" and not getattr(self, "_custom_t0_initialized", False):
+            # Start the custom value somewhere sensible: the burst onset.
+            self._set_custom_t0_seconds(self._burst_onset_t0())
+            self._custom_t0_initialized = True
+        self._sync_t0_widgets()
+        self._refit_after_t0_change()
+
+    def _on_t0_value_edited(self):
+        if self._t0_mode() == "custom":
+            self._refit_after_t0_change()
+
+    def _refit_after_t0_change(self):
+        """A new t₀ changes the fit itself, so an existing Best Fit is redone."""
+        if self._suppress_emit or self._fit_params is None:
+            self._emit_session_changed()
+            return
+        if abs(self._resolved_t0() - float(self._fit_t0_s)) < 1e-9:
+            return
+        self.plot_fit()
+
+    # ---- density model -------------------------------------------------------
+    def _selected_density_model(self) -> str:
+        return normalize_density_model(self.density_model_combo.currentData())
+
+    def _set_density_model(self, model) -> None:
+        index = self.density_model_combo.findData(normalize_density_model(model))
+        blocked = self.density_model_combo.blockSignals(True)
+        try:
+            self.density_model_combo.setCurrentIndex(max(0, index))
+        finally:
+            self.density_model_combo.blockSignals(blocked)
+
+    def _on_density_model_changed(self, _index=0):
+        if self._suppress_emit:
+            return
+        if hasattr(self, "_drift_vals"):
+            self._update_shock_parameters(self._selected_fold())
+            label = density_model_label(self._selected_density_model())
+            self.status.showMessage(f"Updated using the {label} density model.", 3000)
+        else:
+            self._refresh_comparison_table()
+        self._emit_session_changed()
+
+    def _fit_comparison_table_height(self) -> None:
+        table = self.comparison_table
+        header = table.horizontalHeader().sizeHint().height()
+        rows = sum(table.rowHeight(row) for row in range(table.rowCount()))
+        table.setFixedHeight(header + rows + 2 * table.frameWidth() + 2)
+
+    def _refresh_comparison_table(self) -> None:
+        selected = self._selected_density_model()
+        have_results = bool(self._model_comparison)
+        for row, key in enumerate(DENSITY_MODEL_ORDER):
+            result = self._model_comparison.get(key) or {}
+            for column, (field, _header, _tip, digits) in enumerate(_COMPARISON_COLUMNS):
+                value = result.get(field)
+                text, tooltip = "—", ""
+                if value is not None and np.isfinite(value):
+                    text = f"{float(value):.{digits}f}"
+                elif have_results:
+                    tooltip = "This frequency range lies outside the model (below the photosphere or beyond 1 AU)."
+                item = QTableWidgetItem(text)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                if tooltip:
+                    item.setToolTip(tooltip)
+                if key == selected:
+                    font = QFont(item.font())
+                    font.setBold(True)
+                    item.setFont(font)
+                self.comparison_table.setItem(row, column, item)
+            header_item = self.comparison_table.verticalHeaderItem(row) or QTableWidgetItem(DENSITY_MODELS[key].label)
+            header_font = QFont(header_item.font())
+            header_font.setBold(key == selected)
+            header_item.setFont(header_font)
+            self.comparison_table.setVerticalHeaderItem(row, header_item)
+        self.comparison_header.setText(f"<b>Density model comparison ({self._selected_fold()}-fold):</b>")
+        self._fit_comparison_table_height()
+
     def _emit_session_changed(self):
         if self._suppress_emit:
             return
@@ -251,15 +518,18 @@ class AnalyzeDialog(QDialog):
         if not isinstance(summary, dict):
             return
         fold = int(summary.get("fold", self._selected_fold()) or self._selected_fold())
-        self.shock_header.setText(f"<b>Shock Parameters (Newkirk {fold}-fold):</b>")
+        model = density_model_label(summary.get("density_model", self._selected_density_model()))
+        self.shock_header.setText(f"<b>Shock Parameters ({model} {fold}-fold):</b>")
 
         def _f(v, digits=2):
             if v is None:
                 return ""
             try:
-                return f"{float(v):.{digits}f}"
+                value = float(v)
             except Exception:
                 return ""
+            # A frequency outside the chosen density model's range has no value.
+            return f"{value:.{digits}f}" if np.isfinite(value) else "—"
 
         self.avg_freq_display.setText(
             f"Average Frequency: <b>{_f(summary.get('avg_freq_mhz'), 2)} ± {_f(summary.get('avg_freq_err_mhz'), 2)}</b> MHz"
@@ -311,19 +581,23 @@ class AnalyzeDialog(QDialog):
 
         plot_time = np.asarray(self.time, dtype=float).reshape(-1)
         plot_freq = np.asarray(self.freq, dtype=float).reshape(-1)
-        fit_mask = self._power_law_fit_mask(plot_time, plot_freq)
+        # The power law is fitted in time since t0; the graph keeps the data's own time axis.
+        t0 = self._resolved_t0()
+        fit_mask = self._power_law_fit_mask(plot_time - t0, plot_freq)
         if np.count_nonzero(fit_mask) < 2:
+            where = "time > 0 s" if t0 == 0.0 else f"time after t₀ = {t0:.2f} s"
             QMessageBox.warning(
                 self,
                 "Analyzer",
-                "Power-law fitting requires at least two points with time > 0 s and frequency > 0 MHz.",
+                f"Power-law fitting requires at least two points with {where} and frequency > 0 MHz.",
             )
             self.status.showMessage("Best fit failed: insufficient positive time samples.", 3000)
             return
 
-        fit_time = plot_time[fit_mask]
+        fit_time = plot_time[fit_mask] - t0
         fit_freq = plot_freq[fit_mask]
         self._fit_mask = fit_mask
+        self._fit_t0_s = float(t0)
 
         if params is None:
             from scipy.optimize import curve_fit
@@ -349,13 +623,14 @@ class AnalyzeDialog(QDialog):
         # The best fit is the one Analyzer graph shown in the OriginPro style
         # on screen; "Save Graph" draws the same graph on its own page.
         self.current_plot_title = f"{self.filename}_Best_Fit"
+        variable = "x" if t0 == 0.0 else f"(x − {t0:.2f})"
         self._graph = {
             "x": plot_time,
             "y": plot_freq,
-            "fit_x": time_fit,
+            "fit_x": time_fit + t0,
             "fit_y": freq_fit,
             "data_label": "Original Data",
-            "fit_label": power_law_label(a, b, prefix="Best Fit"),
+            "fit_label": power_law_label(a, b, prefix="Best Fit", variable=variable),
             "title": self.current_plot_title,
             "x_label": "Time (s)",
             "y_label": "Frequency (MHz)",
@@ -374,7 +649,10 @@ class AnalyzeDialog(QDialog):
         r2 = r2_score(fit_freq, predicted)
         rmse = np.sqrt(mean_squared_error(fit_freq, predicted))
 
-        self.equation_display.setText(f"<b>f(x) = {a:.2f} · x<sup>-{b:.2f}</sup></b>")
+        if t0 == 0.0:
+            self.equation_display.setText(f"<b>f(x) = {a:.2f} · x<sup>-{b:.2f}</sup></b>")
+        else:
+            self.equation_display.setText(f"<b>f(x) = {a:.2f} · (x − {t0:.2f})<sup>-{b:.2f}</sup></b>")
         self.r2_display.setText(f"R² = {r2:.4f}")
         self.rmse_display.setText(f"RMSE = {rmse:.4f}")
 
@@ -444,6 +722,9 @@ class AnalyzeDialog(QDialog):
                 "fit_params": fit,
                 "fold": fold,
                 "shock_summary": shock,
+                "density_model": self._selected_density_model(),
+                "t0_mode": self._t0_mode(),
+                "t0_s": float(self._fit_t0_s if fit else self._resolved_t0()),
             },
             "type_ii": dict(self._type_ii_state or {}),
             "ui": {
@@ -489,6 +770,13 @@ class AnalyzeDialog(QDialog):
             except Exception:
                 pass
 
+            self._set_density_model(analyzer.get("density_model", DEFAULT_DENSITY_MODEL))
+            t0_mode = normalize_t0_mode(analyzer.get("t0_mode", DEFAULT_T0_MODE))
+            if t0_mode == "custom":
+                self._set_custom_t0_seconds(analyzer.get("t0_s", 0.0))
+                self._custom_t0_initialized = True
+            self._set_t0_mode(t0_mode)
+
             if not isinstance(fit, dict):
                 fit = None
 
@@ -533,11 +821,11 @@ class AnalyzeDialog(QDialog):
 
         n = self._selected_fold()
         self._update_shock_parameters(n)
-        self.status.showMessage(f"Updated using Newkirk {n}-fold model.", 3000)
+        label = density_model_label(self._selected_density_model())
+        self.status.showMessage(f"Updated using {label} {n}-fold model.", 3000)
         self._emit_session_changed()
 
     def _update_shock_parameters(self, n):
-        denom = n * 3.385
         observed_freq_values = np.asarray(getattr(self, "_fit_freq", self.freq), dtype=float).reshape(-1)
         observed_drift_vals = np.asarray(self._drift_vals, dtype=float).reshape(-1)
         max_intensity_freq_values = np.asarray(self.freq, dtype=float).reshape(-1)
@@ -556,30 +844,32 @@ class AnalyzeDialog(QDialog):
         shock_drift_errs = drift_errs / harmonic_number
         shock_freq_err = float(self.freq_err) / harmonic_number
 
-        shock_speed = (13853221.38 * np.abs(shock_drift_vals)) / (
-                shock_freq_values * (np.log(shock_freq_values ** 2 / denom) ** 2)
-        )
-        R_p = 4.32 * np.log(10) / np.log(shock_freq_values ** 2 / denom)
+        # Every density model is evaluated, for the side-by-side table; the
+        # selected one drives the labels, the session and the extra plots.
+        comparison = {
+            key: shock_parameters(
+                shock_freq_values,
+                shock_drift_vals,
+                shock_drift_errs,
+                freq_err_mhz=shock_freq_err,
+                model=key,
+                fold=n,
+                start_percentile=90,
+            )
+            for key in DENSITY_MODEL_ORDER
+        }
+        model = self._selected_density_model()
+        selected = comparison[model]
+        shock_speed = selected["shock_speed_km_s"]
+        R_p = selected["shock_height_rs"]
         avg_freq_values = max_intensity_freq_values / harmonic_number if max_intensity_freq_values.size else shock_freq_values
 
         percentile = 90
-        start_freq = np.percentile(shock_freq_values, percentile)
-
-        idx = np.abs(shock_freq_values - start_freq).argmin()
-        f0 = shock_freq_values[idx]
-        drift_err0 = shock_drift_errs[idx]
-
-        start_shock_speed = shock_speed[idx]
-        start_height = R_p[idx]
-
-        shock_speed_err = (13853221.38 * drift_err0) / (
-                f0 * (np.log(f0 ** 2 / denom) ** 2)
-        )
-
-        # Error propagation for R_p based on your n-fold expression
-        g0 = np.log(f0 ** 2 / denom)
-        dRp_df = 8.64 * np.log(10) / (f0 * (g0 ** 2))
-        Rp_err = np.abs(dRp_df * shock_freq_err)
+        start_freq = selected["start_freq_mhz"]
+        start_shock_speed = selected["initial_shock_speed_km_s"]
+        start_height = selected["initial_shock_height_rs"]
+        shock_speed_err = selected["initial_shock_speed_err_km_s"]
+        Rp_err = selected["initial_shock_height_err_rs"]
 
         # Average frequency is reported from the selected maximum-intensity points.
         avg_freq = np.mean(avg_freq_values)
@@ -587,10 +877,10 @@ class AnalyzeDialog(QDialog):
         avg_drift = np.mean(shock_drift_vals)
         avg_drift_err = np.std(shock_drift_vals) / np.sqrt(len(shock_drift_vals))
 
-        avg_speed = np.mean(shock_speed)
-        avg_speed_err = np.std(shock_speed) / np.sqrt(len(shock_speed))
-        avg_height = np.mean(R_p)
-        avg_height_err = np.std(R_p) / np.sqrt(len(R_p))
+        avg_speed = selected["avg_shock_speed_km_s"]
+        avg_speed_err = selected["avg_shock_speed_err_km_s"]
+        avg_height = selected["avg_shock_height_rs"]
+        avg_height_err = selected["avg_shock_height_err_rs"]
 
         # Store arrays for extra plots
         self.shock_speed = shock_speed
@@ -622,9 +912,12 @@ class AnalyzeDialog(QDialog):
             "observed_avg_freq_mhz": float(np.mean(max_intensity_freq_values)) if max_intensity_freq_values.size else float(np.mean(observed_freq_values)),
             "observed_avg_drift_mhz_s": float(np.mean(observed_drift_vals)),
             "observed_start_freq_mhz": float(np.percentile(observed_freq_values, percentile)),
+            "density_model": model,
         }
+        self._model_comparison = comparison
 
         self._set_summary_labels_from_dict(self._shock_summary)
+        self._refresh_comparison_table()
 
     def save_graph(self):
         """Save the graph on show as an OriginPro-style figure; the window keeps its look."""
@@ -733,7 +1026,8 @@ class AnalyzeDialog(QDialog):
                     "avg_freq", "avg_freq_err", "Avg_drift", "avg_drift_err",
                     "start_freq", "start_freq_err", "initial_shock_speed", "initial_shock_speed_err",
                     "initial_shock_height", "initial_shock_height_err", "avg_shock_speed", "avg_shock_speed_err",
-                    "avg_shock_height", "avg_shock_height_err", "avg_drift_abs"
+                    "avg_shock_height", "avg_shock_height_err", "avg_drift_abs",
+                    "density_model", "t0_s",
                 ]
                 ws.append(headers)
             except Exception as e:
@@ -781,7 +1075,8 @@ class AnalyzeDialog(QDialog):
                 avg_freq, avg_freq_err, avg_drift, avg_drift_err,
                 start_freq, start_freq_err, init_speed, init_speed_err,
                 init_height, init_height_err, avg_speed, avg_speed_err,
-                avg_height, avg_height_err, avg_drift_abs
+                avg_height, avg_height_err, avg_drift_abs,
+                density_model_label(self._selected_density_model()), float(self._fit_t0_s),
             ]
 
             ws.append(row)
