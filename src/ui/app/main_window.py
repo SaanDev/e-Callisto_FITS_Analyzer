@@ -3790,6 +3790,9 @@ class MainWindow(QMainWindow):
         display_data = self._intensity_for_display(self.noise_reduced_data)
         display_unit = self._intensity_unit_label()
         cmap = self._plot_cmap()
+        # The noise clipping thresholds are color-scale limits, not a change to
+        # the data, so they travel with it for the spectrum to look noise-reduced.
+        display_levels = self._threshold_display_levels()
 
         if self._type_ii_dialog is None:
             dialog = TypeIIBandSplittingDialog(
@@ -3803,6 +3806,7 @@ class MainWindow(QMainWindow):
                 display_unit=display_unit,
                 cmap=cmap,
                 frequency_step_mhz=self._frequency_step_mhz,
+                display_levels=display_levels,
             )
             dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
             dialog.sessionChanged.connect(lambda payload: self._on_analysis_session_changed(payload, source="type_ii"))
@@ -3811,6 +3815,16 @@ class MainWindow(QMainWindow):
             dialog.show()
         else:
             try:
+                self._type_ii_dialog.set_spectrum(
+                    self.noise_reduced_data,
+                    self.freqs,
+                    self.time,
+                    display_data=display_data,
+                    display_unit=display_unit,
+                    cmap=cmap,
+                    frequency_step_mhz=self._frequency_step_mhz,
+                    display_levels=display_levels,
+                )
                 self._type_ii_dialog.restore_session(candidate, emit_change=False)
             except Exception:
                 pass
@@ -13241,6 +13255,7 @@ class MainWindow(QMainWindow):
                     display_unit=self._intensity_unit_label(),
                     cmap=self.get_current_cmap(),
                     frequency_step_mhz=self._frequency_step_mhz,
+                    display_levels=self._threshold_display_levels(),
                 )
                 created_dialog = True
             except Exception:

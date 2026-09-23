@@ -72,6 +72,7 @@ class TypeIIBandSplittingDialog(QDialog):
         display_unit: str = "Digits",
         cmap=None,
         frequency_step_mhz=None,
+        display_levels=None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Type II Band-splitting")
@@ -85,6 +86,10 @@ class TypeIIBandSplittingDialog(QDialog):
         self.display_unit = str(display_unit or "Digits")
         self.cmap = cmap if cmap is not None else colormaps.get_cmap("viridis")
         self.frequency_step_mhz = frequency_step_mhz
+        # The main window's noise clipping thresholds, in display units. They are
+        # color-scale limits there, so the spectrum here needs them to look the
+        # same as the noise-reduced plot it was opened from.
+        self.display_levels = self._normalize_display_levels(display_levels)
         self._session_context = dict(session or {})
         self._suppress_emit = False
         self._using_pyqtgraph = pg is not None
@@ -833,6 +838,49 @@ class TypeIIBandSplittingDialog(QDialog):
             return 1.0
         return float(np.nanmedian(diffs))
 
+    @staticmethod
+    def _normalize_display_levels(levels) -> tuple[float, float] | None:
+        if levels is None:
+            return None
+        try:
+            low, high = sorted((float(levels[0]), float(levels[1])))
+        except (TypeError, ValueError, IndexError):
+            return None
+        if not (np.isfinite(low) and np.isfinite(high)) or high <= low:
+            return None
+        return low, high
+
+    def _display_limits(self, arr) -> tuple[float | None, float | None]:
+        """The color-scale limits: the noise clipping thresholds when set, else the data range."""
+        if self.display_levels is not None:
+            return self.display_levels
+        return finite_data_limits(arr)
+
+    def set_spectrum(
+        self,
+        spectrum_data,
+        freqs,
+        time_seconds,
+        *,
+        display_data=None,
+        display_unit: str | None = None,
+        cmap=None,
+        frequency_step_mhz=None,
+        display_levels=None,
+    ) -> None:
+        """Replace the dynamic spectrum on show, keeping the picked points and fits."""
+        self.spectrum_data = np.asarray(spectrum_data, dtype=float).copy()
+        self.display_data = np.asarray(display_data if display_data is not None else spectrum_data, dtype=float).copy()
+        self.freqs = np.asarray(freqs, dtype=float).reshape(-1)
+        self.time_seconds = np.asarray(time_seconds, dtype=float).reshape(-1)
+        if display_unit is not None:
+            self.display_unit = str(display_unit or "Digits")
+        if cmap is not None:
+            self.cmap = cmap
+        self.frequency_step_mhz = frequency_step_mhz
+        self.display_levels = self._normalize_display_levels(display_levels)
+        self._refresh_plot()
+
     def origin_figure(self):
         """The graph on show, drawn with matplotlib as an OriginPro graph (Save Plot, project report).
 
@@ -878,7 +926,7 @@ class TypeIIBandSplittingDialog(QDialog):
         arr = np.asarray(self.display_data, dtype=float)
         freq_edges = frequency_edges(self.freqs, default_step=self.frequency_step_mhz or 1.0)
         time_edges = axis_edges(self.time_seconds, default_step=self._time_step_seconds())
-        vmin, vmax = finite_data_limits(arr)
+        vmin, vmax = self._display_limits(arr)
         image = SpectrumImage(
             arr,
             (float(time_edges[0]), float(time_edges[-1]), float(freq_edges[-1]), float(freq_edges[0])),
@@ -1361,7 +1409,7 @@ class TypeIIBandSplittingDialog(QDialog):
 
         self._show_spectrum_items()
 
-        vmin, vmax = finite_data_limits(arr)
+        vmin, vmax = self._display_limits(arr)
         if vmin is None or vmax is None:
             self.image_item.clear()
         else:

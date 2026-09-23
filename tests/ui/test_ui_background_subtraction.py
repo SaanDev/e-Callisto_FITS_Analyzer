@@ -299,3 +299,63 @@ def test_project_payload_carries_the_applied_method(window):
 
     assert window._background_applied_method == "plotutil_median_db"
     assert window._intensity_unit_label() == "dB"
+
+
+def _close_dialog(dlg) -> None:
+    dlg.close()
+    dlg.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+
+def test_type_ii_window_shows_the_noise_reduced_spectrum(window):
+    _subtract(window, "median")
+    window._set_noise_clip_state(-2.0, 10.0, scale=window.NOISE_CLIP_SCALE_LINEAR, sync_widgets=True)
+    window.update_noise_live()
+    QApplication.processEvents()
+
+    dlg = window._open_or_focus_type_ii_dialog()
+    assert dlg is not None
+    try:
+        assert np.array_equal(dlg.spectrum_data, window.noise_reduced_data)
+        assert not np.allclose(dlg.spectrum_data, window.raw_data)
+        # The thresholds are the main plot's color limits; the window must use
+        # them too, or the subtracted data show at full range and look raw.
+        assert tuple(dlg.image_item.getLevels()) == pytest.approx((-2.0, 10.0))
+        images = [im for ax in dlg.origin_figure().axes for im in ax.images]
+        assert images and images[0].get_clim() == pytest.approx((-2.0, 10.0))
+    finally:
+        _close_dialog(dlg)
+
+
+def test_type_ii_window_fits_the_data_without_thresholds(window):
+    _subtract(window, "median")
+
+    dlg = window._open_or_focus_type_ii_dialog()
+    try:
+        low, high = float(np.nanmin(window.noise_reduced_data)), float(np.nanmax(window.noise_reduced_data))
+        assert tuple(dlg.image_item.getLevels()) == pytest.approx((low, high))
+    finally:
+        _close_dialog(dlg)
+
+
+def test_reopening_type_ii_window_loads_the_isolated_burst(window):
+    _subtract(window, "median")
+    window._set_noise_clip_state(-2.0, 10.0, scale=window.NOISE_CLIP_SCALE_LINEAR, sync_widgets=True)
+    dlg = window._open_or_focus_type_ii_dialog()
+    try:
+        dlg._upper_points = [(12.0, 70.0), (13.0, 65.0)]
+        dlg._emit_session_changed()
+
+        mask = np.zeros(window.noise_reduced_data.shape, dtype=bool)
+        mask[4:8, 10:16] = True
+        window._plot_isolated_burst(mask)
+        window._set_noise_clip_state(0.0, 30.0, scale=window.NOISE_CLIP_SCALE_LINEAR, sync_widgets=True)
+        QApplication.processEvents()
+
+        assert window._open_or_focus_type_ii_dialog() is dlg
+        np.testing.assert_array_equal(dlg.spectrum_data, window.noise_reduced_data)
+        assert np.all(dlg.spectrum_data[~mask] == 0.0)
+        assert tuple(dlg.image_item.getLevels()) == pytest.approx((0.0, 30.0))
+        assert dlg._upper_points == [(12.0, 70.0), (13.0, 65.0)]
+    finally:
+        _close_dialog(dlg)
