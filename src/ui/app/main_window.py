@@ -11,10 +11,8 @@ import os
 import platform
 import re
 import sys
-import tempfile
 import math
 import json
-import io
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import unquote, urlparse
 
@@ -38,7 +36,6 @@ from PySide6.QtGui import (
     QImage,
     QPainter,
     QPalette,
-    QPdfWriter,
     QPixmap,
 )
 from PySide6.QtWidgets import (
@@ -79,6 +76,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.backend.common.figure_export import FIGURE_EXPORT_FILTERS, figure_png_bytes, origin_restyled_copy, save_figure
 from src.backend.session.analysis_log import append_csv_log, append_txt_summary, build_log_row
 from src.backend.session.analysis_session import (
     from_legacy_max_intensity,
@@ -116,6 +114,18 @@ from src.backend.radio.frequency_axis import (
     transparent_bad_cmap,
 )
 from src.backend.radio.fits_io import build_combined_header, extract_ut_start_sec, load_callisto_fits
+from src.backend.radio.radio_figures import (
+    GoesOverlay,
+    GraphText,
+    Measurement,
+    SpectrumGraph,
+    SpectrumImage,
+    SwavesPanel,
+    dynamic_spectrum_figure,
+    fit_graph_figure,
+    goes_flux_figure,
+    power_law_label,
+)
 from src.backend.space_weather.goes_overlay import (
     GOES_OVERLAY_CHANNEL_LABELS,
     GOES_OVERLAY_CHANNEL_ORDER,
@@ -274,6 +284,8 @@ class MainWindow(QMainWindow):
     HW_DEFAULT_TICK_FONT_PX = 14
     HW_DEFAULT_AXIS_FONT_PX = 16
     HW_DEFAULT_TITLE_FONT_PX = 22
+    #: Resolution of the OriginPro-style graphs embedded in the project report.
+    REPORT_FIGURE_DPI = 220
     LIGHT_CURVE_SETTINGS_KEY = "analysis/light_curve_settings_json"
     LIGHT_CURVE_SETTINGS_DEFAULTS = {
         "mode": "single",
@@ -8170,193 +8182,6 @@ class MainWindow(QMainWindow):
         arr = np.frombuffer(ptr, dtype=np.uint8, count=size).reshape((height, image.bytesPerLine()))
         return arr[:, : width * 4].reshape((height, width, 4)).copy()
 
-    def _qt_image_format_for_ext(self, ext: str) -> str:
-        normalized = str(ext or "").strip().lower().lstrip(".")
-        mapping = {
-            "png": "PNG",
-            "jpg": "JPG",
-            "jpeg": "JPG",
-            "bmp": "BMP",
-            "tif": "TIFF",
-            "tiff": "TIFF",
-            "webp": "WEBP",
-        }
-        return mapping.get(normalized, normalized.upper() or "PNG")
-
-    def _capture_hardware_plot_qimage(self) -> QImage:
-        accel = getattr(self, "accel_canvas", None)
-        if accel is None:
-            return QImage()
-
-        QApplication.processEvents()
-
-        viewport = None
-        graphics = getattr(accel, "_graphics", None)
-        if graphics is not None:
-            try:
-                viewport = graphics.viewport()
-            except Exception:
-                viewport = None
-
-        if viewport is not None:
-            try:
-                grab_framebuffer = getattr(viewport, "grabFramebuffer", None)
-                if callable(grab_framebuffer):
-                    image = grab_framebuffer()
-                    if isinstance(image, QImage) and not image.isNull():
-                        return image
-            except Exception:
-                pass
-
-            try:
-                pixmap = viewport.grab()
-                if not pixmap.isNull():
-                    return pixmap.toImage()
-            except Exception:
-                pass
-
-            try:
-                size = viewport.size()
-                if size.width() > 0 and size.height() > 0:
-                    image = QImage(size, QImage.Format_ARGB32)
-                    image.fill(Qt.transparent)
-                    painter = QPainter(image)
-                    try:
-                        viewport.render(painter)
-                    finally:
-                        painter.end()
-                    if not image.isNull():
-                        return image
-            except Exception:
-                pass
-
-        try:
-            pixmap = accel.grab()
-            if not pixmap.isNull():
-                return pixmap.toImage()
-        except Exception:
-            pass
-
-        return QImage()
-
-    def _save_captured_hardware_plot(self, file_path: str, ext_final: str) -> None:
-        image = self._capture_hardware_plot_qimage()
-        if image.isNull():
-            raise RuntimeError("Could not capture the accelerated plot image.")
-        image_format = self._qt_image_format_for_ext(ext_final)
-        if not image.save(file_path, image_format):
-            raise RuntimeError(f"Failed to save image as {ext_final}.")
-
-    def _export_hardware_visible_plot(self, file_path: str, ext_final: str) -> None:
-        ext = str(ext_final or "").lower()
-        # With the SWAVES panel up, export the whole scene so both panels land
-        # in the file; a single PlotItem would capture only the CALLISTO one.
-        plot_item = None
-        if getattr(self.accel_canvas, "has_swaves_panel", False):
-            plot_item = self.accel_canvas.export_scene()
-        if plot_item is None:
-            plot_item = self.accel_canvas.export_plot_item()
-        if plot_item is None:
-            raise RuntimeError("Hardware plot is not available for export.")
-
-        try:
-            import pyqtgraph.exporters as pg_exporters
-        except Exception:
-            pg_exporters = None
-
-        if pg_exporters is not None:
-            raster_exts = {"png", "tif", "tiff", "jpg", "jpeg", "bmp", "webp"}
-            if ext in raster_exts:
-                try:
-                    exporter = pg_exporters.ImageExporter(plot_item)
-                    params = exporter.parameters()
-                    width = max(1, int(self.accel_canvas.width() * self.accel_canvas.devicePixelRatioF()))
-                    params["width"] = max(width, 1400)
-                    exporter.export(file_path)
-                    if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-                        # A non-empty file is not proof of a real render: an
-                        # unrealised scene exports as a blank canvas. The
-                        # detector only decodes PNG, so limit the check to it.
-                        blank = False
-                        if ext == "png":
-                            try:
-                                with open(file_path, "rb") as handle:
-                                    blank = self._png_is_blank_or_black(handle.read())
-                            except Exception:
-                                blank = False
-                        if not blank:
-                            return
-                except Exception:
-                    pass
-                self._save_captured_hardware_plot(file_path, ext)
-                return
-
-            if ext == "svg":
-                exporter = pg_exporters.SVGExporter(plot_item)
-                exporter.export(file_path)
-                return
-
-            if ext in {"pdf", "eps"}:
-                temp_png = None
-                img = QImage()
-                try:
-                    try:
-                        fd, temp_png = tempfile.mkstemp(suffix=".png")
-                        os.close(fd)
-                        exporter = pg_exporters.ImageExporter(plot_item)
-                        try:
-                            params = exporter.parameters()
-                            width = max(1, int(self.accel_canvas.width() * self.accel_canvas.devicePixelRatioF()))
-                            params["width"] = max(width, 1800)
-                        except Exception:
-                            pass
-                        exporter.export(temp_png)
-                        img = QImage(temp_png)
-                    except Exception:
-                        img = QImage()
-
-                    if img.isNull():
-                        img = self._capture_hardware_plot_qimage()
-                    if img.isNull():
-                        raise RuntimeError("Failed to capture hardware plot image.")
-
-                    if ext == "pdf":
-                        writer = QPdfWriter(file_path)
-                        writer.setResolution(300)
-                        painter = QPainter(writer)
-                        target = writer.pageLayout().paintRectPixels(writer.resolution())
-                        scaled = img.scaled(target.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                        x = target.x() + (target.width() - scaled.width()) // 2
-                        y = target.y() + (target.height() - scaled.height()) // 2
-                        painter.drawImage(x, y, scaled)
-                        painter.end()
-                        return
-
-                    rgba = self._qimage_to_rgba_array(img.convertToFormat(QImage.Format_RGBA8888))
-                    fig = Figure(figsize=(rgba.shape[1] / 300.0, rgba.shape[0] / 300.0), dpi=300)
-                    ax = fig.add_axes([0, 0, 1, 1])
-                    ax.imshow(rgba)
-                    ax.axis("off")
-                    fig.savefig(file_path, dpi=300, bbox_inches="tight", pad_inches=0, format="eps")
-                    return
-                finally:
-                    if temp_png:
-                        try:
-                            os.remove(temp_png)
-                        except Exception:
-                            pass
-
-        if ext in {"png", "tif", "tiff", "jpg", "jpeg", "bmp", "webp"}:
-            self._save_captured_hardware_plot(file_path, ext)
-            return
-
-        # Last-resort fallback for non-raster formats remains limited.
-        pixmap = self.accel_canvas.grab()
-        if pixmap.isNull():
-            raise RuntimeError("Could not capture the accelerated plot image.")
-        if not pixmap.save(file_path, ext.upper() if ext else "PNG"):
-            raise RuntimeError(f"Failed to save image as {ext}.")
-
     def _pick_export_path_for_figure(self, caption: str, default_name: str, filters: str, default_filter: str = None):
         """
         Linux keeps using the shared helper because it preserves the selected
@@ -8387,13 +8212,185 @@ class MainWindow(QMainWindow):
             default_filter=default_filter,
         )
 
-    def export_figure(self):
+    # ------------------------------------------------------------------
+    # OriginPro-style figures for Export Figure and the project report
+    # ------------------------------------------------------------------
 
+    def _origin_graph_text(self) -> GraphText:
+        """The Graph Properties font, sizes and emphasis, for an Origin-style figure."""
+        return GraphText(
+            font_family=normalize_font_family(self.graph_font_family) or "",
+            tick_size=float(self.tick_font_px),
+            label_size=float(self.axis_label_font_px),
+            title_size=float(self.title_font_px),
+            title_bold=bool(self.title_bold),
+            title_italic=bool(self.title_italic),
+            axis_bold=bool(self.axis_bold),
+            axis_italic=bool(self.axis_italic),
+            ticks_bold=bool(self.ticks_bold),
+            ticks_italic=bool(self.ticks_italic),
+        )
+
+    def _origin_goes_overlay(self) -> GoesOverlay | None:
+        selected = self._selected_goes_overlay_channels()
+        payload = self._goes_overlay_payload if (self._goes_overlay_enabled and selected) else None
+        if payload is None:
+            return None
+        series = []
+        for key, item in self._goes_overlay_visible_series(payload, selected_channels=selected):
+            try:
+                xs = np.asarray(self._goes_payload_field(item, "x_seconds", []), dtype=float)
+                flux = np.asarray(self._goes_payload_field(item, "flux_wm2", []), dtype=float)
+            except Exception:
+                continue
+            width = GOES_OVERLAY_LINE_WIDTH + (0.2 if key == "xrsb" else 0.0)
+            series.append((xs, flux, GOES_OVERLAY_CHANNEL_COLORS.get(key, "#ffffff"), width))
+        return GoesOverlay(series) if series else None
+
+    def _origin_swaves_panel(self) -> SwavesPanel | None:
+        payload = getattr(self, "_swaves_payload", None)
+        if payload is None:
+            return None
+        vmin, vmax = self._swaves_clim(payload)
+        span = None
+        if self.time is not None and len(self.time):
+            try:
+                span = (float(np.min(self.time)), float(np.max(self.time)))
+            except Exception:
+                span = None
+        titles = not self.remove_titles
+        return SwavesPanel(
+            image=SpectrumImage(
+                payload.intensity_db,
+                payload.matplotlib_extent(),
+                self._plot_cmap(),
+                (vmin, vmax) if vmin is not None and vmax is not None else None,
+                payload.units_label if titles else "",
+            ),
+            title=f"STEREO/SWAVES — {payload.spacecraft_label}" if titles else "",
+            y_label="Frequency" if titles else "",
+            time_bounds=payload.time_bounds(),
+            callisto_span=span,
+        )
+
+    def _origin_annotations(self) -> list[dict]:
+        if not getattr(self, "_annotations_visible", True):
+            return []
+        annotations = []
+        for ann in list(getattr(self, "_annotations", []) or []):
+            if not isinstance(ann, dict):
+                continue
+            if ann.get("kind") == "text":
+                annotations.append({**ann, **self._annotation_text_style(ann)})
+            else:
+                annotations.append(dict(ann))
+        return annotations
+
+    def _origin_measurement(self) -> Measurement | None:
+        result = getattr(self, "_measurement_result", None)
+        if result is not None:
+            return Measurement(self._measurement_points_for_plot(result), self._measurement_overlay_label(result))
+        points = [(float(x), float(y)) for x, y in list(getattr(self, "_measurement_capture_points", []) or [])]
+        return Measurement(points) if points else None
+
+    def _origin_spectrum_graph(
+        self,
+        data,
+        *,
+        plot_type: str | None = None,
+        view=None,
+        levels: tuple[float, float] | None = None,
+        light_curves: list[dict] | None = None,
+        annotations: list[dict] | None = None,
+        measurement: Measurement | None = None,
+        include_goes: bool = True,
+        include_swaves: bool = False,
+    ) -> SpectrumGraph | None:
+        """The loaded spectrum and the chosen overlays, as the Origin-style figure draws them."""
+        if data is None or self.freqs is None or self.time is None:
+            return None
+        try:
+            arr = np.asarray(data)
+            if arr.ndim != 2 or arr.size == 0:
+                return None
+            display = np.asarray(self._intensity_for_display(arr), dtype=float)
+            extent = matplotlib_extent(self.freqs, self.time, default_step=self._frequency_step_mhz)
+        except Exception:
+            return None
+
+        data_low, data_high = finite_data_limits(display)
+        if levels is not None and data_low is not None:
+            if min(float(levels[1]), data_high) < max(float(levels[0]), data_low):
+                levels = None  # left over from another spectrum: they miss this one entirely
+        if levels is None:
+            levels = self._threshold_display_levels() or (data_low, data_high)
+        if levels[0] is None or levels[1] is None:
+            levels = None
+
+        utc = bool(self.use_utc and self.ut_start_sec is not None)
+        if self.remove_titles:
+            title = x_label = y_label = colorbar_label = ""
+        else:
+            title = self.graph_title_override or self._default_graph_title(self._normalize_plot_type(plot_type))
+            x_label = "Time [UT]" if utc else "Time [s]"
+            y_label = "Frequency [MHz]"
+            colorbar_label = f"Intensity [{self._intensity_unit_label()}]"
+
+        gap_spans = []
+        gap_mask = self._current_gap_row_mask()
+        if gap_mask is not None:
+            try:
+                default_step = float(self._frequency_step_mhz) if self._frequency_step_mhz else 1.0
+                gap_spans = frequency_gap_spans(self.freqs, gap_mask, default_step=default_step)
+            except Exception:
+                gap_spans = []
+
+        log_bounds = None
+        if self._frequency_axis_is_log() and self._frequency_axis_log_usable():
+            log_bounds = self._positive_frequency_bounds()
+
+        return SpectrumGraph(
+            image=SpectrumImage(display, extent, self._plot_cmap(), levels, colorbar_label),
+            title=title,
+            x_label=x_label,
+            y_label=y_label,
+            ut_start_sec=float(self.ut_start_sec) if utc else None,
+            # A view that misses the spectrum is a stale default, not a zoom.
+            view=self._dynamic_spectrum_view_for_extent(view, extent),
+            log_frequency_bounds=log_bounds,
+            gap_spans=gap_spans,
+            light_curves=list(light_curves or []),
+            annotations=list(annotations or []),
+            goes=self._origin_goes_overlay() if include_goes else None,
+            measurement=measurement,
+            swaves=self._origin_swaves_panel() if include_swaves else None,
+            text=self._origin_graph_text(),
+        )
+
+    def _build_origin_export_figure(self) -> Figure | None:
+        """What the main plot shows, overlays and zoom included, as an OriginPro graph."""
+        data = self._current_dynamic_spectrum_source_data()
+        light_curves = []
+        if self._light_curve_records_payload():
+            light_curves, _valid, _reason = self._build_active_light_curve_overlays()
+        graph = self._origin_spectrum_graph(
+            data,
+            plot_type=self.current_plot_type,
+            view=self._capture_view(),
+            levels=self._current_dynamic_spectrum_levels(),
+            light_curves=light_curves,
+            annotations=self._origin_annotations(),
+            measurement=self._origin_measurement(),
+            include_goes=True,
+            include_swaves=self._swaves_active(),
+        )
+        return dynamic_spectrum_figure(graph) if graph is not None else None
+
+    def export_figure(self):
+        """Save the main plot as an OriginPro-style graph; the screen keeps its own look."""
         if not self.filename:
             QMessageBox.warning(self, "No File Loaded", "Load a FITS file before exporting.")
             return
-
-        formats = "PNG (*.png);;PDF (*.pdf);;EPS (*.eps);;SVG (*.svg);;TIFF (*.tiff)"
 
         if self._hardware_mode_enabled():
             base_title = str(self.graph_title_override or self._default_graph_title(self.current_plot_type)).strip()
@@ -8404,7 +8401,7 @@ class MainWindow(QMainWindow):
         file_path, ext = self._pick_export_path_for_figure(
             "Export Figure",
             default_name,
-            formats,
+            FIGURE_EXPORT_FILTERS,
             default_filter="PNG (*.png)",
         )
 
@@ -8420,43 +8417,15 @@ class MainWindow(QMainWindow):
             )
             return
 
-        def normalize_ext(ext_value: str) -> str:
-            """
-            Accepts values like: 'png', '.png', 'PNG (*.png)'
-            Returns: 'png'
-            """
-            if not ext_value:
-                return "png"
-            s = str(ext_value).strip().lower()
-            if s.startswith("."):
-                s = s[1:]
-            m = re.search(r"\*\.(\w+)", s)
-            if m:
-                return m.group(1).lower()
-            return s
-
         try:
-            root, current_ext = os.path.splitext(file_path)
-
-            # If user did not type an extension, add one based on returned ext
-            if current_ext == "":
-                ext_final = normalize_ext(ext)
-                file_path = f"{file_path}.{ext_final}"
-            else:
-                ext_final = current_ext.lower().lstrip(".")
-
-            if self._hardware_mode_enabled():
-                self._export_hardware_visible_plot(file_path, ext_final)
-            else:
-                self.canvas.figure.savefig(
-                    file_path,
-                    dpi=300,
-                    bbox_inches="tight",
-                    format=ext_final
-                )
-
+            if not os.path.splitext(file_path)[1]:
+                suffix = _ext_from_filter(str(ext)) or str(ext or "png").strip().lstrip(".").lower()
+                file_path = f"{file_path}.{suffix}"
+            fig = self._build_origin_export_figure()
+            if fig is None:
+                raise RuntimeError("There is no dynamic spectrum to export.")
+            save_figure(fig, file_path, tight=True)
             QMessageBox.information(self, "Export Complete", f"Figure saved:\n{file_path}")
-
         except Exception as e:
             QMessageBox.critical(self, "Export Failed", f"An error occurred:\n{e}")
 
@@ -12846,29 +12815,6 @@ class MainWindow(QMainWindow):
             return self._normalize_plot_type(getattr(self, "current_plot_type", "Raw"))
         return mapping.get(lowered, self._normalize_plot_type(title))
 
-    def _report_spectrum_export_geometry(self) -> tuple[int, int, int]:
-        widget_width = 1142
-        widget_height = 666
-        pixel_ratio = 2.0
-        accel = getattr(self, "accel_canvas", None)
-        if accel is not None:
-            try:
-                width = int(accel.width())
-                height = int(accel.height())
-                if width >= 400 and height >= 250:
-                    widget_width = width
-                    widget_height = height
-            except Exception:
-                pass
-            try:
-                ratio = float(accel.devicePixelRatioF())
-                if math.isfinite(ratio) and ratio > 0.0:
-                    pixel_ratio = ratio
-            except Exception:
-                pass
-        export_width = max(1800, int(round(widget_width * max(pixel_ratio, 1.0))))
-        return widget_width, widget_height, export_width
-
     def _dynamic_spectrum_view_for_extent(self, view, extent):
         if not view:
             return None
@@ -13030,150 +12976,42 @@ class MainWindow(QMainWindow):
         overlays: list[dict] | None = None,
         view=None,
     ) -> bytes:
+        """One report spectrum as an OriginPro graph, light mode whatever the theme."""
         if data is None or self.freqs is None or self.time is None:
             return b""
         try:
             arr = np.asarray(data)
-            freqs = np.asarray(self.freqs, dtype=float).reshape(-1)
-            time = np.asarray(self.time, dtype=float).reshape(-1)
-        except Exception:
-            return b""
-        if arr.ndim != 2 or freqs.size == 0 or time.size == 0:
-            return b""
-
-        try:
-            import pyqtgraph as pg
-            import pyqtgraph.exporters as pg_exporters
-        except Exception:
-            return b""
-
-        widget = None
-        previous_options = {}
-        for key in ("useOpenGL", "antialias", "imageAxisOrder"):
-            try:
-                previous_options[key] = pg.getConfigOption(key)
-            except Exception:
-                pass
-        try:
-            try:
-                pg.setConfigOptions(useOpenGL=False, antialias=False, imageAxisOrder="row-major")
-            except Exception:
-                pass
-            widget = AcceleratedPlotWidget(use_opengl=False)
-            if not bool(getattr(widget, "is_available", False)):
+            if arr.ndim != 2 or arr.size == 0:
                 return b""
-
-            widget.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
-            width, height, export_width = self._report_spectrum_export_geometry()
-            widget.resize(width, height)
-            widget.set_dark(self._is_dark_ui())
-            widget.set_time_mode(self.use_utc, self.ut_start_sec)
-            widget.set_navigation_locked(bool(getattr(self, "nav_locked", False)))
-
             display_data = np.asarray(self._intensity_for_display(arr), dtype=np.float32)
-            extent = pyqtgraph_extent(freqs, time, default_step=self._frequency_step_mhz)
-            export_view = self._dynamic_spectrum_view_for_extent(view, extent)
             normalized_plot_type = self._normalize_plot_type(plot_type)
-            display_levels = self._report_levels_for_spectrum_data(
+            graph = self._origin_spectrum_graph(
                 arr,
-                display_data,
                 plot_type=normalized_plot_type,
+                view=view,
+                levels=self._report_levels_for_spectrum_data(arr, display_data, plot_type=normalized_plot_type),
+                light_curves=overlays,
+                include_goes=True,
             )
-            if self.remove_titles:
-                plot_title = ""
-                x_label = ""
-                y_label = ""
-                cbar_label = ""
-            else:
-                plot_title = self.graph_title_override or self._default_graph_title(normalized_plot_type)
-                x_label = "Time [UT]" if (self.use_utc and self.ut_start_sec is not None) else "Time [s]"
-                y_label = "Frequency [MHz]"
-                cbar_label = f"Intensity [{self._intensity_unit_label()}]"
-
-            tick_font_px = self.tick_font_px
-            axis_label_font_px = self.axis_label_font_px
-            title_font_px = self.title_font_px
-            if getattr(self, "_hw_default_font_sizes_active", False):
-                tick_font_px = self.HW_DEFAULT_TICK_FONT_PX
-                axis_label_font_px = self.HW_DEFAULT_AXIS_FONT_PX
-                title_font_px = self.HW_DEFAULT_TITLE_FONT_PX
-            widget.set_text_style(
-                font_family=self.graph_font_family,
-                tick_font_px=tick_font_px,
-                axis_label_font_px=axis_label_font_px,
-                title_font_px=title_font_px,
-                title_bold=self.title_bold,
-                title_italic=self.title_italic,
-                axis_bold=self.axis_bold,
-                axis_italic=self.axis_italic,
-                ticks_bold=self.ticks_bold,
-                ticks_italic=self.ticks_italic,
-            )
-            widget.show()
-            QApplication.processEvents()
-            widget.update_image(
-                display_data,
-                extent=extent,
-                cmap=self.get_current_cmap(),
-                gap_row_mask=self._current_gap_row_mask(),
-                levels=display_levels,
-                title=plot_title,
-                x_label=x_label,
-                y_label=y_label,
-                colorbar_label=cbar_label,
-                view=export_view,
-            )
-            try:
-                widget.set_goes_overlay(
-                    self._goes_overlay_payload if self._goes_overlay_enabled else None,
-                    visible_channels=self._selected_goes_overlay_channels(),
-                )
-            except Exception:
-                pass
-            if overlays:
-                try:
-                    widget.set_light_curve_overlays(overlays)
-                except Exception:
-                    pass
-            QApplication.processEvents()
-            plot_item = widget.export_plot_item()
-            if plot_item is None:
+            if graph is None:
                 return b""
-            exporter = pg_exporters.ImageExporter(plot_item)
-            params = exporter.parameters()
-            params["width"] = export_width
-            image = exporter.export(toBytes=True)
-            png = self._qimage_to_png_bytes(image)
-            return b"" if self._png_is_blank_or_black(png) else png
+            png = figure_png_bytes(dynamic_spectrum_figure(graph), dpi=self.REPORT_FIGURE_DPI, tight=True)
         except Exception:
             return b""
-        finally:
-            if widget is not None:
-                try:
-                    widget.close()
-                    widget.deleteLater()
-                    QApplication.processEvents()
-                except Exception:
-                    pass
-            try:
-                restore = {key: value for key, value in previous_options.items() if value is not None}
-                if restore:
-                    pg.setConfigOptions(**restore)
-            except Exception:
-                pass
-
-    @staticmethod
-    def _matplotlib_figure_to_png(fig: Figure, *, dpi: int = 180) -> bytes:
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight", facecolor="white")
-        return buf.getvalue()
+        return b"" if self._png_is_blank_or_black(png) else png
 
     def _matplotlib_canvas_to_png_bytes(self, canvas) -> bytes:
+        """A window's matplotlib plot for the report, restyled as an OriginPro graph.
+
+        The restyle works on a copy, so the window keeps its own look; a figure
+        that cannot be copied is rendered as it stands.
+        """
         fig = getattr(canvas, "fig", None) or getattr(canvas, "figure", None)
         if fig is None:
             return b""
         try:
-            return self._matplotlib_figure_to_png(fig)
+            origin = origin_restyled_copy(fig)
+            return figure_png_bytes(origin if origin is not None else fig, dpi=self.REPORT_FIGURE_DPI, tight=True)
         except Exception:
             return self._qwidget_to_png_bytes(canvas)
 
@@ -13316,12 +13154,8 @@ class MainWindow(QMainWindow):
         caption_parts = []
         png = b""
         try:
-            fig = Figure(figsize=(7.2, 4.1), dpi=150)
-            ax = fig.add_subplot(111)
-            style_axes(ax)
-            finite_points = np.isfinite(x) & np.isfinite(y)
-            if np.any(finite_points):
-                ax.scatter(x[finite_points], y[finite_points], s=14, color="#2563eb", label="Maximum intensity")
+            x_fit = y_fit = None
+            fit_label = ""
             try:
                 a = float(fit.get("a"))
                 b = abs(float(fit.get("b")))
@@ -13329,17 +13163,23 @@ class MainWindow(QMainWindow):
                 if np.count_nonzero(mask) >= 2:
                     x_fit = np.linspace(float(np.nanmin(x[mask])), float(np.nanmax(x[mask])), 400)
                     y_fit = a * np.power(x_fit, -b)
-                    ax.plot(x_fit, y_fit, color="#dc2626", linewidth=2.0, label=f"Best fit: f = {a:.3g} * x^-{b:.3g}")
+                    fit_label = power_law_label(a, b, digits=3)
                     caption_parts.append(f"Fit: f = {a:.5g} * x^-{b:.5g}")
             except Exception:
                 pass
-            ax.set_title("Maximum Intensity Fit")
-            ax.set_xlabel(x_label)
-            ax.set_ylabel("Frequency [MHz]")
-            if len(ax.get_legend_handles_labels()[0]) > 0:
-                ax.legend(loc="best", fontsize=8)
-            fig.tight_layout()
-            png = self._matplotlib_figure_to_png(fig)
+            fig = fit_graph_figure(
+                x,
+                y,
+                fit_x=x_fit,
+                fit_y=y_fit,
+                data_label="Maximum intensity",
+                fit_label=fit_label,
+                title="Maximum Intensity Fit",
+                x_label=x_label,
+                y_label="Frequency [MHz]",
+                text=self._origin_graph_text(),
+            )
+            png = figure_png_bytes(fig, dpi=self.REPORT_FIGURE_DPI, tight=True)
         except Exception:
             png = b""
         if fit.get("r2") is not None:
@@ -13408,8 +13248,7 @@ class MainWindow(QMainWindow):
         png = b""
         if dialog is not None:
             try:
-                image = dialog._render_export_image(min_width=2400)
-                png = self._qimage_to_png_bytes(image)
+                png = figure_png_bytes(dialog.origin_figure(), dpi=self.REPORT_FIGURE_DPI, tight=True)
                 if self._png_is_blank_or_black(png):
                     png = b""
             except Exception:
@@ -13424,8 +13263,8 @@ class MainWindow(QMainWindow):
         return self._project_report_figure(
             "Type II Band Splitting",
             png,
-            caption="Captured from the Type II band-splitting view.",
-            unavailable="Type II band-splitting plot could not be captured.",
+            caption="Drawn from the Type II band-splitting view.",
+            unavailable="Type II band-splitting plot could not be drawn.",
         )
 
     def _capture_goes_payload_report_figure(self) -> ProjectReportFigure:
@@ -13439,38 +13278,26 @@ class MainWindow(QMainWindow):
                 unavailable="Separate GOES X-Ray data is not available.",
             )
 
+        series = []
+        for key, item in visible:
+            try:
+                xs = np.asarray(self._goes_payload_field(item, "x_seconds", []), dtype=float).reshape(-1)
+                flux = np.asarray(self._goes_payload_field(item, "flux_wm2", []), dtype=float).reshape(-1)
+            except Exception:
+                continue
+            label = self._goes_payload_field(item, "display_label", GOES_OVERLAY_CHANNEL_LABELS.get(key, key.upper()))
+            series.append((str(label), xs, flux))
+
         png = b""
         try:
-            fig = Figure(figsize=(7.2, 4.1), dpi=150)
-            ax = fig.add_subplot(111)
-            style_axes(ax)
-            plotted = 0
-            for key, item in visible:
-                try:
-                    xs = np.asarray(self._goes_payload_field(item, "x_seconds", []), dtype=float).reshape(-1)
-                    flux = np.asarray(self._goes_payload_field(item, "flux_wm2", []), dtype=float).reshape(-1)
-                except Exception:
-                    continue
-                n = min(xs.size, flux.size)
-                if n == 0:
-                    continue
-                xs = xs[:n]
-                flux = flux[:n]
-                mask = np.isfinite(xs) & np.isfinite(flux) & (flux > 0.0)
-                if not np.any(mask):
-                    continue
-                label = self._goes_payload_field(item, "display_label", GOES_OVERLAY_CHANNEL_LABELS.get(key, key.upper()))
-                color = "#0891b2" if key == "xrsa" else "#111827"
-                ax.plot(xs[mask], flux[mask], color=color, linewidth=2.0, label=str(label))
-                plotted += 1
-            if plotted:
-                ax.set_title("GOES X-Ray Data")
-                ax.set_xlabel("Time [s]")
-                ax.set_ylabel("Flux [W/m^2]")
-                ax.set_yscale("log")
-                ax.legend(loc="best", fontsize=8)
-                fig.tight_layout()
-                png = self._matplotlib_figure_to_png(fig)
+            utc = bool(self.use_utc and self.ut_start_sec is not None)
+            fig = goes_flux_figure(
+                series,
+                x_label="Time [UT]" if utc else "Time [s]",
+                ut_start_sec=float(self.ut_start_sec) if utc else None,
+                text=self._origin_graph_text(),
+            )
+            png = figure_png_bytes(fig, dpi=self.REPORT_FIGURE_DPI, tight=True)
         except Exception:
             png = b""
         return self._project_report_figure(
@@ -13527,84 +13354,25 @@ class MainWindow(QMainWindow):
         png = b""
         try:
             callisto = self.noise_reduced_data if self.noise_reduced_data is not None else self.raw_data
-            has_callisto = callisto is not None and self.time is not None and self.freqs is not None
-
-            fig = Figure(figsize=(7.6, 6.4 if has_callisto else 3.8), dpi=150)
-            if has_callisto:
-                grid = fig.add_gridspec(2, 1, height_ratios=[1, 1], hspace=0.16)
-                top_ax = fig.add_subplot(grid[0, 0])
-                bottom_ax = fig.add_subplot(grid[1, 0], sharex=top_ax)
-            else:
-                top_ax = None
-                bottom_ax = fig.add_subplot(111)
-
-            x_lo = None
-            x_hi = None
-            if top_ax is not None:
-                style_axes(top_ax)
-                display = self._intensity_for_display(callisto)
-                image = top_ax.imshow(
-                    masked_display_data(display),
-                    aspect="auto",
-                    extent=matplotlib_extent(self.freqs, self.time, default_step=self._frequency_step_mhz),
-                    cmap=self._plot_cmap(),
+            graph = None
+            if callisto is not None:
+                graph = self._origin_spectrum_graph(
+                    callisto,
+                    plot_type=self.current_plot_type,
+                    include_goes=False,
+                    include_swaves=True,
                 )
-                vmin, vmax = self._threshold_display_levels() or finite_data_limits(display)
-                if vmin is not None and vmax is not None:
-                    image.set_clim(vmin, vmax)
-                top_ax.set_ylabel("Frequency [MHz]")
-                top_ax.set_title(f"CALLISTO — {self.filename or 'loaded spectrum'}", loc="left", fontsize=10)
-                top_ax.tick_params(axis="x", labelbottom=False)
-                fig.colorbar(
-                    image,
-                    ax=top_ax,
-                    pad=0.01,
-                ).set_label(f"Intensity [{self._intensity_unit_label()}]", fontsize=8)
-                x_lo = float(np.min(self.time))
-                x_hi = float(np.max(self.time))
-
-            style_axes(bottom_ax)
-            swaves_image = bottom_ax.imshow(
-                masked_display_data(payload.intensity_db),
-                aspect="auto",
-                extent=payload.matplotlib_extent(),
-                cmap=self._plot_cmap(),
-            )
-            vmin, vmax = self._swaves_clim(payload)
-            if vmin is not None and vmax is not None:
-                swaves_image.set_clim(vmin, vmax)
-
-            ticks = log_frequency_ticks(float(payload.log_freq_rows[-1]), float(payload.log_freq_rows[0]))
-            if ticks:
-                bottom_ax.yaxis.set_major_locator(FixedLocator(ticks))
-            bottom_ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _pos: format_log_frequency(value)))
-            bottom_ax.set_ylabel("Frequency")
-            bottom_ax.set_title(f"STEREO/SWAVES — {payload.spacecraft_label}", loc="left", fontsize=10)
-            fig.colorbar(swaves_image, ax=bottom_ax, pad=0.01).set_label(payload.units_label, fontsize=8)
-
-            base = payload.base_utc
-            bottom_ax.xaxis.set_major_formatter(
-                FuncFormatter(lambda value, _pos: f"{base + timedelta(seconds=float(value)):%H:%M}")
-            )
-            bottom_ax.set_xlabel(f"Time [UT]  {payload.start_utc:%Y-%m-%d}")
-
-            sx0, sx1 = payload.time_bounds()
-            if x_lo is None:
-                lo, hi = sx0, sx1
-            else:
-                lo, hi = min(x_lo, sx0), max(x_hi, sx1)
-                bottom_ax.axvspan(
-                    x_lo,
-                    x_hi,
-                    facecolor="none",
-                    edgecolor="#202020",
-                    linewidth=1.1,
-                    linestyle="--",
-                    zorder=5,
+            if graph is None:
+                # No CALLISTO spectrum: the SWAVES window alone, timed from its own start.
+                base = payload.base_utc
+                graph = SpectrumGraph(
+                    image=None,
+                    swaves=self._origin_swaves_panel(),
+                    x_label="" if self.remove_titles else f"Time [UT]  {payload.start_utc:%Y-%m-%d}",
+                    ut_start_sec=base.hour * 3600.0 + base.minute * 60.0 + base.second + base.microsecond / 1e6,
+                    text=self._origin_graph_text(),
                 )
-            bottom_ax.set_xlim(lo, hi)
-
-            png = self._matplotlib_figure_to_png(fig)
+            png = figure_png_bytes(dynamic_spectrum_figure(graph), dpi=self.REPORT_FIGURE_DPI, tight=True)
         except Exception:
             png = b""
 

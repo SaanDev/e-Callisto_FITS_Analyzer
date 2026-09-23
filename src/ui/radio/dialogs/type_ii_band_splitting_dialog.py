@@ -14,7 +14,7 @@ from typing import Any
 from matplotlib import colormaps
 import numpy as np
 from PySide6.QtCore import Signal, QSize, Qt
-from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPageLayout, QPalette, QPdfWriter
+from PySide6.QtGui import QColor, QFont, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -37,7 +37,16 @@ from src.backend.session.analysis_session import (
     TYPE_II_PLOT_STYLE_DEFAULTS,
     TYPE_II_PLOT_STYLE_NUMERIC_FIELDS,
 )
-from src.backend.radio.frequency_axis import axis_edges, finite_data_limits, frequency_edges
+from src.backend.common.figure_export import FIGURE_EXPORT_FILTERS, save_figure
+from src.backend.radio.frequency_axis import axis_edges, finite_data_limits, frequency_edges, transparent_bad_cmap
+from src.backend.radio.radio_figures import (
+    BandTrace,
+    GraphText,
+    SpectrumImage,
+    fit_graph_figure,
+    power_law_label,
+    type_ii_spectrum_figure,
+)
 from src.backend.radio.type_ii_band_splitting import calculate_b_vs_r_profile, calculate_type_ii_parameters, fit_power_law, power_law
 from src.ui.widgets.accelerated_plot_widget import _mpl_cmap_to_lookup, _rgba_image_from_cmap, pg
 from src.ui.radio.dialogs.type_ii_graph_settings_dialog import TypeIIGraphSettingsDialog
@@ -824,84 +833,86 @@ class TypeIIBandSplittingDialog(QDialog):
             return 1.0
         return float(np.nanmedian(diffs))
 
-    def _plot_exporter_module(self):
-        if self.plot_item is None:
-            raise RuntimeError("Type II plot is not available for export.")
-        try:
-            import pyqtgraph.exporters as pg_exporters
-        except Exception as exc:
-            raise RuntimeError("PyQtGraph exporters are unavailable.") from exc
-        return pg_exporters
+    def origin_figure(self):
+        """The graph on show, drawn with matplotlib as an OriginPro graph (Save Plot, project report).
 
-    def _render_export_image(self, *, min_width: int = 2400) -> QImage:
-        pg_exporters = self._plot_exporter_module()
-        QApplication.processEvents()
-        exporter = pg_exporters.ImageExporter(self.plot_item)
-        params = exporter.parameters()
-        try:
-            width = max(
-                min_width,
-                int(self.plot_widget.width() * self.plot_widget.devicePixelRatioF()),
-                int(self.plot_item.sceneBoundingRect().width()),
+        Keeps the lane colours and the fonts of the graph settings; the page,
+        frame, ticks and legend are Origin's. Raises ValueError when the B
+        versus R view has no valid profile.
+        """
+        style = self._normalize_plot_style(self._current_plot_style)
+        text = GraphText(
+            font_family=normalize_font_family(style.get("font_family") or ""),
+            tick_size=float(style["tick_font_px"]),
+            label_size=float(style["axis_label_font_px"]),
+            title_size=float(style["title_font_px"]),
+            title_bold=bool(style["title_bold"]),
+            title_italic=bool(style["title_italic"]),
+            axis_bold=bool(style["axis_bold"]),
+            axis_italic=bool(style["axis_italic"]),
+            ticks_bold=bool(style["ticks_bold"]),
+            ticks_italic=bool(style["ticks_italic"]),
+        )
+        if self._plot_mode == "bvr":
+            profile = self._build_bvr_profile()
+            heights = np.asarray(profile.get("heights_rs", []), dtype=float).reshape(-1)
+            magnetic = np.asarray(profile.get("magnetic_field_g", []), dtype=float).reshape(-1)
+            fit = dict(profile.get("fit") or {})
+            if heights.size < 2 or magnetic.size < 2 or not fit:
+                raise ValueError("B versus R plotting requires a valid magnetic-field profile.")
+            a, b = float(fit["a"]), float(fit["b"])
+            xs = np.linspace(float(np.min(heights)), float(np.max(heights)), 400)
+            return fit_graph_figure(
+                heights,
+                magnetic,
+                fit_x=xs,
+                fit_y=np.asarray(power_law(xs, a, b), dtype=float),
+                data_label="Magnetic field",
+                fit_label=power_law_label(a, b, prefix="Fit", symbol="B", variable="R"),
+                title=f"{self.filename}_Magnetic_Field_vs_Shock_Height",
+                x_label="Shock Height (Rₛ)",
+                y_label="Magnetic Field (G)",
+                text=text,
             )
-        except Exception:
-            width = max(min_width, int(self.plot_widget.width()))
-        params["width"] = max(1, width)
-        image = exporter.export(toBytes=True)
-        if image is None or image.isNull():
-            raise RuntimeError("Could not render the Type II plot image.")
-        return image
 
-    def _export_plot_raster(self, file_path: str, ext: str) -> None:
-        pg_exporters = self._plot_exporter_module()
-        QApplication.processEvents()
-        exporter = pg_exporters.ImageExporter(self.plot_item)
-        params = exporter.parameters()
-        try:
-            width = max(
-                2400,
-                int(self.plot_widget.width() * self.plot_widget.devicePixelRatioF()),
-                int(self.plot_item.sceneBoundingRect().width()),
+        arr = np.asarray(self.display_data, dtype=float)
+        freq_edges = frequency_edges(self.freqs, default_step=self.frequency_step_mhz or 1.0)
+        time_edges = axis_edges(self.time_seconds, default_step=self._time_step_seconds())
+        vmin, vmax = finite_data_limits(arr)
+        image = SpectrumImage(
+            arr,
+            (float(time_edges[0]), float(time_edges[-1]), float(freq_edges[-1]), float(freq_edges[0])),
+            transparent_bad_cmap(self.cmap),
+            (vmin, vmax) if vmin is not None and vmax is not None else None,
+            f"Intensity [{self.display_unit}]",
+        )
+        bands = [
+            BandTrace(
+                label,
+                list(self._band_points(band)),
+                self._fit_curve_samples(band),
+                marker_color=style[f"{band}_marker_color"],
+                line_color=style[f"{band}_line_color"],
+                # The settings are screen pixels; matplotlib sizes are points.
+                marker_size=0.75 * float(style[f"{band}_marker_size"]),
+                line_width=0.75 * float(style[f"{band}_line_width"]),
             )
-        except Exception:
-            width = max(2400, int(self.plot_widget.width()))
-        params["width"] = max(1, width)
-        if not exporter.export(file_path):
-            raise RuntimeError(f"Could not save raster export as {ext}.")
-
-    def _export_plot_pdf(self, file_path: str) -> None:
-        image = self._render_export_image(min_width=2600)
-        writer = QPdfWriter(file_path)
-        writer.setResolution(300)
-        writer.setPageOrientation(QPageLayout.Orientation.Landscape)
-        painter = QPainter(writer)
-        try:
-            target = writer.pageLayout().paintRectPixels(writer.resolution())
-            scaled = image.scaled(target.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-            x = int(target.x() + (target.width() - scaled.width()) / 2)
-            y = int(target.y() + (target.height() - scaled.height()) / 2)
-            painter.drawImage(x, y, scaled)
-        finally:
-            painter.end()
-
-    def _export_plot_svg(self, file_path: str) -> None:
-        pg_exporters = self._plot_exporter_module()
-        QApplication.processEvents()
-        exporter = pg_exporters.SVGExporter(self.plot_item)
-        params = exporter.parameters()
-        try:
-            params["width"] = max(2400.0, float(self.plot_item.sceneBoundingRect().width()))
-        except Exception:
-            pass
-        exporter.export(file_path)
+            for band, label in (("upper", "Upper band"), ("lower", "Lower band"))
+        ]
+        return type_ii_spectrum_figure(
+            image,
+            bands,
+            title=f"{self.filename}_Type_II_Band_Splitting",
+            text=text,
+        )
 
     def _save_plot(self) -> None:
-        formats = "PNG (*.png);;PDF (*.pdf);;SVG (*.svg);;TIFF (*.tiff);;JPG (*.jpg *.jpeg)"
+        """Save the graph on show as an OriginPro-style figure; the window keeps its look."""
         file_path, ext = pick_export_path(
             self,
             "Export Figure",
             self._default_export_name(),
-            formats,
+            FIGURE_EXPORT_FILTERS,
             default_filter="PNG (*.png)",
         )
         if not file_path:
@@ -917,22 +928,9 @@ class TypeIIBandSplittingDialog(QDialog):
             return
 
         try:
-            root, current_ext = os.path.splitext(file_path)
-            if current_ext == "":
-                ext_final = self._normalize_export_extension(ext)
-                file_path = f"{file_path}.{ext_final}"
-            else:
-                ext_final = current_ext.lower().lstrip(".")
-
-            if ext_final in {"png", "tif", "tiff", "jpg", "jpeg"}:
-                self._export_plot_raster(file_path, ext_final)
-            elif ext_final == "pdf":
-                self._export_plot_pdf(file_path)
-            elif ext_final == "svg":
-                self._export_plot_svg(file_path)
-            else:
-                raise RuntimeError(f"Unsupported export format: {ext_final}")
-
+            if not os.path.splitext(file_path)[1]:
+                file_path = f"{file_path}.{self._normalize_export_extension(ext)}"
+            save_figure(self.origin_figure(), file_path, tight=True)
             QMessageBox.information(self, "Export Complete", f"Plot saved:\n{file_path}")
             self.status.showMessage("Export successful!", 3000)
         except Exception as exc:

@@ -14,6 +14,7 @@ pytest.importorskip("matplotlib")
 pytest.importorskip("astropy")
 
 import numpy as np
+from matplotlib.figure import Figure
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication
 
@@ -212,7 +213,6 @@ def test_original_dynamic_spectrum_export_ignores_stale_default_view():
 
 
 def test_original_dynamic_spectrum_export_renderer_produces_nonblack_png():
-    pytest.importorskip("pyqtgraph")
     _app()
     win = MainWindow(theme=None)
     win.freqs = np.array([90.0, 84.0, 78.0, 72.0], dtype=float)
@@ -238,7 +238,6 @@ def test_original_dynamic_spectrum_export_renderer_produces_nonblack_png():
 
 
 def test_original_dynamic_spectrum_export_renderer_preserves_mid_spectrum_content():
-    pytest.importorskip("pyqtgraph")
     _app()
     win = MainWindow(theme=None)
     win.freqs = np.linspace(90.0, 20.0, 64)
@@ -258,10 +257,7 @@ def test_original_dynamic_spectrum_export_renderer_preserves_mid_spectrum_conten
     win.close()
 
 
-def test_original_dynamic_spectrum_export_renderer_uses_app_export_widget(monkeypatch):
-    pytest.importorskip("pyqtgraph")
-    import pyqtgraph.exporters as pg_exporters
-
+def test_report_dynamic_spectrum_is_an_origin_graph_in_light_mode(monkeypatch):
     _app()
     win = MainWindow(theme=None)
     win.filename = "demo.fit"
@@ -270,85 +266,34 @@ def test_original_dynamic_spectrum_export_renderer_uses_app_export_widget(monkey
     data = np.zeros((24, 36), dtype=float)
     data[8:16, 12:24] = 10.0
     monkeypatch.setattr(win, "_is_dark_ui", lambda: True)
-    monkeypatch.setattr(win, "_report_spectrum_export_geometry", lambda: (640, 360, 1800))
 
-    class FakeWidget:
-        is_available = True
+    built = {}
+    real_builder = main_window_module.dynamic_spectrum_figure
 
-        def __init__(self):
-            self.dark = None
-            self.updated = None
-            self.overlays = None
+    def spy(graph):
+        built["graph"] = graph
+        built["figure"] = real_builder(graph)
+        return built["figure"]
 
-        def setAttribute(self, *_args):
-            pass
-
-        def resize(self, *_args):
-            pass
-
-        def set_dark(self, value):
-            self.dark = value
-
-        def set_time_mode(self, *_args):
-            pass
-
-        def set_navigation_locked(self, *_args):
-            pass
-
-        def set_text_style(self, **_kwargs):
-            pass
-
-        def update_image(self, data, **kwargs):
-            self.updated = {"data": np.asarray(data), **kwargs}
-
-        def set_goes_overlay(self, *_args, **_kwargs):
-            pass
-
-        def set_light_curve_overlays(self, overlays):
-            self.overlays = overlays
-
-        def show(self):
-            pass
-
-        def export_plot_item(self):
-            return object()
-
-        def close(self):
-            pass
-
-        def deleteLater(self):
-            pass
-
-    fake_widget = FakeWidget()
-
-    class FakeExporter:
-        def __init__(self, plot_item):
-            self.plot_item = plot_item
-            self.params = {}
-
-        def parameters(self):
-            return self.params
-
-        def export(self, *, toBytes=False):
-            assert toBytes is True
-            assert self.params["width"] == 1800
-            image = QImage(16, 16, QImage.Format_RGB32)
-            image.fill(QColor("#1f60c4"))
-            return image
-
-    monkeypatch.setattr(main_window_module, "AcceleratedPlotWidget", lambda **_kwargs: fake_widget)
-    monkeypatch.setattr(pg_exporters, "ImageExporter", FakeExporter)
+    monkeypatch.setattr(main_window_module, "dynamic_spectrum_figure", spy)
 
     png = win._render_original_dynamic_spectrum_export_png(data, plot_type="Raw")
 
+    graph = built["graph"]
     assert png.startswith(b"\x89PNG")
-    assert fake_widget.dark is True
-    assert fake_widget.updated["title"] == "demo.fit-Raw"
-    assert fake_widget.updated["x_label"] == "Time [s]"
-    assert fake_widget.updated["y_label"] == "Frequency [MHz]"
-    assert fake_widget.updated["colorbar_label"] == "Intensity [Digits]"
-    assert fake_widget.updated["levels"] == (0.0, 10.0)
-    assert np.array_equal(fake_widget.updated["data"], data.astype(np.float32))
+    assert graph.title == "demo.fit-Raw"
+    assert graph.x_label == "Time [s]"
+    assert graph.y_label == "Frequency [MHz]"
+    assert graph.image.colorbar_label == "Intensity [Digits]"
+    assert graph.image.levels == (0.0, 10.0)
+    assert np.array_equal(graph.image.data, data)
+
+    ax = built["figure"].axes[0]
+    assert all(spine.get_visible() for spine in ax.spines.values())
+    assert ax.xaxis.get_tick_params()["direction"] == "in"
+    image = QImage()
+    assert image.loadFromData(png, "PNG")
+    assert image.pixelColor(0, 0) == QColor("#ffffff"), "the report page is light even in dark mode"
     win.close()
 
 
@@ -381,7 +326,7 @@ def test_report_isolated_burst_levels_use_stored_isolated_data_limits():
     win.close()
 
 
-def test_type_ii_report_uses_pyqtgraph_export_path(monkeypatch):
+def test_type_ii_report_uses_the_dialogs_origin_figure(monkeypatch):
     _app()
     win = MainWindow(theme=None)
 
@@ -389,11 +334,9 @@ def test_type_ii_report_uses_pyqtgraph_export_path(monkeypatch):
         def __init__(self):
             self.called = False
 
-        def _render_export_image(self, min_width=2400):
+        def origin_figure(self):
             self.called = True
-            image = QImage(32, 32, QImage.Format_RGB32)
-            image.fill(QColor("#234abc"))
-            return image
+            return main_window_module.fit_graph_figure([1.0, 2.0, 3.0], [95.0, 90.0, 86.0], title="Type II")
 
     fake_dialog = FakeTypeIIDialog()
     win._type_ii_dialog = fake_dialog
@@ -411,6 +354,56 @@ def test_type_ii_report_uses_pyqtgraph_export_path(monkeypatch):
     assert fake_dialog.called is True
     assert figure.title == "Type II Band Splitting"
     assert figure.png_bytes.startswith(b"\x89PNG")
+    win.close()
+
+
+def test_max_intensity_report_figure_is_an_origin_fit_graph(monkeypatch):
+    _app()
+    win = MainWindow(theme=None)
+    built = {}
+    real_builder = main_window_module.fit_graph_figure
+
+    def spy(*args, **kwargs):
+        built["figure"] = real_builder(*args, **kwargs)
+        return built["figure"]
+
+    monkeypatch.setattr(main_window_module, "fit_graph_figure", spy)
+    times = np.linspace(1.0, 60.0, 30)
+    session = {
+        "max_intensity": {"time_seconds": times, "freqs": 120.0 * times ** -0.4},
+        "analyzer": {"fit_params": {"a": 120.0, "b": 0.4, "r2": 0.99, "rmse": 0.5}},
+    }
+
+    figure = win._capture_max_intensity_fit_report_figure(session)
+
+    assert figure.png_bytes.startswith(b"\x89PNG")
+    assert "R2: 0.99" in figure.caption
+    data_line, fit_line = built["figure"].axes[0].get_lines()
+    assert data_line.get_marker() == "s"
+    assert fit_line.get_color().lower() == "#ff0000"
+    win.close()
+
+
+def test_solar_window_report_plot_is_restyled_on_a_copy():
+    _app()
+    win = MainWindow(theme=None)
+    fig = Figure(figsize=(4, 3))
+    fig.patch.set_facecolor("#202020")
+    ax = fig.add_subplot(1, 1, 1)
+    ax.set_facecolor("#111111")
+    ax.plot([0, 1, 2], [3, 1, 2], color="#1f77b4")
+    ax.set_title("Kyoto Dst Index", color="#f0f0f0")
+
+    class FakeCanvas:
+        def __init__(self, figure):
+            self.fig = figure
+
+    png = win._matplotlib_canvas_to_png_bytes(FakeCanvas(fig))
+
+    image = QImage()
+    assert image.loadFromData(png, "PNG")
+    assert image.pixelColor(0, 0) == QColor("#ffffff")
+    assert fig.get_facecolor()[:3] == pytest.approx((0x20 / 255.0,) * 3), "the window keeps its own look"
     win.close()
 
 

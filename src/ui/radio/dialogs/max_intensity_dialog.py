@@ -29,6 +29,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from src.backend.common.figure_export import FIGURE_EXPORT_FILTERS, save_figure
+from src.backend.radio.radio_figures import fit_graph_figure
 from src.ui.radio.dialogs.analyze_dialog import AnalyzeDialog
 from src.ui.common.gui_shared import MplCanvas, fit_window_to_screen, pick_export_path
 from src.ui.common.mpl_style import style_axes
@@ -186,6 +188,7 @@ class MaxIntensityPlotDialog(QDialog):
         self.canvas.ax.set_ylabel("Frequency (MHz)")
         self.canvas.ax.set_title(title)
         self.canvas.draw()
+        self._plot_title = title
 
     def _on_mode_toggled(self, _checked=False):
         self._emit_session_changed()
@@ -323,8 +326,6 @@ class MaxIntensityPlotDialog(QDialog):
             QMessageBox.warning(self, "No File Loaded", "Load a FITS file before exporting.")
             return
 
-        formats = "PNG (*.png);;PDF (*.pdf);;EPS (*.eps);;SVG (*.svg);;TIFF (*.tiff)"
-
         base_name = self.filename.split(".")[0]
         suffix = self.current_plot_type.replace(" ", "")
         default_name = f"{base_name}_{suffix}"
@@ -333,7 +334,7 @@ class MaxIntensityPlotDialog(QDialog):
             self,
             "Export Figure",
             default_name,
-            formats,
+            FIGURE_EXPORT_FILTERS,
             default_filter="PNG (*.png)"
         )
 
@@ -357,17 +358,23 @@ class MaxIntensityPlotDialog(QDialog):
             else:
                 ext = current_ext.lower().lstrip(".")
 
-            self.canvas.figure.savefig(
-                file_path,
-                dpi=300,
-                bbox_inches="tight",
-                format=ext
-            )
+            save_figure(self.origin_figure(), file_path, tight=True)
 
             QMessageBox.information(self, "Export Complete", f"Figure saved:\n{file_path}")
 
         except Exception as e:
             QMessageBox.critical(self, "Export Failed", f"An error occurred:\n{e}")
+
+    def origin_figure(self):
+        """The points on show as an OriginPro graph, for Export; the window keeps its look."""
+        return fit_graph_figure(
+            self._plot_time_values(),
+            self.freqs,
+            data_label="",
+            title=self._plot_title,
+            x_label=self._time_axis_label(),
+            y_label="Frequency (MHz)",
+        )
 
     def show_about_dialog(self):
         QMessageBox.information(

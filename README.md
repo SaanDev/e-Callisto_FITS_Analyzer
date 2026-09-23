@@ -321,6 +321,7 @@ Inside the Maximum Intensities window:
 - Remove them instantly
 - Keep manual cleanup controls available even when automatic outlier removal is enabled
 - Prepare the cleaned curve for fitting
+- **File → Export As** saves the points on show as an OriginPro-style graph (PNG, PDF, EPS, SVG, TIFF, JPG)
 
 ---
 
@@ -354,9 +355,11 @@ Optional additional plots:
 ### Example: Analyzer
 ![Analyzer](assets/screenshots/analysis.png)
 
+The **Best Fit** graph is drawn in the OriginPro style on screen: filled black squares for the maximum-intensity points, the fitted power law as a red curve, a boxed legend and a closed frame with inward ticks. The other Analyzer plots keep their usual look on screen.
+
 Export options:
 
-- Best-fit graph (PNG, PDF, EPS, SVG, TIFF)
+- **Save Graph** writes whichever plot is on show (maximum intensities, best fit or an additional plot) as an OriginPro-style graph on a white page (PNG, PDF, EPS, SVG, TIFF, JPG)
 - Data summary to Excel
 - Multiple additional plots
 
@@ -380,6 +383,7 @@ Workflow:
   - Alfven Mach number
   - Alfven speed
   - Magnetic field
+- **Save Plot** writes the lanes over the spectrum, or the B-versus-R fit, as an OriginPro-style graph (PNG, PDF, EPS, SVG, TIFF, JPG), keeping the lane colours and fonts from the graph settings
 
 Important validation note:
 
@@ -523,6 +527,8 @@ All figures across the application can be exported in:
 - SVG
 - TIFF
 
+**File → Export As → Export Figure** (`Ctrl+E`) always writes the main plot as an **OriginPro-style graph in light mode**, whichever renderer and theme are on screen: Arial type, a closed black frame with inward major and minor ticks on all four sides, a framed colour scale, and ticks on whole UT minutes. The export keeps the current zoom, colormap, display range, log/linear frequency axis, Graph Properties titles and font sizes, and every visible overlay (light curves, annotations, GOES X-ray overlay, ruler measurement, STEREO/SWAVES panel). JPG joins PNG, PDF, EPS, SVG and TIFF. The plot on screen keeps its own look.
+
 Export handling improvements:
 
 - Export errors for PDF, EPS, and SVG formats have been resolved
@@ -555,6 +561,8 @@ The report can include:
 - Maximum-intensity fit
 - Type II band-splitting output
 - Available GOES X-ray, GOES SGPS proton flux, Dst, and Kp context plots
+
+Every graph in the report is drawn in the same OriginPro style as **Export Figure**, on a white page even in dark mode. The Solar Events plots are restyled on a copy, so their windows keep their own look.
 
 The obsolete **Burst Isolated Dynamic Spectrum** report section has been removed in v2.6.0.
 

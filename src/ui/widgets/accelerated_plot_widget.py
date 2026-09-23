@@ -1309,15 +1309,6 @@ class AcceleratedPlotWidget(QWidget):
             return None
         return self._plot
 
-    def export_scene(self):
-        """Whole-scene export target, so a split view exports both panels."""
-        if not self.is_available or self._graphics is None:
-            return None
-        try:
-            return self._graphics.scene()
-        except Exception:
-            return None
-
     # ------------------------------------------------------------------
     # STEREO/SWAVES companion panel
     # ------------------------------------------------------------------

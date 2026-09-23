@@ -29,6 +29,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.backend.common.figure_export import FIGURE_EXPORT_FILTERS, save_figure
+from src.backend.radio.radio_figures import draw_fit_graph, fit_graph_figure, origin_graph_style, power_law_label
 from src.ui.common.gui_shared import MplCanvas, fit_window_to_screen, pick_export_path
 from src.ui.common.mpl_style import style_axes
 
@@ -59,6 +61,8 @@ class AnalyzeDialog(QDialog):
         self.freq = np.asarray(freqs, dtype=float).reshape(-1)
         self.filename = filename.split(".")[0]
         self.current_plot_title = f"{self.filename}_Best_Fit"
+        #: What the canvas shows, as fit_graph_figure() arguments: "Save Graph" redraws it Origin-style.
+        self._graph = None
         self._fit_params = None
         self._shock_summary = {}
         self._type_ii_state = None
@@ -288,6 +292,14 @@ class AnalyzeDialog(QDialog):
         self.canvas.ax.grid(True)
         self.canvas.draw()
         self.current_plot_title = f"{self.filename}_Maximum_Intensity"
+        self._graph = {
+            "x": self.time,
+            "y": self.freq,
+            "data_label": "",
+            "title": self.current_plot_title,
+            "x_label": "Time (s)",
+            "y_label": "Frequency (MHz)",
+        }
         self.equation_display.setText("")
         self.fold_calc_button.setEnabled(False)
         self.status.showMessage("Max intensities plotted successfully!", 3000)
@@ -334,25 +346,27 @@ class AnalyzeDialog(QDialog):
         time_fit = np.linspace(fit_time.min(), fit_time.max(), 400)
         freq_fit = model_func(time_fit, a, b)
 
+        # The best fit is the one Analyzer graph shown in the OriginPro style
+        # on screen; "Save Graph" draws the same graph on its own page.
+        self.current_plot_title = f"{self.filename}_Best_Fit"
+        self._graph = {
+            "x": plot_time,
+            "y": plot_freq,
+            "fit_x": time_fit,
+            "fit_y": freq_fit,
+            "data_label": "Original Data",
+            "fit_label": power_law_label(a, b, prefix="Best Fit"),
+            "title": self.current_plot_title,
+            "x_label": "Time (s)",
+            "y_label": "Frequency (MHz)",
+        }
         self.canvas.ax.clear()
         self.canvas.figure.clf()
-        self.canvas.ax = self.canvas.figure.add_subplot(111)
-        style_axes(self.canvas.ax)
-
-        self.canvas.ax.scatter(plot_time, plot_freq, s=10, color='blue', label="Original Data")
-        self.canvas.ax.plot(
-            time_fit,
-            freq_fit,
-            color='red',
-            label=fr"Best Fit: $f = {a:.2f} \cdot x^{{-{b:.2f}}}$",
-        )
-        self.canvas.ax.set_title(f"{self.filename}_Best_Fit")
-        self.canvas.ax.set_xlabel("Time (s)")
-        self.canvas.ax.set_ylabel("Frequency (MHz)")
-        self.canvas.ax.legend()
-        self.canvas.ax.grid(True)
-        self.canvas.draw()
-        self.current_plot_title = f"{self.filename}_Best_Fit"
+        with origin_graph_style() as text:
+            self.canvas.figure.set_facecolor("white")
+            self.canvas.ax = self.canvas.figure.add_subplot(111)
+            draw_fit_graph(self.canvas.ax, **self._graph, text=text)
+            self.canvas.draw()
 
         from sklearn.metrics import mean_squared_error, r2_score
 
@@ -613,15 +627,18 @@ class AnalyzeDialog(QDialog):
         self._set_summary_labels_from_dict(self._shock_summary)
 
     def save_graph(self):
-        plot_name = getattr(self, "current_plot_title", None) or f"{self.filename}_Plot"
+        """Save the graph on show as an OriginPro-style figure; the window keeps its look."""
+        if self._graph is None:
+            QMessageBox.information(self, "Save Graph", "Plot the maximum intensities or the best fit first.")
+            return
 
-        formats = "PNG (*.png);;PDF (*.pdf);;EPS (*.eps);;SVG (*.svg);;TIFF (*.tiff)"
+        plot_name = getattr(self, "current_plot_title", None) or f"{self.filename}_Plot"
 
         file_path, ext = pick_export_path(
             self,
             "Export Figure",
             plot_name,
-            formats,
+            FIGURE_EXPORT_FILTERS,
             default_filter="PNG (*.png)"
         )
 
@@ -646,12 +663,7 @@ class AnalyzeDialog(QDialog):
             else:
                 ext = current_ext.lower().lstrip(".")
 
-            self.canvas.figure.savefig(
-                file_path,
-                dpi=300,
-                bbox_inches="tight",
-                format=ext
-            )
+            save_figure(fit_graph_figure(**self._graph), file_path, tight=True)
             QMessageBox.information(self, "Export Complete", f"Plot saved:\n{file_path}")
             self.status.showMessage("Export successful!", 3000)
 
@@ -783,30 +795,35 @@ class AnalyzeDialog(QDialog):
     def plot_extra(self):
         choice = self.extra_plot_combo.currentText()
         freq_axis = np.asarray(getattr(self, "_shock_freq_values", getattr(self, "_fit_freq", self.freq)), dtype=float).reshape(-1)
+        # choice -> (x, y, x label, y label, title suffix, on-screen colour)
+        plots = {
+            "Shock Speed vs Shock Height": (
+                self.R_p, self.shock_speed, "Shock Height (Rₛ)", "Shock Speed (km/s)", "Shock_Speed_vs_Shock_Height", "green",
+            ),
+            "Shock Speed vs Frequency": (
+                freq_axis, self.shock_speed, "Frequency (MHz)", "Shock Speed (km/s)", "Shock_Speed_vs_Frequency", "purple",
+            ),
+            "Shock Height vs Frequency": (
+                self.R_p, freq_axis, "Shock Height (Rₛ)", "Frequency (MHz)", "Rs_vs_Freq", "red",
+            ),
+        }
         self.canvas.ax.clear()
-        if choice == "Shock Speed vs Shock Height":
-            self.canvas.ax.scatter(self.R_p, self.shock_speed, color='green', s=10)
-            self.canvas.ax.set_xlabel("Shock Height (Rₛ)")
-            self.canvas.ax.set_ylabel("Shock Speed (km/s)")
-            self.canvas.ax.set_title(f"{self.filename}_Shock_Speed_vs_Shock_Height")
-            self.current_plot_title = f"{self.filename}_Shock_Speed_vs_Shock_Height"
-            self.status.showMessage("Shock Speed vs Shock Height plotted successfully!", 3000)
-
-        elif choice == "Shock Speed vs Frequency":
-            self.canvas.ax.scatter(freq_axis, self.shock_speed, color='purple', s=10)
-            self.canvas.ax.set_xlabel("Frequency (MHz)")
-            self.canvas.ax.set_ylabel("Shock Speed (km/s)")
-            self.canvas.ax.set_title(f"{self.filename}_Shock_Speed_vs_Frequency")
-            self.current_plot_title = f"{self.filename}_Shock_Speed_vs_Frequency"
-            self.status.showMessage("Shock Speed vs Frequency plotted successfully!", 3000)
-
-        elif choice == "Shock Height vs Frequency":
-            self.canvas.ax.scatter(self.R_p, freq_axis, color='red', s=10)
-            self.canvas.ax.set_xlabel("Shock Height (Rₛ)")
-            self.canvas.ax.set_ylabel("Frequency (MHz)")
-            self.canvas.ax.set_title(f"{self.filename}_Rs_vs_Freq")
-            self.current_plot_title = f"{self.filename}_Rs_vs_Freq"
-            self.status.showMessage("Shock Height vs Frequency plotted successfully!", 3000)
+        if choice in plots:
+            x, y, x_label, y_label, suffix, colour = plots[choice]
+            self.canvas.ax.scatter(x, y, color=colour, s=10)
+            self.canvas.ax.set_xlabel(x_label)
+            self.canvas.ax.set_ylabel(y_label)
+            self.current_plot_title = f"{self.filename}_{suffix}"
+            self.canvas.ax.set_title(self.current_plot_title)
+            self._graph = {
+                "x": x,
+                "y": y,
+                "data_label": "",
+                "title": self.current_plot_title,
+                "x_label": x_label,
+                "y_label": y_label,
+            }
+            self.status.showMessage(f"{choice} plotted successfully!", 3000)
         self.canvas.ax.grid(True)
         self.canvas.draw()
 

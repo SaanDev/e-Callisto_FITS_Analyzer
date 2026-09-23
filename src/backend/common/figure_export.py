@@ -11,7 +11,8 @@ major and minor ticks on all four sides, filled symbols in Origin's default
 colour order, a red fitted curve and a boxed legend — and are always drawn in
 light mode, whatever theme the application is showing. On-screen plots keep the
 application's own styling: this module only ever applies its settings inside
-:func:`origin_style`, so nothing leaks into the interactive views.
+:func:`origin_style`, or to a copy of a window's figure
+(:func:`origin_restyled_copy`), so nothing leaks into the interactive views.
 
 Every figure export in the application offers the same formats, listed in
 :data:`FIGURE_EXPORT_FILTERS`.
@@ -188,6 +189,103 @@ def origin_legend(ax: Any, **kwargs: Any) -> Any:
     return legend
 
 
+def origin_restyled_copy(fig: Any) -> Any | None:
+    """A copy of ``fig`` restyled by :func:`restyle_as_origin`, or None.
+
+    The copy is made by pickling, so the figure a window is showing is never
+    touched. A figure holding something that cannot be pickled (a formatter
+    closing over a widget, say) gives None, and the caller keeps its own render.
+    """
+    import pickle
+
+    try:
+        clone = pickle.loads(pickle.dumps(fig))
+    except Exception:
+        return None
+    restyle_as_origin(clone)
+    return clone
+
+
+def restyle_as_origin(fig: Any) -> None:
+    """Turn an already drawn figure into an OriginPro graph on a white page.
+
+    For figures built elsewhere, in whatever theme they were shown: the page
+    turns white, every plotting axes gets Origin's closed frame and inward
+    ticks, the grid goes, all text is set in Arial, legends get a square black
+    border, and text or lines too light to read on white turn dark. Data colours
+    that read on white are left alone. Colour-bar and twin axes keep their own
+    layout and only take the colours.
+    """
+    from matplotlib.lines import Line2D
+    from matplotlib.text import Text
+
+    black = "#000000"
+    families = list(origin_font_families())
+    fig.patch.set_facecolor("white")
+    fig.patch.set_edgecolor("white")
+
+    frame_lines = set()
+    for ax in fig.axes:
+        colorbar = getattr(ax, "_colorbar", None)
+        ax.grid(False)
+        if colorbar is not None:
+            colorbar.outline.set_edgecolor(black)
+            colorbar.outline.set_linewidth(1.0)
+            ax.tick_params(which="both", direction="in", colors=black, labelcolor=black)
+        elif ax.patch.get_visible():
+            ax.set_facecolor("white")
+            style_origin_axes(ax)
+            ax.tick_params(which="both", colors=black, labelcolor=black)
+        else:
+            # A twin drawn over another axes: its frame is the other one's.
+            for spine in ax.spines.values():
+                spine.set_edgecolor(black)
+            ax.tick_params(which="both", direction="in", colors=black, labelcolor=black)
+        for axis in (ax.xaxis, ax.yaxis):
+            axis.label.set_color(black)
+            axis.get_offset_text().set_color(black)
+            for tick in axis.get_major_ticks() + axis.get_minor_ticks():
+                frame_lines.update((tick.tick1line, tick.tick2line, tick.gridline))
+        for title in (ax.title, getattr(ax, "_left_title", None), getattr(ax, "_right_title", None)):
+            if title is not None:
+                title.set_color(black)
+        _restyle_legend(ax.get_legend())
+    for legend in getattr(fig, "legends", []):
+        _restyle_legend(legend)
+
+    for text in fig.findobj(Text):
+        text.set_fontfamily(families)
+        if _too_light_for_white(text.get_color()):
+            text.set_color(black)
+    for line in fig.findobj(Line2D):
+        if line not in frame_lines and _too_light_for_white(line.get_color()):
+            line.set_color("#404040")
+
+
+def _restyle_legend(legend: Any) -> None:
+    if legend is None:
+        return
+    frame = legend.get_frame()
+    frame.set_boxstyle("square", pad=0.0)
+    frame.set_facecolor("white")
+    frame.set_edgecolor("#000000")
+    frame.set_linewidth(1.0)
+    frame.set_alpha(1.0)
+    for text in legend.get_texts():
+        text.set_color("#000000")
+
+
+def _too_light_for_white(color: Any) -> bool:
+    """Whether ``color`` would vanish on a white page (dark-theme text and lines)."""
+    from matplotlib.colors import to_rgba
+
+    try:
+        red, green, blue, alpha = to_rgba(color)
+    except (TypeError, ValueError):
+        return False
+    return alpha > 0.0 and (0.2126 * red + 0.7152 * green + 0.0722 * blue) > 0.8
+
+
 def export_format(path: str | Path) -> str:
     """The matplotlib format for ``path``'s suffix; raises for an unsupported one."""
     suffix = Path(path).suffix.lower()
@@ -198,12 +296,18 @@ def export_format(path: str | Path) -> str:
         raise ValueError(f"Unsupported figure format '{suffix or '(none)'}'. Use one of: {supported}.") from None
 
 
-def save_figure(fig: Any, path: str | Path, *, dpi: int = EXPORT_DPI) -> Path:
-    """Write ``fig`` in the format its suffix names, on a white page."""
+def save_figure(fig: Any, path: str | Path, *, dpi: int = EXPORT_DPI, tight: bool = False) -> Path:
+    """Write ``fig`` in the format its suffix names, on a white page.
+
+    ``tight`` trims the page to the drawing, for figures whose labels can grow
+    with the user's font sizes; fixed-layout figures (movie frames) leave it off.
+    """
     target = Path(path).expanduser()
     fmt = export_format(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     options: dict[str, Any] = {"format": fmt, "dpi": dpi, "facecolor": "white", "edgecolor": "white"}
+    if tight:
+        options.update(bbox_inches="tight", pad_inches=0.08)
     if fmt == "jpeg":
         options["pil_kwargs"] = {"quality": 95}
     elif fmt == "tiff":
@@ -213,11 +317,14 @@ def save_figure(fig: Any, path: str | Path, *, dpi: int = EXPORT_DPI) -> Path:
     return target
 
 
-def figure_png_bytes(fig: Any, *, dpi: int = 200) -> bytes:
+def figure_png_bytes(fig: Any, *, dpi: int = 200, tight: bool = False) -> bytes:
     """``fig`` as PNG bytes, for embedding in a PDF report."""
     buffer = io.BytesIO()
     _ensure_canvas(fig)
-    fig.savefig(buffer, format="png", dpi=dpi, facecolor="white", edgecolor="white")
+    options: dict[str, Any] = {"format": "png", "dpi": dpi, "facecolor": "white", "edgecolor": "white"}
+    if tight:
+        options.update(bbox_inches="tight", pad_inches=0.08)
+    fig.savefig(buffer, **options)
     return buffer.getvalue()
 
 

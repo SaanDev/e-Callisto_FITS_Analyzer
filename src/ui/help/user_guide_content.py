@@ -171,8 +171,8 @@ on the right, the live cursor readout (time, frequency, intensity) and the updat
 <tr><td><b>Save Project</b> ({_kbd('Ctrl+S')})</td><td>Save the full state: view, thresholds, units, colormap, styling, data, and analysis session.</td></tr>
 <tr><td><b>Save Project As</b> ({_kbd('Ctrl+Shift+S')})</td><td>Save the project to a new file.</td></tr>
 <tr><td><b>Recover Last Session</b></td><td>Restore the most recent autosave snapshot after a crash.</td></tr>
-<tr><td><b>Generate Project Report</b></td><td>Build a consolidated PDF with the spectra, fits, and available solar-context plots.</td></tr>
-<tr><td><b>Export &#8594; Export Figure</b> ({_kbd('Ctrl+E')})</td><td>Save the current plot as PNG, PDF, EPS, SVG, or TIFF.</td></tr>
+<tr><td><b>Generate Project Report</b></td><td>Build a consolidated PDF with the spectra, fits, and available solar-context plots. Every graph in the report is drawn in the OriginPro style, in light mode.</td></tr>
+<tr><td><b>Export &#8594; Export Figure</b> ({_kbd('Ctrl+E')})</td><td>Save the current plot, with its zoom and overlays, as PNG, PDF, EPS, SVG, TIFF, or JPG. The file is an OriginPro-style graph in light mode (Arial, closed black frame, inward ticks on all four sides, framed color scale) with your Graph Properties titles and font sizes; the plot on screen keeps its own look.</td></tr>
 <tr><td><b>Export &#8594; Export to FIT</b> ({_kbd('Ctrl+F')})</td><td>Write processed data (raw, background-subtracted, or combined) as a new FITS file.</td></tr>
 <tr><td><b>Export &#8594; Export Provenance Report</b></td><td>Write Markdown and JSON summaries of the source, processing, RFI, annotations, and operation log.</td></tr>
 <tr><td><b>Export &#8594; Export Analysis Log</b></td><td>Write CSV and text summaries of fit parameters and derived shock metrics.</td></tr>
@@ -231,10 +231,14 @@ seconds from file start, with shared, per-station, or manual color scaling, then
 <li><b>GCS CME Fitting...</b>: reconstruct a CME in 3-D from three coronagraph viewpoints, starting from the
 visible time range of the spectrum (see <a href="#gcs-fitting">section 15</a>).</li>
 <li><b>Maximum Intensities &#8594; Open Maximum Intensities</b>: trace the peak frequency for each time channel
-after noise reduction or burst isolation. Inside that window you can lasso-select outliers and remove them.</li>
+after noise reduction or burst isolation. Inside that window you can lasso-select outliers and remove them.
+In the Analyzer, the <b>Best Fit</b> graph is drawn in the OriginPro style (black squares, red fitted curve, boxed
+legend). <b>Save Graph</b> in the Analyzer and <b>File &#8594; Export As</b> in the Maximum Intensities window save
+the plot on show as an OriginPro-style graph, while the windows keep their own look.</li>
 <li><b>Type II Band-splitting &#8594; Open Type II Band-splitting</b>: pick points along the upper and lower
 bands, fit both, and derive shock speed, height, bandwidth, compression ratio, Alfven Mach number, Alfven speed,
-and magnetic field. Validate results against known events.</li>
+and magnetic field. <b>Save Plot</b> writes the lanes (or the B-versus-R fit) as an OriginPro-style graph with
+your lane colours. Validate results against known events.</li>
 <li><b>Plot Light Curves</b>: overlay intensity-versus-time curves. Enter a frequency, or switch on
 <b>Click on a frequency</b> and click the spectrum. Use <b>Settings</b> for color, width, opacity, scale, line
 style, and labels; <b>Clear light curve(s)</b> removes them without resetting the data.</li>
