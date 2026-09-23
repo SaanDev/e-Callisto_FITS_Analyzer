@@ -10,6 +10,7 @@ offscreen.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 import numpy as np
@@ -20,7 +21,7 @@ pytest.importorskip("pyqtgraph")
 
 from PySide6.QtWidgets import QApplication
 
-from src.backend.solar.coronagraph import fit_height_time
+from src.backend.solar.coronagraph import RSUN_KM, fit_height_time
 from src.ui.solar.solar_data_analysis_window import SolarDataAnalysisWindow
 
 
@@ -402,10 +403,10 @@ def test_canvas_click_callback_forwarding():
 
 
 # --------------------------------------------------------------------------- #
-# Circle Fit (CME): N clicks -> least-squares circle -> radius-time kinematics
+# Circle Fit (CME): N clicks -> least-squares circle -> height (1 R☉ + 2r) -> kinematics
 # --------------------------------------------------------------------------- #
 def _timed_frames(count):
-    """Frames one minute apart, so the radius-time fit has a real time axis."""
+    """Frames one minute apart, so the height-time fit has a real time axis."""
     return [
         WcsMap(np.ones((11, 11)), date=f"2026-02-10T01:{i:02d}:00") for i in range(count)
     ]
@@ -418,7 +419,7 @@ def _circle_clicks(win, radius, *, center=(0.0, 0.0)):
         win._measure.on_canvas_click(cx + dx, cy + dy, "left")
 
 
-def test_circle_fit_three_clicks_then_commit_records_radius():
+def test_circle_fit_three_clicks_then_commit_records_height():
     _app()
     win = SolarDataAnalysisWindow()
     _load(win, _timed_frames(2))
@@ -433,9 +434,29 @@ def test_circle_fit_three_clicks_then_commit_records_radius():
     entry = win._measure.circles[0]
     assert entry.radius_arcsec == pytest.approx(4.0)
     assert entry.radius_rsun == pytest.approx(0.5)  # 4" / rsun 8"
+    # A sphere resting on the surface: 1 R☉ + the 1 R☉ diameter.
+    assert entry.height_rsun == pytest.approx(2.0)
+    assert entry[1] == entry.height_rsun  # field 1 is what the kinematics fit
     assert entry.leading_edge_rsun == pytest.approx(0.5)  # centred on the disk
     assert entry.n_points == 3
     assert entry.rms_arcsec == pytest.approx(0.0, abs=1e-9)
+    win.close()
+
+
+def test_circle_fit_height_depends_on_the_diameter_not_the_centre():
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _timed_frames(2))
+
+    win.circle_tool_btn.setChecked(True)
+    _circle_clicks(win, 2.0, center=(6.0, 0.0))
+    win._measure.commit_circle()
+
+    entry = win._measure.circles[0]
+    assert entry.radius_rsun == pytest.approx(0.25)  # 2" / rsun 8"
+    assert entry.height_rsun == pytest.approx(1.5)  # 1 + 2 * 0.25
+    # The geometric lead from disk centre is still reported alongside it.
+    assert entry.leading_edge_rsun == pytest.approx(1.0)  # (6" + 2") / 8"
     win.close()
 
 
@@ -495,7 +516,7 @@ def test_circle_fit_right_click_drops_in_progress_points_only():
     win.close()
 
 
-def test_circle_fit_radius_time_series_and_fit():
+def test_circle_fit_height_time_series_and_fit():
     _app()
     win = SolarDataAnalysisWindow()
     _load(win, _timed_frames(3))
@@ -506,14 +527,23 @@ def test_circle_fit_radius_time_series_and_fit():
         _circle_clicks(win, radius)
         win._measure.commit_circle()
 
-    assert win.tracking_panel.table.rowCount() == 3
+    panel = win.tracking_panel
+    assert panel.table.rowCount() == 3
+    assert panel.table.item(0, 2).text() == "2.000"  # height: 1 + 2 * 0.5
+    assert panel.table.item(0, 3).text() == "0.500"  # radius
+    # r = 0.5, 0.75, 1.0 R☉ -> plotted heights 1 R☉ + 2r, not the radii.
+    _, plotted = panel._scatter.getData()
+    assert list(plotted) == pytest.approx([2.0, 2.5, 3.0])
+
     assert win.ht_fit_btn.isEnabled()
     win._measure.finish_active_fit()
-    # 0.5 R☉ in 120 s -> ~2900 km/s of plane-of-sky radial expansion.
-    assert "km/s" in win.tracking_panel.speed_label.text()
+    # The front climbs 1 R☉ in 120 s: twice the rate the radius grows.
+    speed = re.search(r"v = ([\d,]+) ", panel.speed_label.text())
+    assert speed is not None
+    assert float(speed.group(1).replace(",", "")) == pytest.approx(RSUN_KM / 120.0, abs=1.0)
     assert "circle fit (3 frames, linear fit)" in win.analysis_text.toPlainText()
-    x_fit, _ = win.tracking_panel._fit_line.getData()
-    assert len(x_fit) > 0
+    _, y_fit = panel._fit_line.getData()
+    assert y_fit[0] == pytest.approx(2.0) and y_fit[-1] == pytest.approx(3.0)
     win.close()
 
 
@@ -531,7 +561,8 @@ def test_tracking_panel_swaps_source_without_losing_the_other_store():
 
     win.circle_tool_btn.setChecked(True)
     assert win.tracking_panel.table.columnCount() == 6
-    assert win.tracking_panel.table.horizontalHeaderItem(2).text() == "Radius (R☉)"
+    assert win.tracking_panel.table.horizontalHeaderItem(2).text() == "Height (R☉)"
+    assert win.tracking_panel.table.horizontalHeaderItem(3).text() == "Radius (R☉)"
     assert win.tracking_panel.table.rowCount() == 0  # no circles yet
     assert len(win._measure.picks) == 2  # the other tool's work is untouched
 
@@ -625,10 +656,11 @@ def test_circle_fit_csv_row_matches_its_header():
 
     panel = win.tracking_panel
     header = panel.csv_header()
-    assert header[:3] == ["time_utc", "t_seconds", "radius_rsun"]
+    assert header[:4] == ["time_utc", "t_seconds", "height_rsun", "radius_rsun"]
     row = panel.csv_row(panel._entries[0], panel._entries[0][0])
     assert len(row) == len(header)
-    assert row[2] == "0.5000"
+    assert row[2] == "2.0000"  # 1 R☉ + 2 * 0.5 R☉
+    assert row[3] == "0.5000"
     win.close()
 
 

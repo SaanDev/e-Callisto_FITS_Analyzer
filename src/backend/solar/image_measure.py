@@ -185,6 +185,19 @@ def fit_circle(
     return CircleFit(cx, cy, radius, rms, n, _arc_span_deg(x, y, cx, cy), False)
 
 
+def spherical_bubble_height_rsun(radius_rsun: float) -> float:
+    """Leading-edge height of a spherical CME bubble resting on the photosphere.
+
+    The circle fit models the CME as a uniformly expanding sphere whose base
+    stays on the solar surface, so its centre sits one radius ``r`` above the
+    photosphere and its front ``2r`` above it: the height from Sun centre is
+    ``1 R_sun + 2r``, one solar radius plus the circle's *diameter*. The radius
+    alone drops both the solar radius and half the bubble, which understates the
+    height and halves the front speed fitted from it.
+    """
+    return 1.0 + 2.0 * float(radius_rsun)
+
+
 def _arc_span_deg(x: np.ndarray, y: np.ndarray, cx: float, cy: float) -> float:
     """Angular extent the points cover about ``(cx, cy)``: 360 minus the largest gap."""
     if x.size < 2:

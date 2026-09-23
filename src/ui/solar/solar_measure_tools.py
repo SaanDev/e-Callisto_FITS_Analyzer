@@ -65,6 +65,7 @@ from src.backend.solar.image_measure import (
     line_profile,
     region_stats,
     ruler_measurement,
+    spherical_bubble_height_rsun,
 )
 from src.backend.solar.solar_data_analysis import frame_observation_time
 
@@ -148,7 +149,9 @@ class TrackingPanel(QWidget):
     # Column layout per tracking source.
     _HEADERS = {
         "height_time": ["Time (UT)", "t (s)", "Height (R☉)", "PA (°)"],
-        "circle_fit": ["Time (UT)", "t (s)", "Radius (R☉)", "Lead (R☉)", "PA (°)", "N"],
+        # Height is the spherical-bubble 1 R☉ + 2r that is fitted; the radius it
+        # comes from sits beside it, and the geometric lead rides in the tooltip.
+        "circle_fit": ["Time (UT)", "t (s)", "Height (R☉)", "Radius (R☉)", "PA (°)", "N"],
         # Six visible columns is this panel's practical limit, so tilt, kappa,
         # the viewpoint count and every error bar ride in the row tooltip —
         # the same split refresh_circles already uses for rms and centre.
@@ -377,8 +380,8 @@ class TrackingPanel(QWidget):
             self.fit_btn.setText("Fit Height–Time (3-D)")
             self.clear_btn.setText("Clear Shock Fits" if shock else "Clear GCS Fits")
         else:
-            self.plot.setLabel("left", "Radius (R☉)" if circle else "Height (R☉)")
-            self.fit_btn.setText("Fit Radius–Time" if circle else "Fit Height–Time")
+            self.plot.setLabel("left", "Height (R☉)")
+            self.fit_btn.setText("Fit Height–Time")
             self.clear_btn.setText("Clear Circles" if circle else "Clear Picks")
         self._entries = []
         self.export_btn.setEnabled(False)
@@ -407,22 +410,24 @@ class TrackingPanel(QWidget):
 
         t0 = entries[0][0]
         seconds = [(entry[0] - t0).total_seconds() for entry in entries]
-        radii = [float(entry[1]) for entry in entries]
+        heights = [float(entry.height_rsun) for entry in entries]
         for row, (entry, t_s) in enumerate(zip(entries, seconds)):
             cells = (
-                f"{entry[0]:%H:%M:%S}",
+                f"{entry.when:%H:%M:%S}",
                 f"{t_s:.0f}",
-                f"{float(entry[1]):.3f}",
-                f"{float(entry[5]):.3f}",
-                f"{float(entry[8]):.1f}",
-                f"{int(entry[7])}",
+                f"{float(entry.height_rsun):.3f}",
+                f"{float(entry.radius_rsun):.3f}",
+                f"{float(entry.center_pa_deg):.1f}",
+                f"{int(entry.n_points)}",
             )
-            # Fit quality and the centre stay in the tooltip: the panel is narrow
-            # and six visible columns is already its limit.
+            # Fit quality, the centre and the geometric lead stay in the tooltip:
+            # the panel is narrow and six visible columns is already its limit.
             tip = (
-                f"rms {float(entry[6]):.2f}″  ·  "
-                f"centre ({float(entry[2]):+.1f}″, {float(entry[3]):+.1f}″)  ·  "
-                f"R {float(entry[4]):,.1f}″"
+                f"h = 1 R☉ + 2R  ·  "
+                f"rms {float(entry.rms_arcsec):.2f}″  ·  "
+                f"centre ({float(entry.center_x_arc):+.1f}″, {float(entry.center_y_arc):+.1f}″)  ·  "
+                f"R {float(entry.radius_arcsec):,.1f}″  ·  "
+                f"lead {float(entry.leading_edge_rsun):.3f} R☉ from disk centre"
             )
             for col, text in enumerate(cells):
                 item = QTableWidgetItem(text)
@@ -432,7 +437,7 @@ class TrackingPanel(QWidget):
 
         self._render_series(
             seconds,
-            radii,
+            heights,
             noun="frames",
             single_text="1 frame — step to the next frame and fit the front again.",
         )
@@ -721,7 +726,7 @@ class TrackingPanel(QWidget):
     #: Series label, y-axis title and graph title of the exported graph, per tracking source.
     _GRAPH_LABELS = {
         "height_time": ("Leading edge (plane of sky)", "Height (R☉)", "CME leading-edge height–time"),
-        "circle_fit": ("Circle-fit radius", "Radius (R☉)", "CME circle-fit radius–time"),
+        "circle_fit": ("Circle-fit height (1 R☉ + 2r)", "Height (R☉)", "CME circle-fit height–time"),
         "gcs": ("GCS apex (3-D)", "Apex height (R☉)", "GCS flux-rope apex height–time"),
         "shock": ("Shock apex (3-D)", "Shock apex height (R☉)", "Shock apex height–time"),
     }
@@ -774,7 +779,7 @@ class TrackingPanel(QWidget):
         names = {
             "gcs": "cme_gcs_height_time.png",
             "shock": "cme_shock_height_time.png",
-            "circle_fit": "cme_circle_radius_time.png",
+            "circle_fit": "cme_circle_height_time.png",
         }
         path, _ext = pick_export_path(
             self,
@@ -821,6 +826,7 @@ class TrackingPanel(QWidget):
             return [
                 "time_utc",
                 "t_seconds",
+                "height_rsun",
                 "radius_rsun",
                 "radius_arcsec",
                 "center_x_arcsec",
@@ -888,14 +894,15 @@ class TrackingPanel(QWidget):
             return [
                 when.isoformat(),
                 seconds,
-                f"{float(entry[1]):.4f}",
-                f"{float(entry[4]):.2f}",
-                f"{float(entry[2]):.2f}",
-                f"{float(entry[3]):.2f}",
-                f"{float(entry[5]):.4f}",
-                f"{float(entry[8]):.2f}",
-                f"{float(entry[6]):.3f}",
-                int(entry[7]),
+                f"{float(entry.height_rsun):.4f}",
+                f"{float(entry.radius_rsun):.4f}",
+                f"{float(entry.radius_arcsec):.2f}",
+                f"{float(entry.center_x_arc):.2f}",
+                f"{float(entry.center_y_arc):.2f}",
+                f"{float(entry.leading_edge_rsun):.4f}",
+                f"{float(entry.center_pa_deg):.2f}",
+                f"{float(entry.rms_arcsec):.3f}",
+                int(entry.n_points),
             ]
         if self._source == "gcs":
             return [
@@ -951,13 +958,15 @@ class CircleFitEntry(NamedTuple):
 
     Fields 0 and 1 deliberately mirror the height-time pick tuple (time first,
     then the quantity that is plotted and fitted) so the tracking panel's shared
-    sort/plot code works on either store. It is a ``NamedTuple`` rather than a
+    sort/plot code works on either store. Field 1 is therefore the spherical-
+    bubble height ``1 R☉ + 2r``, not the fitted radius, which is kept last so
+    the other fields keep their positions. It is a ``NamedTuple`` rather than a
     dataclass so ``solar_session`` can serialise it positionally, exactly like a
     pick, without importing anything from the UI layer.
     """
 
     when: datetime | None
-    radius_rsun: float  # the height that drives the kinematic fit
+    height_rsun: float  # 1 R☉ + circle diameter — drives the kinematic fit
     center_x_arc: float
     center_y_arc: float
     radius_arcsec: float
@@ -965,6 +974,7 @@ class CircleFitEntry(NamedTuple):
     rms_arcsec: float
     n_points: int
     center_pa_deg: float
+    radius_rsun: float  # the fitted circle's radius — reported, never fitted
 
 
 class GCSParameterSlider(QWidget):
@@ -1525,6 +1535,7 @@ class MeasurementController(QObject):
             return
         frame = self._current_frame()
         rsun_arcsec = self.window._solar_radius_arcsec(frame) if frame is not None else 960.0
+        radius_rsun = fit.radius / rsun_arcsec
         # A short arc constrains the radius very weakly; say so rather than let
         # the number look as confident as a well-sampled front.
         warn = (
@@ -1533,7 +1544,8 @@ class MeasurementController(QObject):
             else ""
         )
         self._status(
-            f"Circle fit: {n_points} points  ·  R = {fit.radius / rsun_arcsec:.3f} R☉  ·  "
+            f"Circle fit: {n_points} points  ·  R = {radius_rsun:.3f} R☉  ·  "
+            f"h = 1 + 2R = {spherical_bubble_height_rsun(radius_rsun):.3f} R☉  ·  "
             f"rms {fit.rms_residual:.1f}″{warn}  —  Commit Circle records this frame."
         )
 
@@ -1551,7 +1563,7 @@ class MeasurementController(QObject):
         frame = self._current_frame()
         when = frame_observation_time(frame) if frame is not None else None
         if when is None:
-            self._status("This frame has no observation time — cannot use it for radius–time.")
+            self._status("This frame has no observation time — cannot use it for height–time.")
             return
 
         rsun_arcsec = win._solar_radius_arcsec(frame)
@@ -1560,9 +1572,10 @@ class MeasurementController(QObject):
         # a large CRVAL offset would need solar_center_from_meta mapped to arcsec.
         offset_arcsec = float(np.hypot(fit.center_x, fit.center_y))
         pa_deg = ruler_measurement((0.0, 0.0), (fit.center_x, fit.center_y)).position_angle_deg
+        radius_rsun = fit.radius / rsun_arcsec
         self.circles[idx] = CircleFitEntry(
             when=when,
-            radius_rsun=fit.radius / rsun_arcsec,
+            height_rsun=spherical_bubble_height_rsun(radius_rsun),
             center_x_arc=fit.center_x,
             center_y_arc=fit.center_y,
             radius_arcsec=fit.radius,
@@ -1570,6 +1583,7 @@ class MeasurementController(QObject):
             rms_arcsec=fit.rms_residual,
             n_points=fit.n_points,
             center_pa_deg=pa_deg,
+            radius_rsun=radius_rsun,
         )
         if self._lock_center_requested() and self._locked_center is None:
             self._locked_center = (fit.center_x, fit.center_y)
@@ -1578,8 +1592,8 @@ class MeasurementController(QObject):
         self._refresh_tracking_panel()
         entry = self.circles[idx]
         self._status(
-            f"Circle fit: frame {idx + 1} at {when:%H:%M:%S} → R = {entry.radius_rsun:.3f} R☉ "
-            f"({len(self.circles)} frame(s))."
+            f"Circle fit: frame {idx + 1} at {when:%H:%M:%S} → h = {entry.height_rsun:.3f} R☉ "
+            f"(R = {entry.radius_rsun:.3f} R☉, {len(self.circles)} frame(s))."
         )
 
         # Continuous tracking: commit, and the timeline moves itself on.
@@ -1618,13 +1632,13 @@ class MeasurementController(QObject):
         self._refresh_overlay()
 
     def finish_circle_fit(self) -> None:
-        """Fit radius(t) over the committed circles; renders in the tracking panel."""
+        """Fit height(t) = 1 R☉ + 2r(t) over the committed circles, in the tracking panel."""
         entries = sorted(
             (entry for entry in self.circles.values() if entry[0] is not None),
             key=lambda item: item[0],
         )
         if len(entries) < 2:
-            self._status("Radius–time needs committed circles on at least two frames.")
+            self._status("Height–time needs committed circles on at least two frames.")
             return
         times = [entry[0] for entry in entries]
         if not self._has_time_baseline(times):
@@ -1636,7 +1650,7 @@ class MeasurementController(QObject):
             return
         text = (
             f"CME circle fit ({len(entries)} frames, {self._fit_order_name(fit)} fit): "
-            f"plane-of-sky radial expansion speed {self._fit_text(fit, noun='frames')}"
+            f"leading-edge speed, h = 1 R☉ + 2r, {self._fit_text(fit, noun='frames')}"
         )
         self._status(text)
         self._append_analysis(text)

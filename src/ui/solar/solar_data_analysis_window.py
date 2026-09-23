@@ -2184,8 +2184,9 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self.circle_tool_btn.setToolTip(
             "CME circle fitting: click three or more points along the circular front\n"
             "(an on-disk dome, or a coronagraph loop) and the least-squares circle is\n"
-            "drawn live. Commit Circle records its radius as the CME height, so the\n"
-            "sequence builds a radius–time plot with speed and acceleration."
+            "drawn live. The CME is taken as a sphere resting on the surface, so\n"
+            "Commit Circle records its height as 1 R☉ + the circle's diameter and the\n"
+            "sequence builds a height–time plot with speed and acceleration."
         )
         self.clear_measure_btn = QPushButton("Clear")
         self.clear_measure_btn.setToolTip("Clear and reset all measurements: picks, table and overlays.")

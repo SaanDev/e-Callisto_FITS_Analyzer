@@ -216,18 +216,19 @@ def test_summary_helpers(tmp_path):
 # Circle fits
 # --------------------------------------------------------------------------- #
 def _sample_circles():
-    # (when, radius_rsun, cx, cy, radius_arcsec, lead_rsun, rms, n_points, pa)
+    # (when, height_rsun, cx, cy, radius_arcsec, lead_rsun, rms, n_points, pa, radius_rsun)
     return {
-        1: (datetime(2012, 7, 12, 16, 30, 0), 1.5, 40.0, 10.0, 1440.0, 1.54, 3.2, 6, 284.0),
-        0: (datetime(2012, 7, 12, 16, 24, 0), 1.0, 30.0, 5.0, 960.0, 1.03, 2.1, 4, 279.0),
+        1: (datetime(2012, 7, 12, 16, 30, 0), 4.0, 40.0, 10.0, 1440.0, 1.54, 3.2, 6, 284.0, 1.5),
+        0: (datetime(2012, 7, 12, 16, 24, 0), 3.0, 30.0, 5.0, 960.0, 1.03, 2.1, 4, 279.0, 1.0),
     }
 
 
 def test_serialize_circle_fits_round_trip():
     restored = deserialize_circle_fits(serialize_circle_fits(_sample_circles()))
     assert sorted(restored) == [0, 1]
-    when, radius_rsun, cx, cy, radius_arcsec, lead, rms, n_points, pa = restored[1]
+    when, height_rsun, cx, cy, radius_arcsec, lead, rms, n_points, pa, radius_rsun = restored[1]
     assert when == datetime(2012, 7, 12, 16, 30, 0)
+    assert height_rsun == pytest.approx(4.0)
     assert radius_rsun == pytest.approx(1.5)
     assert (cx, cy) == pytest.approx((40.0, 10.0))
     assert radius_arcsec == pytest.approx(1440.0)
@@ -242,12 +243,33 @@ def test_serialize_circle_fits_orders_by_frame_index():
     assert [row["frame_index"] for row in rows] == [0, 1]
 
 
-def test_deserialize_circle_fits_drops_rows_without_a_radius():
+def test_deserialize_circle_fits_drops_rows_without_a_height_or_radius():
     rows = serialize_circle_fits(_sample_circles())
     rows.append({"frame_index": 5, "time": None, "center_x_arc": 1.0, "center_y_arc": 2.0})
-    rows[0]["radius_rsun"] = None  # a bogus 0.0 here would corrupt the fit
+    rows[0]["height_rsun"] = None  # a bogus 0.0 here would corrupt the fit
+    rows[0]["radius_rsun"] = None
     restored = deserialize_circle_fits(rows)
     assert sorted(restored) == [1]
+
+
+def test_deserialize_circle_fits_derives_the_height_for_legacy_sessions():
+    """Sessions saved before the fix stored only the radius, which they fitted
+    as the height; reopening must recover the bubble height 1 R☉ + 2r."""
+    rows = serialize_circle_fits(_sample_circles())
+    for row in rows:
+        row.pop("height_rsun")
+    restored = deserialize_circle_fits(rows)
+    assert restored[0][1] == pytest.approx(3.0)  # 1 + 2 * 1.0
+    assert restored[1][1] == pytest.approx(4.0)  # 1 + 2 * 1.5
+    assert restored[1][9] == pytest.approx(1.5)
+
+
+def test_deserialize_circle_fits_derives_the_radius_from_the_height():
+    rows = serialize_circle_fits(_sample_circles())
+    for row in rows:
+        row.pop("radius_rsun")
+    restored = deserialize_circle_fits(rows)
+    assert restored[1][9] == pytest.approx(1.5)  # (4 - 1) / 2
 
 
 def test_deserialize_circle_fits_defaults_missing_extras():
@@ -256,7 +278,7 @@ def test_deserialize_circle_fits_defaults_missing_extras():
         row.pop("leading_edge_rsun")
         row.pop("rms_arcsec")
     restored = deserialize_circle_fits(rows)
-    assert restored[0][5] == pytest.approx(restored[0][1])  # lead falls back to the radius
+    assert restored[0][5] == pytest.approx(restored[0][9])  # lead falls back to the radius
     assert restored[0][6] == pytest.approx(0.0)
 
 

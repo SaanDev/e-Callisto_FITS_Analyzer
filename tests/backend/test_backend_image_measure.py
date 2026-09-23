@@ -17,6 +17,7 @@ from src.backend.solar.image_measure import (
     line_profile,
     region_stats,
     ruler_measurement,
+    spherical_bubble_height_rsun,
 )
 
 
@@ -188,3 +189,21 @@ def test_circle_fit_is_frozen_dataclass():
     assert isinstance(fit, CircleFit)
     with pytest.raises(Exception):
         fit.radius = 2.0  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    "radius_rsun, expected_height",
+    [
+        (0.0, 1.0),  # a bubble of no size sits on the photosphere
+        (0.5, 2.0),  # 1 R☉ + a 1 R☉ diameter
+        (1.25, 3.5),
+    ],
+)
+def test_spherical_bubble_height_is_rsun_plus_diameter(radius_rsun, expected_height):
+    assert spherical_bubble_height_rsun(radius_rsun) == pytest.approx(expected_height)
+
+
+def test_spherical_bubble_front_moves_twice_as_fast_as_the_radius_grows():
+    # r grows 0.1 R☉ per step, so the front (1 R☉ + 2r) climbs 0.2 R☉ per step.
+    heights = [spherical_bubble_height_rsun(r) for r in (0.3, 0.4, 0.5)]
+    assert np.diff(heights) == pytest.approx([0.2, 0.2])

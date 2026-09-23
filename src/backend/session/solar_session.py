@@ -147,7 +147,7 @@ def serialize_circle_fits(circles: Mapping[int, Sequence[Any]] | None) -> list[d
         return out
     for idx in sorted(circles.keys(), key=lambda k: _safe_int(k, 0)):
         entry = circles[idx]
-        if not isinstance(entry, Sequence) or len(entry) < 9:
+        if not isinstance(entry, Sequence) or len(entry) < 10:
             continue
         when = entry[0]
         when_iso: str | None
@@ -159,7 +159,8 @@ def serialize_circle_fits(circles: Mapping[int, Sequence[Any]] | None) -> list[d
             {
                 "frame_index": _safe_int(idx, 0),
                 "time": when_iso,
-                "radius_rsun": _safe_float(entry[1]),
+                "height_rsun": _safe_float(entry[1]),
+                "radius_rsun": _safe_float(entry[9]),
                 "center_x_arc": _safe_float(entry[2]),
                 "center_y_arc": _safe_float(entry[3]),
                 "radius_arcsec": _safe_float(entry[4]),
@@ -175,9 +176,16 @@ def serialize_circle_fits(circles: Mapping[int, Sequence[Any]] | None) -> list[d
 def deserialize_circle_fits(raw: Any) -> dict[int, tuple]:
     """Rebuild the circle-fit map from :func:`serialize_circle_fits` output.
 
-    Rows without a radius or a centre are dropped: a bogus 0.0 there would
-    silently corrupt the radius-time fit. The reported extras (leading edge, rms,
-    position angle) are re-derived or defaulted when missing instead.
+    Rows without a centre, or with neither a height nor a radius, are dropped: a
+    bogus 0.0 there would silently corrupt the height-time fit. The reported
+    extras (leading edge, rms, position angle) are re-derived or defaulted when
+    missing instead.
+
+    Sessions saved before the height was stored carry only ``radius_rsun``,
+    which those builds fitted as if it were the height. The spherical-bubble
+    height ``1 + 2r`` (``image_measure.spherical_bubble_height_rsun``, restated
+    here because this module stays stdlib-only) is re-derived from it, so an old
+    analysis reopens with the corrected kinematics.
     """
     out: dict[int, tuple] = {}
     if not isinstance(raw, Iterable):
@@ -185,11 +193,16 @@ def deserialize_circle_fits(raw: Any) -> dict[int, tuple]:
     for row in raw:
         if not isinstance(row, Mapping):
             continue
+        height_rsun = _safe_float(row.get("height_rsun"))
         radius_rsun = _safe_float(row.get("radius_rsun"))
+        if height_rsun is None and radius_rsun is not None:
+            height_rsun = 1.0 + 2.0 * radius_rsun
+        elif radius_rsun is None and height_rsun is not None:
+            radius_rsun = (height_rsun - 1.0) / 2.0
         center_x = _safe_float(row.get("center_x_arc"))
         center_y = _safe_float(row.get("center_y_arc"))
         radius_arcsec = _safe_float(row.get("radius_arcsec"))
-        if None in (radius_rsun, center_x, center_y, radius_arcsec):
+        if None in (height_rsun, radius_rsun, center_x, center_y, radius_arcsec):
             continue
         lead = _safe_float(row.get("leading_edge_rsun"))
         if lead is None:
@@ -199,7 +212,7 @@ def deserialize_circle_fits(raw: Any) -> dict[int, tuple]:
         idx = _safe_int(row.get("frame_index"), 0)
         out[idx] = (
             _parse_iso(row.get("time")),
-            float(radius_rsun),
+            float(height_rsun),
             float(center_x),
             float(center_y),
             float(radius_arcsec),
@@ -207,6 +220,7 @@ def deserialize_circle_fits(raw: Any) -> dict[int, tuple]:
             float(rms) if rms is not None else 0.0,
             _safe_int(row.get("n_points"), 0),
             float(pa) if pa is not None else 0.0,
+            float(radius_rsun),
         )
     return out
 

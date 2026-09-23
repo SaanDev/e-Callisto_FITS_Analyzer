@@ -249,6 +249,8 @@ def test_collect_session_meta_captures_circle_fits(tmp_path):
     assert [row["frame_index"] for row in circles] == [0, 1]
     assert circles[0]["radius_rsun"] == pytest.approx(0.5, abs=1e-6)
     assert circles[1]["radius_rsun"] == pytest.approx(1.0, abs=1e-6)
+    assert circles[0]["height_rsun"] == pytest.approx(2.0, abs=1e-6)  # 1 + 2 * 0.5
+    assert circles[1]["height_rsun"] == pytest.approx(3.0, abs=1e-6)
     assert circles[0]["n_points"] == 3
     # The clicked arcs ride along so a reopened session can be edited, not redone.
     assert [row["frame_index"] for row in meta["measurements"]["circle_points"]] == [0, 1]
@@ -272,11 +274,37 @@ def test_restore_hook_replays_circle_fits(tmp_path):
 
     assert len(win2._measure.circles) == 2
     assert win2._measure.circles[1].radius_rsun == pytest.approx(1.0, abs=1e-6)
+    assert win2._measure.circles[1].height_rsun == pytest.approx(3.0, abs=1e-6)
     assert win2._measure._circle_points[0]  # the clicked arc came back too
     # The circle tool owns the panel again and the kinematics were recomputed.
     assert win2.circle_tool_btn.isChecked() is True
     assert win2.tracking_panel.table.columnCount() == 6
     assert "km/s" in win2.tracking_panel.speed_label.text()
+    win2.close()
+
+
+def test_restore_of_a_legacy_circle_session_fits_the_bubble_height(tmp_path):
+    """Sessions saved before the height was stored carry only the radius; the
+    reopened analysis must fit 1 R☉ + 2r, not the radius those builds fitted."""
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _three_frames(), _write_frame_files(tmp_path, 3))
+    _add_two_circles(win)
+    meta = win._collect_session_meta()
+    for row in meta["measurements"]["circle_fits"]:
+        row.pop("height_rsun")
+    win.close()
+
+    reload_dir = tmp_path / "legacy"
+    reload_dir.mkdir()
+    win2 = SolarDataAnalysisWindow()
+    win2._pending_session_restore = meta
+    _load(win2, _three_frames(), _write_frame_files(reload_dir, 3))
+
+    assert win2._measure.circles[0].height_rsun == pytest.approx(2.0, abs=1e-6)
+    assert win2._measure.circles[1].height_rsun == pytest.approx(3.0, abs=1e-6)
+    _, plotted = win2.tracking_panel._scatter.getData()
+    assert list(plotted) == pytest.approx([2.0, 3.0], abs=1e-6)
     win2.close()
 
 
