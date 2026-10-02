@@ -19,6 +19,21 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 @pytest.fixture(autouse=True)
+def _offline_archive_stations(monkeypatch):
+    """Keep the downloaders' automatic station lookups off the network.
+
+    Every downloader date picker reads the archive's day listing to learn which
+    stations have data. Tests start with an empty cache and a lookup that finds
+    no stations; tests that need stations patch ``fetch_stations_for_day``.
+    """
+    module = sys.modules.get("src.ui.downloads.archive_stations")
+    if module is not None:
+        monkeypatch.setattr(module, "fetch_stations_for_day", lambda _day: [])
+        module.clear_station_cache()
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _isolate_qsettings(tmp_path, monkeypatch):
     """Redirect QSettings to a per-test temp location.
 

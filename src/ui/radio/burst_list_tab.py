@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from PySide6.QtCore import QDate, QObject, QThread, QThreadPool, Qt, Signal, Slot
 from PySide6.QtWidgets import (
@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 from src.backend.radio.burst_list import (
     BurstEvent, BurstListCancelled, fetch_burst_events, filter_burst_events,
 )
+from src.ui.downloads.archive_stations import ArchiveStationLoader
 from src.ui.radio.burst_fits import BurstFitsWorker
 from src.ui.radio.burst_preview import BurstPreviewWorker
 
@@ -72,10 +73,14 @@ class BurstListTab(QWidget):
     cache_changed = Signal()
     busy_changed = Signal(bool)
 
-    def __init__(self, stations, parent=None):
+    def __init__(self, stations=(), parent=None):
         super().__init__(parent)
         self.setObjectName("DownloaderTabPage")
+        # Offered for every burst, besides its reported stations and the
+        # stations the archive holds for the burst's UTC days.
         self._known_stations = tuple(stations)
+        self._station_loader = ArchiveStationLoader(self)
+        self._station_loader.loaded.connect(self._add_archive_stations)
         self._events: list[BurstEvent] = []
         self._warnings: list[str] = []
         self._thread = None
@@ -516,6 +521,26 @@ class BurstListTab(QWidget):
                 self.fits_station_combo.addItem(station, station)
         self.fits_station_combo.blockSignals(False)
         self._clear_fits()
+        if event is None:
+            self._station_loader.cancel()
+        else:
+            first, last = event.start_utc.date(), event.end_utc.date()
+            self._station_loader.request(
+                first + timedelta(days=offset) for offset in range(max(0, (last - first).days) + 1)
+            )
+
+    @Slot(object)
+    def _add_archive_stations(self, stations):
+        """Offer the stations with data on the selected burst's days after its reported ones."""
+        if self.selected_event() is None:
+            return
+        combo = self.fits_station_combo
+        present = {combo.itemText(index).casefold() for index in range(combo.count())}
+        combo.blockSignals(True)
+        for station in stations:
+            if station.casefold() not in present:
+                combo.addItem(station, station)
+        combo.blockSignals(False)
 
     def find_fits(self):
         if self.is_busy():

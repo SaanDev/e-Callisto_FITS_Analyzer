@@ -20,7 +20,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from src.backend.radio.callisto_naming import _FITS_SUFFIXES
+from src.backend.radio.callisto_naming import _FITS_SUFFIXES, parse_callisto_archive_filename
 from src.version import APP_NAME, APP_VERSION
 
 BASE_URL = "https://soleil.i4ds.ch/solarradio/data/2002-20yy_Callisto/"
@@ -55,6 +55,36 @@ def extract_fits_links(html: str) -> list[str]:
         links.append(href)
 
     return links
+
+
+def stations_in_listing(hrefs) -> list[str]:
+    """Return the distinct stations named by archive FITS links, sorted case-insensitively.
+
+    Spellings that differ only in case are one station; the first one listed wins.
+    """
+    stations: dict[str, str] = {}
+    for href in hrefs:
+        try:
+            station, _observed_at, _focus_code = parse_callisto_archive_filename(href)
+        except ValueError:
+            continue
+        stations.setdefault(station.casefold(), station)
+    return sorted(stations.values(), key=str.casefold)
+
+
+def fetch_day_stations(observation_date, session) -> list[str]:
+    """Return the stations that published FITS files for one UTC day.
+
+    The archive has no directory for a day nobody has published yet (including
+    future days), which is an empty day rather than an error.
+    """
+    url = day_url(observation_date)
+    with session.get(url, timeout=REQUEST_TIMEOUT) as page:
+        if page.status_code == 404:
+            return []
+        if page.status_code >= 400:
+            raise RuntimeError(f"HTTP {page.status_code} for {url}")
+        return stations_in_listing(extract_fits_links(page.text))
 
 
 def build_archive_session() -> requests.Session:

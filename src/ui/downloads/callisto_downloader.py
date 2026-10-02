@@ -41,6 +41,11 @@ from src.ui.common.gui_shared import (
     pick_export_path,
     screen_for_widget,
 )
+from src.ui.downloads.archive_stations import (
+    ArchiveStationLoader,
+    StationAvailabilityLabel,
+    StationComboBinding,
+)
 from src.ui.radio.burst_list_tab import BurstListTab
 
 from PySide6.QtCore import (
@@ -63,26 +68,8 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
 _OVERVIEW_EXPORT_FILTERS = "PNG (*.png);;PDF (*.pdf);;EPS (*.eps);;SVG (*.svg);;TIFF (*.tiff)"
 
-CALLISTO_STATIONS = (
-    "ALASKA-ANCHORAGE", "ALASKA-COHOE", "ALASKA-HAARP", "ALGERIA-CRAAG",
-    "ALMATY", "Arecibo-observatory", "AUSTRIA-Krumbach", "AUSTRIA-MICHELBACH",
-    "AUSTRIA-OE3FLB", "AUSTRIA-UNIGRAZ", "Australia-ASSA", "BRAZIL", "BIR",
-    "Croatia-Visnjan", "DENMARK", "EGYPT-Alexandria", "EGYPT-SpaceAgency",
-    "ETHIOPIA", "FINLAND-Siuntio", "FINLAND-Kempele", "GERMANY-ESSEN", "GERMANY-DLR",
-    "GLASGOW", "GREENLAND", "HUMAIN", "HURBANOVO", "INDIA-GAURI", "INDIA-Nashik",
-    "INDIA-OOTY", "INDIA-UDAIPUR", "INDONESIA", "ITALY-Strassolt", "JAPAN-IBARAKI",
-    "KASI", "KRIM", "MEXART", "MEXICO-ENSENADA-UNAM", "MEXICO-FCFM-UANL",
-    "MEXICO-FCFM-UNACH", "MEXICO-LANCE-A", "MEXICO-LANCE-B",
-    "MEXICO-UANL-INFIERNILLO", "MONGOLIA-UB", "MRO", "MRT1", "MRT3",
-    "Malaysia_Banting", "NASA-GSFC", "NORWAY-EGERSUND", "NORWAY-NY-AALESUND",
-    "NORWAY-RANDABERG", "NZ-WAIRAKEI-DLR", "PARAGUAY", "POLAND-BALDY", "POLAND-Grotniki",
-    "ROMANIA", "ROSWELL-NM", "RWANDA", "SOUTHAFRICA-SANSA", "SPAIN-ALCALA",
-    "SPAIN-PERALEJOS", "SPAIN-SIGUENZA", "SRI-Lanka", "SSRT", "SWISS-CalU",
-    "SWISS-FM", "SWISS-HB9SCT", "SWISS-HEITERSWIL", "SWISS-IRSOL",
-    "SWISS-Landschlacht", "SWISS-MUHEN", "TAIWAN-NCU", "THAILAND-Pathumthani",
-    "TRIEST", "TURKEY", "UNAM", "URUGUAY", "USA-ARIZONA-ERAU", "USA-BOSTON",
-    "UZBEKISTAN"
-)
+# Listing the stations of a long event window reads one archive day per UTC day.
+MAX_EVENT_STATION_DAYS = 7
 
 
 @dataclass(frozen=True)
@@ -994,6 +981,12 @@ class CallistoDownloaderApp(QDialog):
         self._overview_close_after_finish = False
         self._burst_pending_result = None
 
+        # Station pickers list what the archive holds for the chosen dates.
+        # Event stations the user checked stay checked on later windows.
+        self._event_checked_station_keys: set[str] = set()
+        self._event_station_days: tuple | None = None
+        self._event_station_list_updating = False
+
         self.setWindowTitle("e-CALLISTO FITS Downloader")
         self.setObjectName("CallistoDownloaderDialog")
 
@@ -1052,7 +1045,7 @@ class CallistoDownloaderApp(QDialog):
         self.tabs.addTab(self._build_single_station_tab(), "Single Station")
         self.tabs.addTab(self._build_event_tab(), "Multi-Station Event")
         self.tabs.addTab(self._build_spectral_overview_tab(), "Spectral Overview")
-        self.burst_list_tab = BurstListTab(CALLISTO_STATIONS, self)
+        self.burst_list_tab = BurstListTab(parent=self)
         self.burst_list_tab.import_request.connect(self.import_request.emit)
         self.burst_list_tab.comparison_request.connect(self._compare_burst_files)
         self.burst_list_tab.cache_changed.connect(self._update_cache_size_label)
@@ -1273,8 +1266,11 @@ class CallistoDownloaderApp(QDialog):
         self.date_edit.setCalendarWidget(self.calendar_popup)
         self._configure_calendar_popup(self.calendar_popup)
 
-        self.station_dropdown = QComboBox()
-        self.station_dropdown.addItems(CALLISTO_STATIONS)
+        self.station_dropdown = self._new_station_combo()
+        self.single_station_loader = ArchiveStationLoader(self)
+        StationComboBinding(self.station_dropdown, self.single_station_loader)
+        self.single_station_status = StationAvailabilityLabel(self.single_station_loader, page)
+        self.date_edit.dateChanged.connect(self._request_single_stations)
 
         self.show_button = QPushButton("Show Available FITS")
         self.show_button.setObjectName("PrimaryDownloaderButton")
@@ -1285,7 +1281,12 @@ class CallistoDownloaderApp(QDialog):
         param_layout.addWidget(QLabel("Station:"))
         param_layout.addWidget(self.station_dropdown)
         param_layout.addWidget(self.show_button)
-        param_group.setLayout(param_layout)
+        param_column = QVBoxLayout()
+        param_column.setSpacing(4)
+        param_column.addLayout(param_layout)
+        param_column.addWidget(self.single_station_status)
+        param_group.setLayout(param_column)
+        self._request_single_stations()
 
         # ---- File list, grouped by focus code
         file_group = QGroupBox("Available FITS Files (Whole Day, grouped by focus code)")
@@ -1362,11 +1363,11 @@ class CallistoDownloaderApp(QDialog):
         self.event_station_list.setObjectName("EventStationList")
         self.event_station_list.setMinimumHeight(260)
         self.event_station_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        for station in CALLISTO_STATIONS:
-            item = QListWidgetItem(station)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Unchecked)
-            self.event_station_list.addItem(item)
+        self.event_station_list.itemChanged.connect(self._on_event_station_item_changed)
+        self.event_station_loader = ArchiveStationLoader(self)
+        self.event_station_status = StationAvailabilityLabel(self.event_station_loader, station_group)
+        self.event_station_loader.loading.connect(self._on_event_stations_loading)
+        self.event_station_loader.loaded.connect(self._on_event_stations_loaded)
         station_button_row = QHBoxLayout()
         station_button_row.setSpacing(8)
         self.event_select_all_stations_btn = QPushButton("Select All")
@@ -1376,6 +1377,7 @@ class CallistoDownloaderApp(QDialog):
         station_button_row.addWidget(self.event_select_all_stations_btn)
         station_button_row.addWidget(self.event_clear_stations_btn)
         station_layout.addWidget(self.event_station_filter)
+        station_layout.addWidget(self.event_station_status)
         station_layout.addWidget(self.event_station_list)
         station_layout.addLayout(station_button_row)
 
@@ -1391,6 +1393,7 @@ class CallistoDownloaderApp(QDialog):
             edit.setCalendarPopup(True)
             edit.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
             edit.setMinimumWidth(190)
+            edit.dateTimeChanged.connect(self._request_event_stations)
         self.event_search_btn = QPushButton("Search Matching FITS")
         self.event_search_btn.setObjectName("PrimaryDownloaderButton")
         self.event_search_btn.clicked.connect(self.search_event_fits)
@@ -1466,6 +1469,7 @@ class CallistoDownloaderApp(QDialog):
         content_row.addWidget(right_panel, 1)
         layout.addLayout(content_row, 1)
         self._sync_event_actions()
+        self._request_event_stations()
         return page
 
     def _build_spectral_overview_tab(self) -> QWidget:
@@ -1489,9 +1493,12 @@ class CallistoDownloaderApp(QDialog):
         self.overview_date_edit.setCalendarWidget(self.overview_calendar_popup)
         self._configure_calendar_popup(self.overview_calendar_popup)
 
-        self.overview_station_dropdown = QComboBox(self)
-        self.overview_station_dropdown.addItems(CALLISTO_STATIONS)
+        self.overview_station_dropdown = self._new_station_combo()
         self.overview_station_dropdown.setMinimumWidth(180)
+        self.overview_station_loader = ArchiveStationLoader(self)
+        StationComboBinding(self.overview_station_dropdown, self.overview_station_loader)
+        self.overview_station_status = StationAvailabilityLabel(self.overview_station_loader, controls_group)
+        self.overview_date_edit.dateChanged.connect(self._request_overview_stations)
 
         self.overview_focus_combo = QComboBox(self)
         self.overview_focus_combo.addItem("All available focus codes", "")
@@ -1513,11 +1520,12 @@ class CallistoDownloaderApp(QDialog):
         controls_layout.addWidget(self.overview_date_edit, 0, 1)
         controls_layout.addWidget(QLabel("Station:", self), 0, 2)
         controls_layout.addWidget(self.overview_station_dropdown, 0, 3, 1, 3)
-        controls_layout.addWidget(QLabel("Focus code:", self), 1, 0)
-        controls_layout.addWidget(self.overview_focus_combo, 1, 1)
-        controls_layout.addWidget(self.overview_generate_btn, 1, 2, 1, 2)
-        controls_layout.addWidget(self.overview_cancel_btn, 1, 4)
-        controls_layout.addWidget(self.overview_export_btn, 1, 5)
+        controls_layout.addWidget(self.overview_station_status, 1, 0, 1, 6)
+        controls_layout.addWidget(QLabel("Focus code:", self), 2, 0)
+        controls_layout.addWidget(self.overview_focus_combo, 2, 1)
+        controls_layout.addWidget(self.overview_generate_btn, 2, 2, 1, 2)
+        controls_layout.addWidget(self.overview_cancel_btn, 2, 4)
+        controls_layout.addWidget(self.overview_export_btn, 2, 5)
         controls_layout.setColumnStretch(3, 1)
 
         self.overview_progress_bar = QProgressBar(self)
@@ -1529,8 +1537,8 @@ class CallistoDownloaderApp(QDialog):
         )
         self.overview_status_label.setObjectName("DownloaderStatusLabel")
         self.overview_status_label.setWordWrap(True)
-        controls_layout.addWidget(self.overview_progress_bar, 2, 0, 1, 6)
-        controls_layout.addWidget(self.overview_status_label, 3, 0, 1, 6)
+        controls_layout.addWidget(self.overview_progress_bar, 3, 0, 1, 6)
+        controls_layout.addWidget(self.overview_status_label, 4, 0, 1, 6)
 
         plot_group = QGroupBox("Overview Preview")
         plot_group.setObjectName("DownloaderSection")
@@ -1556,6 +1564,7 @@ class CallistoDownloaderApp(QDialog):
 
         layout.addWidget(controls_group, 0)
         layout.addWidget(plot_group, 1)
+        self._request_overview_stations()
         return page
 
     def _configure_calendar_popup(self, calendar: QCalendarWidget):
@@ -1598,6 +1607,85 @@ class CallistoDownloaderApp(QDialog):
             line_edit.setStyleSheet("border: none; background: transparent; padding: 0px 2px 0px 0px;")
 
     # -----------------------------
+    # Archive station pickers
+    # -----------------------------
+    def _new_station_combo(self) -> QComboBox:
+        combo = QComboBox(self)
+        # Keep the width of a long station name while the list is still loading.
+        combo.setMinimumContentsLength(22)
+        combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        return combo
+
+    def _warn_no_station(self, status: StationAvailabilityLabel) -> None:
+        QMessageBox.information(
+            self, "No Station", f"No station is selected. {status.summary()}".strip()
+        )
+
+    def _request_single_stations(self, *_args) -> None:
+        self.single_station_loader.request([self.date_edit.date().toPython()])
+
+    def _request_overview_stations(self, *_args) -> None:
+        self.overview_station_loader.request([self.overview_date_edit.date().toPython()])
+
+    def _request_event_stations(self, *_args) -> None:
+        try:
+            days = utc_archive_dates_for_window(
+                self._event_datetime_from_edit(self.event_start_dt_edit),
+                self._event_datetime_from_edit(self.event_stop_dt_edit),
+            )
+        except ValueError:
+            self._clear_event_station_days("Stop time is before start time.")
+            return
+        if len(days) > MAX_EVENT_STATION_DAYS:
+            self._clear_event_station_days(
+                f"The window spans {len(days)} UTC days. Narrow it to "
+                f"{MAX_EVENT_STATION_DAYS} days or fewer to list its stations."
+            )
+            return
+        days = tuple(days)
+        if days != self._event_station_days:
+            self._event_station_days = days
+            self.event_station_loader.request(days)
+
+    def _clear_event_station_days(self, message: str) -> None:
+        self._event_station_days = None
+        self.event_station_loader.cancel()
+        self._fill_event_station_list([])
+        self.event_station_status.show_message(message)
+
+    @Slot()
+    def _on_event_stations_loading(self):
+        self._fill_event_station_list([])
+
+    @Slot(object)
+    def _on_event_stations_loaded(self, stations):
+        self._fill_event_station_list(stations)
+
+    def _fill_event_station_list(self, stations) -> None:
+        self._event_station_list_updating = True
+        try:
+            self.event_station_list.clear()
+            for station in stations:
+                item = QListWidgetItem(station)
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                checked = _station_key(station) in self._event_checked_station_keys
+                item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+                self.event_station_list.addItem(item)
+        finally:
+            self._event_station_list_updating = False
+        self._filter_event_stations(self.event_station_filter.text())
+
+    @Slot(QListWidgetItem)
+    def _on_event_station_item_changed(self, item: QListWidgetItem):
+        if self._event_station_list_updating:
+            return
+        key = _station_key(item.text())
+        if item.checkState() == Qt.Checked:
+            self._event_checked_station_keys.add(key)
+        else:
+            self._event_checked_station_keys.discard(key)
+
+    # -----------------------------
     # Full-day spectral overview
     # -----------------------------
     def _reset_overview_focus_selector(self, *_args) -> None:
@@ -1624,7 +1712,10 @@ class CallistoDownloaderApp(QDialog):
             return
 
         date_py = self.overview_date_edit.date().toPython()
-        station = self.overview_station_dropdown.currentText()
+        station = self.overview_station_dropdown.currentText().strip()
+        if not station:
+            self._warn_no_station(self.overview_station_status)
+            return
         focus_code = str(self.overview_focus_combo.currentData() or "")
         self._set_overview_running(True)
         self.overview_progress_bar.setRange(0, 0)
@@ -1846,6 +1937,7 @@ class CallistoDownloaderApp(QDialog):
     def clear_event_stations(self):
         for row in range(self.event_station_list.count()):
             self.event_station_list.item(row).setCheckState(Qt.Unchecked)
+        self._event_checked_station_keys.clear()
 
     def _checked_event_stations(self) -> list[str]:
         return [
@@ -2101,11 +2193,15 @@ class CallistoDownloaderApp(QDialog):
         )
 
     def show_available_fits(self):
+        station = self.station_dropdown.currentText().strip()
+        if not station:
+            self._warn_no_station(self.single_station_status)
+            return
+
         self.file_tree.clear()
         self.file_url_map.clear()
 
         date_py = self.date_edit.date().toPython()
-        station = self.station_dropdown.currentText()
 
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)

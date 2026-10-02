@@ -551,11 +551,13 @@ calibrated intensity measurements.</p>
 <a name="fits-downloader"></a>
 <h2>16. FITS Downloader</h2>
 <p>Open from <code>Download &#8594; Launch FITS Downloader</code> or
-<code>Solar Events &#8594; Radio Bursts</code>. It has three tabs:</p>
+<code>Solar Events &#8594; Radio Bursts</code>. Station lists are read from the archive whenever a date changes, so
+they offer only the stations with data on the chosen UTC days. It has three tabs:</p>
 <ul>
-<li><b>Single Station</b>: pick station, date, and hour, show available files, then preview, download, compare,
-or import them into the analyzer.</li>
-<li><b>Multi-Station Event</b>: select stations and a UTC event window, search matching files, then download,
+<li><b>Single Station</b>: pick a date and one of its stations, show available files, then preview, download,
+compare, or import them into the analyzer.</li>
+<li><b>Multi-Station Event</b>: set a UTC event window, select from the stations with data in it, search matching
+files, then download,
 import compatible selections with automatic time/frequency combination, or open the comparison workspace with
 the explicit <b>Compare</b> button.</li>
 <li><b>Spectral Overview</b>: generate a station's full UTC-day spectrum as six four-hour panels with a day-wide
