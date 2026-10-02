@@ -463,7 +463,7 @@ class GCSFittingWindow(GCSWindowActions, GCSWindowExports, QMainWindow):
         initial: GCSParameters | None = None,
     ):
         super().__init__(parent)
-        self.setWindowTitle("GCS CME Fitting — Three Viewpoints")
+        self.setWindowTitle("GCS CME Fitting v1.0-beta")
         self.theme = theme
         self._tracks: dict[str, ModelTrack] = {key: ModelTrack(key) for key in (GCS_MODEL, SHOCK_MODEL)}
         #: The model the handles, front points, Refine, Commit and kinematics act on.
