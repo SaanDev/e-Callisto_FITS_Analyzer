@@ -38,6 +38,90 @@ def test_is_newer_version():
     assert not update_checker.is_newer_version("2.3", "2.2.1")
 
 
+def test_is_newer_version_treats_prerelease_as_older_than_final():
+    # beta -> final of the same version is an update.
+    assert update_checker.is_newer_version("3.1.0-beta", "3.1.0")
+    assert update_checker.is_newer_version("v3.1.0-beta", "v3.1.0")
+    assert update_checker.is_newer_version("3.1-beta", "3.1.0")
+    # final -> beta, and beta -> same beta, are not.
+    assert not update_checker.is_newer_version("3.1.0", "3.1.0-beta")
+    assert not update_checker.is_newer_version("3.1.0-beta", "3.1.0-beta")
+    # A higher numeric version still wins regardless of suffix.
+    assert update_checker.is_newer_version("3.1.0-beta", "3.1.1")
+    assert not update_checker.is_newer_version("3.1.1", "3.1.0-beta")
+    # 3.1.0-beta is ahead of 3.0.0. check_for_updates never offers it: prerelease-flagged releases are skipped.
+    assert update_checker.is_newer_version("3.0.0", "3.1.0-beta")
+    assert not update_checker.is_newer_version("3.1.0-beta", "3.0.0")
+
+
+def test_is_newer_version_recognises_prerelease_suffix_forms():
+    for current in (
+        "3.1.0-beta",
+        "3.1.0-beta2",
+        "3.1.0-rc1",
+        "3.1.0-alpha",
+        "3.1.0b1",
+        "3.1.0rc1",
+        "3.1.0-BETA",
+        "3.1.0-Beta.2",
+        "3.1.0 Beta",
+        "v3.1.0-beta(Windows)",
+    ):
+        assert update_checker.is_newer_version(current, "3.1.0"), current
+        assert update_checker.is_newer_version(current, "v3.1.0(Windows)"), current
+
+
+def test_is_newer_version_ignores_non_prerelease_tag_noise():
+    for current in ("v3.1.0(Windows)", "3.1.0_amd64", "3.1.0-build5", "Release v3.1.0 by SaanDev"):
+        assert not update_checker.is_newer_version(current, "3.1.0"), current
+    assert not update_checker.is_newer_version("beta", "3.1.0")
+    assert not update_checker.is_newer_version("3.1.0-beta", "invalid")
+
+
+def test_check_for_updates_offers_final_release_to_beta_build(monkeypatch):
+    releases_payload = [
+        {
+            "tag_name": "v3.1.0(Windows)",
+            "name": "Windows Release v3.1.0",
+            "prerelease": False,
+            "draft": False,
+            "html_url": "https://example.com/release/windows-v3.1.0",
+            "assets": [
+                {
+                    "name": "e-CALLISTO_FITS_Analyzer_v3.1.0_Setup.exe",
+                    "browser_download_url": "https://example.com/windows-v3.1.0.exe",
+                }
+            ],
+        },
+        {
+            "tag_name": "v3.1.0-beta(Windows)",
+            "name": "Windows Release v3.1.0-beta",
+            "prerelease": True,
+            "draft": False,
+            "html_url": "https://example.com/release/windows-v3.1.0-beta",
+            "assets": [
+                {
+                    "name": "e-CALLISTO_FITS_Analyzer_v3.1.0-beta_Setup.exe",
+                    "browser_download_url": "https://example.com/windows-v3.1.0-beta.exe",
+                }
+            ],
+        },
+    ]
+
+    def fake_get(url, headers=None, timeout=0):
+        return FakeResponse(releases_payload)
+
+    monkeypatch.setattr(update_checker.requests, "get", fake_get)
+
+    result = update_checker.check_for_updates("3.1.0-beta", system_name="Windows")
+    assert result.status == "update_available"
+    assert result.latest_version == "3.1.0"
+    assert result.download_url == "https://example.com/windows-v3.1.0.exe"
+
+    result = update_checker.check_for_updates("3.1.0", system_name="Windows")
+    assert result.status == "up_to_date"
+
+
 def test_select_download_url_by_os():
     assets = [
         {"name": "installer.exe", "browser_download_url": "https://example.com/windows.exe"},

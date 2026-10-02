@@ -3,8 +3,6 @@ A desktop application for visualizing, processing, and analyzing e-CALLISTO sola
 
 ## What's New in v3.1.0
 
-This beta previews the upcoming **v3.1.0** release. The features below are already implemented in the beta.
-
 ### Radio burst analysis
 
 - **Automatic ridge tracking:** the Maximum Intensities window has a **Track Ridge** button that follows the burst's peak frequency column by column, instead of taking the brightest channel at every time. It starts from the brightest point of the burst, or from a point you click with **Pick Start**, and looks only a few channels around where the ridge was in the previous column. It bridges short dropouts, stops once the signal has stayed in the noise, and refines each peak to sub-channel frequency. A channel that is bright for most of the file is treated as RFI and is not chosen as the start. The tracked points replace the per-column maxima, so outlier removal and **Analyze Burst** work on them as before, and **Edit → Restore Per-Column Maxima** brings the originals back. The search window, threshold, allowed gap and a "drift to lower frequency only" option are under **Analyze → Ridge Tracking Settings…**.
@@ -30,9 +28,9 @@ This beta previews the upcoming **v3.1.0** release. The features below are alrea
 - **Repeatable processing:** reapplying subtraction starts from the raw data, so changing methods replaces the previous result without stacking corrections.
 - **Live display thresholds:** adjust the color-scale limits independently after subtraction; threshold changes do not clip the data.
 
-## Additional features included in this beta
+## Also included in v3.1.0
 
-The beta also includes these archive, instrument, visualization and solar-image analysis capabilities:
+v3.1.0 also includes these archive, instrument, visualization and solar-image analysis capabilities:
 
 ### Working a burst across the archive, without leaving the plot
 - **Timeline panel:** a loaded dataset now knows which station, focus codes and observation times it came from, and the sidebar's **Timeline** section lists them. **◀ Previous** / **Next ▶** fetch the adjacent 15-minute observation and time-combine it into the spectrum in place, one to eight steps at a time. Following a type II from its onset no longer means going back to the downloader and re-importing every file.

@@ -23,6 +23,13 @@ PLATFORM_MACOS = "macos"
 PLATFORM_LINUX = "linux"
 PLATFORM_UNKNOWN = "unknown"
 
+# Pre-release label directly after the numeric version: "-beta", "-beta2", "-rc1", "b1", "rc1", " Beta".
+# Single-letter forms (a/b) must be attached or follow -/./_ so "3.1.0 a release" is not a match.
+_PRERELEASE_SUFFIX_RE = re.compile(
+    r"(?:[-_.\s]?(?:alpha|beta|preview|pre|rc|dev)|[-_.]?[ab])\d*(?![a-z])",
+    re.IGNORECASE,
+)
+
 
 @dataclass(frozen=True)
 class UpdateCheckResult:
@@ -63,6 +70,14 @@ def normalize_version(version: str) -> tuple[int, ...]:
     return tuple(int(part) for part in extracted.split("."))
 
 
+def _is_prerelease_version(version: str) -> bool:
+    text = (version or "").strip().lstrip("vV")
+    match = re.search(r"\d+(?:\.\d+)*", text)
+    if not match:
+        return False
+    return bool(_PRERELEASE_SUFFIX_RE.match(text, match.end()))
+
+
 def is_newer_version(current_version: str, latest_version: str) -> bool:
     current = normalize_version(current_version)
     latest = normalize_version(latest_version)
@@ -71,7 +86,10 @@ def is_newer_version(current_version: str, latest_version: str) -> bool:
     n = max(len(current), len(latest))
     current = current + (0,) * (n - len(current))
     latest = latest + (0,) * (n - len(latest))
-    return latest > current
+    if latest != current:
+        return latest > current
+    # Same numbers: a pre-release (3.1.0-beta) is older than its final release (3.1.0).
+    return _is_prerelease_version(current_version) and not _is_prerelease_version(latest_version)
 
 
 def _platform_family(system_name: str | None = None) -> str:
