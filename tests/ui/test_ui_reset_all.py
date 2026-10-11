@@ -232,6 +232,139 @@ def test_reset_all_returns_the_window_to_its_start_up_state(tmp_path, monkeypatc
         window.close()
 
 
+# ------------------------------------------------- Solar and GCS windows
+
+
+@pytest.fixture
+def solar_cache(tmp_path, monkeypatch):
+    """Solar windows cache under tmp_path; nothing is downloaded."""
+    import src.ui.solar.sunpy_solar_viewer as viewer
+
+    cache = tmp_path / "sunpy_cache"
+    cache.mkdir()
+    monkeypatch.setattr(viewer, "_default_cache_dir", lambda: cache)
+    monkeypatch.setenv("ECALLISTO_PROJECTS_CACHE", str(tmp_path / "projects_cache"))
+    return cache
+
+
+def _with_solar_and_gcs_work(window, tmp_path, monkeypatch):
+    """Loaded frames in Solar Image Analysis and in the GCS window (no network)."""
+    from tests.ui.test_ui_project_parts import _fake_fetch, _frame_files, _sync_loader
+
+    _sync_loader(monkeypatch)
+    solar = window._ensure_solar_window()
+    solar.load_local_paths(_frame_files(tmp_path, 3))
+    _flush()
+    _fake_fetch(monkeypatch, {"A": 0.0, "B": 62.0, "C": -70.0})
+    gcs = window.open_gcs_fitting_window(datetime(2012, 7, 12, 16, 12))
+    for panel in gcs.panels:
+        panel.start_fetch()
+    _flush()
+    assert solar.project_has_content() and gcs.project_has_content()
+    return solar, gcs
+
+
+def _flush_deletes():
+    QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+    _flush()
+
+
+def test_reset_all_asks_then_clears_and_closes_the_solar_and_gcs_windows(tmp_path, monkeypatch, solar_cache):
+    _app()
+    import shiboken6
+
+    from src.ui.app.main_window import MainWindow
+
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: asked.append(a[2]) or QMessageBox.Yes))
+    window = MainWindow(theme=None)
+    try:
+        window.open_fits_paths([str(_fits(tmp_path))])
+        _flush()
+        solar, gcs = _with_solar_and_gcs_work(window, tmp_path, monkeypatch)
+
+        window.reset_all()
+        _flush_deletes()
+
+        assert len(asked) == 1
+        assert "Solar Image Analysis" in asked[0] and "GCS" in asked[0]
+        assert window._solar_data_analysis_window is None and window._gcs_window is None
+        assert not shiboken6.isValid(solar) and not shiboken6.isValid(gcs)
+        assert window.raw_data is None
+        assert window._project_has_content() is False and window._project_dirty is False
+        assert window.tb_reset_all.isEnabled() is False
+        # Opening them again starts them fresh, as after start-up.
+        reopened = window._ensure_solar_window()
+        assert reopened._map_frames == []
+        assert window._ensure_gcs_window().project_has_content() is False
+    finally:
+        window.close()
+
+
+def test_declining_the_reset_leaves_every_window_as_it_was(tmp_path, monkeypatch, solar_cache):
+    _app()
+    from src.ui.app.main_window import MainWindow
+
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.No))
+    window = MainWindow(theme=None)
+    try:
+        window.open_fits_paths([str(_fits(tmp_path))])
+        _flush()
+        solar, gcs = _with_solar_and_gcs_work(window, tmp_path, monkeypatch)
+        window.title_edit.setText("Kept")
+
+        window.reset_all()
+        _flush_deletes()
+
+        assert window.raw_data is not None and window.title_edit.text() == "Kept"
+        assert window._solar_data_analysis_window is solar and len(solar._map_frames) == 3
+        assert window._gcs_window is gcs and gcs.project_has_content()
+    finally:
+        window.close()
+
+
+def test_a_running_solar_operation_blocks_the_reset(tmp_path, monkeypatch, solar_cache):
+    _app()
+    from src.ui.app.main_window import MainWindow
+
+    told, asked = [], []
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: told.append(a[2])))
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: asked.append(a[2]) or QMessageBox.Yes))
+    window = MainWindow(theme=None)
+    try:
+        window.open_fits_paths([str(_fits(tmp_path))])
+        _flush()
+        solar, _gcs = _with_solar_and_gcs_work(window, tmp_path, monkeypatch)
+        monkeypatch.setattr(solar, "is_operation_running", lambda: True)
+
+        window.reset_all()
+
+        assert told and "still working" in told[0]
+        assert asked == []
+        assert window.raw_data is not None and len(solar._map_frames) == 3
+    finally:
+        monkeypatch.undo()
+        window.close()
+
+
+def test_empty_solar_and_gcs_windows_close_without_a_question(tmp_path, monkeypatch, solar_cache):
+    _app()
+    from src.ui.app.main_window import MainWindow
+
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: asked.append(a[2]) or QMessageBox.No))
+    window = MainWindow(theme=None)
+    try:
+        window._ensure_solar_window()
+        window._ensure_gcs_window()
+        window.reset_all()
+        _flush_deletes()
+        assert asked == []
+        assert window._solar_data_analysis_window is None and window._gcs_window is None
+    finally:
+        window.close()
+
+
 def test_opening_a_sidebar_section_keeps_conditional_controls_hidden():
     # A section re-shows its controls when opened; the window then re-hides
     # the ones that do not apply (here: nothing is loaded or overridden).

@@ -187,7 +187,10 @@ on the right, the live cursor readout (time, frequency, intensity) and the updat
 <ul>
 <li><b>Undo</b> ({_kbd('Ctrl+Z')}) and <b>Redo</b> ({_kbd('Ctrl+Shift+Z')}): step through processing changes.</li>
 <li><b>Reset to Raw</b>: revert all applied processing and return to the original loaded data.</li>
-<li><b>Reset All</b>: clear processing, selections, and analysis overlays.</li>
+<li><b>Reset All</b>: return the app to how it starts: the loaded data, processing, graph settings, sidebar
+readouts and undo history are cleared, and the analysis, Geomagnetic Response, Event Figure, Solar Image Analysis
+and GCS windows are closed. If the Solar Image Analysis or GCS window holds work, you are asked first. Your
+preferences and the download cache are kept.</li>
 </ul>
 
 <a name="menu-download"></a>

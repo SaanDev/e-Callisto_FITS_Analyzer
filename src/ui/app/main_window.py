@@ -2953,7 +2953,7 @@ class MainWindow(QMainWindow):
         self.tb_max.setEnabled(has_noise)
         self.tb_reset_sel.setEnabled(has_noise or can_reset_view)
         self.tb_reset_to_raw.setEnabled(has_file)
-        self.tb_reset_all.setEnabled(has_file)
+        self.tb_reset_all.setEnabled(has_file or self._project_has_content())
         self._sync_background_controls()
         self._sync_fits_view_actions()
         self._sync_analysis_menu_actions()
@@ -9113,11 +9113,15 @@ class MainWindow(QMainWindow):
         title, labels, colour bar, SWAVES panel, event strip), the sidebar's
         per-file readouts (timeline, geomagnetic card, analysis summary), undo
         history, the analysis, Geomagnetic Response and Event Figure windows,
-        and the event context and composer settings. Preferences that a fresh
-        start reads from the settings (theme, view mode, the View-menu choices)
-        stay. The Solar Image Analysis and GCS windows have their own Reset All
-        and are left as they are.
+        and the event context and composer settings. The Solar Image Analysis
+        and GCS windows are cleared and closed too, after a confirmation when
+        they hold work. Preferences that a fresh start reads from the settings
+        (theme, view mode, the View-menu choices) stay, and so does the
+        download cache.
         """
+        if not self._confirm_reset_of_solar_and_gcs():
+            return
+
         # Background work first, so nothing lands on the window after the reset.
         self.noise_smooth_timer.stop()
         self.noise_commit_timer.stop()
@@ -9131,6 +9135,7 @@ class MainWindow(QMainWindow):
         self._geomagnetic.reset()
         self._event_context.reset()
         self._close_event_tool_windows()
+        self._close_solar_and_gcs_windows()
 
         # The per-dataset state a new file also resets: undo history, the
         # analysis windows, annotations, ruler, light curve, GOES, RFI.
@@ -9195,8 +9200,8 @@ class MainWindow(QMainWindow):
         self._sync_toolbar_enabled_states()
         self._sync_nav_actions()
 
-        # A new, untitled project. The solar and GCS windows keep their work;
-        # if they hold any, the project stays unsaved so closing still asks.
+        # A new, untitled project. Nothing should be left in it; if a window
+        # still holds work, the project stays unsaved so closing still asks.
         self._project_coordinator.new_project()
         self._project_storage = STORAGE_LINK
         self._set_project_clean(None)
@@ -9208,6 +9213,63 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage("All reset", 4000)
         print("Application reset to initial state.")
+
+    def _confirm_reset_of_solar_and_gcs(self) -> bool:
+        """Ask before Reset All discards Solar Image Analysis or GCS work.
+
+        False means the reset must not go ahead: the user declined, or the
+        solar window is in the middle of a download or computation (stopping
+        it under a running worker is what its own Reset All refuses too).
+        """
+        solar = self._solar_data_analysis_window
+        solar = solar if self._dialog_alive(solar) else None
+        gcs = self._gcs_window if self._dialog_alive(self._gcs_window) else None
+        if solar is not None and (bool(getattr(solar, "_busy", False)) or solar.is_operation_running()):
+            QMessageBox.information(
+                self, "Reset All",
+                "Solar Image Analysis is still working. Wait for it to finish, or stop it, before resetting.",
+            )
+            return False
+        work = []
+        if solar is not None and solar.project_has_content():
+            work.append("Solar Image Analysis: the loaded images and measurements")
+        if gcs is not None and gcs.project_has_content():
+            work.append("GCS CME Fitting: the images, points and fits")
+        if not work:
+            return True
+        reply = QMessageBox.question(
+            self,
+            "Reset All",
+            "Reset All also clears and closes:\n\n"
+            + "\n".join(f"\u2022 {item}" for item in work)
+            + "\n\nWork not saved in a project file is lost. The download cache is kept."
+            "\n\nReset everything?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return reply == QMessageBox.Yes
+
+    def _close_solar_and_gcs_windows(self) -> None:
+        """Clear, close and delete the Solar Image Analysis and GCS windows.
+
+        Opening either again starts it fresh, as after start-up. The GCS window
+        cancels and joins its fetch threads on close; the solar window is only
+        reached here when no operation is running (see the confirmation).
+        """
+        for name, clear in (("_gcs_window", "clear_project_state"), ("_solar_data_analysis_window", "clear_for_project")):
+            window = getattr(self, name, None)
+            setattr(self, name, None)
+            if not self._dialog_alive(window):
+                continue
+            try:
+                getattr(window, clear)()
+            except Exception:
+                pass
+            try:
+                window.close()
+                window.deleteLater()
+            except RuntimeError:
+                pass  # already deleted by Qt
 
     def _reset_mpl_canvas(self) -> None:
         """An empty figure with one styled axes, exactly as the window starts."""
@@ -14310,6 +14372,9 @@ class MainWindow(QMainWindow):
         act = getattr(self, "tb_save_project", None)
         if act is not None:
             act.setEnabled(bool(has_project and not saving))
+        act = getattr(self, "tb_reset_all", None)
+        if act is not None:
+            act.setEnabled(bool(has_data or has_project))
 
     def _sync_fits_view_actions(self):
         has_data = getattr(self, "raw_data", None) is not None

@@ -2022,7 +2022,9 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self.source_combo.currentIndexChanged.connect(lambda _i: self._save_jsoc_settings())
         if self.theme is not None and hasattr(self.theme, "themeChanged"):
             try:
-                self.theme.themeChanged.connect(lambda _dark: self._apply_sidebar_style())
+                # A bound slot, not a lambda: the theme manager outlives this
+                # window, which the main window's Reset All deletes.
+                self.theme.themeChanged.connect(self._on_theme_changed)
             except Exception:
                 pass
         self.use_analyzer_time_window(auto_query=False)
@@ -2589,6 +2591,9 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             label.setTextInteractionFlags(Qt.TextBrowserInteraction)
         box.setStandardButtons(QMessageBox.Ok)
         box.exec()
+
+    def _on_theme_changed(self, _dark: bool = False) -> None:
+        self._apply_sidebar_style()
 
     def _apply_sidebar_style(self) -> None:
         """Theme-aware stylesheet for the whole window (sidebar + viewer)."""
