@@ -396,6 +396,24 @@ def test_embedded_jp2s_go_into_the_cache_and_seed_the_listing(tmp_path, monkeypa
     other.close()
 
 
+def test_the_menu_action_opens_the_gcs_window():
+    # QAction.triggered passes checked=False, which once landed in target_time
+    # ("'bool' object has no attribute 'tzinfo'").
+    _app()
+    window = MainWindow(theme=None)
+    try:
+        window.open_gcs_fitting_action.trigger()
+        _flush()
+        gcs = window._gcs_window
+        assert gcs is not None and gcs.isVisible()
+        assert not isinstance(gcs._requested_time, bool)
+        window.open_gcs_fitting_action.trigger()  # again: the same window comes forward
+        _flush()
+        assert window._gcs_window is gcs
+    finally:
+        window.close()
+
+
 def test_the_solar_and_main_windows_share_one_gcs_window(tmp_path, monkeypatch):
     _app()
     _sync_loader(monkeypatch)

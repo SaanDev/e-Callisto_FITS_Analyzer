@@ -11096,6 +11096,10 @@ class MainWindow(QMainWindow):
         """
         from src.ui.gcs.gcs_fitting_window import GCSFittingWindow  # import here, not at top
 
+        # The menu action's triggered signal passes a bool (checked); only a
+        # real time is a target.
+        if not isinstance(target_time, datetime):
+            target_time = None
         event_range = None if target_time is not None else self._current_time_window_utc()
         try:
             alive = self._gcs_window is not None
