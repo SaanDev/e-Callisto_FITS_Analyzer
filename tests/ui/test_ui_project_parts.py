@@ -494,3 +494,80 @@ def test_opening_a_solar_only_project_clears_the_radio_spectrum(tmp_path, monkey
     assert other.save_project_action.isEnabled()
     other._solar_data_analysis_window.close()
     other.close()
+
+
+# ------------------------------------------------------- damaged sections
+
+
+def _radio_fits(tmp_path):
+    from tests.helpers.learmonth import write_test_callisto_fit
+
+    return write_test_callisto_fit(
+        tmp_path / "BIR_20240510_063000_01.fit",
+        data=(np.arange(40 * 60) % 200).reshape(40, 60).astype(np.uint8),
+        freqs=np.linspace(80.0, 20.0, 40),
+        time=np.linspace(0.0, 1800.0, 60),
+        date_obs="2024/05/10",
+        time_obs="06:30:00",
+    )
+
+
+def _snapshot_with_event_context(tmp_path, events):
+    """A recovery snapshot holding radio data and an event-context section."""
+    from src.backend.session.project_session import STORAGE_LINK, write_project
+    from src.backend.space_weather import event_catalogs as ec
+
+    window = MainWindow(theme=None)
+    try:
+        window.open_fits_paths([str(_radio_fits(tmp_path))])
+        _flush()
+        controller = window._event_context
+        controller.result = ec.EventContextResult(datetime(2024, 5, 10), datetime(2024, 5, 11))
+        controller._result_key = controller.request_key()
+        meta, arrays, _files = window._project_coordinator.capture(STORAGE_LINK)
+    finally:
+        window.close()
+    assert meta["parts"]["event_context"] is True
+    meta["event_context"]["result"]["events"] = events
+    path = tmp_path / "autosave.efaproj"
+    write_project(str(path), meta=meta, arrays=arrays)
+    return str(path)
+
+
+def test_a_snapshot_with_events_in_an_unexpected_shape_still_recovers(tmp_path, monkeypatch):
+    # The macOS report: "events" stored as a list crashed Recover Last Session.
+    _app()
+    path = _snapshot_with_event_context(tmp_path, ["2024-05-10", "2024-05-11"])
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: warned.append(a[2])))
+    other = MainWindow(theme=None)
+    try:
+        assert other._load_snapshot_path(path) is True
+        assert other.raw_data is not None
+        assert other._event_context.result is not None and not any(other._event_context.result.events.values())
+        assert warned == []
+    finally:
+        other.close()
+
+
+def test_a_part_that_cannot_be_restored_is_skipped_and_named(tmp_path, monkeypatch):
+    _app()
+    from src.ui.app.event_context_strip import EventContextController
+
+    path = _snapshot_with_event_context(tmp_path, {})
+
+    def broken(self, meta, arrays):
+        raise ValueError("dictionary update sequence element #0 has length 10; 2 is required")
+
+    monkeypatch.setattr(EventContextController, "project_restore", broken)
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: warned.append(a[2])))
+    other = MainWindow(theme=None)
+    try:
+        assert other._load_snapshot_path(path) is True
+        assert other.raw_data is not None  # the radio part still came back
+        assert other._event_context.result is None
+        assert other._project_coordinator.failed_parts[0][0] == "event_context"
+        assert len(warned) == 1 and "Event context strip" in warned[0] and "length 10" in warned[0]
+    finally:
+        other.close()

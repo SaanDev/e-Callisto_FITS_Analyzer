@@ -11481,6 +11481,7 @@ class MainWindow(QMainWindow):
         if mark_dirty:
             self._mark_project_dirty()
         self.statusBar().showMessage(f"Recovered session from {os.path.basename(path)}", 5000)
+        self._report_unrestored_parts("Recover Session")
         self._log_operation(f"Recovered snapshot: {os.path.basename(path)}")
         return True
 
@@ -15076,11 +15077,24 @@ class MainWindow(QMainWindow):
         restored = coordinator.apply(payload)
         self._project_storage = project_storage(payload.meta)
         self._set_project_clean(path)
+        self._report_unrestored_parts("Open Project")
         detail = ", ".join(restored) if restored else "empty"
         self.statusBar().showMessage(f"Project loaded: {os.path.basename(path)} ({detail})", 5000)
         self._log_operation(f"Loaded project: {os.path.basename(path)}")
         self._remember_recent_project(path)
         return True
+
+    def _report_unrestored_parts(self, title: str) -> None:
+        """Say which parts of the project just applied could not be read."""
+        report = self._project_coordinator.failure_report()
+        if not report:
+            return
+        QMessageBox.warning(
+            self,
+            title,
+            "These parts could not be read and were left empty:\n\n"
+            f"{report}\n\nEverything else was restored.",
+        )
 
     def import_legacy_solar_session_path(self, path) -> bool:
         """Import a v3.1 ``.ecsolar`` as an untitled project with only the solar part."""

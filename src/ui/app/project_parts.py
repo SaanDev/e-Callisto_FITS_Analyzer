@@ -27,6 +27,7 @@ prompts. Ctrl+S in any of the three windows saves the one project.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import threading
@@ -288,6 +289,19 @@ class ControllerPart(ProjectPart):
             controller.project_clear()
 
 
+_LOG = logging.getLogger(__name__)
+
+#: How each part is named when one cannot be restored.
+PART_LABELS = {
+    "radio": "Radio spectrum",
+    "solar": "Solar Image Analysis",
+    "gcs": "GCS CME Fitting",
+    "geomagnetic": "Geomagnetic response",
+    "event_context": "Event context strip",
+    "composer": "Event figure",
+}
+
+
 # ----------------------------------------------------------------- coordinator
 
 
@@ -301,6 +315,8 @@ class ProjectCoordinator(QObject):
         super().__init__(main)
         self._parts: dict[str, ProjectPart] = {}
         self._restoring = False
+        #: ``(part key, message)`` for each part the last :meth:`apply` skipped.
+        self.failed_parts: list[tuple[str, str]] = []
         self.project_id = uuid.uuid4().hex
         for part in (RadioPart(self), SolarPart(self), GCSPart(self)):
             self.register(part)
@@ -418,10 +434,15 @@ class ProjectCoordinator(QObject):
         Returns the restored part keys. Windows the file needs are created and
         shown; a part's own restore may finish asynchronously (frames load on a
         worker), which is why each window keeps its pending restore itself.
+
+        Parts are restored independently: one that cannot be read (a damaged
+        or foreign section) is cleared and listed in :attr:`failed_parts`, and
+        the rest of the project still opens.
         """
         meta = dict(payload.meta or {})
         flags = project_parts(meta)
         self.project_id = str(meta.get("project_id") or uuid.uuid4().hex)
+        self.failed_parts = []
         restored: list[str] = []
         self._restoring = True
         try:
@@ -430,23 +451,35 @@ class ProjectCoordinator(QObject):
                 if part.key == "radio":
                     # The radio keys sit at the top level; a file without radio
                     # data still resets the main window to an empty spectrum.
-                    if wanted:
-                        part.restore(PartPayload(meta=meta, arrays=dict(payload.arrays)), dict(payload.files))
-                        restored.append(part.key)
-                    else:
-                        part.clear()
-                    continue
-                section = meta.get(part.key)
-                if wanted and isinstance(section, dict):
-                    part.restore(
-                        PartPayload(meta=section, arrays=dict(payload.arrays)), dict(payload.files)
-                    )
-                    restored.append(part.key)
+                    section = meta if wanted else None
                 else:
-                    part.clear()
+                    section = meta.get(part.key) if wanted else None
+                if not isinstance(section, dict):
+                    self._clear_part(part)
+                    continue
+                try:
+                    part.restore(PartPayload(meta=section, arrays=dict(payload.arrays)), dict(payload.files))
+                except Exception as exc:
+                    _LOG.exception("Could not restore the %s part of a project", part.key)
+                    self.failed_parts.append((part.key, str(exc).splitlines()[0] if str(exc) else type(exc).__name__))
+                    self._clear_part(part)
+                    continue
+                restored.append(part.key)
         finally:
             self._restoring = False
         return restored
+
+    def _clear_part(self, part: ProjectPart) -> None:
+        try:
+            part.clear()
+        except Exception:
+            _LOG.exception("Could not clear the %s part of a project", part.key)
+
+    def failure_report(self) -> str:
+        """The parts the last :meth:`apply` skipped, one line each (empty if none)."""
+        return "\n".join(
+            f"\u2022 {PART_LABELS.get(key, key)}: {message}" for key, message in self.failed_parts
+        )
 
 
 # --------------------------------------------------------------- save worker

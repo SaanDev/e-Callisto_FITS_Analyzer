@@ -185,3 +185,25 @@ def test_one_failing_source_does_not_stop_the_others(tmp_path):
     assert result.start == datetime(2024, 5, 10, 0)  # queried with the 6 h margin
     back = ec.EventContextResult.from_json(json.loads(json.dumps(result.to_json())))
     assert back.events[ec.SOURCE_CDAW][0].start == result.events[ec.SOURCE_CDAW][0].start
+
+
+def test_a_saved_result_in_an_unexpected_shape_is_read_without_failing():
+    # A recovery snapshot on macOS held "events" as a list, which crashed
+    # Recover Last Session ("dictionary update sequence element #0 ...").
+    flare = ec.CatalogEvent(ec.KIND_FLARE, ec.SOURCE_GOES, datetime(2024, 5, 10, 6, 27), label="X3.9")
+    cme = ec.CatalogEvent(ec.KIND_CME, ec.SOURCE_CDAW, datetime(2024, 5, 10, 6, 48), label="CME")
+    base = {"start": "2024-05-10T00:30:00", "end": "2024-05-10T13:00:00"}
+
+    flat = ec.EventContextResult.from_json({**base, "events": [flare.to_json(), cme.to_json()]})
+    assert [e.label for e in flat.events[ec.SOURCE_GOES]] == ["X3.9"]
+    assert [e.label for e in flat.events[ec.SOURCE_CDAW]] == ["CME"]
+
+    for junk in (["2024-05-10", "2024-05-11"], "2024-05-10", 42, {ec.SOURCE_GOES: "not a list"}):
+        result = ec.EventContextResult.from_json({**base, "events": junk, "errors": ["x"]})
+        assert result is not None
+        assert not any(result.events.values())
+        assert result.errors == {}
+
+    mixed = ec.EventContextResult.from_json({**base, "events": {ec.SOURCE_GOES: [flare.to_json(), "junk", None, {}]}})
+    assert [e.label for e in mixed.events[ec.SOURCE_GOES]] == ["X3.9"]
+    assert ec.EventContextResult.from_json(["not", "a", "result"]) is None

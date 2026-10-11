@@ -95,10 +95,14 @@ class CatalogEvent:
         return out
 
     @classmethod
-    def from_json(cls, raw: Mapping[str, Any]) -> "CatalogEvent | None":
+    def from_json(cls, raw: Any) -> "CatalogEvent | None":
+        """The event, or None for anything that is not a readable event record."""
+        if not isinstance(raw, Mapping):
+            return None
         start = _parse_time(raw.get("start"))
         if start is None:
             return None
+        details = raw.get("details")
         return cls(
             kind=str(raw.get("kind") or ""),
             source=str(raw.get("source") or ""),
@@ -106,7 +110,7 @@ class CatalogEvent:
             peak=_parse_time(raw.get("peak")),
             end=_parse_time(raw.get("end")),
             label=str(raw.get("label") or ""),
-            details=dict(raw.get("details") or {}),
+            details=dict(details) if isinstance(details, Mapping) else {},
             url=str(raw.get("url") or ""),
         )
 
@@ -814,14 +818,32 @@ class EventContextResult:
         }
 
     @classmethod
-    def from_json(cls, raw: Mapping[str, Any]) -> "EventContextResult | None":
+    def from_json(cls, raw: Any) -> "EventContextResult | None":
+        """Read :meth:`to_json` back, skipping whatever is not in that shape.
+
+        ``events`` is ``{source: [event, …]}``. A flat list of events is
+        accepted too (grouped by each event's own source); anything else, and
+        any unreadable event, is left out rather than failing the whole
+        project or recovery snapshot it came from.
+        """
+        if not isinstance(raw, Mapping):
+            return None
         start, end = _parse_time(raw.get("start")), _parse_time(raw.get("end"))
         if start is None or end is None:
             return None
-        events = {}
-        for source, rows in dict(raw.get("events") or {}).items():
-            events[str(source)] = [e for e in (CatalogEvent.from_json(r) for r in rows or []) if e is not None]
-        return cls(start, end, events, {str(k): str(v) for k, v in dict(raw.get("errors") or {}).items()})
+        events: dict[str, list[CatalogEvent]] = {}
+        stored = raw.get("events")
+        if isinstance(stored, Mapping):
+            for source, rows in stored.items():
+                if isinstance(rows, (list, tuple)):
+                    events[str(source)] = [e for e in (CatalogEvent.from_json(r) for r in rows) if e is not None]
+        elif isinstance(stored, (list, tuple)):
+            for event in (CatalogEvent.from_json(r) for r in stored):
+                if event is not None and event.source:
+                    events.setdefault(event.source, []).append(event)
+        errors = raw.get("errors")
+        errors = {str(k): str(v) for k, v in errors.items()} if isinstance(errors, Mapping) else {}
+        return cls(start, end, events, errors)
 
 
 def load_event_context(

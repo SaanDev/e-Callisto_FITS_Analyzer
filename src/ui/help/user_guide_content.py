@@ -50,6 +50,23 @@ _LIGHT_COLORS = {
 }
 
 
+def _monospace_family() -> str:
+    """A monospace family installed here (naming a missing one, such as
+    Consolas on macOS, makes Qt log a qt.qpa.fonts warning and stall)."""
+    try:
+        from PySide6.QtWidgets import QApplication
+
+        if QApplication.instance() is not None:
+            from src.ui.common.font_utils import preferred_monospace_font_family
+
+            family = preferred_monospace_font_family()
+            if family:
+                return family
+    except Exception:
+        pass
+    return "Courier New"
+
+
 def build_default_stylesheet(dark: bool) -> str:
     """Return document CSS for the guide, matching the active theme.
 
@@ -59,6 +76,7 @@ def build_default_stylesheet(dark: bool) -> str:
     """
 
     c = _DARK_COLORS if dark else _LIGHT_COLORS
+    mono = _monospace_family()
     return f"""
     body {{ color: {c['text']}; font-size: 10.5pt; line-height: 140%; }}
     h1 {{ color: {c['heading']}; font-size: 20pt; }}
@@ -69,7 +87,7 @@ def build_default_stylesheet(dark: bool) -> str:
     a {{ color: {c['accent']}; text-decoration: none; }}
     .muted {{ color: {c['muted']}; }}
     .lead {{ color: {c['muted']}; font-size: 11pt; }}
-    code, .kbd {{ color: {c['code']}; font-family: 'Consolas','Courier New',monospace; }}
+    code, .kbd {{ color: {c['code']}; font-family: '{mono}', monospace; }}
     .toc a {{ color: {c['accent']}; }}
     table {{ border-collapse: collapse; }}
     th {{ color: {c['heading']}; text-align: left; border-bottom: 1px solid {c['border']}; padding: 4px 12px 4px 0; }}

@@ -73,6 +73,16 @@ def test_stylesheet_differs_between_light_and_dark():
     assert dark != light
 
 
+def test_stylesheet_uses_the_platforms_monospace_font():
+    # A hard-coded "Consolas" is missing on macOS and logged a qt.qpa.fonts
+    # warning; the guide now asks the same helper as the rest of the app.
+    _app()
+    from src.ui.common.font_utils import preferred_monospace_font_family
+
+    families = re.findall(r"font-family:\s*'([^']+)'", build_default_stylesheet(False))
+    assert families == [preferred_monospace_font_family()]
+
+
 # ---------------------------------------------------------------------- dialog
 
 
