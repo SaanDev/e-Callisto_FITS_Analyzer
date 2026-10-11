@@ -31,65 +31,15 @@ from src.backend.session.project_report import (
     ProjectReportResult,
     _fit_image,
     _import_reportlab,
-    _make_styles,
     _pair_table,
 )
+from src.backend.session.project_report import report_styles as _report_styles
 
 ProgressCallback = Callable[[int, str], None]
 
 REPORT_TITLE = "GCS CME Fitting Report"
 #: The footer of every page.
 REPORT_FOOTER = "©Sahan S Liyanage"
-
-#: The report's typeface: DejaVu Sans, from matplotlib's own data directory.
-_FONT_FACES = {
-    "DejaVuSans": "DejaVuSans.ttf",
-    "DejaVuSans-Bold": "DejaVuSans-Bold.ttf",
-    "DejaVuSans-Oblique": "DejaVuSans-Oblique.ttf",
-    "DejaVuSans-BoldOblique": "DejaVuSans-BoldOblique.ttf",
-}
-
-
-def _register_report_font() -> tuple[str, str]:
-    """Register DejaVu Sans with ReportLab; returns its regular and bold names.
-
-    ReportLab's built-in Helvetica covers Latin-1 only, so the report's "R☉",
-    "α", "κ", "σ", "→" and "″" would print as empty boxes. DejaVu Sans has them
-    all and is always present: matplotlib ships it (and so does every build).
-    """
-    import matplotlib
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.ttfonts import TTFont
-
-    root = Path(matplotlib.get_data_path()) / "fonts" / "ttf"
-    registered = set(pdfmetrics.getRegisteredFontNames())
-    for name, filename in _FONT_FACES.items():
-        if name not in registered:
-            pdfmetrics.registerFont(TTFont(name, str(root / filename)))
-    pdfmetrics.registerFontFamily(
-        "DejaVuSans",
-        normal="DejaVuSans",
-        bold="DejaVuSans-Bold",
-        italic="DejaVuSans-Oblique",
-        boldItalic="DejaVuSans-BoldOblique",
-    )
-    return "DejaVuSans", "DejaVuSans-Bold"
-
-
-def _report_styles(rl) -> Any:
-    """The project report's paragraph styles, in a typeface with the report's symbols."""
-    styles = _make_styles(rl)
-    try:
-        regular, bold = _register_report_font()
-    except Exception:
-        return styles  # Helvetica still lays the report out; only the symbols go missing.
-    for style in styles.byName.values():
-        for attribute in ("fontName", "bulletFontName"):
-            current = str(getattr(style, attribute, "") or "")
-            if current:
-                setattr(style, attribute, bold if "Bold" in current else regular)
-    return styles
-
 
 def _add_table_style(rl, styles) -> None:
     """A tighter cell style, so an eleven-column table keeps its headers whole."""

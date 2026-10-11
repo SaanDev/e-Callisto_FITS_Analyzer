@@ -14144,39 +14144,27 @@ class MainWindow(QMainWindow):
                 "Kp index data is not available in the loaded app state.",
             )
         )
-        figures.append(self._capture_geomagnetic_report_figure())
-
         return figures
 
     def _capture_geomagnetic_report_figure(self) -> ProjectReportFigure:
         """The geomagnetic response, drawn from the data by the backend renderer."""
-        title = "Geomagnetic Response"
-        context = getattr(self._geomagnetic, "context", None)
-        if context is None or not context.has_data():
-            return self._project_report_figure(title, None, unavailable="The geomagnetic response is not loaded.")
-        png = b""
-        try:
-            from src.backend.space_weather.geomagnetic_figures import geomagnetic_figure
-            from src.ui.space_weather.geomagnetic_response_window import load_panel_choice
+        from src.ui.app.report_story import geomagnetic_report_figure
 
-            fig = geomagnetic_figure(
-                context,
-                load_panel_choice(),
-                radio_interval=self._geomagnetic.radio_interval,
-                markers=self._geomagnetic.all_markers(),
-            )
-            png = figure_png_bytes(fig, dpi=self.REPORT_FIGURE_DPI, tight=True)
-        except Exception:
-            png = b""
-        caption = (
-            f"{context.event_label} · {context.start:%Y-%m-%d %H:%M} to {context.end:%Y-%m-%d %H:%M} UTC. "
-            "The dashed line is the event start; the shaded band is the radio data."
+        controller = self._geomagnetic
+        return geomagnetic_report_figure(
+            controller.context, controller.all_markers(), controller.radio_interval, dpi=self.REPORT_FIGURE_DPI
         )
-        if context.notes:
-            caption += " " + " ".join(context.notes)
-        return self._project_report_figure(title, png, caption=caption, unavailable="The geomagnetic figure could not be drawn.")
 
-    def _build_project_report_input(self) -> ProjectReportInput:
+    def _build_project_report_input(self, story_request=None, story_fetched=None) -> ProjectReportInput:
+        """Everything the report shows, captured on the GUI thread.
+
+        ``story_request`` / ``story_fetched`` are the event story's inputs (see
+        :mod:`src.ui.app.report_story`); without them the story is told from
+        what the window already holds.
+        """
+        from src.ui.app.report_story import story_request as build_story_request
+        from src.ui.app.report_story import story_section
+
         context = self._build_provenance_context()
         data_source = dict(context.get("data_source") or {})
         processing = dict(context.get("processing") or {})
@@ -14204,6 +14192,17 @@ class MainWindow(QMainWindow):
 
         base_title = self._project_report_default_stem()
         title = f"{base_title} Project Report"
+        if story_request is None:
+            try:
+                story_request = build_story_request(self, session)
+            except Exception:
+                story_request = None
+        try:
+            event_story, story_figures, story_notes = story_section(
+                self, story_request, story_fetched, dpi=self.REPORT_FIGURE_DPI
+            )
+        except Exception as exc:
+            event_story, story_figures, story_notes = None, [], [f"The event story could not be told: {exc}"]
 
         return ProjectReportInput(
             title=title,
@@ -14225,6 +14224,9 @@ class MainWindow(QMainWindow):
             selected_header=selected_header,
             full_header=full_header,
             figures=self._build_project_report_figures(session),
+            event_story=event_story,
+            story_figures=story_figures,
+            story_notes=story_notes,
         )
 
     def _show_project_report_progress_dialog(self):
@@ -14308,9 +14310,65 @@ class MainWindow(QMainWindow):
             )
             return
 
+        from src.ui.app.report_story import story_request as build_story_request
+
         try:
-            report_input = self._build_project_report_input()
+            request = build_story_request(self, self._project_report_analysis_session())
+        except Exception:
+            request = None
+        if request is not None and request.needs_fetch():
+            self._start_story_fetch(path, request)
+            return
+        self._start_project_report_worker(path, request, None)
+
+    def _start_story_fetch(self, path: str, request) -> None:
+        """Fetch what the event story is missing (catalogs, geomagnetic response), then write the report."""
+        from src.ui.app.report_story import EventStoryFetchWorker
+
+        self._show_project_report_progress_dialog()
+        thread = QThread()  # never parented to a widget (thread-teardown rule)
+        worker = EventStoryFetchWorker(request)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._on_project_report_progress)
+        worker.finished.connect(self._on_story_fetch_finished)
+        worker.cancelled.connect(self._on_story_fetch_cancelled)
+        self._project_report_thread = thread
+        self._project_report_worker = worker
+        self._story_fetch_pending = (path, request)
+        self._sync_project_actions()
+        thread.start()
+
+    def _release_story_fetch(self):
+        """Join the fetch thread, then let go of it and its worker (on the GUI thread)."""
+        thread = self._project_report_thread
+        pending = getattr(self, "_story_fetch_pending", None)
+        if thread is not None:
+            thread.quit()
+            thread.wait()
+        self._project_report_thread = None
+        self._project_report_worker = None
+        self._story_fetch_pending = None
+        self._sync_project_actions()
+        return pending
+
+    @Slot(object)
+    def _on_story_fetch_finished(self, fetched) -> None:
+        pending = self._release_story_fetch()
+        if pending is not None:
+            path, request = pending
+            self._start_project_report_worker(path, request, fetched)
+
+    @Slot()
+    def _on_story_fetch_cancelled(self) -> None:
+        self._release_story_fetch()
+        self._on_project_report_cancelled()
+
+    def _start_project_report_worker(self, path: str, story_request, story_fetched) -> None:
+        try:
+            report_input = self._build_project_report_input(story_request, story_fetched)
         except Exception as e:
+            self._close_project_report_progress_dialog()
             QMessageBox.critical(self, "Generate Project Report Failed", f"Could not prepare report data:\n{e}")
             return
 

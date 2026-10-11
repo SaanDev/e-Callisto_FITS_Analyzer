@@ -82,6 +82,12 @@ class ProjectReportInput:
     selected_header: Mapping[str, Any] = field(default_factory=dict)
     full_header: str = ""
     figures: Sequence[ProjectReportFigure] = field(default_factory=tuple)
+    #: The event story (:class:`~src.backend.session.event_story.EventStory`), when one could be told.
+    event_story: Any = None
+    #: Its figures, in order: the event chain, the event overview, the geomagnetic response.
+    story_figures: Sequence[ProjectReportFigure] = field(default_factory=tuple)
+    #: What the story is missing and why (a catalog that could not be fetched, say).
+    story_notes: Sequence[str] = field(default_factory=tuple)
 
 
 @dataclass
@@ -262,6 +268,56 @@ def _make_styles(rl):
     return styles
 
 
+#: The reports' typeface: DejaVu Sans, from matplotlib's own data directory.
+_FONT_FACES = {
+    "DejaVuSans": "DejaVuSans.ttf",
+    "DejaVuSans-Bold": "DejaVuSans-Bold.ttf",
+    "DejaVuSans-Oblique": "DejaVuSans-Oblique.ttf",
+    "DejaVuSans-BoldOblique": "DejaVuSans-BoldOblique.ttf",
+}
+
+
+def register_report_font() -> tuple[str, str]:
+    """Register DejaVu Sans with ReportLab; returns its regular and bold names.
+
+    ReportLab's built-in Helvetica covers Latin-1 only, so "R☉", "α", "→", "−"
+    and "≈" would print as empty boxes. DejaVu Sans has them all and is always
+    present: matplotlib ships it (and so does every build).
+    """
+    import matplotlib
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    root = Path(matplotlib.get_data_path()) / "fonts" / "ttf"
+    registered = set(pdfmetrics.getRegisteredFontNames())
+    for name, filename in _FONT_FACES.items():
+        if name not in registered:
+            pdfmetrics.registerFont(TTFont(name, str(root / filename)))
+    pdfmetrics.registerFontFamily(
+        "DejaVuSans",
+        normal="DejaVuSans",
+        bold="DejaVuSans-Bold",
+        italic="DejaVuSans-Oblique",
+        boldItalic="DejaVuSans-BoldOblique",
+    )
+    return "DejaVuSans", "DejaVuSans-Bold"
+
+
+def report_styles(rl) -> Any:
+    """The report's paragraph styles, in a typeface with the reports' symbols."""
+    styles = _make_styles(rl)
+    try:
+        regular, bold = register_report_font()
+    except Exception:
+        return styles  # Helvetica still lays the report out; only the symbols go missing.
+    for style in styles.byName.values():
+        for attribute in ("fontName", "bulletFontName"):
+            current = str(getattr(style, attribute, "") or "")
+            if current:
+                setattr(style, attribute, bold if "Bold" in current else regular)
+    return styles
+
+
 def _pair_table(rl, styles, pairs: Sequence[tuple[str, Any]], width: float):
     Paragraph = rl["Paragraph"]
     Table = rl["Table"]
@@ -388,6 +444,146 @@ def _draw_header_footer(report_title: str, rl):
     return _inner
 
 
+def _add_story_styles(rl, styles) -> None:
+    ParagraphStyle = rl["ParagraphStyle"]
+    colors = rl["colors"]
+    styles.add(ParagraphStyle(
+        name="StoryHeadline", parent=styles["Normal"], fontSize=10.5, leading=15,
+        textColor=colors.HexColor("#111827"), backColor=colors.HexColor("#f3f6fa"),
+        borderColor=colors.HexColor("#d7dce3"), borderWidth=0.5, borderPadding=(8, 9, 8, 9),
+        spaceBefore=6, spaceAfter=14,
+    ))
+    styles.add(ParagraphStyle(
+        name="StoryChain", parent=styles["SmallText"], fontSize=8.5, leading=11,
+        textColor=colors.HexColor("#4b5563"), spaceAfter=6,
+    ))
+    styles.add(ParagraphStyle(name="StoryChapter", parent=styles["Heading3"], spaceBefore=8, spaceAfter=3))
+    styles.add(ParagraphStyle(name="StoryText", parent=styles["Normal"], fontSize=9.2, leading=13, spaceAfter=4))
+
+
+def _figure_block(rl, styles, figure: ProjectReportFigure, width: float, max_height: float) -> tuple[list[Any], int]:
+    """A titled figure (or its availability note), with source and caption."""
+    Paragraph = rl["Paragraph"]
+    block: list[Any] = [Paragraph(escape(str(figure.title or "Figure")), styles["Heading3"])]
+    image_bytes = figure.png_bytes
+    if image_bytes is None and figure.image_path:
+        try:
+            image_bytes = Path(figure.image_path).read_bytes()
+        except Exception:
+            image_bytes = None
+    written = 0
+    if image_bytes:
+        try:
+            block.append(_fit_image(rl, image_bytes, width, max_height))
+            written = 1
+        except Exception as exc:
+            block.append(Paragraph(f"Figure could not be embedded: {escape(str(exc))}", styles["SmallText"]))
+    else:
+        block.append(Paragraph(escape(str(figure.availability_note or "Not available")), styles["SmallText"]))
+    if figure.source_filename:
+        block.append(Paragraph(f"Source: {escape(str(figure.source_filename))}", styles["Caption"]))
+    if figure.caption:
+        block.append(Paragraph(escape(str(figure.caption)), styles["Caption"]))
+    block.append(rl["Spacer"](1, 6))
+    return block, written
+
+
+def _timeline_table(rl, styles, event_story: Any, width: float):
+    """Every milestone, in order: UT, time from the event start, where, what, source."""
+    from src.backend.session.event_story import PHASE_COLORS, PHASE_LANES, elapsed_text, ut_text
+
+    Paragraph = rl["Paragraph"]
+    Table = rl["Table"]
+    TableStyle = rl["TableStyle"]
+    colors = rl["colors"]
+    head = [Paragraph(f"<b>{text}</b>", styles["SmallText"]) for text in ("UT", "From start", "Where", "What", "Source")]
+    rows = [head]
+    commands = [
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d7dce3")),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef2f7")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]
+    anchor = event_story.anchor
+    for index, milestone in enumerate(event_story.milestones, start=1):
+        color = PHASE_COLORS.get(milestone.phase, "#374151")
+        what = escape(milestone.title)
+        if milestone.key:
+            what = f"<b>{what}</b>"
+        details = [d for d in (milestone.detail, f"until {ut_text(milestone.end, anchor)}" if milestone.end else "") if d]
+        if details:
+            what += f"<br/><font color='#6b7280'>{escape('; '.join(details))}</font>"
+        rows.append([
+            Paragraph(escape(ut_text(milestone.time, anchor)), styles["SmallText"]),
+            Paragraph(escape(elapsed_text(milestone.time - anchor)), styles["SmallText"]),
+            Paragraph(f"<font color='{color}'><b>{escape(PHASE_LANES.get(milestone.phase, milestone.phase))}</b></font>",
+                      styles["SmallText"]),
+            Paragraph(what, styles["SmallText"]),
+            Paragraph(escape(milestone.source), styles["SmallText"]),
+        ])
+        if milestone.key:
+            commands.append(("BACKGROUND", (0, index), (-1, index), colors.HexColor("#fbfbf3")))
+    table = Table(rows, colWidths=[width * f for f in (0.15, 0.13, 0.13, 0.41, 0.18)], hAlign="LEFT", repeatRows=1)
+    table.setStyle(TableStyle(commands))
+    return table
+
+
+def _add_event_story(flow: list[Any], rl, styles, report: ProjectReportInput, width: float) -> int:
+    """The Event Story section: headline, chain graphic, key numbers, chapters, timeline, figures, sources.
+
+    Returns the number of figures embedded.
+    """
+    from src.backend.session.event_story import PHASE_COLORS
+
+    Paragraph = rl["Paragraph"]
+    Spacer = rl["Spacer"]
+    KeepTogether = rl["KeepTogether"]
+    inch = rl["inch"]
+    event_story = report.event_story
+    figures = [figure for figure in list(report.story_figures or []) if figure]
+    written = 0
+
+    flow.append(Paragraph("Event Story", styles["Heading1"]))
+    flow.append(Paragraph(escape(event_story.headline), styles["StoryHeadline"]))
+    if event_story.chain:
+        flow.append(Paragraph(f"<b>Chain:</b> {escape(event_story.chain)}", styles["StoryChain"]))
+    if figures:
+        block, count = _figure_block(rl, styles, figures[0], width, 4.9 * inch)
+        flow.append(KeepTogether(block))
+        written += count
+    if event_story.key_numbers:
+        flow.append(KeepTogether([Paragraph("Key Numbers", styles["Heading2"]),
+                                  _pair_table(rl, styles, event_story.key_numbers, width)]))
+        flow.append(Spacer(1, 0.1 * inch))
+    if event_story.chapters:
+        flow.append(Paragraph("What Happened", styles["Heading2"]))
+        for phase, title, text in event_story.chapters:
+            color = PHASE_COLORS.get(phase, "#111827")
+            flow.append(KeepTogether([
+                Paragraph(f"<font color='{color}'>{escape(title)}</font>", styles["StoryChapter"]),
+                Paragraph(escape(text), styles["StoryText"]),
+            ]))
+    if event_story.milestones:
+        flow.append(Paragraph("Timeline", styles["Heading2"]))
+        flow.append(_timeline_table(rl, styles, event_story, width))
+        flow.append(Paragraph("Bold rows are the steps joined on the event chain graphic.", styles["Caption"]))
+    for figure in figures[1:]:
+        block, count = _figure_block(rl, styles, figure, width, 6.2 * inch)
+        flow.append(KeepTogether(block))
+        written += count
+    notes = [str(note) for note in report.story_notes or () if note]
+    flow.append(Paragraph("Sources And Caveats", styles["Heading2"]))
+    pairs = [(what, where) for what, where in event_story.sources]
+    if pairs:
+        flow.append(_pair_table(rl, styles, pairs, width))
+    for line in list(event_story.caveats) + notes:
+        flow.append(Paragraph(escape(line), styles["Caption"]))
+    return written
+
+
 def generate_project_report_pdf(
     output_path: str,
     report: ProjectReportInput,
@@ -406,7 +602,8 @@ def generate_project_report_pdf(
     data_source = dict(_as_mapping(report.data_source))
     if data_source.get("combined_mode") == "time_frequency":
         data_source["combined_mode"] = "time + frequency"
-    styles = _make_styles(rl)
+    styles = report_styles(rl)
+    _add_story_styles(rl, styles)
     SimpleDocTemplate = rl["SimpleDocTemplate"]
     Paragraph = rl["Paragraph"]
     Spacer = rl["Spacer"]
@@ -453,11 +650,18 @@ def generate_project_report_pdf(
                 ("Observation date", report.date_obs),
                 ("Current plot", _as_mapping(report.processing).get("plot_type")),
                 ("Source file", data_source.get("filename")),
-            ],
+            ]
+            + ([("Event", report.event_story.chain)] if report.event_story is not None and report.event_story.chain else []),
             doc.width,
         )
     )
     story.append(PageBreak())
+
+    figures_written = 0
+    if report.event_story is not None:
+        _emit(progress_cb, 10, "Telling the event story...")
+        figures_written += _add_event_story(story, rl, styles, report, doc.width)
+        story.append(PageBreak())
 
     _emit(progress_cb, 18, "Adding data and processing sections...")
     _section(story, rl, styles, "Data Source")
@@ -532,7 +736,6 @@ def generate_project_report_pdf(
     story.append(_pair_table(rl, styles, _type_ii_pairs(report.analysis_session), doc.width))
     story.append(Spacer(1, 0.12 * inch))
 
-    figures_written = 0
     figure_items = [fig for fig in list(report.figures or []) if fig]
     if not figure_items:
         _section(story, rl, styles, "Figures")
