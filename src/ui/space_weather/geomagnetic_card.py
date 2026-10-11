@@ -120,6 +120,15 @@ class GeomagneticCard(QGroupBox):
         self._on_event()
         self._on_context(controller.context)
 
+    def refresh_state(self) -> None:
+        """Re-apply what the card shows and hides.
+
+        The sidebar section re-shows every control when it is opened, so the
+        main window calls this afterwards (and once at start-up).
+        """
+        self._on_event()
+        self._on_busy(self.controller.is_busy())
+
     def _on_event(self) -> None:
         label = self.controller.event_label()
         self.event_label.setText(label or "Load data or select an event.")

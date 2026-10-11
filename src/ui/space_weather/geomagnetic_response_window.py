@@ -126,7 +126,9 @@ class GeomagneticResponseWindow(QMainWindow):
         self.controller = controller
         self.panels = load_panel_choice()
         self._build_ui()
-        controller.contextChanged.connect(lambda _c: self.render())
+        # Bound slots, not lambdas: Qt drops them when this window is deleted
+        # (Reset All does that), while the controller lives on.
+        controller.contextChanged.connect(self._on_context_changed)
         controller.eventChanged.connect(self._sync_event)
         controller.statusChanged.connect(self.statusBar().showMessage)
         theme = _get_theme()
@@ -260,6 +262,9 @@ class GeomagneticResponseWindow(QMainWindow):
         self.notes_label.setText("  ·  ".join(context.notes))
 
     def _on_theme_changed(self, _dark: bool = False) -> None:
+        self.render()
+
+    def _on_context_changed(self, _context: Any = None) -> None:
         self.render()
 
     def drawn_axes(self) -> list[Any]:

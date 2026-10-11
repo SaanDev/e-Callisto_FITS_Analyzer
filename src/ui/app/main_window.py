@@ -1069,6 +1069,9 @@ class MainWindow(QMainWindow):
             settings_key=SIDEBAR_SECTIONS_SETTINGS_KEY,
         )
         self._refresh_timeline_panel()
+        # Building the sections showed every card's controls; hide the
+        # conditional ones again (opening a section later does the same).
+        self.geomagnetic_card.refresh_state()
 
         # ----- Menu Bar -----
         menubar = self.menuBar()
@@ -4952,9 +4955,11 @@ class MainWindow(QMainWindow):
         high_label.setText(self._format_noise_clip_value(high_disp, unit_label))
         if low_sub_label is not None:
             low_sub_label.clear()
+            low_sub_label.setToolTip("")
             low_sub_label.setVisible(False)
         if high_sub_label is not None:
             high_sub_label.clear()
+            high_sub_label.setToolTip("")
             high_sub_label.setVisible(False)
         if self._background_product_is_db():
             tooltip = "Color-scale limit in dB above the per-channel median background"
@@ -5969,6 +5974,10 @@ class MainWindow(QMainWindow):
         if hasattr(self, "timeline_list"):
             self._set_timeline_controls_visible(self._timeline_state() is not None)
             self._fit_timeline_list_height()
+        self._update_noise_clip_value_labels()
+        card = getattr(self, "geomagnetic_card", None)
+        if card is not None:
+            card.refresh_state()
 
     def _normalize_sidebar_section_layouts(self) -> None:
         """Give every sidebar card the same inner rhythm.
@@ -6248,6 +6257,8 @@ class MainWindow(QMainWindow):
     def _on_timeline_probe_finished(self, payload):
         if not hasattr(self, "timeline_next_btn") or self._timeline_busy():
             return
+        if getattr(self, "raw_data", None) is None:
+            return  # a probe that outlived Reset All: there is nothing to step
         payload = payload or {}
         for direction, button, action_name in (
             ("next", self.timeline_next_btn, "timeline_next_action"),
@@ -9096,64 +9107,57 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Exported FITS (BITPIX={bitpix}): {os.path.basename(save_path)}", 5000)
 
     def reset_all(self):
+        """Return the main window to the state it has right after start-up.
+
+        Everything the loaded data produced goes: the plot (both canvases,
+        title, labels, colour bar, SWAVES panel, event strip), the sidebar's
+        per-file readouts (timeline, geomagnetic card, analysis summary), undo
+        history, the analysis, Geomagnetic Response and Event Figure windows,
+        and the event context and composer settings. Preferences that a fresh
+        start reads from the settings (theme, view mode, the View-menu choices)
+        stay. The Solar Image Analysis and GCS windows have their own Reset All
+        and are left as they are.
+        """
+        # Background work first, so nothing lands on the window after the reset.
         self.noise_smooth_timer.stop()
         self.noise_commit_timer.stop()
         self._noise_undo_pending = False
         self._noise_slider_drag_active = False
-        if self._hardware_mode_enabled():
-            self._show_accel_canvas()
-        else:
-            self._show_plot_canvas()
-        try:
-            self.accel_canvas.clear()
-        except Exception:
-            pass
-        self._clear_light_curve_overlay(clear_frequency=True)
-        self._set_light_curve_click_mode_checked(False)
-        self.clear_ruler_measurement(reset_readout=True)
-
-        self._clear_current_colorbar_artists()
-
-        # Clear canvas
-        self.canvas.ax.clear()
-        self.canvas.draw()
         self._cancel_goes_overlay_request()
-        self._clear_goes_overlay_payload()
+        probe = getattr(self, "_timeline_probe_worker", None)
+        if probe is not None:
+            probe.cancel()
+            self._timeline_probe_worker = None
+        self._geomagnetic.reset()
+        self._event_context.reset()
+        self._close_event_tool_windows()
+
+        # The per-dataset state a new file also resets: undo history, the
+        # analysis windows, annotations, ruler, light curve, GOES, RFI.
+        self._reset_runtime_state_for_loaded_data()
+        self._reset_interaction_modes()
         self._goes_overlay_active_request = None
         self._goes_overlay_enabled = False
         self._set_goes_overlay_checked(False)
-        self._render_goes_overlay()
 
-        # Clear data
+        # Data
         self.raw_data = None
-        self._background_applied_method = None
         self.freqs = None
         self.time = None
         self.filename = ""
-        self.noise_reduced_data = None
-        self.noise_reduced_original = None
-        self.noise_reduced_original_plot_type = "Background Subtracted"
-        self.lasso_mask = None
         self.current_plot_type = "Raw"
-        self.current_display_data = None
-        self._current_plot_source_data = None
-        self.noise_vmin = None
-        self.noise_vmax = None
-        self._rfi_preview_data = None
-        self._rfi_preview_masked = []
-        self._annotations = []
         self._annotation_artists = []
-        self._rfi_config = rfi_config_dict(
-            enabled=True,
-            kernel_time=3,
-            kernel_freq=3,
-            channel_z_threshold=6.0,
-            percentile_clip=99.5,
-            masked_channel_indices=[],
-            applied=False,
-        )
-        self._annotations_visible = True
-        self._annotation_style_defaults = self._merge_annotation_style_defaults()
+        self._swaves_payload = None
+        self._swaves_standalone = False
+        self._swaves_visible = True
+        swaves_action = getattr(self, "swaves_panel_action", None)
+        if swaves_action is not None:
+            swaves_action.blockSignals(True)
+            swaves_action.setChecked(True)
+            swaves_action.blockSignals(False)
+            swaves_action.setEnabled(False)
+        self._colorbar_label_text = ""
+        self._swaves_colorbar_label_text = ""
 
         # FITS metadata / provenance
         self._fits_header0 = None
@@ -9162,29 +9166,103 @@ class MainWindow(QMainWindow):
         self._is_combined = False
         self._combined_mode = None
         self._combined_sources = []
+        self._combined_options = {}
+        self._timeline_undo_state = None
         self.ut_start_sec = None
         self._home_view = None
         self._pan_start_view = None
         self._processing_log = []
         self._last_time_sync_context = {}
-        self._reset_sidebar_controls_to_defaults()
-
-        # Reset GUI
-        self.statusBar().showMessage("All reset", 4000)
-
-        # Tool bar
-        self._sync_toolbar_enabled_states()
-        self.graph_group.setEnabled(False)
-
-        if self.canvas.ax:
-            self.canvas.ax.set_xlim(0, 1)
-            self.canvas.ax.set_ylim(1, 0)
-
-        self._clear_analysis_session_state(close_windows=True)
+        self._downloader_date_time_state = None
         self._active_preset_snapshot = None
-        self._set_project_clean(None)
 
+        # The plot: an empty figure and an empty hardware plot, as at start-up.
+        if self._hardware_mode_enabled():
+            self._show_accel_canvas()
+        else:
+            self._show_plot_canvas()
+        try:
+            self.accel_canvas.clear()
+        except Exception:
+            pass
+        self._reset_mpl_canvas()
+
+        # Sidebar and menus
+        self._reset_sidebar_controls_to_defaults()
+        self._refresh_timeline_panel()
+        self._composer_state.project_clear()
+        self.graph_group.setEnabled(False)
+        self._sync_toolbar_enabled_states()
+        self._sync_nav_actions()
+
+        # A new, untitled project. The solar and GCS windows keep their work;
+        # if they hold any, the project stays unsaved so closing still asks.
+        self._project_coordinator.new_project()
+        self._project_storage = STORAGE_LINK
+        self._set_project_clean(None)
+        if self._project_has_content():
+            self._project_dirty = True
+            self._sync_project_actions()
+        elif getattr(self, "_autosave_timer", None) is not None:
+            self._autosave_timer.stop()
+
+        self.statusBar().showMessage("All reset", 4000)
         print("Application reset to initial state.")
+
+    def _reset_mpl_canvas(self) -> None:
+        """An empty figure with one styled axes, exactly as the window starts."""
+        self._clear_current_colorbar_artists()
+        cid = getattr(self, "_event_strip_hover_cid", None)
+        if cid is not None:
+            try:
+                self.canvas.mpl_disconnect(cid)
+            except Exception:
+                pass
+            self._event_strip_hover_cid = None
+        self._event_strip_ax = None
+        self._event_strip_hits = []
+        self._goes_overlay_mpl_ax = None
+        self.canvas.figure.clear()
+        self.canvas.ax = self.canvas.figure.add_subplot(111)
+        style_axes(self.canvas.ax)
+        self._apply_mpl_theme()
+        self.canvas.draw_idle()
+
+    def _reset_interaction_modes(self) -> None:
+        """Leave lasso, rectangle zoom and navigation lock, as Reset All needs."""
+        self._stop_rect_zoom()
+        if getattr(self, "lasso", None):
+            try:
+                self.lasso.disconnect_events()
+            except Exception:
+                pass
+            self.lasso = None
+        self.lasso_active = False
+        self.nav_locked = False
+        self._panning = False
+        self._last_pan_xy = None
+        try:
+            self.accel_canvas.stop_interaction_capture()
+            self.accel_canvas.clear_overlays()
+            self.accel_canvas.set_navigation_locked(False)
+        except Exception:
+            pass
+
+    def _close_event_tool_windows(self) -> None:
+        """Close the Geomagnetic Response and Event Figure windows for good.
+
+        The next open builds them afresh from the next data set, as after start-up.
+        """
+        for name in ("_geomagnetic_window", "_composer_window"):
+            window = getattr(self, name, None)
+            setattr(self, name, None)
+            if window is None:
+                continue
+            try:
+                window.close()
+                window.deleteLater()
+            except RuntimeError:
+                pass  # already deleted by Qt
 
     def reset_to_raw(self):
         if self.raw_data is None:

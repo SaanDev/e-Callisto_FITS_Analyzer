@@ -425,3 +425,21 @@ class GeomagneticController(QObject):
         self.radio_interval = None
         self.eventChanged.emit()
         self.contextChanged.emit(None)
+
+    def reset(self) -> None:
+        """Back to a fresh start (Reset All): no event, no response, the default span.
+
+        A fetch still running is cancelled; its reply no longer matches the
+        requested key, so it is dropped when it arrives.
+        """
+        self._queued = None
+        if self._worker is not None:
+            self._worker.request_cancel()
+        self.before = DEFAULT_BEFORE
+        self.after = DEFAULT_AFTER
+        self.markers = []
+        self.project_clear()
+        self.statusChanged.emit("")
+        if self._thread is not None:
+            # The cancelled fetch may take a moment to stop; to the user it is over.
+            self.busyChanged.emit(False)

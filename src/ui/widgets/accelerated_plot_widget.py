@@ -273,6 +273,10 @@ class AcceleratedPlotWidget(QWidget):
     viewInteractionFinished = Signal(dict, dict)
     rectZoomFinished = Signal(dict, dict)
 
+    #: Axis labels of the empty plot, before any data is drawn.
+    DEFAULT_X_LABEL = "Time [s]"
+    DEFAULT_Y_LABEL = "Frequency [MHz]"
+
     def __init__(self, parent=None, *, use_opengl: bool = True):
         super().__init__(parent)
         self._available = pg is not None
@@ -314,8 +318,8 @@ class AcceleratedPlotWidget(QWidget):
         self._title = ""
         self._log_freq = False
         self._axis_ylim = None
-        self._x_label = "Time [s]"
-        self._y_label = "Frequency [MHz]"
+        self._x_label = self.DEFAULT_X_LABEL
+        self._y_label = self.DEFAULT_Y_LABEL
         self._colorbar_label = ""
         self._fg = "#101010"
         self._full_view = None
@@ -1297,10 +1301,27 @@ class AcceleratedPlotWidget(QWidget):
         self._clear_annotation_capture_overlay()
 
     def clear(self) -> None:
+        """Back to the empty plot the widget starts with.
+
+        The title, axis and colour-bar labels are stored and re-applied on every
+        text-style change, so they are reset too — clearing only the drawn title
+        let the next style refresh bring the old one back.
+        """
         if not self.is_available:
             return
         self._image.clear()
+        self._title = ""
+        self._x_label = self.DEFAULT_X_LABEL
+        self._y_label = self.DEFAULT_Y_LABEL
+        self._colorbar_label = ""
+        self._full_view = None
         self._plot.setTitle("")
+        if self._color_bar is not None:
+            try:
+                self._color_bar.setLevels((0.0, 1.0))
+                self._color_bar.setColorMap(pg.colormap.get("viridis"))
+            except Exception:
+                pass
         self._interaction_mode = None
         self._clear_lasso_overlay()
         self._clear_drift_overlay()
@@ -1311,6 +1332,15 @@ class AcceleratedPlotWidget(QWidget):
         self.clear_goes_overlay()
         self.clear_swaves_panel()
         self.clear_event_strip()
+        self._apply_text_style()
+        try:
+            # The empty image still carried the last data's placement, and the
+            # view its range; start both over and auto-range, as at start-up.
+            self._image.resetTransform()
+            self._viewbox.setRange(xRange=(0.0, 1.0), yRange=(0.0, 1.0), padding=0.0)
+            self._viewbox.enableAutoRange()
+        except Exception:
+            pass
 
     def export_plot_item(self):
         if not self.is_available:

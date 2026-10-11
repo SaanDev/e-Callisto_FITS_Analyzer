@@ -432,3 +432,14 @@ class EventContextController(QObject):
         self._requested_key = None
         self.range = None
         self.resultChanged.emit(None)
+
+    def reset(self) -> None:
+        """Back to a fresh start (Reset All): no range, no catalog results.
+
+        The View-menu choices (strip on or off, which sources) are preferences
+        that a fresh start reads from the settings too, so they are kept.
+        """
+        self._queued = None
+        if self._worker is not None:
+            self._worker.request_cancel()
+        self.project_clear()
