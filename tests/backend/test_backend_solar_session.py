@@ -1,11 +1,16 @@
 """
 e-CALLISTO FITS Analyzer
-Version 3.1.0
+Version 3.2.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
+
+The app no longer writes ``.ecsolar`` (v3.2 saves everything to one .efaproj),
+so these fixtures build legacy sessions exactly as v3.1 laid them out and check
+the read-only importer and the measurement serializers the project shares.
 """
 
 import json
+import os
 import zipfile
 from datetime import datetime
 
@@ -18,14 +23,13 @@ from src.backend.session.solar_session import (
     deserialize_circle_fits,
     deserialize_circle_points,
     deserialize_picks,
-    read_solar_session,
+    import_legacy_solar_session,
     serialize_circle_fits,
     serialize_circle_points,
     serialize_picks,
     session_circle_count,
     session_frame_count,
     session_pick_count,
-    write_solar_session,
 )
 
 
@@ -36,6 +40,26 @@ def _make_frame_files(tmp_path, count):
         p.write_bytes(f"FITS-BYTES-{i}".encode("ascii"))
         paths.append(str(p))
     return paths
+
+
+def write_legacy_session(path, *, meta, frame_paths):
+    """A v3.1 ``.ecsolar``: meta.json plus ``frames/NNNN_<name>`` in load order."""
+    manifest = []
+    payload = dict(meta)
+    payload.update(
+        {"magic": SOLAR_SESSION_MAGIC, "schema_version": SOLAR_SCHEMA_VERSION,
+         "app": "e-CALLISTO FITS Analyzer", "created_at": "2026-07-01T00:00:00+00:00"}
+    )
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for index, source in enumerate(frame_paths):
+            name = os.path.basename(source)
+            arcname = f"frames/{index:04d}_{name}"
+            with open(source, "rb") as handle:
+                zf.writestr(arcname, handle.read())
+            manifest.append({"arcname": arcname, "name": name})
+        payload["frame_files"] = manifest
+        zf.writestr("meta.json", json.dumps(payload).encode("utf-8"))
+    return len(manifest)
 
 
 def _sample_meta():
@@ -50,15 +74,15 @@ def _sample_meta():
     }
 
 
-def test_write_read_round_trip(tmp_path):
+def test_legacy_session_imports_frames_and_meta(tmp_path):
     frame_paths = _make_frame_files(tmp_path, 3)
     session_path = tmp_path / "event.ecsolar"
 
-    embedded = write_solar_session(str(session_path), meta=_sample_meta(), frame_paths=frame_paths)
+    embedded = write_legacy_session(str(session_path), meta=_sample_meta(), frame_paths=frame_paths)
     assert embedded == 3
 
     extract_dir = tmp_path / "restore"
-    result = read_solar_session(str(session_path), extract_dir=str(extract_dir))
+    result = import_legacy_solar_session(str(session_path), extract_dir=str(extract_dir))
 
     assert result.meta["magic"] == SOLAR_SESSION_MAGIC
     assert result.meta["schema_version"] == SOLAR_SCHEMA_VERSION
@@ -82,8 +106,8 @@ def test_frame_order_is_preserved(tmp_path):
         frame_paths.append(str(p))
 
     session_path = tmp_path / "order.ecsolar"
-    write_solar_session(str(session_path), meta=_sample_meta(), frame_paths=frame_paths)
-    result = read_solar_session(str(session_path), extract_dir=str(tmp_path / "out"))
+    write_legacy_session(str(session_path), meta=_sample_meta(), frame_paths=frame_paths)
+    result = import_legacy_solar_session(str(session_path), extract_dir=str(tmp_path / "out"))
 
     for i, path in enumerate(result.frame_paths):
         with open(path, "rb") as fh:
@@ -128,40 +152,13 @@ def test_deserialize_picks_tolerates_missing_time():
     assert restored[0][1] == pytest.approx(2.0)
 
 
-def test_write_rejects_empty_frame_list(tmp_path):
-    with pytest.raises(SolarSessionError):
-        write_solar_session(str(tmp_path / "empty.ecsolar"), meta={}, frame_paths=[])
-
-
-def test_write_rejects_missing_frame_file(tmp_path):
-    with pytest.raises(SolarSessionError):
-        write_solar_session(
-            str(tmp_path / "missing.ecsolar"),
-            meta={},
-            frame_paths=[str(tmp_path / "does_not_exist.fits")],
-        )
-
-
-def test_failed_write_leaves_no_partial_file(tmp_path):
-    session_path = tmp_path / "partial.ecsolar"
-    good = _make_frame_files(tmp_path, 1)[0]
-    with pytest.raises(SolarSessionError):
-        write_solar_session(
-            str(session_path),
-            meta={},
-            frame_paths=[good, str(tmp_path / "missing.fits")],
-        )
-    assert not session_path.exists()
-    assert not (tmp_path / "partial.ecsolar.tmp").exists()
-
-
 def test_read_rejects_bad_magic(tmp_path):
     session_path = tmp_path / "bad.ecsolar"
     with zipfile.ZipFile(session_path, "w") as zf:
         zf.writestr("meta.json", json.dumps({"magic": "nope", "schema_version": 1}).encode("utf-8"))
         zf.writestr("frames/0000_a.fits", b"x")
     with pytest.raises(SolarSessionError):
-        read_solar_session(str(session_path), extract_dir=str(tmp_path / "out"))
+        import_legacy_solar_session(str(session_path), extract_dir=str(tmp_path / "out"))
 
 
 def test_read_rejects_unsupported_schema(tmp_path):
@@ -170,7 +167,7 @@ def test_read_rejects_unsupported_schema(tmp_path):
     with zipfile.ZipFile(session_path, "w") as zf:
         zf.writestr("meta.json", json.dumps(meta).encode("utf-8"))
     with pytest.raises(SolarSessionError):
-        read_solar_session(str(session_path), extract_dir=str(tmp_path / "out"))
+        import_legacy_solar_session(str(session_path), extract_dir=str(tmp_path / "out"))
 
 
 def test_read_rejects_zip_slip(tmp_path):
@@ -184,7 +181,7 @@ def test_read_rejects_zip_slip(tmp_path):
         zf.writestr("meta.json", json.dumps(meta).encode("utf-8"))
         zf.writestr("../escape.fits", b"x")
     with pytest.raises(SolarSessionError):
-        read_solar_session(str(session_path), extract_dir=str(tmp_path / "out"))
+        import_legacy_solar_session(str(session_path), extract_dir=str(tmp_path / "out"))
 
 
 def test_read_rejects_missing_embedded_frame(tmp_path):
@@ -198,14 +195,14 @@ def test_read_rejects_missing_embedded_frame(tmp_path):
         zf.writestr("meta.json", json.dumps(meta).encode("utf-8"))
         # note: the frame listed in the manifest is not actually stored
     with pytest.raises(SolarSessionError):
-        read_solar_session(str(session_path), extract_dir=str(tmp_path / "out"))
+        import_legacy_solar_session(str(session_path), extract_dir=str(tmp_path / "out"))
 
 
 def test_summary_helpers(tmp_path):
     frame_paths = _make_frame_files(tmp_path, 2)
     session_path = tmp_path / "sum.ecsolar"
-    write_solar_session(str(session_path), meta=_sample_meta(), frame_paths=frame_paths)
-    result = read_solar_session(str(session_path), extract_dir=str(tmp_path / "out"))
+    write_legacy_session(str(session_path), meta=_sample_meta(), frame_paths=frame_paths)
+    result = import_legacy_solar_session(str(session_path), extract_dir=str(tmp_path / "out"))
     assert session_frame_count(result.meta) == 2
     assert session_pick_count(result.meta) == 2
     assert session_frame_count(None) == 0
@@ -300,11 +297,11 @@ def test_session_with_circle_fits_keeps_schema_version_1(tmp_path):
     meta = _sample_meta()
     meta["measurements"]["circle_fits"] = serialize_circle_fits(_sample_circles())
     session_path = tmp_path / "circles.ecsolar"
-    write_solar_session(
+    write_legacy_session(
         str(session_path), meta=meta, frame_paths=_make_frame_files(tmp_path, 2)
     )
 
-    result = read_solar_session(str(session_path), extract_dir=str(tmp_path / "restore"))
+    result = import_legacy_solar_session(str(session_path), extract_dir=str(tmp_path / "restore"))
     assert result.meta["schema_version"] == SOLAR_SCHEMA_VERSION == 1
     assert session_circle_count(result.meta) == 2
     assert session_pick_count(result.meta) == 2

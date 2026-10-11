@@ -72,6 +72,9 @@ class BurstListTab(QWidget):
     idle = Signal()
     cache_changed = Signal()
     busy_changed = Signal(bool)
+    #: A burst was selected: (start UTC, label). The main window's geomagnetic
+    #: response and event context follow it.
+    event_time_selected = Signal(object, str)
 
     def __init__(self, stations=(), parent=None):
         super().__init__(parent)
@@ -521,6 +524,10 @@ class BurstListTab(QWidget):
                 self.fits_station_combo.addItem(station, station)
         self.fits_station_combo.blockSignals(False)
         self._clear_fits()
+        if event is not None:
+            stations = ", ".join(event.stations[:3]) + (" …" if len(event.stations) > 3 else "")
+            label = f"Burst list: type {event.burst_type or '?'}" + (f" ({stations})" if stations else "")
+            self.event_time_selected.emit(event.start_utc, label)
         if event is None:
             self._station_loader.cancel()
         else:

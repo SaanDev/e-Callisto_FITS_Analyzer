@@ -56,7 +56,12 @@ class GCSWindowActions:
             return item
 
         file_menu = self.menuBar().addMenu("&File")
-        action(file_menu, "export_analysis", "Export analysis &JSON…", self._export_analysis, "Ctrl+Shift+S")
+        # The one project, saved by the main window with every other part of it.
+        action(file_menu, "open_project", "&Open Project…", self._open_project)
+        action(file_menu, "save_project", "&Save Project", self._save_project, "Ctrl+S")
+        action(file_menu, "save_project_as", "Save Project &As…", self._save_project_as, "Ctrl+Shift+S")
+        file_menu.addSeparator()
+        action(file_menu, "export_analysis", "Export analysis &JSON…", self._export_analysis)
         action(file_menu, "export_csv", "Export recorded fits &CSV…", self.tracking_panel.export_csv)
         action(file_menu, "export_graph", "Export height–time &graph…", self.tracking_panel.export_graph)
         file_menu.addSeparator()
@@ -140,7 +145,9 @@ class GCSWindowActions:
         fits = self._track().fits
         fetching = any(panel.is_fetching() for panel in self.panels)
         loaded = any(panel.frames for panel in self.panels)
+        has_host = self._project_host() is not None
         enabled = {
+            "open_project": has_host, "save_project": has_host, "save_project_as": has_host,
             "load": not fetching,
             "cancel": fetching,
             "export_csv": bool(fits), "export_graph": bool(fits), "snapshot": loaded,
@@ -170,6 +177,28 @@ class GCSWindowActions:
             was = actions[key].blockSignals(True)
             actions[key].setChecked(on)
             actions[key].blockSignals(was)
+
+    def _project_host(self):
+        """The main window that owns the project, or None when opened alone."""
+        parent = self.parent()
+        while parent is not None:
+            if hasattr(parent, "_project_coordinator") and hasattr(parent, "save_project"):
+                return parent
+            parent = parent.parent()
+        return None
+
+    def _open_project(self):
+        host = self._project_host()
+        if host is not None:
+            host.open_project()
+
+    def _save_project(self):
+        host = self._project_host()
+        return bool(host.save_project()) if host is not None else False
+
+    def _save_project_as(self):
+        host = self._project_host()
+        return bool(host.save_project_as()) if host is not None else False
 
     def _reset_image_zoom(self):
         for panel in self.panels:
@@ -231,6 +260,7 @@ class GCSWindowActions:
             track.provenance.pop(when, None)
             self._forget_recorded_note(self._editing)
             self._refresh_fits()
+            self._notify_project_modified()
             self._set_status("Recorded fit at the current time deleted.")
 
     def _jump_to_time(self):

@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 3.1.0
+Version 3.2.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -120,3 +120,69 @@ def test_load_dst_range_filters_samples_across_month_boundaries(monkeypatch):
     assert list(times) == [datetime(2026, 2, 28, 23, 0, 0), datetime(2026, 3, 1, 0, 0, 0)]
     assert list(values) == [-20.0, -30.0]
     assert sources == (dst.ARCHIVE_REALTIME,)
+
+
+def _month(year, month, label, values):
+    return dst.DstMonthData(
+        year=year,
+        month=month,
+        source_label=label,
+        updated_at_utc=None,
+        timestamps=tuple(datetime(year, month, 1, hour) for hour in range(len(values))),
+        values_nt=tuple(values),
+    )
+
+
+def test_load_dst_range_accepts_timezone_aware_datetimes(monkeypatch):
+    from datetime import timedelta, timezone
+
+    monkeypatch.setattr(dst, "fetch_month_data", lambda year, month, **_k: _month(year, month, dst.ARCHIVE_FINAL, [-5, -6, -7]))
+    aware_start = datetime(2020, 1, 1, 1, 0, tzinfo=timezone.utc)
+    # 02:00 in UTC+1 is 01:00 UTC; it must be converted, not compared naively.
+    aware_end = datetime(2020, 1, 1, 3, 0, tzinfo=timezone(timedelta(hours=1)))
+    times, values, sources = dst.load_dst_range(aware_start, aware_end)
+    assert list(times) == [datetime(2020, 1, 1, 1, 0), datetime(2020, 1, 1, 2, 0)]
+    assert list(values) == [-6.0, -7.0]
+
+
+def test_fill_hours_become_nan(monkeypatch):
+    import math
+
+    monkeypatch.setattr(dst, "fetch_month_data", lambda year, month, **_k: _month(year, month, dst.ARCHIVE_REALTIME, [-20, 9999, -25]))
+    times, values, sources = dst.load_dst_samples(datetime(2026, 2, 1, 0), datetime(2026, 2, 1, 2))
+    assert values[0] == -20.0 and math.isnan(values[1]) and values[2] == -25.0
+    assert sources == ("Real-time", "Real-time", "Real-time")
+
+
+def test_live_months_expire_from_the_cache_but_final_ones_do_not(monkeypatch):
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(dst.time, "monotonic", lambda: clock["t"])
+    dst.clear_month_cache()
+    fetched = []
+
+    class Response:
+        status_code = 200
+        text = REALTIME_HTML
+
+        def raise_for_status(self):
+            pass
+
+    class Session:
+        def get(self, url, timeout):
+            fetched.append(url)
+            return Response()
+
+    dst.fetch_month_data(2026, 2, session=Session())
+    dst.fetch_month_data(2026, 2, session=Session())
+    assert len(fetched) == 1  # cached within the TTL
+    clock["t"] += dst.LIVE_MONTH_TTL_S + 1
+    dst.fetch_month_data(2026, 2, session=Session())
+    assert len(fetched) == 2  # a real-time month is re-read after the TTL
+
+    dst.clear_month_cache()
+    fetched.clear()
+    dst.fetch_month_data(2019, 2, session=Session())
+    clock["t"] += 10 * dst.LIVE_MONTH_TTL_S
+    dst.fetch_month_data(2019, 2, session=Session())
+    assert len(fetched) == 1  # final data never change
+    dst.clear_month_cache()

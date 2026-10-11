@@ -1,0 +1,6 @@
+[
+ {"event_starttime": "2024-05-10 06:27:00.000", "event_peaktime": "2024-05-10 06:54:00.000", "event_endtime": "2024-05-10 07:06:00.000", "fl_goescls": "X3.9", "ar_noaanum": 13664, "frm_name": "SWPC"},
+ {"event_starttime": "2024-05-10 00:10:00.000", "event_peaktime": "2024-05-10 00:13:00.000", "event_endtime": "2024-05-10 00:22:00.000", "fl_goescls": "M1.3", "ar_noaanum": 13664, "frm_name": "SWPC"},
+ {"event_starttime": "2024-05-10 03:15:00.000", "event_peaktime": "2024-05-10 03:20:00.000", "event_endtime": "2024-05-10 03:31:00.000", "fl_goescls": "C9.8", "ar_noaanum": 0, "frm_name": "SWPC"},
+ {"event_starttime": "", "fl_goescls": "C1.0"}
+]

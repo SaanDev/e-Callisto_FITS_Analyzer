@@ -1,0 +1,57 @@
+[
+ {
+  "activityID": "2024-05-10T14:00:00-IPS-001",
+  "location": "STEREO A",
+  "eventTime": "2024-05-10T14:00Z",
+  "linkedEvents": [
+   {
+    "activityID": "2024-05-07T03:12:00-CME-001"
+   },
+   {
+    "activityID": "2024-05-07T05:24:00-CME-001"
+   },
+   {
+    "activityID": "2024-05-08T05:36:00-CME-001"
+   },
+   {
+    "activityID": "2024-05-08T12:24:00-CME-001"
+   },
+   {
+    "activityID": "2024-05-08T19:12:00-CME-001"
+   },
+   {
+    "activityID": "2024-05-10T14:50:00-SEP-001"
+   }
+  ],
+  "link": "https://ccmc.gsfc.nasa.gov/DONKI/view/IPS/30687/-1"
+ },
+ {
+  "activityID": "2024-05-10T16:36:00-IPS-001",
+  "location": "Earth",
+  "eventTime": "2024-05-10T16:36Z",
+  "linkedEvents": [
+   {
+    "activityID": "2024-05-07T03:12:00-CME-001"
+   },
+   {
+    "activityID": "2024-05-07T05:24:00-CME-001"
+   },
+   {
+    "activityID": "2024-05-08T05:36:00-CME-001"
+   },
+   {
+    "activityID": "2024-05-08T12:24:00-CME-001"
+   },
+   {
+    "activityID": "2024-05-08T19:12:00-CME-001"
+   },
+   {
+    "activityID": "2024-05-10T15:00:00-GST-001"
+   },
+   {
+    "activityID": "2024-05-10T18:01:00-MPC-001"
+   }
+  ],
+  "link": "https://ccmc.gsfc.nasa.gov/DONKI/view/IPS/30688/-1"
+ }
+]

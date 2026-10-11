@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 3.1.0
+Version 3.2.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
@@ -21,6 +21,8 @@ legend. The interactive views keep the application's own look.
   fitted curve, as in the Analyzer's best fit and the Type II B-versus-R fit.
 * :func:`type_ii_spectrum_figure`: the band-splitting lanes over the spectrum.
 * :func:`goes_flux_figure`: GOES X-ray flux against time.
+* :func:`draw_event_strip`: the event-context lanes (flares, CMEs, DONKI,
+  bursts) above a spectrum, used on screen, in exports and in the composer.
 
 Nothing here imports Qt.
 """
@@ -212,6 +214,110 @@ class SwavesPanel:
 
 
 @dataclass(frozen=True)
+class EventMark:
+    """One catalog event on the strip, in seconds on the shared time axis.
+
+    ``x1`` is None for an instant (a CME's first C2 appearance, a shock
+    arrival); spans (flares, bursts) are drawn as bars.
+    """
+
+    x0: float
+    x1: float | None = None
+    label: str = ""
+    color: str = "#444444"
+    tooltip: str = ""
+
+
+@dataclass(frozen=True)
+class EventLane:
+    """One catalog's lane: its marks, and how many lie just outside the range."""
+
+    title: str
+    marks: tuple[EventMark, ...] = ()
+    before: int = 0
+    after: int = 0
+
+
+@dataclass(frozen=True)
+class EventMarkers:
+    """The event-context strip: one lane per enabled catalog, top to bottom."""
+
+    lanes: tuple[EventLane, ...] = ()
+
+    def is_empty(self) -> bool:
+        return not self.lanes
+
+
+#: Height of the strip relative to the spectrum, per lane.
+EVENT_STRIP_LANE_RATIO = 0.07
+
+
+def draw_event_strip(ax: Any, markers: EventMarkers, text: GraphText | None = None, *, origin: bool = True) -> list[tuple]:
+    """Draw the event lanes onto ``ax`` (which shares the spectrum's x axis).
+
+    Returns hit boxes ``(x0, x1, y0, y1, tooltip)`` in data coordinates, for
+    hover tooltips on screen.
+    """
+    from matplotlib.transforms import blended_transform_factory
+
+    text = text or GraphText()
+    lanes = list(markers.lanes)
+    n = max(1, len(lanes))
+    ax.set_ylim(0.0, float(n))
+    hits: list[tuple] = []
+    small = max(5.5, text.tick_size - 4.0)
+    edge = blended_transform_factory(ax.transAxes, ax.transData)
+    # A flare already under way when the plot starts is labelled at the left
+    # edge, where its bar begins on screen, rather than off the plot.
+    left = min(ax.get_xlim())
+    for index, lane in enumerate(lanes):
+        y0 = float(n - 1 - index)
+        if index:
+            ax.axhline(y0 + 1.0, color="#999999", linewidth=0.5)
+        for mark in lane.marks:
+            tip = mark.tooltip or mark.label
+            if mark.x1 is not None and mark.x1 > mark.x0:
+                ax.broken_barh([(mark.x0, mark.x1 - mark.x0)], (y0 + 0.18, 0.64),
+                               facecolors=mark.color, edgecolors="none", alpha=0.8)
+                hits.append((mark.x0, mark.x1, y0, y0 + 1.0, tip))
+            else:
+                ax.vlines(mark.x0, y0 + 0.1, y0 + 0.9, colors=mark.color, linewidth=1.6)
+                ax.plot([mark.x0], [y0 + 0.82], marker="v", markersize=4.0, color=mark.color, clip_on=True)
+                hits.append((mark.x0, mark.x0, y0, y0 + 1.0, tip))
+            if mark.label:
+                clamped = mark.x0 < left
+                nudge = 3 + (70 if clamped and lane.before else 0)
+                ax.annotate(mark.label, xy=(max(mark.x0, left), y0 + 0.5), xytext=(nudge, 0), textcoords="offset points",
+                            fontsize=small, va="center", ha="left", clip_on=True, annotation_clip=True)
+        if lane.before:
+            ax.text(0.004, y0 + 0.5, f"< {lane.before} more nearby", transform=edge, fontsize=small,
+                    va="center", ha="left", color="#555555", clip_on=False)
+        if lane.after:
+            ax.text(0.996, y0 + 0.5, f"{lane.after} more nearby >", transform=edge, fontsize=small,
+                    va="center", ha="right", color="#555555", clip_on=False)
+    ax.set_yticks([n - 0.5 - index for index in range(len(lanes))])
+    ax.set_yticklabels([lane.title for lane in lanes], fontsize=small + 0.5)
+    ax.tick_params(axis="y", which="both", length=0)
+    ax.tick_params(axis="x", which="both", labelbottom=False)
+    ax.yaxis.set_minor_locator(_null_locator())
+    if origin:
+        style_origin_axes(ax)
+        ax.tick_params(axis="y", which="both", length=0)
+        ax.tick_params(axis="x", which="both", labelbottom=False)
+        ax.yaxis.set_minor_locator(_null_locator())
+    return hits
+
+
+_draw_event_strip = draw_event_strip
+
+
+def _null_locator() -> Any:
+    from matplotlib.ticker import NullLocator
+
+    return NullLocator()
+
+
+@dataclass(frozen=True)
 class SpectrumGraph:
     """Everything :func:`dynamic_spectrum_figure` draws, as plain data.
 
@@ -239,6 +345,8 @@ class SpectrumGraph:
     goes: GoesOverlay | None = None
     measurement: Measurement | None = None
     swaves: SwavesPanel | None = None
+    #: The event-context strip, drawn above the spectrum when given.
+    events: EventMarkers | None = None
     text: GraphText = field(default_factory=GraphText)
     figsize: tuple[float, float] | None = None
 
@@ -251,21 +359,37 @@ def dynamic_spectrum_figure(graph: SpectrumGraph) -> Any:
         raise ValueError("A dynamic-spectrum figure needs a spectrum or a SWAVES panel.")
     split = graph.image is not None and graph.swaves is not None
     text = graph.text
+    events = graph.events if graph.events is not None and not graph.events.is_empty() else None
 
     with origin_graph_style(text):
-        fig = Figure(figsize=graph.figsize or (SPLIT_FIGSIZE if split else SPECTRUM_FIGSIZE), dpi=100, layout="constrained")
-        if split:
-            main_ax, swaves_ax = fig.subplots(2, 1, sharex=True)
-        elif graph.image is not None:
-            main_ax, swaves_ax = fig.add_subplot(1, 1, 1), None
+        size = graph.figsize or (SPLIT_FIGSIZE if split else SPECTRUM_FIGSIZE)
+        strip_ax = None
+        if events is not None:
+            ratio = EVENT_STRIP_LANE_RATIO * len(events.lanes)
+            if graph.figsize is None:
+                size = (size[0], size[1] * (1.0 + ratio))
+            fig = Figure(figsize=size, dpi=100, layout="constrained")
+            panels_below = [graph.image is not None, graph.swaves is not None]
+            rows = 1 + sum(panels_below)
+            axes = fig.subplots(rows, 1, sharex=True, height_ratios=[ratio] + [1.0] * (rows - 1), squeeze=False)[:, 0]
+            strip_ax = axes[0]
+            rest = list(axes[1:])
+            main_ax = rest.pop(0) if graph.image is not None else None
+            swaves_ax = rest.pop(0) if graph.swaves is not None else None
         else:
-            main_ax, swaves_ax = None, fig.add_subplot(1, 1, 1)
+            fig = Figure(figsize=size, dpi=100, layout="constrained")
+            if split:
+                main_ax, swaves_ax = fig.subplots(2, 1, sharex=True)
+            elif graph.image is not None:
+                main_ax, swaves_ax = fig.add_subplot(1, 1, 1), None
+            else:
+                main_ax, swaves_ax = None, fig.add_subplot(1, 1, 1)
 
         goes_ax = None
         if main_ax is not None:
-            goes_ax = _draw_callisto_panel(fig, main_ax, graph)
+            goes_ax = draw_callisto_panel(fig, main_ax, graph)
         if swaves_ax is not None:
-            _draw_swaves_panel(fig, swaves_ax, graph.swaves, text, standalone=main_ax is None)
+            draw_swaves_panel(fig, swaves_ax, graph.swaves, text, standalone=main_ax is None)
 
         panels = [ax for ax in (main_ax, swaves_ax) if ax is not None]
         bottom = panels[-1]
@@ -280,6 +404,9 @@ def dynamic_spectrum_figure(graph: SpectrumGraph) -> Any:
         _apply_view(main_ax, graph.view)
 
         top = panels[0]
+        if strip_ax is not None:
+            draw_event_strip(strip_ax, events, text)
+            top = strip_ax
         title = graph.title if main_ax is not None else (graph.title or graph.swaves.title)
         if title:
             top.set_title(title, loc=graph.title_loc, **text.title_kw())
@@ -288,7 +415,7 @@ def dynamic_spectrum_figure(graph: SpectrumGraph) -> Any:
     return fig
 
 
-def _draw_callisto_panel(fig: Any, ax: Any, graph: SpectrumGraph) -> Any:
+def draw_callisto_panel(fig: Any, ax: Any, graph: SpectrumGraph) -> Any:
     """The spectrogram, its colour scale and overlays; returns the GOES axes, if any."""
     image = graph.image
     text = graph.text
@@ -313,6 +440,10 @@ def _draw_callisto_panel(fig: Any, ax: Any, graph: SpectrumGraph) -> Any:
     colorbar = fig.colorbar(im, ax=ax, pad=0.02, fraction=0.05)
     _style_colorbar(colorbar, image.colorbar_label, text)
     return goes_ax
+
+
+#: The pre-3.2 private name, kept for callers that still use it.
+_draw_callisto_panel = draw_callisto_panel
 
 
 def _show_image(ax: Any, image: SpectrumImage) -> Any:
@@ -537,7 +668,7 @@ def _draw_goes_overlay(ax: Any, goes: GoesOverlay, text: GraphText) -> Any:
     return twin
 
 
-def _draw_swaves_panel(fig: Any, ax: Any, panel: SwavesPanel, text: GraphText, *, standalone: bool) -> None:
+def draw_swaves_panel(fig: Any, ax: Any, panel: SwavesPanel, text: GraphText, *, standalone: bool) -> None:
     from matplotlib.ticker import FixedLocator, FuncFormatter
 
     im = _show_image(ax, panel.image)
@@ -560,6 +691,9 @@ def _draw_swaves_panel(fig: Any, ax: Any, panel: SwavesPanel, text: GraphText, *
                 ax.axvspan(t0, t1, facecolor="none", edgecolor="#202020", linewidth=1.2, linestyle="--", zorder=5)
     colorbar = fig.colorbar(im, ax=ax, pad=0.02, fraction=0.05)
     _style_colorbar(colorbar, panel.image.colorbar_label, text)
+
+
+_draw_swaves_panel = draw_swaves_panel
 
 
 def _log10_minor_ticks(lo: float, hi: float) -> list[float]:
@@ -802,24 +936,35 @@ def goes_flux_figure(
     with origin_graph_style(text) as style:
         fig = Figure(figsize=figsize, dpi=100, layout="constrained")
         ax = fig.add_subplot(1, 1, 1)
-        plotted = 0
-        for label, xs, flux in series:
-            x_arr, f_arr = _finite_pairs(xs, flux)
-            keep = f_arr > 0.0
-            if not np.any(keep):
-                continue
-            ax.plot(x_arr[keep], f_arr[keep], color=ORIGIN_COLORS[plotted % len(ORIGIN_COLORS)], linewidth=1.5, label=str(label))
-            plotted += 1
-        if not plotted:
+        if not draw_goes_flux(ax, series, style):
             raise ValueError("No positive GOES flux to plot.")
-        ax.set_yscale("log")
-        style_origin_axes(ax)
         if ut_start_sec is not None:
             ut_time_axis(ax, ut_start_sec)
         ax.set_xlabel(x_label, **style.label_kw())
         ax.set_ylabel(y_label, **style.label_kw())
         if title:
             ax.set_title(title, **style.title_kw())
-        origin_legend(ax, loc="best")
         _emphasise_ticks(ax, style)
     return fig
+
+
+def draw_goes_flux(ax: Any, series: Sequence[tuple[str, Any, Any]], text: GraphText | None = None, *, legend: bool = True) -> int:
+    """GOES X-ray flux on ``ax``: log axis, one Origin colour per channel.
+
+    Returns how many channels had a positive, finite sample to draw.
+    """
+    text = text or GraphText()
+    plotted = 0
+    for label, xs, flux in series:
+        x_arr, f_arr = _finite_pairs(xs, flux)
+        keep = f_arr > 0.0
+        if not np.any(keep):
+            continue
+        ax.plot(x_arr[keep], f_arr[keep], color=ORIGIN_COLORS[plotted % len(ORIGIN_COLORS)], linewidth=1.5, label=str(label))
+        plotted += 1
+    if plotted:
+        ax.set_yscale("log")
+        if legend:
+            origin_legend(ax, loc="best")
+    style_origin_axes(ax)
+    return plotted

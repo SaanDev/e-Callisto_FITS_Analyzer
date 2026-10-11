@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 3.1.0
+Version 3.2.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -34,6 +34,21 @@ def _offline_archive_stations(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _offline_event_context(tmp_path, monkeypatch):
+    """No automatic network fetches on data load, and every cache under tmp_path.
+
+    Loading FITS data, selecting a burst or a downloader day would otherwise
+    start a geomagnetic (and event-catalog) download in the background of any
+    main-window test. Tests of those features re-enable it with a stub loader.
+    """
+    monkeypatch.setenv("E_CALLISTO_DISABLE_GEOMAGNETIC_AUTOFETCH", "1")
+    monkeypatch.setenv("E_CALLISTO_DISABLE_EVENT_CONTEXT_AUTOFETCH", "1")
+    monkeypatch.setenv("ECALLISTO_SPACE_WEATHER_CACHE", str(tmp_path / "_space_weather_cache"))
+    monkeypatch.setenv("ECALLISTO_PROJECTS_CACHE", str(tmp_path / "_projects_cache"))
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _isolate_qsettings(tmp_path, monkeypatch):
     """Redirect QSettings to a per-test temp location.
 
@@ -63,7 +78,12 @@ def _isolate_qsettings(tmp_path, monkeypatch):
 
     # Redirect modules that persist settings, but only if already imported, so
     # that pure backend test runs are not forced to import the Qt UI layer.
-    for module_name in ("src.ui.solar.sunpy_solar_viewer", "src.ui.app.main_window"):
+    for module_name in (
+        "src.ui.solar.sunpy_solar_viewer",
+        "src.ui.app.main_window",
+        "src.ui.space_weather.geomagnetic_response_window",
+        "src.ui.app.event_context_strip",
+    ):
         module = sys.modules.get(module_name)
         if module is not None and hasattr(module, "_make_settings"):
             monkeypatch.setattr(module, "_make_settings", _temp_settings, raising=False)

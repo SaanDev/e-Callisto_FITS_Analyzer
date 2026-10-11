@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 3.1.0
+Version 3.2.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
@@ -112,6 +112,9 @@ _TOC = """
 &#8226; <a href="#gcs-fitting">15. GCS CME Fitting</a><br>
 &#8226; <a href="#fits-downloader">16. FITS Downloader</a><br>
 &#8226; <a href="#context-viewers">17. Solar event context viewers</a><br>
+&#8226; <a href="#geomagnetic-response">17a. Geomagnetic response</a><br>
+&#8226; <a href="#event-context-strip">17b. Event context strip</a><br>
+&#8226; <a href="#event-figure">17c. Event figure composer</a><br>
 &#8226; <a href="#sunpy-explorer">18. SunPy Multi-Mission Explorer</a></p>
 <p><b>Appendix</b><br>
 &#8226; <a href="#shortcuts">A. Keyboard shortcuts</a><br>
@@ -167,15 +170,16 @@ on the right, the live cursor readout (time, frequency, intensity) and the updat
 <tr><th>Item</th><th>What it does</th></tr>
 <tr><td><b>Open</b> ({_kbd('Ctrl+O')})</td><td>Load one FITS file, or automatically combine a compatible multi-file time, frequency, or time + frequency selection.</td></tr>
 <tr><td><b>Combine FITS Files...</b></td><td>Select, validate, preview, and import time-only, frequency-only, or complete timestamp × focus-code grid combinations.</td></tr>
-<tr><td><b>Open Project</b> ({_kbd('Ctrl+Shift+O')})</td><td>Reopen a saved <code>.efaproj</code> session.</td></tr>
-<tr><td><b>Save Project</b> ({_kbd('Ctrl+S')})</td><td>Save the full state: view, thresholds, units, colormap, styling, data, and analysis session.</td></tr>
-<tr><td><b>Save Project As</b> ({_kbd('Ctrl+Shift+S')})</td><td>Save the project to a new file.</td></tr>
+<tr><td><b>Open Project</b> ({_kbd('Ctrl+Shift+O')})</td><td>Reopen a saved <code>.efaproj</code> project. Every window the project needs (Solar Image Analysis, GCS fitting) opens and is restored. An old <code>.ecsolar</code> session can be opened here too: it is imported as a new, unsaved project.</td></tr>
+<tr><td><b>Save Project</b> ({_kbd('Ctrl+S')})</td><td>Save everything in one file: the radio spectrum with its view, thresholds, units, colormap, styling and analysis, the Solar Image Analysis frames and measurements, and the GCS fits. A project may hold any of these on its own. {_kbd('Ctrl+S')} in the Solar Image Analysis or GCS window saves the same project.</td></tr>
+<tr><td><b>Save Project As</b> ({_kbd('Ctrl+Shift+S')})</td><td>Save the project to a new file. When it holds solar or GCS images you choose <b>Link data (small)</b>, which refers to the image files on this computer, or <b>Embed data (portable)</b>, which stores them in the project (the dialog shows the size) so it opens anywhere, even offline. The choice is remembered for {_kbd('Ctrl+S')}.</td></tr>
 <tr><td><b>Recover Last Session</b></td><td>Restore the most recent autosave snapshot after a crash.</td></tr>
 <tr><td><b>Generate Project Report</b></td><td>Build a consolidated PDF with the spectra, fits, and available solar-context plots. Every graph in the report is drawn in the OriginPro style, in light mode.</td></tr>
 <tr><td><b>Export &#8594; Export Figure</b> ({_kbd('Ctrl+E')})</td><td>Save the current plot, with its zoom and overlays, as PNG, PDF, EPS, SVG, TIFF, or JPG. The file is an OriginPro-style graph in light mode (Arial, closed black frame, inward ticks on all four sides, framed color scale) with your Graph Properties titles and font sizes; the plot on screen keeps its own look.</td></tr>
 <tr><td><b>Export &#8594; Export to FIT</b> ({_kbd('Ctrl+F')})</td><td>Write processed data (raw, background-subtracted, or combined) as a new FITS file.</td></tr>
 <tr><td><b>Export &#8594; Export Provenance Report</b></td><td>Write Markdown and JSON summaries of the source, processing, RFI, annotations, and operation log.</td></tr>
 <tr><td><b>Export &#8594; Export Analysis Log</b></td><td>Write CSV and text summaries of fit parameters and derived shock metrics.</td></tr>
+<tr><td><b>Export &#8594; Event Figure…</b></td><td>Compose one publication figure of the whole event: image thumbnails, the spectrum, SWAVES, GOES X-rays and protons, the event catalogs and the geomagnetic response (see <a href="#event-figure">section 17c</a>).</td></tr>
 </table>
 
 <a name="menu-edit"></a>
@@ -198,7 +202,8 @@ on the right, the live cursor readout (time, frequency, intensity) and the updat
 <li><b>CMEs &#8594; SOHO/LASCO CME Catalog</b>: daily CME lists, parameter table, and LASCO movies.</li>
 <li><b>Flares &#8594; GOES X-Ray Flux</b>: the standalone X-ray viewer.</li>
 <li><b>Energetic Particles &#8594; GOES SEP Proton Flux</b>: NOAA SGPS proton flux across a date range.</li>
-<li><b>Geomagnetic</b>: Kyoto Dst Index and GFZ Kp Index viewers.</li>
+<li><b>Geomagnetic</b>: Kyoto Dst Index and GFZ Kp Index viewers, and <b>Geomagnetic Response…</b>, the
+Dst, Kp, IMF, solar-wind and SYM-H/AE response to the selected event (see <a href="#geomagnetic-response">section 17a</a>).</li>
 <li><b>Archives &#8594; SunPy Multi-Mission Explorer</b>: search and plot external imagery and time series
 (see <a href="#sunpy-explorer">section 18</a>).</li>
 <li><b>Radio Bursts</b>: the e-CALLISTO, Learmonth, and STEREO/SWAVES loaders.</li>
@@ -219,6 +224,8 @@ spectrum, with a flare-class guide (A/B/C/M/X). The overlay does not alter the d
 <code>.efaview.json</code> file.</li>
 <li><b>Multi-Station Comparison</b>: stack several station spectra in synchronized panels aligned by UT clock or
 seconds from file start, with shared, per-station, or manual color scaling, then export the view.</li>
+<li><b>Event Context Strip</b>: GOES flares, CDAW CMEs, NASA DONKI events and e-CALLISTO bursts as lanes above
+the spectrum; <b>Event Context Sources</b> chooses the lanes (see <a href="#event-context-strip">section 17b</a>).</li>
 <li><b>Theme</b>: System, Light, or Dark.</li>
 <li><b>Mode</b>: Classic (Matplotlib rendering) or Modern (hardware-accelerated rendering).</li>
 </ul>
@@ -303,6 +310,10 @@ would saturate the new scale. The <b>Logarithmic Threshold Scale</b> checkbox gi
 cividis, turbo, RdYlBu, jet, cubehelix, bone_r), font family, graph title and a Remove Titles checkbox, font
 sizes for tick labels/axis labels/title, and Bold/Italic style toggles.</li>
 <li><b>Analysis Summary</b>: a read-only summary of the current analysis session.</li>
+<li><b>Geomagnetic Response</b>: the event the response is for, the Dst minimum (with how many hours after the event
+it came), the Kp maximum and its NOAA G level, the lowest Bz, the fastest solar wind and the storm class, with
+<b>Refresh</b> and <b>Open window</b>. After a burst-list or downloader selection, <b>Use loaded data</b> goes back
+to the loaded file's event (see <a href="#geomagnetic-response">section 17a</a>).</li>
 <li><b>Ruler Measurement</b>: the latest ruler readout, with a Clear control.</li>
 </ul>
 
@@ -348,8 +359,10 @@ TIFF or JPG in light mode and the OriginPro style.</li>
 <li><b>Common actions</b>: fetch or find archive records, load local FITS, plot frames, running/base difference,
 crop by ROI, detect bright active regions, fetch NOAA/HEK labels, build RGB composites, and export plots,
 cropped FITS, CSV, GIF, or MP4.</li>
-<li><b>Sessions</b>: save and reopen the workspace as an <code>.ecsolar</code> file
-(<code>Ctrl+S</code> / <code>Ctrl+Shift+S</code>). Press {_kbd('Esc')} to cancel an in-progress measurement pick.</li>
+<li><b>Project</b>: the frames, view, crop and measurements are part of the main window's project
+(<code>Project &#8594; Save Project</code>, <code>Ctrl+S</code> / <code>Ctrl+Shift+S</code>). A linked project whose
+frames have been moved or cleared from the cache fetches them again from the archive; measurements are matched
+to the reloaded frames by observation time. Press {_kbd('Esc')} to cancel an in-progress measurement pick.</li>
 <li><b>GCS CME Fitting</b>: <code>Analysis &#8594; GCS CME Fitting...</code> opens the three-viewpoint fitting window
 at the time of the displayed frame (see <a href="#gcs-fitting">section 15</a>).</li>
 <li><b>Potential Field (PFSS)</b>: extrapolate the coronal magnetic field from a synoptic magnetogram and draw
@@ -404,7 +417,7 @@ statistics including open flux and open-area fraction. The figure can be saved a
 </ul>
 <p>Stepping through a sequence re-projects the same solution onto each frame rather than re-solving, which is
 correct: the magnetogram is valid across the rotation while the observer's view changes frame to frame. Saving a
-session stores the PFSS settings, not the solution — reopening restores the controls and one click reproduces
+project stores the PFSS settings, not the solution — reopening restores the controls and one click reproduces
 the overlay.</p>
 <p class="note">PFSS needs the optional <code>sunkit-magex</code> package. Without it the card stays visible but
 disabled and shows the install command. Unmeasured pixels in a magnetogram — GONG leaves gaps over the poles —
@@ -515,7 +528,10 @@ spheroid.</p>
 (light mode) whatever the application theme. Graphs follow the OriginPro style. Figures can be saved as PNG, PDF,
 EPS, SVG, TIFF or JPG.</p>
 <ul>
-<li><code>File &#8594; Export analysis JSON</code> ({_kbd('Ctrl+Shift+S')}): the current, recorded and set-aside
+<li><code>File &#8594; Save Project</code> ({_kbd('Ctrl+S')}): the fitting is part of the main window's project,
+with the channels, display settings, front points and recorded fits; with <b>Embed data</b> the JPEG2000 images go in
+too, so the fit reopens offline.</li>
+<li><code>File &#8594; Export analysis JSON</code>: the current, recorded and set-aside
 parameters of both models, with the clicked points, image times, offsets and observer geometry. It is an analyzer
 export, not a PyThea session file.</li>
 <li><code>File &#8594; Export recorded fits CSV</code>, or <b>Export &#8594; Table as CSV</b> in the Kinematics
@@ -604,6 +620,56 @@ spacecraft override and PNG/CSV export.</li>
 PNG/CSV export.</li>
 </ul>
 
+<a name="geomagnetic-response"></a>
+<h2>17a. Geomagnetic response</h2>
+<p>What Earth's environment did around a radio event, from one day before its start to seven days after (the span
+is editable). The event is the loaded data's observation start, or the row selected in the burst list, or the day or
+file selected in the e-CALLISTO downloader. The sidebar card summarises it; the window
+(<code>Solar Events &#8594; Geomagnetic &#8594; Geomagnetic Response…</code>) shows every panel on one UTC axis. Nothing
+ever pops up on its own.</p>
+<ul>
+<li><b>Dst / SYM-H</b>: Kyoto Dst (final, provisional or real-time, month by month) with the 1-minute SYM-H index.</li>
+<li><b>Kp</b>: GFZ Kp bars coloured by NOAA G level.</li>
+<li><b>IMF</b>: Bt, Bz and By (GSM).</li>
+<li><b>Plasma</b>: speed and density, temperature and dynamic pressure.</li>
+<li><b>Ey, β, Mach</b> and <b>AE / AL / AU</b>.</li>
+</ul>
+<p>The solar wind comes from OMNI 5-minute data, time-shifted to the bow shock. Where OMNI is not yet published —
+usually the last few weeks — the L1 measurements of DSCOVR or SWPC's real-time feed are used instead and labelled
+<i>L1, not time-shifted to the bow shock</i>; their Ey, β and Mach number are computed with OMNI's formulas. SYM-H and
+AE have no such stand-in and are reported as not yet published. The event start is a dashed red line, the radio data's
+interval is shaded, and DONKI shock arrivals at Earth, storms and their linked CMEs are marked. Choose the panels with
+the checkboxes (remembered between sessions); export the figure (OriginPro style: PNG, PDF, SVG, EPS, TIFF, JPG) or a CSV
+whose provenance column names the archive or spacecraft of every value. The response is saved in the project, so it
+reopens without fetching anything, and the project report includes it.</p>
+
+<a name="event-context-strip"></a>
+<h2>17b. Event context strip</h2>
+<p><code>View &#8594; Event Context Strip</code> adds lanes above the spectrum, on its own time axis, in both the
+Classic and the hardware-accelerated view:</p>
+<ul>
+<li><b>Flares</b>: the NOAA SWPC flare list (through the HEK), as bars coloured by GOES class.</li>
+<li><b>CMEs</b>: the CDAW LASCO catalog, at the first C2 appearance, with speed and width.</li>
+<li><b>DONKI</b>: NASA's CMEs, flares, interplanetary shocks, geomagnetic storms and SEP events.</li>
+<li><b>Bursts</b>: the e-CALLISTO (Monstein) burst lists, as bars with their type.</li>
+</ul>
+<p>Hover a marker for its details. Events up to six hours outside the spectrum are counted at the lane's edge
+("2 more nearby"). Choose the lanes in <code>View &#8594; Event Context Sources</code>. The catalogs are cached per day
+on disk; recent days are refreshed after a day. The strip is included in <b>Export Figure</b> and the project report
+while it is shown, and saved in the project.</p>
+
+<a name="event-figure"></a>
+<h2>17c. Event figure composer</h2>
+<p><code>File &#8594; Export As &#8594; Event Figure…</code> builds one figure of the whole event. Tick the event panels
+(CALLISTO spectrum, STEREO/SWAVES, GOES X-ray flux, GOES protons, event catalogs), move them up or down and set each
+one's height. Add thumbnails by time and source (AIA, EIT, LASCO, STEREO COR1/COR2): a frame already loaded in the
+Solar Image Analysis or GCS window near that time is used as it is processed there; otherwise a Helioviewer image is
+fetched. Each thumbnail's time is drawn as a dashed line down through the panels. The optional geomagnetic block has its
+own, days-long time axis, with the radio interval shaded and DONKI markers. Pick the page width — 8.8 cm (one column),
+12 cm, 18 cm (two columns) or custom — and a font scale; the preview follows every change. <b>Fetch missing data</b>
+downloads what the chosen panels need and is not loaded (GOES protons and X-rays, thumbnails). Export as PNG, PDF, EPS,
+SVG, TIFF or JPG. The composer's settings are saved in the project.</p>
+
 <a name="sunpy-explorer"></a>
 <h2>18. SunPy Multi-Mission Explorer</h2>
 <p>Open from <code>Solar Events &#8594; Archives</code>. Search external archives (SDO/AIA, SOHO/EIT, SOHO/LASCO C2/C3,
@@ -619,8 +685,8 @@ download need network access; cached files reopen offline.</p>
 <tr><td>{_kbd('Ctrl+O')}</td><td>Open a FITS file</td></tr>
 <tr><td>{_kbd('Ctrl+E')}</td><td>Export figure</td></tr>
 <tr><td>{_kbd('Ctrl+F')}</td><td>Export as FITS</td></tr>
-<tr><td>{_kbd('Ctrl+S')}</td><td>Save Project (Save Session in the Solar window)</td></tr>
-<tr><td>{_kbd('Ctrl+Shift+S')}</td><td>Save Project As / Save Session As</td></tr>
+<tr><td>{_kbd('Ctrl+S')}</td><td>Save Project (in the main, Solar Image Analysis and GCS windows)</td></tr>
+<tr><td>{_kbd('Ctrl+Shift+S')}</td><td>Save Project As</td></tr>
 <tr><td>{_kbd('Ctrl+Shift+O')}</td><td>Open Project</td></tr>
 <tr><td>{_kbd('Ctrl+Z')}</td><td>Undo</td></tr>
 <tr><td>{_kbd('Ctrl+Shift+Z')}</td><td>Redo</td></tr>
@@ -633,9 +699,9 @@ download need network access; cached files reopen offline.</p>
 <table>
 <tr><th>Extension</th><th>Meaning</th></tr>
 <tr><td><code>.fit .fits .fit.gz .fits.gz</code></td><td>Radio spectra loaded by the analyzer, and solar images in the imaging workspace. Upper-case suffixes (<code>.FITS</code>) open the same way.</td></tr>
-<tr><td><code>.efaproj</code></td><td>Full analyzer project (view, processing, data, and analysis session).</td></tr>
+<tr><td><code>.efaproj</code></td><td>The one project file: radio analysis, Solar Image Analysis and GCS fitting, with the solar and GCS images linked or embedded. Projects saved by v3.2 cannot be opened by v3.1.</td></tr>
 <tr><td><code>.efaview.json</code></td><td>Portable view configuration (range, units, thresholds, colormap, styling).</td></tr>
-<tr><td><code>.ecsolar</code></td><td>Solar Image Analysis session (embeds its FITS frames).</td></tr>
+<tr><td><code>.ecsolar</code></td><td>Solar Image Analysis session from v3.1 and earlier. Opening one imports it as a new project; it is never written any more.</td></tr>
 </table>
 
 <a name="tips"></a>

@@ -1,36 +1,35 @@
 """
 e-CALLISTO FITS Analyzer
-Version 3.1.0
+Version 3.2.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
-Self-contained session files for the Solar Image Analysis window.
+Legacy ``.ecsolar`` sessions and the solar measurement serializers.
 
-A solar session is a single ``.ecsolar`` zip that bundles *everything* needed to
-reopen an analysis exactly where it was left off:
+Until v3.1 the Solar Image Analysis window saved its own ``.ecsolar`` file: a
+zip of ``meta.json`` plus the original FITS frames under ``frames/``. Since
+v3.2 the solar analysis is a part of the one ``.efaproj`` project (see
+``project_session`` and ``src.ui.app.project_parts``) and the app never writes
+``.ecsolar`` again. Old sessions are still imported, read-only, with
+:func:`import_legacy_solar_session`.
 
-* the original FITS frame files (raw bytes, so restore goes back through the
-  normal ``Map()`` load path and keeps every header/WCS/colormap detail), and
-* a ``meta.json`` describing the data source, the display/crop/playback state,
-  and the hand-made CME measurements (height-time picks and circle fits).
-
-Frames are embedded rather than referenced so a session survives a cleared cache
-or a move to another machine, at the cost of a large file. This module is pure
-stdlib (no Qt, no SunPy, no numpy) so it unit-tests without a display or network.
-The window layer (`solar_data_analysis_window`) is responsible for reading state
-off its widgets into the ``meta`` dict and pushing it back after a restore.
+The picks / circle-fit / PFSS serializers here are shared by both formats: a
+project's ``meta["solar"]`` is the same session meta, so the solar window keeps
+one capture and one restore path. This module is pure stdlib (no Qt, no SunPy,
+no numpy) so it unit-tests without a display or network.
 """
 
 from __future__ import annotations
 
-import io
 import json
 import os
 import re
 import zipfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Iterable, Mapping, Sequence
+
+from src.backend.session.project_session import ProjectFormatError, extract_members, is_safe_arcname
 
 SOLAR_SESSION_MAGIC = "e-callisto-solar-analysis"
 SOLAR_SCHEMA_VERSION = 1
@@ -43,10 +42,6 @@ _ARCNAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 class SolarSessionError(RuntimeError):
     """Raised when a ``.ecsolar`` file is malformed or unreadable."""
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
 def _safe_basename(path: str) -> str:
@@ -225,7 +220,7 @@ def deserialize_circle_fits(raw: Any) -> dict[int, tuple]:
     return out
 
 
-# --- GCS fits ---------------------------------------------------------------
+# --- PFSS -----------------------------------------------------------------------
 
 
 def serialize_pfss_state(state: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -288,139 +283,6 @@ def deserialize_pfss_state(payload: Any) -> dict[str, Any]:
             if isinstance(item, Sequence) and len(item) >= 2
         ]
     return out
-
-
-def serialize_gcs_fits(fits: Mapping[int, Sequence[Any]] | None) -> list[dict[str, Any]]:
-    """Flatten the controller's ``{frame_index: GCSFitEntry}`` GCS fits.
-
-    Read positionally, like :func:`serialize_circle_fits`, so this module keeps
-    knowing nothing about the UI layer's types. Stored under a new key in
-    ``meta["measurements"]`` for the reason spelled out there: an unknown key is
-    ignored on read, whereas a schema bump would refuse the whole file.
-    """
-    out: list[dict[str, Any]] = []
-    if not isinstance(fits, Mapping):
-        return out
-    for idx in sorted(fits.keys(), key=lambda k: _safe_int(k, 0)):
-        entry = fits[idx]
-        if not isinstance(entry, Sequence) or len(entry) < 15:
-            continue
-        when = entry[0]
-        if isinstance(when, datetime):
-            when_iso: str | None = when.isoformat()
-        else:
-            when_iso = str(when) if when else None
-        out.append(
-            {
-                "frame_index": _safe_int(idx, 0),
-                "time": when_iso,
-                "apex_height_rsun": _safe_float(entry[1]),
-                "lon_deg": _safe_float(entry[2]),
-                "lat_deg": _safe_float(entry[3]),
-                "tilt_deg": _safe_float(entry[4]),
-                "alpha_deg": _safe_float(entry[5]),
-                "kappa": _safe_float(entry[6]),
-                "rms_arcsec": _safe_float(entry[7]),
-                "n_points": _safe_int(entry[8], 0),
-                "n_viewpoints": _safe_int(entry[9], 1),
-                "separation_deg": _safe_float(entry[10]),
-                "lon_err_deg": _safe_float(entry[11]),
-                "lat_err_deg": _safe_float(entry[12]),
-                "height_err_rsun": _safe_float(entry[13]),
-                "refined": bool(entry[14]),
-            }
-        )
-    return out
-
-
-def deserialize_gcs_fits(raw: Any) -> dict[int, tuple]:
-    """Rebuild the GCS-fit map from :func:`serialize_gcs_fits` output.
-
-    A row without the six model parameters is dropped rather than defaulted: a
-    zeroed longitude or height would silently restore a *different* CME and feed
-    the 3-D kinematics a wrong number. The error bars and fit-quality extras are
-    allowed to be missing — they degrade to NaN, which the panel already renders
-    as "no error quoted".
-    """
-    out: dict[int, tuple] = {}
-    if not isinstance(raw, Iterable):
-        return out
-    for row in raw:
-        if not isinstance(row, Mapping):
-            continue
-        required = [
-            _safe_float(row.get(key))
-            for key in ("apex_height_rsun", "lon_deg", "lat_deg", "tilt_deg", "alpha_deg", "kappa")
-        ]
-        if any(value is None for value in required):
-            continue
-        height, lon, lat, tilt, alpha, kappa = (float(value) for value in required)
-
-        def optional(key: str) -> float:
-            value = _safe_float(row.get(key))
-            return float(value) if value is not None else float("nan")
-
-        out[_safe_int(row.get("frame_index"), 0)] = (
-            _parse_iso(row.get("time")),
-            height,
-            lon,
-            lat,
-            tilt,
-            alpha,
-            kappa,
-            optional("rms_arcsec"),
-            _safe_int(row.get("n_points"), 0),
-            _safe_int(row.get("n_viewpoints"), 1),
-            optional("separation_deg"),
-            optional("lon_err_deg"),
-            optional("lat_err_deg"),
-            optional("height_err_rsun"),
-            bool(row.get("refined", False)),
-        )
-    return out
-
-
-def serialize_gcs_points(points: Mapping[int, Sequence[Any]] | None) -> list[dict[str, Any]]:
-    """Flatten the front points clicked per frame for the GCS refine step."""
-    return serialize_circle_points(points)
-
-
-def deserialize_gcs_points(raw: Any) -> dict[int, list[tuple[float, float]]]:
-    """Rebuild the clicked GCS front points."""
-    return deserialize_circle_points(raw)
-
-
-def serialize_gcs_parameters(params: Any) -> list[float] | None:
-    """The live (uncommitted) slider parameters, so reopening shows the same shell."""
-    if params is None:
-        return None
-    values = params.as_array() if hasattr(params, "as_array") else params
-    try:
-        out = [float(value) for value in values]
-    except Exception:
-        return None
-    return out if len(out) == 6 else None
-
-
-def deserialize_gcs_parameters(raw: Any) -> list[float] | None:
-    """Rebuild the live GCS parameters; ``None`` when absent or malformed."""
-    if not isinstance(raw, Iterable) or isinstance(raw, (str, bytes, Mapping)):
-        return None
-    values = [_safe_float(value) for value in raw]
-    if len(values) != 6 or any(value is None for value in values):
-        return None
-    return [float(value) for value in values]
-
-
-def session_gcs_count(meta: Mapping[str, Any] | None) -> int:
-    """How many GCS fits a saved session holds (for the restore summary)."""
-    if not isinstance(meta, Mapping):
-        return 0
-    measurements = meta.get("measurements")
-    if not isinstance(measurements, Mapping):
-        return 0
-    raw = measurements.get("gcs_fits")
-    return len(raw) if isinstance(raw, list) else 0
 
 
 def serialize_circle_points(points: Mapping[int, Sequence[Any]] | None) -> list[dict[str, Any]]:
@@ -488,101 +350,20 @@ def _safe_int(value: Any, default: int) -> int:
         return int(default)
 
 
-# ------------------------------------------------------------------------- writing
+# ------------------------------------------------------------------------- reading
 
 
 @dataclass(frozen=True)
 class SolarSessionResult:
-    """What :func:`read_solar_session` hands back to the window."""
+    """What :func:`import_legacy_solar_session` hands back to the window."""
 
     meta: dict[str, Any]
     frame_paths: list[str]  # extracted FITS files, in the saved load order
 
 
-def _frame_manifest(frame_paths: Sequence[str]) -> tuple[list[dict[str, str]], list[str]]:
-    """Assign each source file a unique in-zip name, preserving order."""
-    manifest: list[dict[str, str]] = []
-    used: set[str] = set()
-    kept_paths: list[str] = []
-    for i, path in enumerate(frame_paths):
-        text = str(path or "").strip()
-        if not text:
-            continue
-        base = _safe_basename(text)
-        arcname = f"{FRAMES_DIR}/{i:04d}_{base}"
-        # f-string index already guarantees uniqueness, but guard anyway.
-        suffix = 1
-        while arcname in used:
-            arcname = f"{FRAMES_DIR}/{i:04d}_{suffix}_{base}"
-            suffix += 1
-        used.add(arcname)
-        manifest.append({"arcname": arcname, "name": base})
-        kept_paths.append(text)
-    return manifest, kept_paths
 
-
-def write_solar_session(
-    path: str,
-    *,
-    meta: Mapping[str, Any],
-    frame_paths: Sequence[str],
-) -> int:
-    """Write a ``.ecsolar`` session bundling ``meta`` and the FITS frame files.
-
-    ``frame_paths`` are copied byte-for-byte into the archive under ``frames/``.
-    Returns the number of frame files actually embedded. Raises
-    :class:`SolarSessionError` if none of the given files could be read (a
-    session with no frames cannot be restored).
-    """
-    manifest, kept_paths = _frame_manifest(frame_paths)
-    if not manifest:
-        raise SolarSessionError("Cannot save a solar session with no frame files.")
-
-    payload_meta = dict(meta)
-    payload_meta["magic"] = SOLAR_SESSION_MAGIC
-    payload_meta["schema_version"] = SOLAR_SCHEMA_VERSION
-    payload_meta.setdefault("app", "e-CALLISTO FITS Analyzer")
-    payload_meta.setdefault("created_at", _now_iso())
-    payload_meta["frame_files"] = manifest
-
-    embedded = 0
-    tmp_path = f"{path}.tmp"
-    try:
-        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for entry, source_path in zip(manifest, kept_paths):
-                try:
-                    with open(source_path, "rb") as handle:
-                        data = handle.read()
-                except OSError as exc:
-                    raise SolarSessionError(
-                        f"Could not read frame file for the session:\n{source_path}\n{exc}"
-                    ) from exc
-                zf.writestr(entry["arcname"], data)
-                embedded += 1
-            meta_bytes = json.dumps(
-                payload_meta, indent=2, sort_keys=True, ensure_ascii=False
-            ).encode("utf-8")
-            zf.writestr(META_FILENAME, meta_bytes)
-    except Exception:
-        _quiet_remove(tmp_path)
-        raise
-
-    os.replace(tmp_path, path)
-    return embedded
-
-
-def _quiet_remove(path: str) -> None:
-    try:
-        os.remove(path)
-    except OSError:
-        pass
-
-
-# ------------------------------------------------------------------------- reading
-
-
-def read_solar_session(path: str, *, extract_dir: str) -> SolarSessionResult:
-    """Read a ``.ecsolar`` session and extract its frames into ``extract_dir``.
+def import_legacy_solar_session(path: str, *, extract_dir: str) -> SolarSessionResult:
+    """Read a legacy ``.ecsolar`` session and extract its frames into ``extract_dir``.
 
     The returned ``frame_paths`` are in the original load order so replaying them
     through the normal FITS loader reproduces the same frame sequence (and hence
@@ -596,8 +377,11 @@ def read_solar_session(path: str, *, extract_dir: str) -> SolarSessionResult:
                 raise SolarSessionError("Not a valid solar session (missing meta.json).") from exc
             meta = _load_meta(meta_raw)
             manifest = _validate_manifest(meta, zf)
-            os.makedirs(extract_dir, exist_ok=True)
-            frame_paths = _extract_frames(zf, manifest, extract_dir)
+            try:
+                extracted = extract_members(zf, [entry["arcname"] for entry in manifest], extract_dir)
+            except ProjectFormatError as exc:
+                raise SolarSessionError(str(exc)) from exc
+            frame_paths = [extracted[entry["arcname"]] for entry in manifest]
     except zipfile.BadZipFile as exc:
         raise SolarSessionError("Not a valid solar session file (bad zip).") from exc
 
@@ -642,39 +426,11 @@ def _validate_manifest(meta: Mapping[str, Any], zf: zipfile.ZipFile) -> list[dic
 
 
 def _is_safe_frame_arcname(arcname: str) -> bool:
-    """Reject absolute paths and ``..`` traversal; only allow ``frames/<file>``."""
-    if not arcname or arcname != arcname.strip():
+    """A safe member path (see ``project_session.is_safe_arcname``) directly under ``frames/``."""
+    if not is_safe_arcname(arcname):
         return False
-    normalized = arcname.replace("\\", "/")
-    if normalized.startswith("/") or ":" in normalized:
-        return False
-    parts = normalized.split("/")
-    if len(parts) != 2 or parts[0] != FRAMES_DIR:
-        return False
-    leaf = parts[1]
-    return bool(leaf) and leaf not in {".", ".."}
-
-
-def _extract_frames(
-    zf: zipfile.ZipFile, manifest: Sequence[Mapping[str, str]], extract_dir: str
-) -> list[str]:
-    frame_paths: list[str] = []
-    used: set[str] = set()
-    for entry in manifest:
-        arcname = entry["arcname"]
-        leaf = arcname.split("/")[-1]
-        out_name = leaf
-        suffix = 1
-        while out_name.lower() in used:
-            stem, ext = os.path.splitext(leaf)
-            out_name = f"{stem}_{suffix}{ext}"
-            suffix += 1
-        used.add(out_name.lower())
-        out_path = os.path.join(extract_dir, out_name)
-        with zf.open(arcname) as src, open(out_path, "wb") as dst:
-            dst.write(src.read())
-        frame_paths.append(out_path)
-    return frame_paths
+    parts = arcname.split("/")
+    return len(parts) == 2 and parts[0] == FRAMES_DIR
 
 
 # ---------------------------------------------------------------------- summaries

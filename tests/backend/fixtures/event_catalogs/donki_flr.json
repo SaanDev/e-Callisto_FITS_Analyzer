@@ -1,0 +1,24 @@
+[
+ {
+  "flrID": "2024-05-08T01:33:00-FLR-001",
+  "beginTime": "2024-05-08T01:33Z",
+  "peakTime": "2024-05-08T01:41Z",
+  "endTime": "2024-05-08T01:48Z",
+  "classType": "X1.0",
+  "sourceLocation": "N25W60",
+  "activeRegionNum": 13663,
+  "linkedEvents": null,
+  "link": "https://ccmc.gsfc.nasa.gov/DONKI/view/FLR/30548/-1"
+ },
+ {
+  "flrID": "2024-05-08T02:16:00-FLR-001",
+  "beginTime": "2024-05-08T02:16Z",
+  "peakTime": "2024-05-08T02:27Z",
+  "endTime": "2024-05-08T02:36Z",
+  "classType": "M3.4",
+  "sourceLocation": "S20W10",
+  "activeRegionNum": 13664,
+  "linkedEvents": null,
+  "link": "https://ccmc.gsfc.nasa.gov/DONKI/view/FLR/30566/-1"
+ }
+]

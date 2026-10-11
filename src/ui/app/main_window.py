@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 3.1.0
+Version 3.2.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -148,6 +148,7 @@ from src.ui.app.recent_files import (
     fits_entry_label,
     recent_fits_entries,
     recent_projects,
+    is_legacy_solar_session_path,
     remove_recent_fits,
     remove_recent_project,
 )
@@ -159,7 +160,35 @@ from src.backend.session.presets import (
     parse_presets_json,
     upsert_preset,
 )
-from src.backend.session.project_session import ProjectFormatError, read_project, write_project
+from src.backend.session.project_session import (
+    STORAGE_EMBED,
+    STORAGE_LINK,
+    ProjectFormatError,
+    ProjectPayload,
+    project_storage,
+    read_project,
+    write_project,
+)
+from src.backend.session.solar_session import SolarSessionError, import_legacy_solar_session
+from src.ui.space_weather.geomagnetic_card import GeomagneticCard
+from src.ui.app.event_context_strip import EventContextController
+from src.ui.app.event_figure_composer import ComposerState
+from src.backend.space_weather.event_catalogs import SOURCE_LABELS as EVENT_SOURCE_LABELS, SOURCES as EVENT_SOURCES
+from src.backend.radio.radio_figures import draw_event_strip
+from src.ui.space_weather.geomagnetic_controller import (
+    SOURCE_BURST_LIST,
+    SOURCE_DOWNLOADER,
+    GeomagneticController,
+)
+from src.ui.app.project_parts import (
+    ControllerPart,
+    ProjectCoordinator,
+    ProjectSaveListener,
+    ProjectSaveWorker,
+    describe_storage_choice,
+    human_size,
+    projects_cache_root,
+)
 from src.backend.session.project_report import (
     ProjectReportFigure,
     ProjectReportInput,
@@ -909,6 +938,23 @@ class MainWindow(QMainWindow):
         self.measurement_readout = MeasurementReadout("Ruler Measurement", self)
         self.measurement_readout.clearRequested.connect(self.clear_ruler_measurement)
 
+        # Geomagnetic response to the selected event: a summary card here and
+        # a full window, both fed by one controller (never an automatic pop-up).
+        self._geomagnetic = GeomagneticController(self)
+        self._geomagnetic_window = None
+        self.geomagnetic_card = GeomagneticCard(self._geomagnetic)
+        self.geomagnetic_card.openWindowRequested.connect(self.open_geomagnetic_window)
+        # Flares, CMEs, DONKI and bursts as lanes above the spectrum.
+        self._event_context = EventContextController(self)
+        # The event-figure composer's settings live here, so they are saved
+        # with the project whether or not its window is open.
+        self._composer_state = ComposerState(self)
+        self._composer_window = None
+        self._event_strip_ax = None
+        self._event_strip_hits = []
+        self._event_strip_hover_cid = None
+        self._event_strip_refresh_pending = False
+
         # -------------------------
         # Build the LEFT PANEL as a widget, then put it in a ScrollArea
         # This is the key fix for Windows (no overlaps, no clipping).
@@ -925,6 +971,7 @@ class MainWindow(QMainWindow):
         side_panel_layout.addWidget(self.axis_group_box)
         side_panel_layout.addWidget(self.graph_group)
         side_panel_layout.addWidget(self.analysis_summary_group)
+        side_panel_layout.addWidget(self.geomagnetic_card)
         side_panel_layout.addWidget(self.measurement_readout)
         side_panel_layout.addStretch(1)
 
@@ -937,6 +984,7 @@ class MainWindow(QMainWindow):
         self.axis_group_box.setMaximumWidth(SIDEBAR_W)
         self.graph_group.setMaximumWidth(SIDEBAR_W)
         self.analysis_summary_group.setMaximumWidth(SIDEBAR_W)
+        self.geomagnetic_card.setMaximumWidth(SIDEBAR_W)
         self.measurement_readout.setMaximumWidth(SIDEBAR_W)
 
         # Sidebar collapse/expand uses the same method as the Solar Image
@@ -1090,6 +1138,15 @@ class MainWindow(QMainWindow):
         export_menu.addAction(self.export_analysis_log_action)
         self.export_analysis_log_action.triggered.connect(self.export_analysis_log)
 
+        export_menu.addSeparator()
+        self.event_figure_action = QAction("Event Figure…", self)
+        self.event_figure_action.setToolTip(
+            "Compose one publication figure of the event: thumbnails, the spectrum, SWAVES, GOES, "
+            "protons, the event catalogs and the geomagnetic response."
+        )
+        self.event_figure_action.triggered.connect(self.open_event_figure_composer)
+        export_menu.addAction(self.event_figure_action)
+
         # Edit Menu
         edit_menu = menubar.addMenu("Edit")
 
@@ -1176,6 +1233,13 @@ class MainWindow(QMainWindow):
         self.open_kp_action = QAction("GFZ Kp Index", self)
         self.open_kp_action.triggered.connect(self.open_kp_window)
         geomagnetic_submenu.addAction(self.open_kp_action)
+        geomagnetic_submenu.addSeparator()
+        self.open_geomagnetic_action = QAction("Geomagnetic Response…", self)
+        self.open_geomagnetic_action.setToolTip(
+            "Dst, Kp, IMF, solar wind and SYM-H/AE from 1 day before to 7 days after the selected event."
+        )
+        self.open_geomagnetic_action.triggered.connect(self.open_geomagnetic_window)
+        geomagnetic_submenu.addAction(self.open_geomagnetic_action)
 
         # Archives submenu
         archives_submenu = solar_events_menu.addMenu("Archives")
@@ -1246,6 +1310,26 @@ class MainWindow(QMainWindow):
         self.multi_station_comparison_action = QAction("Multi-Station Comparison...", self)
         view_menu.addAction(self.multi_station_comparison_action)
         self.multi_station_comparison_action.triggered.connect(self.open_multi_station_comparison_dialog)
+        view_menu.addSeparator()
+        self.event_strip_action = QAction("Event Context Strip", self, checkable=True)
+        self.event_strip_action.setChecked(self._event_context.enabled)
+        self.event_strip_action.setToolTip(
+            "Show GOES flares, CDAW CMEs, NASA DONKI events and e-CALLISTO bursts as lanes above the spectrum."
+        )
+        self.event_strip_action.toggled.connect(self._event_context.set_enabled)
+        view_menu.addAction(self.event_strip_action)
+        self.event_strip_sources_menu = view_menu.addMenu("Event Context Sources")
+        self.event_strip_source_actions = {}
+        for source in EVENT_SOURCES:
+            act = QAction(EVENT_SOURCE_LABELS[source], self, checkable=True)
+            act.setChecked(source in self._event_context.sources)
+            act.toggled.connect(self._on_event_strip_sources_changed)
+            self.event_strip_sources_menu.addAction(act)
+            self.event_strip_source_actions[source] = act
+        self.event_strip_sources_menu.addSeparator()
+        self.event_strip_refresh_action = QAction("Refresh Event Context", self)
+        self.event_strip_refresh_action.triggered.connect(self._event_context.refresh)
+        self.event_strip_sources_menu.addAction(self.event_strip_refresh_action)
         view_menu.addSeparator()
         theme_menu = view_menu.addMenu("Theme")
         mode_menu = view_menu.addMenu("Mode")
@@ -1516,6 +1600,28 @@ class MainWindow(QMainWindow):
         self._project_path = None
         self._project_dirty = False
         self._loading_project = False
+        # One project for every window: the coordinator gathers the radio,
+        # solar, GCS (and later) parts into one .efaproj and restores them.
+        self._project_storage = STORAGE_LINK
+        self._project_save_thread = None
+        self._project_save_worker = None
+        self._project_coordinator = ProjectCoordinator(self)
+        self._project_coordinator.projectModified.connect(self._mark_project_dirty)
+        self._project_coordinator.register(
+            ControllerPart(self._project_coordinator, "geomagnetic", "_geomagnetic")
+        )
+        self._geomagnetic.modified.connect(self._project_coordinator.notify_modified)
+        self._project_coordinator.register(
+            ControllerPart(self._project_coordinator, "event_context", "_event_context")
+        )
+        self._event_context.modified.connect(self._project_coordinator.notify_modified)
+        self._project_coordinator.register(
+            ControllerPart(self._project_coordinator, "composer", "_composer_state")
+        )
+        self._composer_state.modified.connect(self._project_coordinator.notify_modified)
+        self._event_context.resultChanged.connect(self._on_event_context_result)
+        self._event_context.enabledChanged.connect(self._on_event_context_enabled_changed)
+        self._event_context.statusChanged.connect(self._on_event_context_status)
         self._max_intensity_state = None  # populated after Max-Intensity dialog closes
         self._analysis_session = None
         self._max_intensity_dialog = None
@@ -2820,7 +2926,7 @@ class MainWindow(QMainWindow):
         # Needs a plot / filename
         self.tb_export.setEnabled(bool(filename))
         self.tb_export_fits.setEnabled(bool(filename))
-        self.tb_save_project.setEnabled(has_file)
+        self.tb_save_project.setEnabled(self._project_has_content())
 
         # Undo/redo availability
         self.tb_undo.setEnabled(has_undo)
@@ -3019,6 +3125,10 @@ class MainWindow(QMainWindow):
         )
         self.accel_canvas.set_time_mode(self.use_utc, self.ut_start_sec)
         self._refresh_accel_swaves_panel()
+        try:
+            self.accel_canvas.set_event_strip(self._event_strip_markers())
+        except Exception:
+            pass
         try:
             self.accel_canvas.set_goes_overlay(
                 self._goes_overlay_payload if self._goes_overlay_enabled else None,
@@ -4185,6 +4295,7 @@ class MainWindow(QMainWindow):
         self.plot_data(plot_source, title=effective_plot_title)
         if self._selected_goes_overlay_channels():
             QTimer.singleShot(0, lambda: self._ensure_goes_overlay_for_current_data(force=True))
+        self._update_geomagnetic_event()
 
         self._project_path = None
         self._mark_project_dirty()
@@ -4304,6 +4415,7 @@ class MainWindow(QMainWindow):
         self._mark_project_dirty()
         self._refresh_timeline_panel()
         self._sync_toolbar_enabled_states()
+        self._update_geomagnetic_event()
 
     def _reapply_processing_chain(self):
         """Rebuild the displayed product for the current ``raw_data``.
@@ -7119,7 +7231,15 @@ class MainWindow(QMainWindow):
             self._swaves_cax = None
 
         self.canvas.ax = main_ax
-        self.current_cax = make_axes_locatable(main_ax).append_axes("right", size="5%", pad=0.1)
+        # One divider for the colour bar and the event strip: two dividers on
+        # one axes would each reset its locator.
+        divider = make_axes_locatable(main_ax)
+        self.current_cax = divider.append_axes("right", size="5%", pad=0.1)
+        self._event_strip_ax = None
+        markers = self._event_strip_markers()
+        if markers is not None:
+            size = f"{min(40, 7 * len(markers.lanes))}%"
+            self._event_strip_ax = divider.append_axes("top", size=size, pad=0.45, sharex=main_ax)
         return main_ax, self._swaves_ax
 
     def _swaves_clim(self, payload) -> tuple[float, float] | tuple[None, None]:
@@ -7419,6 +7539,7 @@ class MainWindow(QMainWindow):
         # x axis spans the union of both instruments' time ranges.
         self._render_swaves_panel()
         self._apply_shared_time_limits()
+        self._render_event_strip_mpl()
 
         # Save full-extent limits as the "home" view (used for Reset Selection after zoom/pan)
         self._home_view = {
@@ -8568,6 +8689,7 @@ class MainWindow(QMainWindow):
             goes=self._origin_goes_overlay() if include_goes else None,
             measurement=measurement,
             swaves=self._origin_swaves_panel() if include_swaves else None,
+            events=self._event_strip_markers(),
             text=self._origin_graph_text(),
         )
 
@@ -10402,6 +10524,9 @@ class MainWindow(QMainWindow):
         self.downloader_dialog.restore_date_time_state(previous_date_time_state)
         self.downloader_dialog.import_request.connect(self.process_imported_files)
         self.downloader_dialog.comparison_request.connect(self.process_comparison_sources)
+        # Day, file and burst-list selections retarget the geomagnetic card
+        # while the (modal) downloader is still open.
+        self.downloader_dialog.event_time_selected.connect(self._on_external_event_selected)
 
         self.import_success_signal = lambda: self.downloader_dialog.accept()
         self.downloader_dialog.import_success.connect(self.import_success_signal)
@@ -10639,11 +10764,199 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-    def open_gcs_fitting_window(self):
-        """Open the standalone three-viewpoint GCS CME fitting window."""
+    def open_event_figure_composer(self):
+        """Open the event-figure composer (File → Export As → Event Figure…)."""
+        from src.ui.app.event_figure_composer import EventFigureComposer
+
+        try:
+            alive = self._composer_window is not None
+            if alive:
+                _ = self._composer_window.windowTitle()
+        except Exception:
+            alive = False
+        if not alive:
+            self._composer_window = EventFigureComposer(self, self._composer_state, self)
+        self._composer_window.show()
+        self._composer_window.raise_()
+        self._composer_window.activateWindow()
+        return self._composer_window
+
+    def open_geomagnetic_window(self):
+        """Open the Geomagnetic Response window (it shows the controller's data)."""
+        from src.ui.space_weather.geomagnetic_response_window import GeomagneticResponseWindow
+
+        try:
+            alive = self._geomagnetic_window is not None
+            if alive:
+                _ = self._geomagnetic_window.windowTitle()
+        except Exception:
+            alive = False
+        if not alive:
+            self._geomagnetic_window = GeomagneticResponseWindow(self._geomagnetic, self)
+        self._geomagnetic_window.show()
+        self._geomagnetic_window.raise_()
+        self._geomagnetic_window.activateWindow()
+        if self._geomagnetic.context is None and self._geomagnetic.current_choice() is not None:
+            self._geomagnetic.refresh()
+        return self._geomagnetic_window
+
+    # -----------------------------
+    # Event-context strip
+    # -----------------------------
+    def _event_strip_x_range(self) -> tuple[float, float] | None:
+        """The plot's time range in axis seconds: the data, widened by SWAVES."""
+        if self.time is None or len(self.time) == 0:
+            return None
+        try:
+            x0 = float(np.nanmin(self.time))
+            x1 = float(np.nanmax(self.time))
+        except Exception:
+            return None
+        payload = getattr(self, "_swaves_payload", None)
+        if payload is not None and self._swaves_active():
+            try:
+                s0, s1 = payload.time_bounds()
+                x0, x1 = min(x0, float(s0)), max(x1, float(s1))
+            except Exception:
+                pass
+        return (x0, x1) if np.isfinite(x0) and np.isfinite(x1) and x1 > x0 else None
+
+    def _event_strip_markers(self):
+        """The strip's lanes for the current data, or None when it is off or empty."""
+        controller = getattr(self, "_event_context", None)
+        if controller is None or not controller.enabled or getattr(self, "raw_data", None) is None:
+            return None
+        base = self._swaves_base_utc()
+        bounds = self._event_strip_x_range()
+        if base is None or bounds is None:
+            return None
+        return controller.markers(base, bounds[0], bounds[1])
+
+    def _render_event_strip_mpl(self) -> None:
+        ax = getattr(self, "_event_strip_ax", None)
+        if ax is None:
+            return
+        markers = self._event_strip_markers()
+        ax.clear()
+        if markers is None:
+            return
+        try:
+            self._event_strip_hits = draw_event_strip(ax, markers, origin=False)
+            theme = getattr(self, "theme", None)
+            if theme is not None and hasattr(theme, "apply_mpl"):
+                theme.apply_mpl(self.canvas.figure, ax)
+            style_axes(ax)
+            ax.tick_params(axis="x", which="both", labelbottom=False)
+            ax.set_xlabel("")
+        except Exception:
+            self._event_strip_hits = []
+        if self._event_strip_hover_cid is None:
+            try:
+                self._event_strip_hover_cid = self.canvas.mpl_connect("motion_notify_event", self._on_event_strip_hover)
+            except Exception:
+                self._event_strip_hover_cid = None
+
+    def _on_event_strip_hover(self, event) -> None:
+        ax = getattr(self, "_event_strip_ax", None)
+        if ax is None or event.inaxes is not ax or event.xdata is None or event.ydata is None:
+            return
+        try:
+            x0, x1 = ax.get_xlim()
+            slack = abs(x1 - x0) * 0.006
+        except Exception:
+            slack = 0.0
+        for left, right, bottom, top, tip in self._event_strip_hits:
+            if left - slack <= event.xdata <= right + slack and bottom <= event.ydata <= top:
+                from PySide6.QtGui import QCursor
+                from PySide6.QtWidgets import QToolTip
+
+                QToolTip.showText(QCursor.pos(), str(tip), self.canvas)
+                return
+
+    def _refresh_event_strip(self) -> None:
+        """New catalog results or settings: redraw the strip on both canvases.
+
+        Deferred and coalesced: a project open queues its own replot, and the
+        strip check must see that plot (and its restored zoom), not the old one.
+        """
+        if getattr(self, "_event_strip_refresh_pending", False):
+            return
+        self._event_strip_refresh_pending = True
+        QTimer.singleShot(0, self._apply_event_strip_refresh)
+
+    def _apply_event_strip_refresh(self) -> None:
+        self._event_strip_refresh_pending = False
+        if getattr(self, "raw_data", None) is None:
+            return
+        markers = self._event_strip_markers()
+        try:
+            self.accel_canvas.set_event_strip(markers)
+        except Exception:
+            pass
+        has_strip = getattr(self, "_event_strip_ax", None) is not None
+        if (markers is not None) != has_strip:
+            # The strip is part of the axes layout: adding or removing it rebuilds the plot.
+            data = self._current_dynamic_spectrum_source_data()
+            if data is not None:
+                self.plot_data(data, title=self.current_plot_type, keep_view=True)
+            return
+        if has_strip:
+            self._render_event_strip_mpl()
+            try:
+                self.canvas.draw_idle()
+            except Exception:
+                pass
+
+    def _on_event_context_result(self, _result=None) -> None:
+        self._refresh_event_strip()
+
+    def _on_event_context_status(self, text) -> None:
+        self.statusBar().showMessage(str(text), 5000)
+
+    def _on_event_context_enabled_changed(self, enabled: bool) -> None:
+        action = getattr(self, "event_strip_action", None)
+        if action is not None and action.isChecked() != bool(enabled):
+            was = action.blockSignals(True)
+            action.setChecked(bool(enabled))
+            action.blockSignals(was)
+        if enabled and self._event_context.result is None and self._event_context.range is not None:
+            self._event_context.refresh()
+        self._refresh_event_strip()
+
+    def _on_event_strip_sources_changed(self, _checked: bool = False) -> None:
+        chosen = [source for source, act in self.event_strip_source_actions.items() if act.isChecked()]
+        self._event_context.set_sources(chosen)
+        self._refresh_event_strip()
+
+    def _update_geomagnetic_event(self) -> None:
+        """Point the geomagnetic response at the loaded data's observation start."""
+        try:
+            ctx = self._goes_overlay_request_context()
+        except Exception:
+            ctx = None
+        if not ctx:
+            return
+        label = f"FITS: {os.path.basename(str(getattr(self, 'filename', '') or 'loaded data'))}"
+        self._geomagnetic.set_loaded_event(ctx["start_utc"], label, radio_interval=(ctx["start_utc"], ctx["end_utc"]))
+        self._event_context.set_range(ctx["start_utc"], ctx["end_utc"])
+
+    def _on_external_event_selected(self, when, label: str, source: str = SOURCE_DOWNLOADER) -> None:
+        """A burst-list or downloader selection overrides the loaded data's event."""
+        if when is None:
+            return
+        kind = SOURCE_BURST_LIST if str(label).startswith("Burst list") else str(source or SOURCE_DOWNLOADER)
+        self._geomagnetic.select_event(when, str(label), kind)
+
+    def open_gcs_fitting_window(self, target_time=None, *, cache_dir=None):
+        """Open the one three-viewpoint GCS CME fitting window.
+
+        The Solar Image Analysis window opens it through here too, handing over
+        the moment it is looking at (``target_time``), so there is only ever
+        one GCS window and it belongs to the one project.
+        """
         from src.ui.gcs.gcs_fitting_window import GCSFittingWindow  # import here, not at top
 
-        event_range = self._current_time_window_utc()
+        event_range = None if target_time is not None else self._current_time_window_utc()
         try:
             alive = self._gcs_window is not None
             if alive:
@@ -10651,12 +10964,24 @@ class MainWindow(QMainWindow):
         except Exception:
             alive = False
         if not alive:
-            self._gcs_window = GCSFittingWindow(self, event_range=event_range)
+            # Only what is known is passed on: the window has its own defaults.
+            options = {"event_range": event_range}
+            for name, value in (("target_time", target_time), ("cache_dir", cache_dir),
+                                ("theme", getattr(self, "theme", None))):
+                if value is not None:
+                    options[name] = value
+            self._gcs_window = GCSFittingWindow(self, **options)
+            coordinator = getattr(self, "_project_coordinator", None)
+            if coordinator is not None:
+                coordinator.connect_window(self._gcs_window)
+        elif target_time is not None:
+            self._gcs_window.set_target_time(target_time)
         elif event_range:
             self._gcs_window.set_time_window(*event_range)
         self._gcs_window.show()
         self._gcs_window.raise_()
         self._gcs_window.activateWindow()
+        return self._gcs_window
 
     def open_solar_data_analysis_window(self):
         try:
@@ -10685,6 +11010,7 @@ class MainWindow(QMainWindow):
             alive = False
         if not alive:
             self._solar_data_analysis_window = SolarDataAnalysisWindow(parent=self)
+            self._project_coordinator.connect_window(self._solar_data_analysis_window)
         self._solar_data_analysis_window.show()
         self._solar_data_analysis_window.raise_()
         self._solar_data_analysis_window.activateWindow()
@@ -10982,13 +11308,14 @@ class MainWindow(QMainWindow):
             self._processing_log = self._processing_log[-500:]
 
     def _perform_autosave(self):
-        if getattr(self, "raw_data", None) is None:
+        if not self._project_has_content():
             return
         if not getattr(self, "_project_dirty", False):
             return
 
         try:
-            meta, arrays = self._capture_project_payload()
+            # Always link mode: autosave must stay fast and small.
+            meta, arrays, _files = self._project_coordinator.capture(STORAGE_LINK)
             save_recovery_snapshot(
                 meta=meta,
                 arrays=arrays,
@@ -11009,7 +11336,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Recovery Failed", f"Could not open recovery snapshot:\n{e}")
             return False
 
-        self._apply_project_payload(payload.meta, payload.arrays)
+        self._project_coordinator.apply(payload)
         self._set_project_clean(None)
         if mark_dirty:
             self._mark_project_dirty()
@@ -13676,8 +14003,37 @@ class MainWindow(QMainWindow):
                 "Kp index data is not available in the loaded app state.",
             )
         )
+        figures.append(self._capture_geomagnetic_report_figure())
 
         return figures
+
+    def _capture_geomagnetic_report_figure(self) -> ProjectReportFigure:
+        """The geomagnetic response, drawn from the data by the backend renderer."""
+        title = "Geomagnetic Response"
+        context = getattr(self._geomagnetic, "context", None)
+        if context is None or not context.has_data():
+            return self._project_report_figure(title, None, unavailable="The geomagnetic response is not loaded.")
+        png = b""
+        try:
+            from src.backend.space_weather.geomagnetic_figures import geomagnetic_figure
+            from src.ui.space_weather.geomagnetic_response_window import load_panel_choice
+
+            fig = geomagnetic_figure(
+                context,
+                load_panel_choice(),
+                radio_interval=self._geomagnetic.radio_interval,
+                markers=self._geomagnetic.all_markers(),
+            )
+            png = figure_png_bytes(fig, dpi=self.REPORT_FIGURE_DPI, tight=True)
+        except Exception:
+            png = b""
+        caption = (
+            f"{context.event_label} · {context.start:%Y-%m-%d %H:%M} to {context.end:%Y-%m-%d %H:%M} UTC. "
+            "The dashed line is the event start; the shaded band is the radio data."
+        )
+        if context.notes:
+            caption += " " + " ".join(context.notes)
+        return self._project_report_figure(title, png, caption=caption, unavailable="The geomagnetic figure could not be drawn.")
 
     def _build_project_report_input(self) -> ProjectReportInput:
         context = self._build_provenance_context()
@@ -13835,10 +14191,20 @@ class MainWindow(QMainWindow):
         self._sync_project_actions()
         self._project_report_thread.start()
 
+    def _project_has_content(self) -> bool:
+        """Whether any part of the project (radio, solar, GCS, ...) holds something."""
+        coordinator = getattr(self, "_project_coordinator", None)
+        if coordinator is None:
+            return getattr(self, "raw_data", None) is not None
+        return coordinator.has_content()
+
     def _mark_project_dirty(self):
         if getattr(self, "_loading_project", False):
             return
-        if getattr(self, "raw_data", None) is None:
+        coordinator = getattr(self, "_project_coordinator", None)
+        if coordinator is not None and coordinator.restoring:
+            return
+        if not self._project_has_content():
             return
         self._project_dirty = True
         if getattr(self, "_autosave_timer", None) is not None and not self._autosave_timer.isActive():
@@ -13852,15 +14218,20 @@ class MainWindow(QMainWindow):
 
     def _sync_project_actions(self):
         has_data = getattr(self, "raw_data", None) is not None
+        has_project = self._project_has_content()
+        saving = getattr(self, "_project_save_thread", None) is not None
 
         for name, enabled in (
-            ("save_project_action", has_data),
-            ("save_project_as_action", has_data),
+            ("save_project_action", has_project and not saving),
+            ("save_project_as_action", has_project and not saving),
             ("generate_project_report_action", has_data and getattr(self, "_project_report_worker", None) is None),
         ):
             act = getattr(self, name, None)
             if act is not None:
                 act.setEnabled(bool(enabled))
+        act = getattr(self, "tb_save_project", None)
+        if act is not None:
+            act.setEnabled(bool(has_project and not saving))
 
     def _sync_fits_view_actions(self):
         has_data = getattr(self, "raw_data", None) is not None
@@ -13933,6 +14304,13 @@ class MainWindow(QMainWindow):
         base = "project"
         if getattr(self, "filename", ""):
             base = os.path.splitext(os.path.basename(self.filename))[0] or base
+        else:
+            solar = getattr(self, "_solar_data_analysis_window", None)
+            try:
+                if solar is not None and solar.project_has_content():
+                    base = os.path.splitext(solar._default_session_name())[0] or base
+            except Exception:
+                pass
         return f"{base}.efaproj"
 
     def _capture_project_payload(self):
@@ -14350,29 +14728,26 @@ class MainWindow(QMainWindow):
             self._sync_project_actions()
 
     def save_project(self) -> bool:
-        if getattr(self, "raw_data", None) is None:
-            QMessageBox.information(self, "Save Project", "Load a FITS file first.")
+        """Save every window's work to the current project (Ctrl+S anywhere)."""
+        if not self._project_has_content():
+            QMessageBox.information(
+                self,
+                "Save Project",
+                "There is nothing to save yet: load a FITS file, solar images or a GCS event first.",
+            )
             return False
 
         if not getattr(self, "_project_path", None):
             return bool(self.save_project_as())
-
-        try:
-            meta, arrays = self._capture_project_payload()
-            write_project(self._project_path, meta=meta, arrays=arrays)
-        except Exception as e:
-            QMessageBox.critical(self, "Save Project Failed", f"Could not save project:\n{e}")
-            return False
-
-        self._set_project_clean(self._project_path)
-        self.statusBar().showMessage(f"Project saved: {os.path.basename(self._project_path)}", 5000)
-        self._log_operation(f"Saved project: {os.path.basename(self._project_path)}")
-        self._remember_recent_project(self._project_path)
-        return True
+        return self._write_project_to(self._project_path, self._project_storage)
 
     def save_project_as(self) -> bool:
-        if getattr(self, "raw_data", None) is None:
-            QMessageBox.information(self, "Save Project", "Load a FITS file first.")
+        if not self._project_has_content():
+            QMessageBox.information(
+                self,
+                "Save Project",
+                "There is nothing to save yet: load a FITS file, solar images or a GCS event first.",
+            )
             return False
 
         start_dir = ""
@@ -14394,17 +14769,125 @@ class MainWindow(QMainWindow):
         if not path.lower().endswith(".efaproj"):
             path += ".efaproj"
 
+        storage = self._project_storage
+        if self._project_coordinator.has_images():
+            choice = self._ask_project_storage(storage)
+            if choice is None:
+                return False
+            storage = choice
+        current = os.path.normcase(os.path.abspath(self._project_path)) if self._project_path else ""
+        if os.path.normcase(os.path.abspath(path)) != current:
+            # A copy gets its own identity, so the two never share an unpack folder.
+            self._project_coordinator.new_project()
+        return self._write_project_to(path, storage)
+
+    def _ask_project_storage(self, current: str) -> str | None:
+        """Link or Embed, with the embedded size; ``None`` when cancelled.
+
+        Only asked by Save As, and only when the project holds solar or GCS
+        images; the answer is stored in the file so Ctrl+S never asks again.
+        """
+        embed_bytes = self._project_coordinator.estimated_embed_bytes()
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Save Project As")
+        box.setText("How should the project keep its images?")
+        box.setInformativeText(describe_storage_choice(0, embed_bytes))
+        link_btn = box.addButton("Link data (small)", QMessageBox.AcceptRole)
+        embed_btn = box.addButton(f"Embed data (portable, ~{human_size(embed_bytes)})", QMessageBox.AcceptRole)
+        box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(embed_btn if current == STORAGE_EMBED else link_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is link_btn:
+            return STORAGE_LINK
+        if clicked is embed_btn:
+            return STORAGE_EMBED
+        return None
+
+    def _write_project_to(self, path: str, storage: str) -> bool:
         try:
-            meta, arrays = self._capture_project_payload()
-            write_project(path, meta=meta, arrays=arrays)
+            meta, arrays, files = self._project_coordinator.capture(storage)
         except Exception as e:
             QMessageBox.critical(self, "Save Project Failed", f"Could not save project:\n{e}")
             return False
 
+        if files:
+            ok = self._write_project_in_background(path, meta, arrays, files)
+        else:
+            # Link and radio-only saves are small: write them synchronously.
+            try:
+                write_project(path, meta=meta, arrays=arrays)
+                ok = True
+            except Exception as e:
+                QMessageBox.critical(self, "Save Project Failed", f"Could not save project:\n{e}")
+                ok = False
+        if not ok:
+            return False
+
+        self._project_storage = storage
         self._set_project_clean(path)
         self.statusBar().showMessage(f"Project saved: {os.path.basename(path)}", 5000)
         self._log_operation(f"Saved project: {os.path.basename(path)}")
         self._remember_recent_project(path)
+        return True
+
+    def _write_project_in_background(self, path: str, meta: dict, arrays: dict, files: dict) -> bool:
+        """Stream embedded images into the project on a worker thread.
+
+        A local event loop keeps the window responsive behind a progress dialog
+        while the caller still gets a plain True/False: the close and
+        "save before continuing?" prompts need to know whether it worked.
+        """
+        from PySide6.QtCore import QEventLoop
+
+        dlg = QProgressDialog("Embedding images in the project...", "Cancel", 0, 1000, self)
+        dlg.setWindowTitle("Save Project")
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        dlg.setValue(0)
+
+        loop = QEventLoop(self)
+        listener = ProjectSaveListener(dlg, loop)  # lives on this (GUI) thread
+        thread = QThread()  # never parented to a widget (thread-teardown rule)
+        worker = ProjectSaveWorker(path, meta, arrays, files)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(listener.on_progress)
+        worker.finished.connect(listener.on_finished)
+        worker.failed.connect(listener.on_failed)
+        worker.cancelled.connect(listener.on_cancelled)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
+        dlg.canceled.connect(worker.request_cancel)
+
+        self._project_save_thread = thread
+        self._project_save_worker = worker
+        self._sync_project_actions()
+        thread.start()
+        dlg.show()
+        if not listener.done():
+            loop.exec()
+
+        # Join before freeing the worker here; never deleteLater it on its thread.
+        thread.quit()
+        thread.wait()
+        self._project_save_worker = None
+        self._project_save_thread = None
+        worker = None
+        thread.deleteLater()
+        dlg.close()
+        self._sync_project_actions()
+
+        if listener.cancelled:
+            self.statusBar().showMessage("Project save cancelled; the previous file was kept.", 5000)
+            return False
+        if not listener.ok:
+            QMessageBox.critical(self, "Save Project Failed", f"Could not save project:\n{listener.error}")
+            return False
         return True
 
     def open_project(self):
@@ -14421,7 +14904,8 @@ class MainWindow(QMainWindow):
             self,
             "Open Project",
             start_dir,
-            "e-CALLISTO Project (*.efaproj)",
+            "e-CALLISTO Project (*.efaproj *.ecsolar);;e-CALLISTO Project (*.efaproj);;"
+            "Legacy solar session (*.ecsolar)",
         )
         if not path:
             return
@@ -14429,9 +14913,16 @@ class MainWindow(QMainWindow):
         self.open_project_path(path)
 
     def open_project_path(self, path) -> bool:
-        """Load a project file; callers have already asked about unsaved changes."""
+        """Load a project file; callers have already asked about unsaved changes.
+
+        A legacy ``.ecsolar`` session is imported instead: it becomes an
+        untitled, unsaved project holding only the solar part.
+        """
+        if is_legacy_solar_session_path(path):
+            return self.import_legacy_solar_session_path(path)
+        coordinator = self._project_coordinator
         try:
-            payload = read_project(path)
+            payload = read_project(path, extract_dir=coordinator.extract_dir_for)
         except ProjectFormatError as e:
             QMessageBox.critical(self, "Open Project Failed", str(e))
             return False
@@ -14439,12 +14930,111 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Open Project Failed", f"Could not open project:\n{e}")
             return False
 
-        self._apply_project_payload(payload.meta, payload.arrays)
+        restored = coordinator.apply(payload)
+        self._project_storage = project_storage(payload.meta)
         self._set_project_clean(path)
-        self.statusBar().showMessage(f"Project loaded: {os.path.basename(path)}", 5000)
+        detail = ", ".join(restored) if restored else "empty"
+        self.statusBar().showMessage(f"Project loaded: {os.path.basename(path)} ({detail})", 5000)
         self._log_operation(f"Loaded project: {os.path.basename(path)}")
         self._remember_recent_project(path)
         return True
+
+    def import_legacy_solar_session_path(self, path) -> bool:
+        """Import a v3.1 ``.ecsolar`` as an untitled project with only the solar part."""
+        coordinator = self._project_coordinator
+        coordinator.new_project()
+        extract_dir = projects_cache_root() / coordinator.project_id / "legacy"
+        try:
+            result = import_legacy_solar_session(str(path), extract_dir=str(extract_dir))
+        except SolarSessionError as e:
+            QMessageBox.critical(self, "Import Solar Session Failed", str(e))
+            return False
+        except Exception as e:
+            QMessageBox.critical(self, "Import Solar Session Failed", f"Could not import the session:\n{e}")
+            return False
+
+        meta = dict(result.meta)
+        meta["frame_paths"] = list(result.frame_paths)
+        meta["storage"] = STORAGE_LINK
+        payload = ProjectPayload(
+            meta={
+                "parts": {"radio": False, "solar": True},
+                "project_id": coordinator.project_id,
+                "solar": meta,
+            },
+            arrays={},
+            files={},
+        )
+        coordinator.apply(payload)
+        self._project_storage = STORAGE_LINK
+        self._set_project_clean(None)
+        # Untitled and dirty: the user is asked to save it as a project.
+        self._project_dirty = True
+        self._sync_project_actions()
+        self.statusBar().showMessage(
+            f"Imported legacy solar session {os.path.basename(str(path))}; save it as a project (.efaproj).",
+            8000,
+        )
+        self._log_operation(f"Imported legacy solar session: {os.path.basename(str(path))}")
+        return True
+
+    def _clear_radio_for_project(self) -> None:
+        """Reset the main window to an empty spectrum for a project without radio data."""
+        if getattr(self, "raw_data", None) is None and not getattr(self, "filename", ""):
+            return
+        self._apply_project_payload({}, {})
+        self.raw_data = None
+        self.noise_reduced_data = None
+        try:
+            self.canvas.figure.clear()
+            self.canvas.draw_idle()
+        except Exception:
+            pass
+        try:
+            self.accel_canvas.clear()
+        except Exception:
+            pass
+        try:
+            self._sync_toolbar_enabled_states()
+        except Exception:
+            pass
+
+    def _ensure_solar_window(self):
+        """The Solar Image Analysis window, created and shown if needed (no time sync)."""
+        try:
+            alive = self._solar_data_analysis_window is not None
+            if alive:
+                _ = self._solar_data_analysis_window.windowTitle()
+        except Exception:
+            alive = False
+        if not alive:
+            try:
+                from src.ui.solar.solar_data_analysis_window import SolarDataAnalysisWindow  # import here, not at top
+            except Exception as exc:
+                QMessageBox.critical(self, "Open Project", f"The Solar Image Analysis window could not be loaded:\n{exc}")
+                return None
+            self._solar_data_analysis_window = SolarDataAnalysisWindow(parent=self)
+            self._project_coordinator.connect_window(self._solar_data_analysis_window)
+        self._solar_data_analysis_window.show()
+        self._solar_data_analysis_window.raise_()
+        return self._solar_data_analysis_window
+
+    def _ensure_gcs_window(self):
+        """The one GCS fitting window, created and shown if needed."""
+        from src.ui.gcs.gcs_fitting_window import GCSFittingWindow  # import here, not at top
+
+        try:
+            alive = self._gcs_window is not None
+            if alive:
+                _ = self._gcs_window.windowTitle()
+        except Exception:
+            alive = False
+        if not alive:
+            self._gcs_window = GCSFittingWindow(self, theme=self.theme)
+            self._project_coordinator.connect_window(self._gcs_window)
+        self._gcs_window.show()
+        self._gcs_window.raise_()
+        return self._gcs_window
 
     def open_fits_header_viewer(self):
         if getattr(self, "raw_data", None) is None:
@@ -14527,6 +15117,21 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
+            self._geomagnetic.shutdown()
+            if self._geomagnetic_window is not None:
+                self._geomagnetic_window.close()
+        except Exception:
+            pass
+        try:
+            self._event_context.shutdown()
+        except Exception:
+            pass
+        try:
+            if self._composer_window is not None:
+                self._composer_window.close()
+        except Exception:
+            pass
+        try:
             if self._cme_helper_client is not None:
                 self._cme_helper_client.shutdown()
         except Exception:
@@ -14587,6 +15192,15 @@ class MainWindow(QMainWindow):
                     return
                 self._solar_data_analysis_window.deleteLater()
                 self._solar_data_analysis_window = None
+        except Exception:
+            pass
+        try:
+            # The GCS window belongs to this project; its panels cancel and join
+            # their downloads in its own closeEvent.
+            if self._gcs_window is not None:
+                self._gcs_window.close()
+                self._gcs_window.deleteLater()
+                self._gcs_window = None
         except Exception:
             pass
         try:

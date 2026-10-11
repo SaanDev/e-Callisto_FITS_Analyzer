@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 3.1.0
+Version 3.2.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -13,13 +13,11 @@ import shlex
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from typing import List
-from urllib.parse import urljoin
 
 import requests
-from bs4 import BeautifulSoup
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication,
@@ -43,42 +41,26 @@ from src.ui.cme.cme_helper_client import CMEHelperClient, HelperOpenResult
 from src.ui.common.url_opener import OpenResult, open_url_robust
 from src.version import APP_VERSION
 
-CDAW_ROOT = "https://cdaw.gsfc.nasa.gov"
-BASE_URL = f"{CDAW_ROOT}/CME_list/UNIVERSAL_ver2/"
-FETCH_TIMEOUT = (6, 25)
-FETCH_MAX_ATTEMPTS = 3
-
-STATUS_OK = "ok"
-STATUS_NO_DATA = "no_data"
-STATUS_MONTH_UNPUBLISHED = "month_unpublished"
-STATUS_FETCH_ERROR = "fetch_error"
-
-
-@dataclass(frozen=True)
-class CMECatalogRow:
-    timestamp: datetime
-    values: List[str]
-    catalog_movie_url: str
-    fallback_movie_url: str
-    source_href: str = ""
-
-    @property
-    def preferred_movie_url(self) -> str:
-        return self.catalog_movie_url or self.fallback_movie_url
-
-    @property
-    def interactive_movie_url(self) -> str:
-        # make_javamovie provides running-difference + GOES X-ray synchronized view.
-        return self.fallback_movie_url or self.catalog_movie_url
-
-
-@dataclass(frozen=True)
-class FetchOutcome:
-    status: str
-    rows: List[CMECatalogRow]
-    message: str = ""
-    month_url: str = ""
-    http_status: int = 0
+# The CDAW catalog itself (URLs, the table parser and the month fetch) lives in
+# the backend so the event-context strip can use it too; the names stay
+# importable from here for this window and its tests.
+from src.backend.space_weather.event_catalogs import (  # noqa: E402
+    BASE_URL,
+    CDAW_ROOT,
+    FETCH_MAX_ATTEMPTS,
+    FETCH_TIMEOUT,
+    STATUS_FETCH_ERROR,
+    STATUS_MONTH_UNPUBLISHED,
+    STATUS_NO_DATA,
+    STATUS_OK,
+    CMECatalogRow,
+    FetchOutcome,
+    build_fallback_movie_url,
+    build_month_catalog_url,
+    parse_catalog_rows,
+    resolve_catalog_movie_url,
+)
+from src.backend.space_weather.event_catalogs import fetch_catalog_outcome as _fetch_catalog_outcome  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -125,90 +107,6 @@ def _cme_logger() -> logging.Logger:
     return logger
 
 
-def build_month_catalog_url(year: str, month: str) -> str:
-    y = str(year or "").strip()
-    m = str(month or "").strip().zfill(2)
-    return f"{BASE_URL}{y}_{m}/univ{y}_{m}.html"
-
-
-def build_fallback_movie_url(start_dt: datetime) -> str:
-    end_dt = start_dt + timedelta(hours=2)
-    stime = start_dt.strftime("%Y%m%d_%H%M")
-    etime = end_dt.strftime("%Y%m%d_%H%M")
-    return (
-        "https://cdaw.gsfc.nasa.gov/movie/make_javamovie.php"
-        f"?stime={stime}&etime={etime}&img1=lasc2rdf"
-    )
-
-
-def resolve_catalog_movie_url(raw_href: str) -> str:
-    href = str(raw_href or "").strip()
-    if not href:
-        return ""
-    return urljoin(CDAW_ROOT, href)
-
-
-def parse_catalog_rows(html: str, year: str, month: str, day: str) -> List[CMECatalogRow]:
-    soup = BeautifulSoup(str(html or ""), "html.parser")
-    all_rows = soup.find_all("tr")
-    if not all_rows:
-        return []
-
-    start_index = 0
-    for idx, row in enumerate(all_rows):
-        if "First C2 Appearance" in row.get_text(" ", strip=True):
-            start_index = idx + 1
-            break
-
-    target_date = f"{str(year).strip()}/{str(month).strip().zfill(2)}/{str(day).strip().zfill(2)}"
-    parsed_rows: List[CMECatalogRow] = []
-
-    for row in all_rows[start_index:]:
-        cols = row.find_all("td")
-        if len(cols) < 13:
-            continue
-
-        row_date = cols[0].get_text(strip=True)
-        row_time = cols[1].get_text(strip=True)
-        if row_date != target_date:
-            continue
-
-        datetime_str = f"{row_date} {row_time}"
-        try:
-            timestamp = datetime.strptime(datetime_str, "%Y/%m/%d %H:%M:%S")
-        except ValueError:
-            continue
-
-        values = [
-            datetime_str,
-            cols[2].get_text(strip=True),
-            cols[3].get_text(strip=True),
-            cols[4].get_text(strip=True),
-            cols[7].get_text(strip=True),
-            cols[8].get_text(strip=True),
-            cols[9].get_text(strip=True),
-            cols[10].get_text(strip=True),
-            cols[12].get_text(strip=True),
-        ]
-
-        href = ""
-        anchor = cols[11].find("a") if cols[11] else None
-        if anchor is not None and anchor.has_attr("href"):
-            href = str(anchor["href"]).strip()
-
-        parsed_rows.append(
-            CMECatalogRow(
-                timestamp=timestamp,
-                values=values,
-                catalog_movie_url=resolve_catalog_movie_url(href),
-                fallback_movie_url=build_fallback_movie_url(timestamp),
-                source_href=href,
-            )
-        )
-
-    return parsed_rows
-
-
 def fetch_catalog_outcome(
     year: str,
     month: str,
@@ -216,112 +114,8 @@ def fetch_catalog_outcome(
     timeout: tuple[int, int] = FETCH_TIMEOUT,
     max_attempts: int = FETCH_MAX_ATTEMPTS,
 ) -> FetchOutcome:
-    logger = _cme_logger()
-    month_url = build_month_catalog_url(year, month)
-    headers = {"User-Agent": f"e-Callisto-FITS-Analyzer/{APP_VERSION}"}
-
-    logger.info(
-        "event=fetch_start year=%s month=%s day=%s month_url=%s",
-        year,
-        month,
-        day,
-        month_url,
-    )
-
-    last_error = ""
-    for attempt in range(1, max(1, int(max_attempts)) + 1):
-        try:
-            response = requests.get(month_url, headers=headers, timeout=timeout)
-        except requests.RequestException as exc:
-            last_error = str(exc)
-            logger.warning(
-                "event=fetch_retry reason=network_error attempt=%s max_attempts=%s error=%s",
-                attempt,
-                max_attempts,
-                last_error,
-            )
-            if attempt < max_attempts:
-                time.sleep(0.35 * attempt)
-                continue
-            return FetchOutcome(
-                status=STATUS_FETCH_ERROR,
-                rows=[],
-                message=f"Network error while loading CME catalog: {last_error}",
-                month_url=month_url,
-            )
-
-        status_code = int(response.status_code)
-        if status_code == 404:
-            logger.info(
-                "event=fetch_month_unpublished year=%s month=%s month_url=%s",
-                year,
-                month,
-                month_url,
-            )
-            return FetchOutcome(
-                status=STATUS_MONTH_UNPUBLISHED,
-                rows=[],
-                message=f"CME catalog for {year}-{str(month).zfill(2)} is not published yet.",
-                month_url=month_url,
-                http_status=status_code,
-            )
-
-        if status_code != 200:
-            last_error = f"HTTP {status_code}"
-            logger.warning(
-                "event=fetch_non_200 status=%s attempt=%s max_attempts=%s",
-                status_code,
-                attempt,
-                max_attempts,
-            )
-            if status_code >= 500 and attempt < max_attempts:
-                time.sleep(0.35 * attempt)
-                continue
-            return FetchOutcome(
-                status=STATUS_FETCH_ERROR,
-                rows=[],
-                message=f"CME catalog request failed with HTTP {status_code}.",
-                month_url=month_url,
-                http_status=status_code,
-            )
-
-        rows = parse_catalog_rows(response.text, year, month, day)
-        if rows:
-            logger.info(
-                "event=fetch_success rows=%s year=%s month=%s day=%s",
-                len(rows),
-                year,
-                month,
-                day,
-            )
-            return FetchOutcome(
-                status=STATUS_OK,
-                rows=rows,
-                month_url=month_url,
-                http_status=status_code,
-            )
-
-        logger.info(
-            "event=fetch_no_data year=%s month=%s day=%s month_url=%s",
-            year,
-            month,
-            day,
-            month_url,
-        )
-        return FetchOutcome(
-            status=STATUS_NO_DATA,
-            rows=[],
-            message=f"No CME data available for {year}-{str(month).zfill(2)}-{str(day).zfill(2)}.",
-            month_url=month_url,
-            http_status=status_code,
-        )
-
-    return FetchOutcome(
-        status=STATUS_FETCH_ERROR,
-        rows=[],
-        message=f"Unable to load CME catalog ({last_error or 'unknown error'}).",
-        month_url=month_url,
-    )
+    """One day of the CDAW catalog, logged to this window's rotating log file."""
+    return _fetch_catalog_outcome(year, month, day, timeout, max_attempts, logger=_cme_logger())
 
 
 def _use_legacy_helper_mode() -> bool:

@@ -1,0 +1,108 @@
+[
+ {
+  "activityID": "2024-05-08T05:36:00-CME-001",
+  "startTime": "2024-05-08T05:36Z",
+  "sourceLocation": "S22W10",
+  "activeRegionNum": 13664,
+  "cmeAnalyses": [
+   {
+    "isMostAccurate": true,
+    "time21_5": "2024-05-08T09:30Z",
+    "latitude": -7.0,
+    "longitude": 9.0,
+    "halfAngle": 43.0,
+    "speed": 870.0,
+    "type": "C"
+   },
+   {
+    "isMostAccurate": true,
+    "time21_5": "2024-05-08T09:47Z",
+    "latitude": -15.0,
+    "longitude": 15.0,
+    "halfAngle": 45.0,
+    "speed": 729.0,
+    "type": "C"
+   }
+  ],
+  "linkedEvents": [
+   {
+    "activityID": "2024-05-08T04:20:00-FLR-001"
+   },
+   {
+    "activityID": "2024-05-08T04:37:00-FLR-001"
+   },
+   {
+    "activityID": "2024-05-10T13:35:00-SEP-001"
+   },
+   {
+    "activityID": "2024-05-10T14:00:00-IPS-001"
+   },
+   {
+    "activityID": "2024-05-10T15:00:00-GST-001"
+   },
+   {
+    "activityID": "2024-05-10T16:36:00-IPS-001"
+   },
+   {
+    "activityID": "2024-05-10T18:01:00-MPC-001"
+   },
+   {
+    "activityID": "2024-05-15T13:55:00-RBE-001"
+   }
+  ],
+  "link": "https://ccmc.gsfc.nasa.gov/DONKI/view/CME/30589/-1"
+ },
+ {
+  "activityID": "2024-05-08T12:24:00-CME-001",
+  "startTime": "2024-05-08T12:24Z",
+  "sourceLocation": "S20W11",
+  "activeRegionNum": 13664,
+  "cmeAnalyses": [
+   {
+    "isMostAccurate": true,
+    "time21_5": "2024-05-08T16:58Z",
+    "latitude": -5.0,
+    "longitude": 3.0,
+    "halfAngle": 45.0,
+    "speed": 776.0,
+    "type": "C"
+   },
+   {
+    "isMostAccurate": true,
+    "time21_5": "2024-05-08T15:16Z",
+    "latitude": -15.0,
+    "longitude": 8.0,
+    "halfAngle": 43.0,
+    "speed": 1156.0,
+    "type": "O"
+   }
+  ],
+  "linkedEvents": [
+   {
+    "activityID": "2024-05-08T11:26:00-FLR-001"
+   },
+   {
+    "activityID": "2024-05-10T13:35:00-SEP-001"
+   },
+   {
+    "activityID": "2024-05-10T14:00:00-IPS-001"
+   },
+   {
+    "activityID": "2024-05-10T14:50:00-SEP-001"
+   },
+   {
+    "activityID": "2024-05-10T15:00:00-GST-001"
+   },
+   {
+    "activityID": "2024-05-10T16:36:00-IPS-001"
+   },
+   {
+    "activityID": "2024-05-10T18:01:00-MPC-001"
+   },
+   {
+    "activityID": "2024-05-15T13:55:00-RBE-001"
+   }
+  ],
+  "link": "https://ccmc.gsfc.nasa.gov/DONKI/view/CME/30564/-1"
+ }
+]

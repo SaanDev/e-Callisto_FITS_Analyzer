@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 3.1.0
+Version 3.2.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -304,6 +304,12 @@ class AcceleratedPlotWidget(QWidget):
         self._swaves_region = None
         self._swaves_title = ""
         self._swaves_colorbar_label = ""
+        self._event_view = None
+        self._event_axis = None
+        self._event_items = []
+        self._event_edge_labels = []
+        self._event_mark_labels = []
+        self._event_markers = None
         self._title = ""
         self._log_freq = False
         self._axis_ylim = None
@@ -1303,11 +1309,197 @@ class AcceleratedPlotWidget(QWidget):
         self._clear_annotation_overlay()
         self.clear_goes_overlay()
         self.clear_swaves_panel()
+        self.clear_event_strip()
 
     def export_plot_item(self):
         if not self.is_available:
             return None
         return self._plot
+
+    # ------------------------------------------------------------------
+    # Event-context strip
+    #
+    # The strip lives inside the spectrum's own PlotItem, in the cell of its
+    # (always hidden) top axis: the grid gives it exactly the spectrum's width,
+    # so the lanes line up with the time axis at every size without any
+    # geometry syncing, and the plot title stays above both.
+    # ------------------------------------------------------------------
+
+    #: Pixel height of one strip lane.
+    EVENT_LANE_PX = 18
+
+    @property
+    def has_event_strip(self) -> bool:
+        return bool(self.is_available and self._event_view is not None)
+
+    def event_strip_items(self) -> list:
+        return list(self._event_items)
+
+    def _ensure_event_strip(self) -> bool:
+        if not self.is_available:
+            return False
+        if self._event_view is not None:
+            return True
+        try:
+            view = pg.ViewBox(enableMenu=False)
+            view.setMouseEnabled(x=False, y=False)
+            view.setXLink(self._viewbox)
+            axis = pg.AxisItem("left")
+            axis.linkToView(view)
+            axis.setStyle(tickLength=0)
+            self._plot.layout.addItem(view, 1, 1)
+            self._plot.layout.addItem(axis, 1, 0)
+            view.sigXRangeChanged.connect(self._position_event_edge_labels)
+            self._event_view = view
+            self._event_axis = axis
+            return True
+        except Exception:
+            self._event_view = None
+            self._event_axis = None
+            return False
+
+    def clear_event_strip(self) -> None:
+        if not self.is_available:
+            return
+        view, axis = self._event_view, self._event_axis
+        self._event_view = None
+        self._event_axis = None
+        self._event_markers = None
+        self._event_items = []
+        self._event_edge_labels = []
+        for item in (view, axis):
+            if item is None:
+                continue
+            try:
+                self._plot.layout.removeItem(item)
+                scene = item.scene()
+                if scene is not None:
+                    scene.removeItem(item)
+            except Exception:
+                pass
+        try:
+            self._plot.layout.setRowFixedHeight(1, 0)
+        except Exception:
+            pass
+
+    def set_event_strip(self, markers) -> bool:
+        """Draw (or, given None or no lanes, remove) the event-context lanes."""
+        if not self.is_available:
+            return False
+        lanes = list(getattr(markers, "lanes", ()) or ())
+        if not lanes:
+            if self.has_event_strip:
+                self.clear_event_strip()
+            return False
+        if not self._ensure_event_strip():
+            return False
+        view = self._event_view
+        for item in self._event_items:
+            try:
+                view.removeItem(item)
+            except Exception:
+                pass
+        self._event_items = []
+        self._event_edge_labels = []
+        self._event_mark_labels = []
+        self._event_markers = markers
+
+        n = len(lanes)
+        height = self.EVENT_LANE_PX * n + 4
+        try:
+            self._plot.layout.setRowFixedHeight(1, height)
+            view.setMinimumHeight(height)
+            view.setMaximumHeight(height)
+        except Exception:
+            pass
+        view.setYRange(0.0, float(n), padding=0.0)
+        font = QFont()
+        font.setPointSizeF(7.5)
+        ticks = []
+        for index, lane in enumerate(lanes):
+            y0 = float(n - 1 - index)
+            ticks.append((y0 + 0.5, str(lane.title)))
+            if index:
+                divider = pg.InfiniteLine(pos=y0 + 1.0, angle=0, pen=pg.mkPen(color=(150, 150, 150, 120), width=1))
+                view.addItem(divider)
+                self._event_items.append(divider)
+            instants_x, instants_y, tips, brushes = [], [], [], []
+            for mark in lane.marks:
+                color = QColor(str(mark.color))
+                tip = str(mark.tooltip or mark.label)
+                if mark.x1 is not None and mark.x1 > mark.x0:
+                    from PySide6.QtWidgets import QGraphicsRectItem
+
+                    rect = QGraphicsRectItem(QRectF(float(mark.x0), y0 + 0.18, float(mark.x1 - mark.x0), 0.64))
+                    fill = QColor(color)
+                    fill.setAlpha(200)
+                    rect.setBrush(pg.mkBrush(fill))
+                    rect.setPen(pg.mkPen(None))
+                    rect.setToolTip(tip)
+                    view.addItem(rect)
+                    self._event_items.append(rect)
+                else:
+                    line = pg.PlotCurveItem(
+                        x=[float(mark.x0), float(mark.x0)], y=[y0 + 0.1, y0 + 0.9], pen=pg.mkPen(color=color, width=2)
+                    )
+                    line.setToolTip(tip)
+                    view.addItem(line)
+                    self._event_items.append(line)
+                    instants_x.append(float(mark.x0))
+                    instants_y.append(y0 + 0.78)
+                    tips.append(tip)
+                    brushes.append(pg.mkBrush(color))
+                if mark.label:
+                    label = pg.TextItem(str(mark.label), color=color, anchor=(0.0, 0.5))
+                    label.setFont(font)
+                    label.setPos(float(mark.x0), y0 + 0.5)
+                    view.addItem(label)
+                    self._event_items.append(label)
+                    self._event_mark_labels.append((label, float(mark.x0), y0 + 0.5))
+            if instants_x:
+                scatter = pg.ScatterPlotItem(
+                    x=instants_x, y=instants_y, data=tips, symbol="t", size=9, pen=None, brush=brushes,
+                    hoverable=True, tip=lambda x, y, data: str(data),
+                )
+                view.addItem(scatter)
+                self._event_items.append(scatter)
+            for side, count in (("before", lane.before), ("after", lane.after)):
+                if not count:
+                    continue
+                text = f"< {count} more nearby" if side == "before" else f"{count} more nearby >"
+                edge = pg.TextItem(text, color=self._fg, anchor=(0.0 if side == "before" else 1.0, 0.5))
+                edge.setFont(font)
+                view.addItem(edge)
+                self._event_items.append(edge)
+                self._event_edge_labels.append((edge, side, y0 + 0.5))
+        try:
+            self._event_axis.setTicks([ticks, []])
+            self._event_axis.setPen(pg.mkPen(self._fg))
+            self._event_axis.setTextPen(pg.mkPen(self._fg))
+        except Exception:
+            pass
+        self._position_event_edge_labels()
+        return True
+
+    def _position_event_edge_labels(self, *_args) -> None:
+        view = self._event_view
+        if view is None:
+            return
+        try:
+            x0, x1 = view.viewRange()[0]
+        except Exception:
+            return
+        # An event already under way at the left edge is labelled at the edge.
+        for item, start, y in self._event_mark_labels:
+            try:
+                item.setPos(max(start, x0), y)
+            except Exception:
+                pass
+        for item, side, y in self._event_edge_labels:
+            try:
+                item.setPos(x0 if side == "before" else x1, y)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # STEREO/SWAVES companion panel

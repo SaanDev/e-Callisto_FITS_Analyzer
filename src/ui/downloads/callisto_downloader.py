@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 3.1.0
+Version 3.2.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import os
+import re
 import shutil
 import tempfile
 from urllib.parse import urljoin
@@ -943,6 +944,10 @@ class CallistoDownloaderApp(QDialog):
     import_request = Signal(list)   # list of URLs
     comparison_request = Signal(list)   # list of URLs or local FITS paths
     import_success = Signal()
+    #: A day, a file or a burst was selected: (UTC datetime, label, source),
+    #: source "downloader" or "burst_list". Drives the main window's
+    #: geomagnetic response while this dialog is open.
+    event_time_selected = Signal(object, str, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1047,6 +1052,9 @@ class CallistoDownloaderApp(QDialog):
         self.tabs.addTab(self._build_spectral_overview_tab(), "Spectral Overview")
         self.burst_list_tab = BurstListTab(parent=self)
         self.burst_list_tab.import_request.connect(self.import_request.emit)
+        self.burst_list_tab.event_time_selected.connect(
+            lambda when, label: self.event_time_selected.emit(when, label, "burst_list")
+        )
         self.burst_list_tab.comparison_request.connect(self._compare_burst_files)
         self.burst_list_tab.cache_changed.connect(self._update_cache_size_label)
         self.burst_list_tab.busy_changed.connect(self._set_burst_running)
@@ -1271,6 +1279,7 @@ class CallistoDownloaderApp(QDialog):
         StationComboBinding(self.station_dropdown, self.single_station_loader)
         self.single_station_status = StationAvailabilityLabel(self.single_station_loader, page)
         self.date_edit.dateChanged.connect(self._request_single_stations)
+        self.date_edit.dateChanged.connect(self._emit_day_selected)
 
         self.show_button = QPushButton("Show Available FITS")
         self.show_button.setObjectName("PrimaryDownloaderButton")
@@ -1301,6 +1310,7 @@ class CallistoDownloaderApp(QDialog):
         self.file_tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
         self.file_tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.file_tree.itemChanged.connect(self._on_file_tree_item_changed)
+        self.file_tree.currentItemChanged.connect(self._emit_file_selected)
         file_layout.addWidget(self.file_tree)
         file_group.setLayout(file_layout)
 
@@ -2325,6 +2335,28 @@ class CallistoDownloaderApp(QDialog):
     # -----------------------------
     # Selection helpers
     # -----------------------------
+    def _emit_day_selected(self, qdate=None) -> None:
+        qdate = qdate if qdate is not None else self.date_edit.date()
+        try:
+            day = datetime(qdate.year(), qdate.month(), qdate.day())
+        except (ValueError, AttributeError):
+            return
+        self.event_time_selected.emit(day, f"Downloader: {day:%Y-%m-%d}", "downloader")
+
+    def _emit_file_selected(self, item, _previous=None) -> None:
+        """A FITS file picked in the list: its start time, from the file name."""
+        if item is None or item.childCount():
+            return
+        name = str(item.text(0) or "")
+        match = re.search(r"(\d{8})_(\d{6})", name)
+        if not match:
+            return
+        try:
+            when = datetime.strptime(match.group(1) + match.group(2), "%Y%m%d%H%M%S")
+        except ValueError:
+            return
+        self.event_time_selected.emit(when, f"Downloader: {name}", "downloader")
+
     def _on_file_tree_item_changed(self, item: QTreeWidgetItem, column: int):
         if column != 0 or self._file_tree_updating:
             return

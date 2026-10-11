@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 3.1.0
+Version 3.2.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
@@ -643,6 +643,11 @@ class JP2Sequence:
     #: running-difference reference for the first frame. Never displayed, and
     #: not counted in ``listed``; ``None`` when there was none to load.
     previous: Any | None = None
+    #: The archive listing times that were picked for download (the JP2 cache
+    #: is keyed by them) and the previous frame's, so a project can embed the
+    #: exact files and replay the listing offline (:func:`seed_listing_cache`).
+    picked_times: tuple[datetime, ...] = ()
+    previous_time: datetime | None = None
 
 
 def fetch_range(
@@ -763,6 +768,8 @@ def fetch_range(
         skipped=tuple(skipped),
         dropped=dropped,
         previous=previous,
+        picked_times=tuple(picked),
+        previous_time=previous_time if previous is not None else None,
     )
 
 
@@ -770,6 +777,29 @@ def fetch_range(
 #: not add to. Keyed by (sourceId, start, end).
 _LISTING_CACHE: dict[tuple[int, datetime, datetime], list[datetime]] = {}
 _LISTING_CACHE_LOCK = threading.Lock()
+#: Listings restored from a project. Used whatever the window's age: they are
+#: what the saved analysis was made from, and what lets it reopen offline.
+_SEEDED_LISTINGS: dict[tuple[int, datetime, datetime], list[datetime]] = {}
+
+
+def listing_cache_key(source: JP2Source, start: datetime, end: datetime) -> tuple[int, datetime, datetime]:
+    """The key :func:`fetch_range` lists ``[start, end]`` under."""
+    return (source.source_id, start - PREVIOUS_FRAME_LOOKBACK, end)
+
+
+def seed_listing_cache(source: JP2Source, start: datetime, end: datetime, times: Sequence[datetime]) -> None:
+    """Make the next :func:`fetch_range` of ``[start, end]`` use ``times`` as its listing.
+
+    With every listed JP2 already in the disk cache, that fetch never touches
+    the network — which is how an embedded project reopens offline.
+    """
+    clean = sorted({when.replace(tzinfo=None) for when in times if isinstance(when, datetime)})
+    if not clean:
+        return
+    with _LISTING_CACHE_LOCK:
+        if len(_SEEDED_LISTINGS) > 64:
+            _SEEDED_LISTINGS.clear()
+        _SEEDED_LISTINGS[listing_cache_key(source, start, end)] = clean
 
 
 def _cached_listing(
@@ -782,6 +812,10 @@ def _cached_listing(
     cancel_cb: Callable[[], bool] | None,
 ) -> list[datetime]:
     key = (source.source_id, start, end)
+    with _LISTING_CACHE_LOCK:
+        seeded = _SEEDED_LISTINGS.get(key)
+    if seeded:
+        return list(seeded)
     settled = end < datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1)
     if settled:
         with _LISTING_CACHE_LOCK:

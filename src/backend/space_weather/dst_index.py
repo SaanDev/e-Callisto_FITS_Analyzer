@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 3.1.0
+Version 3.2.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -8,9 +8,10 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from html import unescape
 import re
+import time
 from typing import Callable, Iterable
 
 import numpy as np
@@ -26,6 +27,13 @@ ARCHIVE_REALTIME = "Real-time"
 # final through 2020-12, provisional through 2025-06, real-time from 2025-07.
 FINAL_LAST_MONTH = 202012
 PROVISIONAL_LAST_MONTH = 202506
+
+#: Kyoto's fill for an hour with no value (future hours of the current month).
+FILL_VALUE_NT = 9999
+
+#: How long a provisional or real-time month stays cached. Final months never
+#: change; the others are revised as Kyoto updates them through the day.
+LIVE_MONTH_TTL_S = 3 * 3600.0
 
 _PRE_RE = re.compile(r"<pre[^>]*class=[\"']data[\"'][^>]*>(.*?)</pre>", re.IGNORECASE | re.DOTALL)
 _DAY_ROW_RE = re.compile(r"^\s*(\d{1,2})\b")
@@ -59,6 +67,42 @@ ARCHIVE_SPECS = {
 }
 
 _MONTH_CACHE: dict[tuple[int, int], DstMonthData] = {}
+#: When each cached month was fetched (time.monotonic()).
+_MONTH_FETCHED_AT: dict[tuple[int, int], float] = {}
+
+
+class DstCancelled(RuntimeError):
+    """The caller cancelled a load."""
+
+
+def _naive_utc(value: datetime) -> datetime:
+    """Kyoto hours are naive UTC; accept aware datetimes by converting them."""
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
+def is_fill(value: float) -> bool:
+    return abs(float(value)) >= FILL_VALUE_NT
+
+
+def _cached_month(key: tuple[int, int]) -> DstMonthData | None:
+    month = _MONTH_CACHE.get(key)
+    if month is None:
+        return None
+    if month.source_label == ARCHIVE_FINAL:
+        return month
+    fetched = _MONTH_FETCHED_AT.get(key)
+    if fetched is None or time.monotonic() - fetched > LIVE_MONTH_TTL_S:
+        _MONTH_CACHE.pop(key, None)
+        _MONTH_FETCHED_AT.pop(key, None)
+        return None
+    return month
+
+
+def clear_month_cache() -> None:
+    _MONTH_CACHE.clear()
+    _MONTH_FETCHED_AT.clear()
 
 
 def iter_year_months(start_dt: datetime, end_dt: datetime) -> Iterable[tuple[int, int]]:
@@ -151,8 +195,10 @@ def fetch_month_data(
     use_cache: bool = True,
 ) -> DstMonthData:
     cache_key = (int(year), int(month))
-    if use_cache and cache_key in _MONTH_CACHE:
-        return _MONTH_CACHE[cache_key]
+    if use_cache:
+        cached = _cached_month(cache_key)
+        if cached is not None:
+            return cached
 
     attempts: list[str] = []
     last_error: Exception | None = None
@@ -164,6 +210,7 @@ def fetch_month_data(
             month_data = parse_dst_html_page(year, month, html, archive.label)
             if use_cache:
                 _MONTH_CACHE[cache_key] = month_data
+                _MONTH_FETCHED_AT[cache_key] = time.monotonic()
             return month_data
         except requests.HTTPError as exc:
             status = getattr(getattr(exc, "response", None), "status_code", None)
@@ -181,14 +228,24 @@ def fetch_month_data(
     ) from last_error
 
 
-def load_dst_range(
+def load_dst_samples(
     start_dt: datetime,
     end_dt: datetime,
     *,
     session=None,
     timeout: int = 30,
     progress_cb: Callable[[int | None, str | None], None] | None = None,
+    cancel_cb: Callable[[], bool] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, tuple[str, ...]]:
+    """Hourly Dst in ``[start_dt, end_dt]`` with each sample's archive label.
+
+    Returns ``(times, values_nt, sources)`` where ``times`` are naive UTC
+    datetimes, fill hours are NaN, and ``sources[i]`` is the archive
+    (Final / Provisional / Real-time) sample ``i`` came from. Aware datetimes
+    are accepted and converted to UTC.
+    """
+    start_dt = _naive_utc(start_dt)
+    end_dt = _naive_utc(end_dt)
     if end_dt < start_dt:
         raise ValueError("End time must be after start time.")
 
@@ -201,6 +258,8 @@ def load_dst_range(
     selected_sources: list[str] = []
 
     for idx, (year, month) in enumerate(months, start=1):
+        if cancel_cb is not None and cancel_cb():
+            raise DstCancelled("Dst load cancelled.")
         if progress_cb:
             progress_cb(
                 int(100 * (idx - 1) / max(1, len(months))),
@@ -211,9 +270,38 @@ def load_dst_range(
         for timestamp, value in zip(month_data.timestamps, month_data.values_nt):
             if start_dt <= timestamp <= end_dt:
                 selected_times.append(timestamp)
-                selected_values.append(float(value))
+                selected_values.append(float("nan") if is_fill(value) else float(value))
                 selected_sources.append(month_data.source_label)
 
+    return (
+        np.array(selected_times, dtype=object),
+        np.array(selected_values, dtype=float),
+        tuple(selected_sources),
+    )
+
+
+def load_dst_range(
+    start_dt: datetime,
+    end_dt: datetime,
+    *,
+    session=None,
+    timeout: int = 30,
+    progress_cb: Callable[[int | None, str | None], None] | None = None,
+    cancel_cb: Callable[[], bool] | None = None,
+) -> tuple[np.ndarray, np.ndarray, tuple[str, ...]]:
+    """Hourly Dst in ``[start_dt, end_dt]``; fill hours are NaN.
+
+    Returns ``(times, values_nt, archives)`` where ``archives`` lists the
+    archives used, Final first.
+    """
+    times, values, sources = load_dst_samples(
+        start_dt,
+        end_dt,
+        session=session,
+        timeout=timeout,
+        progress_cb=progress_cb,
+        cancel_cb=cancel_cb,
+    )
     if progress_cb:
         progress_cb(100, "Preparing Dst plot...")
 
@@ -222,11 +310,5 @@ def load_dst_range(
         ARCHIVE_PROVISIONAL: 1,
         ARCHIVE_REALTIME: 2,
     }
-    unique_sources = tuple(sorted(set(selected_sources), key=lambda item: source_order.get(item, 99)))
-
-    return (
-        np.array(selected_times, dtype=object),
-        np.array(selected_values, dtype=float),
-        unique_sources,
-    )
-
+    unique_sources = tuple(sorted(set(sources), key=lambda item: source_order.get(item, 99)))
+    return times, values, unique_sources

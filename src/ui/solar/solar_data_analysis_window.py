@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 3.1.0
+Version 3.2.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
+import os
 from pathlib import Path
 import re
 import shutil
@@ -108,19 +109,14 @@ from src.backend.solar.derotation import (
 )
 from src.backend.services.download_manager import format_bytes, format_eta
 from src.backend.solar.image_measure import ruler_measurement
+from src.backend.session.project_session import STORAGE_EMBED, safe_member_name
 from src.backend.session.solar_session import (
-    SolarSessionError,
     deserialize_circle_fits,
     deserialize_circle_points,
     deserialize_picks,
-    read_solar_session,
     serialize_circle_fits,
     serialize_circle_points,
     serialize_picks,
-    session_circle_count,
-    session_frame_count,
-    session_pick_count,
-    write_solar_session,
     deserialize_pfss_state,
     serialize_pfss_state,
 )
@@ -1914,6 +1910,9 @@ class RegionLightcurveDialog(QDialog):
 
 
 class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
+    #: Something worth saving changed; the main window's one project goes dirty.
+    projectModified = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(SOLAR_WINDOW_TITLE)
@@ -1924,11 +1923,16 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
 
         self._search_result: SunPySearchResult | None = None
         self._loaded_paths: list[str] = []
-        # Self-contained analysis session (.ecsolar) state. When opening a
-        # session the frame load is asynchronous, so the restore payload is
-        # stashed here and applied once _apply_loaded_frames lands.
-        self._session_path: str | None = None
+        # Project restore state. The solar analysis is one part of the main
+        # window's .efaproj project; opening one loads the frames
+        # asynchronously, so the restore payload is stashed here and applied
+        # once _apply_loaded_frames lands. A linked project whose files are gone
+        # re-runs its archive query first (_pending_session_fetch).
         self._pending_session_restore: dict[str, Any] | None = None
+        self._pending_session_fetch: dict[str, Any] | None = None
+        self._pending_session_download = False
+        self._restoring_project = False
+        self._last_restore_unmatched = 0
         # Whether the loaded frames are currently cropped, and the arcsec bounds
         # that were applied (frozen at Apply Crop time so a session restores the
         # exact crop even if the spin fields are edited afterwards).
@@ -2460,16 +2464,18 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             pass
 
     def _build_menu_bar(self) -> None:
-        self.session_menu = self.menuBar().addMenu("Session")
-        self.open_session_action = QAction("Open Session…", self)
-        self.save_session_action = QAction("Save Session", self)
-        self.save_session_action.setShortcut("Ctrl+S")
-        self.save_session_as_action = QAction("Save Session As…", self)
-        self.save_session_as_action.setShortcut("Ctrl+Shift+S")
-        self.session_menu.addAction(self.open_session_action)
-        self.session_menu.addSeparator()
-        self.session_menu.addAction(self.save_session_action)
-        self.session_menu.addAction(self.save_session_as_action)
+        # The one project: these act on the main window's .efaproj, which holds
+        # this window's analysis alongside the radio and GCS work.
+        self.project_menu = self.menuBar().addMenu("Project")
+        self.open_project_action = QAction("Open Project…", self)
+        self.save_project_action = QAction("Save Project", self)
+        self.save_project_action.setShortcut("Ctrl+S")
+        self.save_project_as_action = QAction("Save Project As…", self)
+        self.save_project_as_action.setShortcut("Ctrl+Shift+S")
+        self.project_menu.addAction(self.open_project_action)
+        self.project_menu.addSeparator()
+        self.project_menu.addAction(self.save_project_action)
+        self.project_menu.addAction(self.save_project_as_action)
 
         self.data_menu = self.menuBar().addMenu("Data")
         self.fetch_action = QAction("Fetch Archive Records", self)
@@ -3949,9 +3955,9 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self.export_regions_btn.clicked.connect(self.export_regions_csv)
         self.export_movie_btn.clicked.connect(self.export_movie)
         self.quick_mp4_btn.clicked.connect(lambda: self.export_movie(default_suffix=".mp4"))
-        self.open_session_action.triggered.connect(self.open_session)
-        self.save_session_action.triggered.connect(self.save_session)
-        self.save_session_as_action.triggered.connect(self.save_session_as)
+        self.open_project_action.triggered.connect(self.open_project)
+        self.save_project_action.triggered.connect(self.save_project)
+        self.save_project_as_action.triggered.connect(self.save_project_as)
         self.fetch_action.triggered.connect(self.search_archives)
         self.find_latest_action.triggered.connect(self.find_latest_data)
         self.live_preview_action.triggered.connect(self.open_helioviewer_preview)
@@ -4015,6 +4021,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
                 pass
         measuring = getattr(getattr(self, "_measure", None), "mode", None) is not None
         if measuring:
+            self._notify_project_modified()
             return
         if button == "left":
             self._on_pfss_canvas_click(x_arcsec, y_arcsec)
@@ -4226,11 +4233,13 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         busy = bool(getattr(self, "_busy", False))
         has_results = bool(self._search_result and self._search_result.rows)
         has_regions = bool(self._regions)
-        if hasattr(self, "open_session_action"):
-            self.open_session_action.setEnabled(not busy)
-            # Saving a session embeds the loaded FITS, so it needs loaded frames.
-            self.save_session_action.setEnabled((not busy) and bool(loaded))
-            self.save_session_as_action.setEnabled((not busy) and bool(loaded))
+        if hasattr(self, "open_project_action"):
+            # Project actions belong to the main window's coordinator; a window
+            # opened on its own (tests, embedding) has no project to act on.
+            has_host = self._project_host() is not None
+            self.open_project_action.setEnabled(has_host and not busy)
+            self.save_project_action.setEnabled(has_host and not busy)
+            self.save_project_as_action.setEnabled(has_host and not busy)
         for action in (self.fetch_action, self.find_latest_action, self.upload_action, self.use_analyzer_action):
             action.setEnabled(not busy)
         self.load_selected_action.setEnabled((not busy) and has_results)
@@ -4819,6 +4828,12 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             self._pending_close = False
             self.close()
             return
+        # A linked project whose frames had to be searched for again downloads
+        # them once the search thread has fully stopped.
+        if self._pending_session_download:
+            self._pending_session_download = False
+            self.download_and_load_selected()
+            return
         # A vector re-download accepted while the previous worker was still
         # winding down starts once the thread has fully stopped.
         if self._pending_vector_download:
@@ -4897,8 +4912,10 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
 
     @Slot(str)
     def _on_worker_failed(self, tb_text: str):
-        # A failed load must not leave a session restore pending for the next one.
+        # A failed load must not leave a project restore pending for the next one.
         self._pending_session_restore = None
+        self._pending_session_fetch = None
+        self._pending_session_download = False
         short = str(tb_text).strip().splitlines()[-1] if tb_text else "Unknown error"
         self.statusBar().showMessage("Solar data operation failed.", 5000)
         self.analysis_text.setPlainText("Operation failed.\n\n" + short)
@@ -4916,6 +4933,8 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
     @Slot()
     def _on_worker_cancelled(self):
         self._pending_session_restore = None
+        self._pending_session_fetch = None
+        self._pending_session_download = False
         self.statusBar().showMessage("Operation cancelled.", 5000)
         self.analysis_text.setPlainText("Operation cancelled by user.")
 
@@ -4979,6 +4998,8 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self._set_results_selection_controls_enabled(bool(result.rows))
         self._sync_menu_action_state(loaded=bool(self._map_frames))
         target = self._spec_target_label(result.spec)
+        if self._pending_session_fetch is not None:
+            self._select_rows_for_project_restore(result)
         if not result.rows:
             self.archive_results_status_label.setText(f"No {target} archive records found for this query.")
             hint = (
@@ -5153,6 +5174,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         if not frames:
             QMessageBox.information(self, "Solar Image Analysis", "No map frames were loaded.")
             return
+        replaying_project = self._pending_session_restore is not None
         # Order frames chronologically so the time-lapse / movie plays in
         # observation order regardless of how the files were uploaded or the
         # order downloads completed.
@@ -5236,13 +5258,15 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             pending, self._pending_session_restore = self._pending_session_restore, None
             try:
                 self._apply_session_restore(pending)
-            except Exception as exc:  # noqa: BLE001 - a bad session must not crash the load
+            except Exception as exc:  # noqa: BLE001 - a bad project must not crash the load
                 QMessageBox.warning(
                     self,
-                    "Open Session",
+                    "Open Project",
                     f"Frames loaded, but the saved analysis state could not be fully "
                     f"restored:\n{exc}",
                 )
+        if not replaying_project:
+            self._notify_project_modified()
 
     def _update_load_summary(self) -> None:
         """Refresh the always-visible 'what is loaded' line in the sidebar."""
@@ -5911,6 +5935,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             self.tracking_panel.lock_center_check.blockSignals(False)
         self._measure.clear_all()
         self._sync_tracking_panel_visibility()
+        self._notify_project_modified()
 
     def _sync_nrgf_enabled(self) -> None:
         """NRGF applies to plain frames only — differences already remove the
@@ -6333,6 +6358,12 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         if frames:
             index = max(0, min(int(getattr(self, "_current_frame_index", 0)), len(frames) - 1))
             target = frame_observation_time(frames[index])
+        host = self._project_host()
+        if host is not None and hasattr(host, "open_gcs_fitting_window"):
+            # One GCS window per project: the main window owns it, so the radio
+            # and solar windows always drive the same fit.
+            self._gcs_window = host.open_gcs_fitting_window(target, cache_dir=self.cache_dir)
+            return
         if not alive:
             # The GCS window loads only Helioviewer JPEG2000 frames, so nothing
             # loaded here is handed over as pixels. What carries across is the
@@ -6693,6 +6724,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
                 f"Applied crop x=[{bounds[0]},{bounds[1]}], y=[{bounds[2]},{bounds[3]}].\n"
                 + self._frame_resolution_status(self._map_frames)
             )
+            self._notify_project_modified()
         except Exception as exc:
             QMessageBox.critical(self, "Apply Crop", str(exc))
 
@@ -7113,6 +7145,20 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             return
 
         # 1) Clear loaded / analysis state.
+        self._clear_loaded_data()
+
+        # 2) Reset query + display controls to their construction defaults.
+        self._reset_controls_to_defaults()
+
+        # 3) Clear the plot + analysis panels.
+        self._clear_plot_panels()
+
+        # 4) Delete the download cache.
+        removed = self._clear_cache_folder()
+        self.statusBar().showMessage(f"Reset complete. Cache cleared ({removed}).", 6000)
+
+    def _clear_loaded_data(self) -> None:
+        """Forget every loaded frame and the analysis derived from it."""
         self._search_result = None
         self._loaded_paths = []
         self._original_frames = []
@@ -7142,7 +7188,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self.download_load_btn.setEnabled(False)
         self._set_results_selection_controls_enabled(False)
 
-        # 2) Reset query + display controls to their construction defaults.
+    def _reset_controls_to_defaults(self) -> None:
         now = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
         self.wavelength_combo.setCurrentText("AIA 193 A")
         self.start_dt_edit.setDateTime(QDateTime(now - timedelta(hours=2)))
@@ -7193,7 +7239,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self.vector_threshold_spin.setValue(200)
         self.vector_status_label.setText("No vector field data loaded.")
 
-        # 3) Clear the plot + analysis panels.
+    def _clear_plot_panels(self) -> None:
         self._set_loaded_state(False)
         for canvas in self._all_plot_canvases():
             try:
@@ -7206,10 +7252,6 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self._update_load_summary()
         self._apply_instrument_visibility()
         self._update_size_estimate()
-
-        # 4) Delete the download cache.
-        removed = self._clear_cache_folder()
-        self.statusBar().showMessage(f"Reset complete. Cache cleared ({removed}).", 6000)
 
     def _clear_cache_folder(self) -> str:
         cache_path = Path(self.cache_dir)
@@ -7646,11 +7688,37 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Composite Plot", str(exc))
 
-    # ------------------------------------------------------------ sessions
-    def _session_extract_dir(self, session_path: str) -> Path:
-        """A per-session folder under the cache to unpack embedded frames into."""
-        stem = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(session_path).stem) or "session"
-        return Path(self.cache_dir) / "sessions" / stem
+    # ------------------------------------------------------------- project
+    def _project_host(self) -> Any:
+        """The main window that owns the project, or None when opened alone."""
+        parent = self.parent()
+        while parent is not None:
+            if hasattr(parent, "_project_coordinator") and hasattr(parent, "save_project"):
+                return parent
+            try:
+                parent = parent.parent()
+            except Exception:
+                return None
+        return None
+
+    def _notify_project_modified(self) -> None:
+        if self._restoring_project or self._pending_session_restore is not None:
+            return
+        self.projectModified.emit()
+
+    def open_project(self) -> None:
+        host = self._project_host()
+        if host is None:
+            return
+        host.open_project()
+
+    def save_project(self) -> bool:
+        host = self._project_host()
+        return bool(host.save_project()) if host is not None else False
+
+    def save_project_as(self) -> bool:
+        host = self._project_host()
+        return bool(host.save_project_as()) if host is not None else False
 
     def _default_session_name(self) -> str:
         label = re.sub(r"[^A-Za-z0-9]+", "_", self._loaded_instrument_label() or "solar").strip("_")
@@ -7663,7 +7731,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
                     stamp = when.strftime("_%Y%m%d_%H%M")
             except Exception:
                 stamp = ""
-        return f"{label}{stamp}.ecsolar"
+        return f"{label}{stamp}.efaproj"
 
     def _collect_session_meta(self) -> dict[str, Any]:
         """Snapshot the display state and CME picks for a saved session.
@@ -7764,101 +7832,225 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             },
         }
 
-    def save_session(self) -> bool:
-        """Save to the current session file, or prompt if there isn't one yet."""
-        if self._session_path:
-            return self._write_session_to(self._session_path)
-        return self.save_session_as()
+    def project_has_content(self) -> bool:
+        """Loaded frames are what makes this window part of a project."""
+        return bool(self._map_frames)
 
-    def save_session_as(self) -> bool:
-        if not self._map_frames or not self._loaded_paths:
-            QMessageBox.information(
-                self,
-                "Save Session",
-                "Load or upload solar frames before saving a session.",
-            )
-            return False
-        default = self._default_session_name()
-        if self._session_path:
-            default = str(Path(self._session_path).with_name(default))
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save Solar Session", default, "Solar session (*.ecsolar)"
-        )
-        if not path:
-            return False
-        if not path.lower().endswith(".ecsolar"):
-            path += ".ecsolar"
-        return self._write_session_to(path)
+    def thumbnail_near(self, when: datetime, *, tolerance_s: float = 1800.0) -> Any:
+        """The loaded frame nearest ``when``, as the event-figure composer draws it.
 
-    def _write_session_to(self, path: str) -> bool:
+        The frame as processed here (level, derotation, crop) with this
+        window's colormap, scale and clip percentiles; ``None`` when no frame
+        lies within ``tolerance_s``.
+        """
+        from src.backend.common.event_figure import ThumbnailImage
+
+        best = None
+        best_gap = None
+        for frame in self._map_frames:
+            try:
+                stamp = frame_observation_time(frame)
+            except Exception:
+                stamp = None
+            if stamp is None:
+                continue
+            stamp = stamp.replace(tzinfo=None)
+            gap = abs((stamp - when.replace(tzinfo=None)).total_seconds())
+            if gap <= tolerance_s and (best_gap is None or gap < best_gap):
+                best, best_gap = (frame, stamp), gap
+        if best is None:
+            return None
+        frame, stamp = best
         try:
-            meta = self._collect_session_meta()
-            count = write_solar_session(path, meta=meta, frame_paths=self._loaded_paths)
-        except SolarSessionError as exc:
-            QMessageBox.critical(self, "Save Session Failed", str(exc))
-            return False
-        except Exception as exc:  # noqa: BLE001 - surface any I/O failure to the user
-            QMessageBox.critical(self, "Save Session Failed", f"Could not save session:\n{exc}")
-            return False
-        self._session_path = path
-        picks = session_pick_count(meta)
-        circles = session_circle_count(meta)
-        measured = f"{picks} CME pick(s)"
-        if circles:
-            measured += f", {circles} circle fit(s)"
-        self.statusBar().showMessage(
-            f"Session saved: {Path(path).name}  ·  {count} frame(s), {measured} embedded.",
-            7000,
-        )
-        return True
+            data = self._prepare_map_array(frame.data, "thumbnail")
+        except Exception:
+            return None
+        if data.ndim != 2:
+            return ThumbnailImage(stamp, self._loaded_instrument_label(), data, "loaded")
+        step = max(1, int(max(data.shape) // 512))
+        data = np.asarray(data[::step, ::step], dtype=float)
+        if self.scale_combo.currentText().strip() == "log":
+            with np.errstate(invalid="ignore", divide="ignore"):
+                data = np.where(data > 0, np.log10(data), np.nan)
+        finite = data[np.isfinite(data)]
+        levels = None
+        if finite.size:
+            low = float(np.percentile(finite, float(self.clip_low_slider.value())))
+            high = float(np.percentile(finite, float(self.clip_high_slider.value())))
+            levels = (low, high) if high > low else None
+        cmap = self.matplotlib_canvas._matplotlib_colormap(self._resolved_colormap_name())
+        return ThumbnailImage(stamp, self._loaded_instrument_label(), data, "loaded", cmap=cmap, levels=levels)
 
-    def open_session(self) -> None:
+    def _project_source_query(self) -> dict[str, Any]:
+        """What re-fetches these frames when a linked project's files are gone."""
+        instrument, value = self._current_observable()
+        return {
+            "instrument": str(instrument or ""),
+            "observable": _normalize_observable_data(value),
+            "level": self._base_level,
+            "archive_source": str(self.source_combo.currentData() or "auto"),
+        }
+
+    def project_part_payload(self, storage: str) -> tuple[dict[str, Any], dict[str, str]]:
+        """``(meta, files)`` for the project's solar part.
+
+        The meta is the session meta (view, picks, circles, PFSS settings …)
+        plus where the frames are: their paths and the archive query in link
+        mode, their embedded member names in embed mode. ``files`` maps those
+        member names to the FITS files to embed.
+        """
+        meta = self._collect_session_meta()
+        meta["source"]["query"] = self._project_source_query()
+        meta["frame_paths"] = [str(path) for path in self._loaded_paths]
+        meta["storage"] = str(storage)
+        files: dict[str, str] = {}
+        frame_files: list[str] = []
+        if storage == STORAGE_EMBED:
+            for index, path in enumerate(self._loaded_paths):
+                if not os.path.isfile(str(path)):
+                    continue
+                arcname = f"solar/frames/{index:04d}_{safe_member_name(path, 'frame.fits')}"
+                files[arcname] = str(path)
+                frame_files.append(arcname)
+        meta["frame_files"] = frame_files
+        return meta, files
+
+    def restore_project_part(self, meta: dict[str, Any], extracted_files: dict[str, str]) -> None:
+        """Reload a project's frames, then replay its view and measurements.
+
+        Embedded frames come from the unpacked project. Linked frames are used
+        where they still exist; when any is gone the saved archive query is run
+        again and the frames nearest the saved times are downloaded. Either way
+        the restore itself happens in ``_apply_loaded_frames`` once the frames
+        are in memory, with measurements remapped onto the frames by time.
+        """
+        meta = dict(meta or {})
         if self._busy or self.is_operation_running():
             QMessageBox.information(
-                self, "Open Session", "Wait for the current operation to finish before opening a session."
+                self,
+                "Open Project",
+                "Solar Image Analysis is busy; stop the current operation and open the project again.",
             )
             return
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Open Solar Session", "", "Solar session (*.ecsolar);;All files (*)"
-        )
-        if not path:
+        self.clear_for_project()
+
+        paths: list[str] = []
+        frame_files = [str(name) for name in meta.get("frame_files") or []]
+        if frame_files and extracted_files:
+            paths = [extracted_files[name] for name in frame_files if name in extracted_files]
+        if not paths:
+            linked = [str(path) for path in meta.get("frame_paths") or [] if str(path or "").strip()]
+            existing = [path for path in linked if os.path.isfile(path)]
+            if linked and len(existing) == len(linked):
+                paths = existing
+            elif self._project_can_refetch(meta):
+                self._refetch_project_frames(meta, missing=len(linked) - len(existing))
+                return
+            else:
+                paths = existing
+        if not paths:
+            self._restore_source_widgets(dict(meta.get("source") or {}))
+            QMessageBox.warning(
+                self,
+                "Open Project",
+                "The project's solar frames could not be found and cannot be fetched again; "
+                "only the query settings were restored.",
+            )
             return
-        extract_dir = self._session_extract_dir(path)
-        try:
-            # Start from a clean extraction folder so a re-open never mixes in
-            # stale frames from a previous session with the same name.
-            if extract_dir.exists():
-                shutil.rmtree(extract_dir, ignore_errors=True)
-            result = read_solar_session(path, extract_dir=str(extract_dir))
-        except SolarSessionError as exc:
-            QMessageBox.critical(self, "Open Session Failed", str(exc))
-            return
-        except Exception as exc:  # noqa: BLE001 - surface any I/O failure to the user
-            QMessageBox.critical(self, "Open Session Failed", f"Could not open session:\n{exc}")
-            return
-        self._session_path = path
-        self._pending_session_restore = result.meta
-        self.statusBar().showMessage(
-            f"Opening session: {session_frame_count(result.meta)} frame(s), "
-            f"{session_pick_count(result.meta)} CME pick(s)…",
-            6000,
-        )
+        self._pending_session_restore = meta
+        self.statusBar().showMessage(f"Opening project: loading {len(paths)} solar frame(s)…", 6000)
         # Frames load asynchronously; _apply_loaded_frames applies the restore.
-        self.load_local_paths(result.frame_paths)
+        self.load_local_paths(paths)
+
+    @staticmethod
+    def _project_can_refetch(meta: dict[str, Any]) -> bool:
+        source = dict(meta.get("source") or {})
+        return bool(source.get("start") and source.get("end") and source.get("observable_data") is not None)
+
+    def _refetch_project_frames(self, meta: dict[str, Any], *, missing: int) -> None:
+        source = dict(meta.get("source") or {})
+        self._restore_source_widgets(source)
+        try:
+            self.sample_seconds_spin.setValue(int(source.get("sample_seconds") or self.sample_seconds_spin.value()))
+            self.max_records_spin.setValue(int(source.get("max_records") or self.max_records_spin.value()))
+            self.high_resolution_check.setChecked(bool(source.get("high_resolution", False)))
+        except (TypeError, ValueError):
+            pass
+        query = dict(source.get("query") or {})
+        archive_source = query.get("archive_source")
+        if archive_source:
+            index = self.source_combo.findData(str(archive_source))
+            if index >= 0:
+                self.source_combo.setCurrentIndex(index)
+        if query.get("level"):
+            self._requested_level = str(query.get("level"))
+        self._pending_session_restore = meta
+        self._pending_session_fetch = {"frame_times": list(source.get("frame_times") or [])}
+        self.statusBar().showMessage(
+            f"{missing} linked solar frame(s) are missing; fetching them from the archive again…", 8000
+        )
+        self.search_archives()
+
+    def _select_rows_for_project_restore(self, result: Any) -> None:
+        """Check the archive rows nearest the project's saved frame times."""
+        pending, self._pending_session_fetch = self._pending_session_fetch, None
+        rows = list(getattr(result, "rows", []) or [])
+        if not rows:
+            self._pending_session_restore = None
+            QMessageBox.warning(
+                self,
+                "Open Project",
+                "The archive no longer lists the project's solar frames; the measurements were not restored.",
+            )
+            return
+        wanted = [self._parse_frame_time(value) for value in (pending or {}).get("frame_times") or []]
+        wanted = [when for when in wanted if when is not None]
+        chosen: set[int] = set()
+        if wanted:
+            for when in wanted:
+                best = min(
+                    range(len(rows)),
+                    key=lambda i: abs((rows[i].start.replace(tzinfo=None) - when).total_seconds()),
+                )
+                chosen.add(best)
+        else:
+            chosen = set(range(len(rows)))
+        for index in range(self.results_table.rowCount()):
+            item = self.results_table.item(index, 0)
+            if item is not None:
+                item.setCheckState(Qt.Checked if index in chosen else Qt.Unchecked)
+        # Downloading has to wait for the search thread to finish winding down.
+        self._pending_session_download = True
+
+    def clear_for_project(self) -> None:
+        """Drop loaded frames and measurements without touching the cache or settings."""
+        if self._busy or self.is_operation_running():
+            return
+        try:
+            self.clear_all_measurements()
+        except Exception:
+            pass
+        if not self._map_frames and not self._loaded_paths:
+            return
+        self._clear_loaded_data()
+        self._clear_plot_panels()
 
     def _apply_session_restore(self, meta: dict[str, Any]) -> None:
         """Replay saved display state and CME picks after the frames reload."""
+        self._restoring_project = True
+        try:
+            self._apply_session_restore_inner(meta)
+        finally:
+            self._restoring_project = False
+
+    def _apply_session_restore_inner(self, meta: dict[str, Any]) -> None:
         view = dict(meta.get("view") or {})
         source = dict(meta.get("source") or {})
         n = len(self._map_frames)
-
-        saved_count = int(source.get("frame_count") or view.get("frame_count") or 0)
-        if saved_count and saved_count != n:
-            self.statusBar().showMessage(
-                f"Session had {saved_count} frame(s) but {n} reloaded — "
-                "picks are realigned by frame index.",
-                8000,
-            )
+        # Measurements are keyed by frame index. When the reloaded frames are
+        # not the saved ones (a linked project re-fetched, a file missing), the
+        # indices are remapped to the nearest frame in time.
+        remap = self._frame_index_remap(source.get("frame_times"))
 
         self._restore_source_widgets(source)
         self._restore_view_widgets(view)
@@ -7889,12 +8081,15 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
 
         # Restore the measurements, dropping any that fall outside the range.
         measurements = meta.get("measurements") or {}
-        picks = deserialize_picks(measurements.get("height_time_picks"))
-        picks = {idx: entry for idx, entry in picks.items() if 0 <= idx < n}
-        circles = deserialize_circle_fits(measurements.get("circle_fits"))
-        circles = {idx: entry for idx, entry in circles.items() if 0 <= idx < n}
-        circle_points = deserialize_circle_points(measurements.get("circle_points"))
-        circle_points = {idx: pts for idx, pts in circle_points.items() if 0 <= idx < n}
+        unmatched = 0
+        picks, dropped = self._remap_indexed(deserialize_picks(measurements.get("height_time_picks")), remap, n)
+        unmatched += dropped
+        circles, dropped = self._remap_indexed(deserialize_circle_fits(measurements.get("circle_fits")), remap, n)
+        unmatched += dropped
+        circle_points, _dropped = self._remap_indexed(
+            deserialize_circle_points(measurements.get("circle_points")), remap, n
+        )
+        self._last_restore_unmatched = unmatched
         if (picks or circles) and not self.measurements_check.isChecked():
             # Restored measurements need the tracking panel available to be seen.
             self.measurements_check.setChecked(True)
@@ -7916,6 +8111,8 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
 
         # Land on the saved frame and render with the restored display state.
         target = int(view.get("current_frame_index", 0) or 0)
+        if remap:
+            target = remap.get(target, target)
         self._set_frame_index(max(0, min(target, max(0, n - 1))))
         self._refresh_graticule_overlay()
         self._refresh_region_overlays()
@@ -7930,7 +8127,84 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         restored = f"{len(picks)} CME pick(s)"
         if circles:
             restored += f", {len(circles)} circle fit(s)"
-        self.statusBar().showMessage(f"Session restored: {n} frame(s), {restored}.", 7000)
+        message = f"Solar analysis restored: {n} frame(s), {restored}."
+        if unmatched:
+            message += (
+                f" {unmatched} measurement(s) were dropped: no reloaded frame within "
+                "the time tolerance of the frame they were made on."
+            )
+            QMessageBox.warning(self, "Open Project", message)
+        self.statusBar().showMessage(message, 9000)
+
+    @staticmethod
+    def _parse_frame_time(value: Any) -> datetime | None:
+        if isinstance(value, datetime):
+            return value.replace(tzinfo=None)
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", ""))
+        except ValueError:
+            return None
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+
+    def _frame_index_remap(self, saved_times: Any) -> dict[int, int] | None:
+        """Saved frame index -> reloaded frame index, matched by observation time.
+
+        ``None`` when the project carries no frame times (files saved before
+        they were stored): the index order is then trusted as it always was.
+        A saved frame matches the nearest reloaded frame within half the
+        reloaded cadence (at least 30 s, at most 10 min); unmatched ones are
+        left out and reported.
+        """
+        if not isinstance(saved_times, (list, tuple)) or not saved_times:
+            return None
+        saved = [self._parse_frame_time(value) for value in saved_times]
+        if not any(when is not None for when in saved):
+            return None
+        current: list[datetime | None] = []
+        for frame in self._map_frames:
+            try:
+                when = frame_observation_time(frame)
+            except Exception:
+                when = None
+            current.append(when.replace(tzinfo=None) if isinstance(when, datetime) else None)
+        timed = sorted(when for when in current if when is not None)
+        gaps = [(b - a).total_seconds() for a, b in zip(timed, timed[1:]) if b > a]
+        tolerance = 30.0
+        if gaps:
+            tolerance = min(600.0, max(30.0, 0.5 * float(np.median(gaps))))
+        mapping: dict[int, int] = {}
+        for old_index, when in enumerate(saved):
+            if when is None:
+                continue
+            best = None
+            best_gap = None
+            for new_index, candidate in enumerate(current):
+                if candidate is None:
+                    continue
+                gap = abs((candidate - when).total_seconds())
+                if gap <= tolerance and (best_gap is None or gap < best_gap):
+                    best, best_gap = new_index, gap
+            if best is not None:
+                mapping[old_index] = best
+        return mapping
+
+    @staticmethod
+    def _remap_indexed(items: dict[int, Any], remap: dict[int, int] | None, n: int) -> tuple[dict[int, Any], int]:
+        """Re-key frame-indexed measurements; returns ``(kept, dropped)``."""
+        out: dict[int, Any] = {}
+        dropped = 0
+        for index, entry in sorted(items.items()):
+            new_index = index if remap is None else remap.get(index)
+            if new_index is None or not 0 <= new_index < n or new_index in out:
+                dropped += 1
+                continue
+            out[new_index] = entry
+        return out, dropped
 
     def _observable_index_for_data(self, data: Any) -> int | None:
         """Combo index whose userData matches a saved observable, else None."""

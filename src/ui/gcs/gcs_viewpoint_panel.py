@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 3.1.0
+Version 3.2.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
@@ -298,6 +298,11 @@ class GCSViewpointPanel(QWidget):
         self._limb_visible = True
         #: Set by the window: the cap on frames per channel for a range fetch.
         self.max_frames_provider: Callable[[], int] | None = None
+        #: Archive listing times behind the loaded frames, plus the previous
+        #: frame's. The JP2 disk cache is keyed by them, so they name the exact
+        #: files a project embeds and replay the listing when it reopens.
+        self.picked_times: tuple[datetime, ...] = ()
+        self.previous_listing_time: datetime | None = None
 
         self._build_image()
         self._build_controls()
@@ -415,6 +420,8 @@ class GCSViewpointPanel(QWidget):
     def invalidate_frames(self, *_args: Any) -> None:
         """Discard frames and pending downloads when their source/range changes."""
         self.cancel_fetch(discard_result=True)
+        self.picked_times = ()
+        self.previous_listing_time = None
         if self.frames:
             self.set_frames([])
         else:
@@ -873,6 +880,26 @@ class GCSViewpointPanel(QWidget):
             # returns None), so the two can never disagree.
             return None
 
+    def jp2_cache_directory(self) -> Path:
+        """This panel's JP2 disk cache (shared by every panel)."""
+        return jp2_cache_dir(self._cache_base)
+
+    def listing_times(self) -> list[datetime]:
+        """The listing that reproduces the loaded frames: picked times and the previous one."""
+        times = list(self.picked_times)
+        if self.previous_listing_time is not None:
+            times.append(self.previous_listing_time)
+        return sorted(set(times))
+
+    def cached_jp2_paths(self) -> list[Path]:
+        """The cached JP2 files behind the loaded frames (those still on disk)."""
+        jp2_source = self.source()
+        if jp2_source is None:
+            return []
+        directory = self.jp2_cache_directory()
+        paths = [hvjp2.cache_path(directory, jp2_source, when) for when in self.listing_times()]
+        return [path for path in paths if path.is_file()]
+
     # -------------------------------------------------------------- fetching
     def start_fetch(self) -> bool:
         """Load this channel's frames for its date range. False if not started."""
@@ -938,6 +965,8 @@ class GCSViewpointPanel(QWidget):
             self.frames_label.setText("none")
             self.statusChanged.emit(f"{self.label}: nothing could be loaded.")
             return
+        self.picked_times = tuple(getattr(sequence, "picked_times", ()) or ())
+        self.previous_listing_time = getattr(sequence, "previous_time", None)
         self.set_frames(frames, harmonised=True, previous=getattr(sequence, "previous", None))
         notes = [f"{len(frames)} frame(s)"]
         listed = int(getattr(sequence, "listed", 0) or 0)

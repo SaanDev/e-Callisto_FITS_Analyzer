@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 3.1.0
+Version 3.2.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
@@ -111,6 +111,7 @@ from src.ui.gcs.gcs_viewpoint_panel import (
 )
 from src.ui.gcs.gcs_window_actions import GCSWindowActions
 from src.ui.gcs.gcs_window_exports import GCSWindowExports
+from src.ui.gcs.gcs_window_project import GCSWindowProject
 
 
 def _utc_now() -> datetime:
@@ -439,8 +440,11 @@ class GCSControlDeck(QScrollArea):
 # --- Window -------------------------------------------------------------------------
 
 
-class GCSFittingWindow(GCSWindowActions, GCSWindowExports, QMainWindow):
+class GCSFittingWindow(GCSWindowActions, GCSWindowExports, GCSWindowProject, QMainWindow):
     """Fit one GCS shell against up to three simultaneous viewpoints."""
+
+    #: Something worth saving changed; the main window's one project goes dirty.
+    projectModified = Signal()
 
     # The GCS model's state, under the names it had before the shock model.
     _params = _gcs_track_attribute("params")
@@ -488,6 +492,9 @@ class GCSFittingWindow(GCSWindowActions, GCSWindowExports, QMainWindow):
         #: every resize re-fits it so the images leave no space unused.
         self._user_split = {LAYOUT_EQUAL: False, LAYOUT_FOCUS: False}
         self._split_pending = False
+        #: Project restore: set while a reopened project's channels load.
+        self._restoring_project = False
+        self._pending_project_restore: dict | None = None
 
         if event_range is None:
             centre = _as_utc(target_time or _utc_now()).replace(microsecond=0, second=0)
@@ -1456,6 +1463,7 @@ class GCSFittingWindow(GCSWindowActions, GCSWindowExports, QMainWindow):
             for other in self.panels:
                 if other is not panel and other.frames:
                     other.set_difference_mode(DEFAULT_DIFFERENCE_MODE)
+            self._notify_project_modified()
         if not self._updating_event:
             self._rebuild_time_axis()
             self._sync_all()
@@ -1546,6 +1554,7 @@ class GCSFittingWindow(GCSWindowActions, GCSWindowExports, QMainWindow):
         for panel in self.panels:
             panel.set_difference_mode(mode)
         self._sync_all()
+        self._notify_project_modified()
 
     # ----------------------------------------------------------------- event
     def event_range(self) -> tuple[datetime, datetime]:
@@ -1664,6 +1673,9 @@ class GCSFittingWindow(GCSWindowActions, GCSWindowExports, QMainWindow):
         self.load_all_btn.setText("Loading…" if busy else "Load all")
         if hasattr(self, "menu_actions"):
             self._sync_menu_actions()
+        if not busy and getattr(self, "_pending_project_restore", None):
+            # After the slot that delivers the frames has run to completion.
+            QTimer.singleShot(0, self._check_project_restore_done)
 
     # ------------------------------------------------------------ interaction
     def _on_parameters(self, params: GCSParameters) -> None:
@@ -1672,6 +1684,7 @@ class GCSFittingWindow(GCSWindowActions, GCSWindowExports, QMainWindow):
         self._last_refinement = None
         self._forget_recorded_note(GCS_MODEL)
         self._sync_all()
+        self._notify_project_modified()
 
     def _on_shock_parameters(self, params: ShockParameters) -> None:
         self.pause()
@@ -1680,6 +1693,7 @@ class GCSFittingWindow(GCSWindowActions, GCSWindowExports, QMainWindow):
         track.last_refinement = None
         self._forget_recorded_note(SHOCK_MODEL)
         self._sync_all()
+        self._notify_project_modified()
 
     def _on_handle(self, key: str, name: str, x: float, y: float, _finished: bool) -> None:
         # Handles outside the GCS layer arrive as "<layer>:<name>".
@@ -1701,6 +1715,7 @@ class GCSFittingWindow(GCSWindowActions, GCSWindowExports, QMainWindow):
         track.last_refinement = None
         self._forget_recorded_note(model)
         self._sync_all()
+        self._notify_project_modified()
 
     def _on_canvas_click(self, key: str, x: float, y: float, button: str) -> None:
         panel = self._panel(key)
@@ -1725,6 +1740,7 @@ class GCSFittingWindow(GCSWindowActions, GCSWindowExports, QMainWindow):
             return
         track.last_refinement = None
         self._sync_all()
+        self._notify_project_modified()
 
     @staticmethod
     def _drop_click_entry(track: ModelTrack, key: str, frame: int | None, point: tuple[float, float]) -> None:
@@ -1760,6 +1776,7 @@ class GCSFittingWindow(GCSWindowActions, GCSWindowExports, QMainWindow):
         del points[len(points) - 1 - points[::-1].index(point)]
         track.last_refinement = None
         self._sync_all()
+        self._notify_project_modified()
         subject = "front point" if self._editing == GCS_MODEL else "shock front point"
         self._set_status(f"Removed the last {subject}, from panel {key}.")
 
@@ -1774,6 +1791,7 @@ class GCSFittingWindow(GCSWindowActions, GCSWindowExports, QMainWindow):
             track.click_order = [entry for entry in track.click_order if entry[:2] != (key, current)]
         track.last_refinement = None
         self._sync_all()
+        self._notify_project_modified()
 
     # --------------------------------------------------------------- fitting
     def _viewpoints(self, model: str | None = None) -> list[GCSViewpoint]:
@@ -1857,6 +1875,7 @@ class GCSFittingWindow(GCSWindowActions, GCSWindowExports, QMainWindow):
         track.params = result.parameters
         self._forget_recorded_note(model)
         self._sync_all()
+        self._notify_project_modified()
         self._set_status(result.message + self._refine_scope(model, free, upcoming, points))
 
     def _on_commit(self) -> None:
@@ -1914,6 +1933,7 @@ class GCSFittingWindow(GCSWindowActions, GCSWindowExports, QMainWindow):
         track.provenance[when] = self._current_provenance(model)
         self._forget_recorded_note(model)
         self._refresh_fits()
+        self._notify_project_modified()
         subject = "" if model == GCS_MODEL else "shock "
         self._set_status(
             f"Committed {subject}{when:%H:%M:%S} → apex {params.height_rsun:.2f} R☉ "
@@ -1973,6 +1993,7 @@ class GCSFittingWindow(GCSWindowActions, GCSWindowExports, QMainWindow):
         track.provenance.clear()
         self._forget_recorded_note(self._editing)
         self._refresh_fits()
+        self._notify_project_modified()
         self._set_status(f"Recorded {'GCS' if self._editing == GCS_MODEL else 'shock'} fits cleared.")
 
     def _on_fit_kinematics(self) -> None:
@@ -2069,6 +2090,7 @@ class GCSFittingWindow(GCSWindowActions, GCSWindowExports, QMainWindow):
     # ----------------------------------------------------------------- close
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         self._play_timer.stop()
+        self._pending_project_restore = None
         for panel in self.panels:
             panel.shutdown()
         super().closeEvent(event)

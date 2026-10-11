@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 3.1.0
+Version 3.2.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -376,6 +376,7 @@ def test_sidebar_sections_are_collapsible_cards():
             "Axis",
             "Graph Properties",
             "Analysis Summary",
+            "Geomagnetic Response",
             "Ruler Measurement",
         ]
         # The header row is the control; there is no check box to hit.

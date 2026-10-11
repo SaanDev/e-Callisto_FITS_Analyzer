@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 3.1.0
+Version 3.2.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
@@ -17,8 +17,11 @@ the FITS analysis canvas.
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Callable
 from urllib.parse import urlencode
 
@@ -38,7 +41,34 @@ SOURCE_IDS: dict[tuple[str, str], int] = {
     ("EIT", "304"): 3,
     ("LASCO", "C2"): 4,
     ("LASCO", "C3"): 5,
+    # SDO/AIA, for the event-figure composer's thumbnails. Checked against
+    # getDataSources (Oct 2026): 94..4500 are sourceIds 8..17.
+    ("AIA", "94"): 8,
+    ("AIA", "131"): 9,
+    ("AIA", "171"): 10,
+    ("AIA", "193"): 11,
+    ("AIA", "211"): 12,
+    ("AIA", "304"): 13,
+    ("AIA", "335"): 14,
+    ("AIA", "1600"): 15,
+    ("AIA", "1700"): 16,
+    ("AIA", "4500"): 17,
 }
+
+
+def _add_coronagraph_sources() -> None:
+    """STEREO COR1/COR2: the same sourceIds the GCS window loads as JPEG2000."""
+    from src.backend.solar.helioviewer_jp2 import GCS_JP2_SOURCES
+
+    for source in GCS_JP2_SOURCES:
+        if source.instrument == "SECCHI":
+            SOURCE_IDS[("SECCHI", source.key)] = int(source.source_id)
+
+
+_add_coronagraph_sources()
+
+#: Which spacecraft each instrument flies on, for display names.
+_OBSERVATORY = {"EIT": "SOHO", "LASCO": "SOHO", "AIA": "SDO", "SECCHI": "STEREO"}
 
 # Retained for callers that only ever deal with LASCO detectors.
 LASCO_SOURCE_IDS: dict[str, int] = {
@@ -87,9 +117,27 @@ def channels_for(instrument: str = DEFAULT_INSTRUMENT) -> tuple[str, ...]:
 
 
 def display_name(instrument: str, channel: str) -> str:
-    """Human label for a source, e.g. 'SOHO/LASCO C2' or 'SOHO/EIT 195'."""
+    """Human label for a source, e.g. 'SOHO/LASCO C2', 'SDO/AIA 193', 'STEREO/SECCHI COR2-A'."""
     inst = str(instrument or "").strip().upper()
-    return f"SOHO/{inst} {str(channel or '').strip()}".strip()
+    observatory = _OBSERVATORY.get(inst, "SOHO")
+    return f"{observatory}/{inst} {str(channel or '').strip()}".strip()
+
+
+#: Thumbnail sources offered by the event-figure composer: (label, instrument, channel).
+THUMBNAIL_SOURCES: tuple[tuple[str, str, str], ...] = tuple(
+    [(f"AIA {chan}", "AIA", chan) for chan in ("94", "131", "171", "193", "211", "304", "335", "1600")]
+    + [(f"EIT {chan}", "EIT", chan) for chan in ("171", "195", "284", "304")]
+    + [("LASCO C2", "LASCO", "C2"), ("LASCO C3", "LASCO", "C3")]
+    + [(key, "SECCHI", key) for (inst, key) in list(SOURCE_IDS) if inst == "SECCHI"]
+)
+
+
+def thumbnail_source(label: str) -> tuple[str, str] | None:
+    """``(instrument, channel)`` for a :data:`THUMBNAIL_SOURCES` label."""
+    for name, inst, chan in THUMBNAIL_SOURCES:
+        if name == str(label):
+            return inst, chan
+    return None
 
 
 def _resolve_channel(instrument: str, channel: str) -> tuple[str, str, int]:
@@ -250,6 +298,59 @@ def fetch_preview(
         size_px=int(size_px),
         image_url=url,
     )
+
+
+@dataclass(frozen=True)
+class CachedPreview:
+    """A preview PNG from the disk cache (or just fetched into it)."""
+
+    png_bytes: bytes
+    date: datetime          # observation time of the image Helioviewer chose
+    label: str
+    from_cache: bool
+
+
+def preview_cache_dir(base: str | os.PathLike[str]) -> Path:
+    return Path(base) / "helioviewer_previews"
+
+
+def fetch_preview_cached(
+    instrument: str,
+    channel: str,
+    date: datetime,
+    *,
+    cache_dir: str | os.PathLike[str],
+    size_px: int = 512,
+    session: requests.Session | None = None,
+    api_base: str = HELIOVIEWER_API_BASE,
+) -> CachedPreview:
+    """:func:`fetch_preview` for the image nearest ``date``, through a disk cache.
+
+    Keyed by source, the requested minute and the size: a figure rebuilt with
+    the same thumbnails never refetches them, and works offline once cached.
+    These are display PNGs (Helioviewer's own scaling) — never normalised again.
+    """
+    inst, chan, _source_id = _resolve_channel(instrument, channel)
+    when = date.astimezone(timezone.utc).replace(tzinfo=None) if date.tzinfo else date
+    stem = f"{inst}_{chan}_{when:%Y%m%dT%H%M}_{int(size_px)}"
+    folder = preview_cache_dir(cache_dir)
+    png_path = folder / f"{stem}.png"
+    meta_path = folder / f"{stem}.json"
+    label = display_name(inst, chan)
+    if png_path.is_file() and meta_path.is_file():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            return CachedPreview(png_path.read_bytes(), _parse_hv_date(meta["date"]), label, True)
+        except (OSError, ValueError, KeyError):
+            pass
+    preview = fetch_preview(chan, instrument=inst, size_px=size_px, date=when, session=session, api_base=api_base)
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        png_path.write_bytes(preview.png_bytes)
+        meta_path.write_text(json.dumps({"date": preview.info.date.strftime("%Y-%m-%dT%H:%M:%S")}), encoding="utf-8")
+    except OSError:
+        pass
+    return CachedPreview(preview.png_bytes, preview.info.date, label, False)
 
 
 def build_frame_times(

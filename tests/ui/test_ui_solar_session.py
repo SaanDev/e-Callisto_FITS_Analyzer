@@ -1,16 +1,19 @@
 """
 e-CALLISTO FITS Analyzer
-Offscreen tests for self-contained solar analysis sessions
-(save/open wiring in src/ui/solar/solar_data_analysis_window.py).
+Offscreen tests for the solar part of the one project
+(src/ui/solar/solar_data_analysis_window.py: project_part_payload,
+restore_project_part and the restore hook).
 
 Frames are lightweight WcsMap fakes and are loaded through _apply_loaded_frames
 directly, matching tests/ui/test_ui_solar_measure_tools.py. The async file reload
-that open_session normally kicks off is simulated by setting
+that restore_project_part normally kicks off is simulated by setting
 _pending_session_restore and calling _apply_loaded_frames, which fires the same
 restore hook.
 """
 
 from __future__ import annotations
+
+import os
 
 import numpy as np
 import pytest
@@ -20,7 +23,6 @@ pytest.importorskip("pyqtgraph")
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from src.backend.session.solar_session import SOLAR_SESSION_MAGIC, read_solar_session
 from src.ui.solar.solar_data_analysis_window import SolarDataAnalysisWindow
 
 
@@ -125,31 +127,45 @@ def test_collect_session_meta_captures_display_and_picks(tmp_path):
     win.close()
 
 
-def test_save_session_embeds_frame_bytes(tmp_path):
+def test_project_part_embeds_the_frame_files_in_load_order(tmp_path):
     _app()
     win = SolarDataAnalysisWindow()
     paths = _write_frame_files(tmp_path, 3)
     _load(win, _three_frames(), paths)
 
-    out = tmp_path / "event.ecsolar"
-    assert win._write_session_to(str(out)) is True
-    assert win._session_path == str(out)
-
-    result = read_solar_session(str(out), extract_dir=str(tmp_path / "restore"))
-    assert result.meta["magic"] == SOLAR_SESSION_MAGIC
-    assert len(result.frame_paths) == 3
-    for i, path in enumerate(result.frame_paths):
-        with open(path, "rb") as fh:
-            assert fh.read() == f"FITS-{i}".encode("ascii")
+    meta, files = win.project_part_payload("embed")
+    assert meta["storage"] == "embed"
+    assert meta["frame_files"] == sorted(files)
+    assert [files[name] for name in meta["frame_files"]] == paths
+    assert all(name.startswith("solar/frames/000") for name in meta["frame_files"])
+    assert meta["frame_paths"] == paths
+    assert meta["source"]["query"]["instrument"]
     win.close()
 
 
-def test_save_session_requires_loaded_frames(tmp_path):
+def test_link_mode_references_the_frames_and_embeds_nothing(tmp_path):
     _app()
     win = SolarDataAnalysisWindow()
-    # Nothing loaded: save must not write a file (guard dialog is stubbed).
-    assert win.save_session_as() is False
-    assert win._session_path is None
+    paths = _write_frame_files(tmp_path, 3)
+    _load(win, _three_frames(), paths)
+
+    meta, files = win.project_part_payload("link")
+    assert files == {}
+    assert meta["frame_files"] == []
+    assert meta["frame_paths"] == paths
+    assert len(meta["source"]["frame_times"]) == 3
+    win.close()
+
+
+def test_a_window_on_its_own_has_no_project_to_save():
+    _app()
+    win = SolarDataAnalysisWindow()
+    assert win.project_has_content() is False
+    # Project actions belong to the main window's coordinator.
+    assert win.project_menu.title() == "Project"
+    assert not win.save_project_action.isEnabled()
+    assert win.save_project_action.shortcut().toString() == "Ctrl+S"
+    assert win.save_project() is False
     win.close()
 
 
@@ -436,3 +452,158 @@ def test_session_restore_ignores_an_observable_that_no_longer_exists():
     win._restore_source_widgets({"observable_data": ["MDI", "magnetogram"]})
     assert win._current_observable() == before
     win.close()
+
+
+# --------------------------------------------------------------------------- #
+# Project restore: linked files, re-fetch, remapping by time
+# --------------------------------------------------------------------------- #
+def test_linked_frames_that_still_exist_are_loaded_directly(tmp_path, monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    paths = _write_frame_files(tmp_path, 3)
+    _load(win, _three_frames(), paths)
+    meta, _files = win.project_part_payload("link")
+    win.close()
+
+    win2 = SolarDataAnalysisWindow()
+    loaded = []
+    monkeypatch.setattr(win2, "load_local_paths", lambda p: loaded.append(list(p)))
+    win2.restore_project_part(meta, {})
+    assert loaded == [paths]
+    assert win2._pending_session_restore == meta
+    win2.close()
+
+
+def test_embedded_frames_are_loaded_from_the_unpacked_project(tmp_path, monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _three_frames(), _write_frame_files(tmp_path, 3))
+    meta, _files = win.project_part_payload("embed")
+    win.close()
+
+    unpacked = {name: str(tmp_path / f"unpacked_{i}.fits") for i, name in enumerate(meta["frame_files"])}
+    win2 = SolarDataAnalysisWindow()
+    loaded = []
+    monkeypatch.setattr(win2, "load_local_paths", lambda p: loaded.append(list(p)))
+    win2.restore_project_part(meta, unpacked)
+    assert loaded == [[unpacked[name] for name in meta["frame_files"]]]
+    win2.close()
+
+
+def test_missing_linked_frames_rerun_the_saved_archive_query(tmp_path, monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    paths = _write_frame_files(tmp_path, 3)
+    _load(win, _three_frames(), paths)
+    meta, _files = win.project_part_payload("link")
+    win.close()
+    os.remove(paths[0])
+
+    win2 = SolarDataAnalysisWindow()
+    searched = []
+    monkeypatch.setattr(win2, "search_archives", lambda: searched.append(True))
+    monkeypatch.setattr(win2, "load_local_paths", lambda p: pytest.fail("must not load a partial set"))
+    win2.restore_project_part(meta, {})
+    assert searched == [True]
+    assert win2._pending_session_fetch["frame_times"] == meta["source"]["frame_times"]
+    assert win2._pending_session_restore == meta
+    assert win2.start_dt_edit.dateTime().toPython().replace(tzinfo=None).isoformat() == meta["source"]["start"]
+    win2.close()
+
+
+def test_a_refetch_checks_the_archive_rows_nearest_the_saved_frames(tmp_path):
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    _app()
+    win = SolarDataAnalysisWindow()
+    rows = [
+        SimpleNamespace(start=datetime(2012, 7, 12, 15, 50), selected=True, source="VSO", instrument="", size="", fileid="a"),
+        SimpleNamespace(start=datetime(2012, 7, 12, 16, 0, 5), selected=True, source="VSO", instrument="", size="", fileid="b"),
+        SimpleNamespace(start=datetime(2012, 7, 12, 16, 9, 58), selected=True, source="VSO", instrument="", size="", fileid="c"),
+    ]
+    result = SimpleNamespace(rows=rows)
+    win._populate_results_table(result)
+    win._pending_session_fetch = {"frame_times": ["2012-07-12T16:00:00", "2012-07-12T16:10:00"]}
+    win._select_rows_for_project_restore(result)
+    assert win._checked_rows() == [1, 2]
+    assert win._pending_session_download is True
+    assert win._pending_session_fetch is None
+    win.close()
+
+
+def test_measurements_are_remapped_to_reloaded_frames_by_time(tmp_path):
+    """Picks are keyed by frame index; a reload that lost the first frame must
+    move every pick to the frame with the same time, not the same position."""
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _three_frames(), _write_frame_files(tmp_path, 3))
+    win.measurements_check.setChecked(True)
+    win.height_time_btn.setChecked(True)
+    win.tracking_panel.auto_advance_check.setChecked(False)
+    for index, x in ((1, 4.0), (2, 8.0)):
+        win.frame_slider.setValue(index)
+        QApplication.processEvents()
+        win._measure.on_canvas_click(x, 0.0, "left")
+    meta = win._collect_session_meta()
+    assert sorted(win._measure.picks) == [1, 2]
+    win.close()
+
+    reload_dir = tmp_path / "later"
+    reload_dir.mkdir()
+    win2 = SolarDataAnalysisWindow()
+    win2._pending_session_restore = meta
+    later_two = [
+        CorWcsMap(np.ones((11, 11)), date="2012-07-12T16:10:00"),
+        CorWcsMap(np.ones((11, 11)), date="2012-07-12T16:20:00"),
+    ]
+    _load(win2, later_two, _write_frame_files(reload_dir, 2))
+    assert sorted(win2._measure.picks) == [0, 1]
+    assert win2._measure.picks[0][1] == pytest.approx(0.5, abs=1e-6)
+    assert win2._measure.picks[1][1] == pytest.approx(1.0, abs=1e-6)
+    assert win2._last_restore_unmatched == 0
+    win2.close()
+
+
+def test_a_measurement_without_a_matching_frame_is_dropped_and_reported(tmp_path):
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load(win, _three_frames(), _write_frame_files(tmp_path, 3))
+    _add_two_picks(win)  # frames 0 (16:00) and 1 (16:10)
+    meta = win._collect_session_meta()
+    win.close()
+
+    reload_dir = tmp_path / "shifted"
+    reload_dir.mkdir()
+    win2 = SolarDataAnalysisWindow()
+    win2._pending_session_restore = meta
+    shifted = [
+        CorWcsMap(np.ones((11, 11)), date="2012-07-12T16:10:00"),
+        CorWcsMap(np.ones((11, 11)), date="2012-07-12T16:20:00"),
+    ]
+    _load(win2, shifted, _write_frame_files(reload_dir, 2))
+    # The 16:00 pick has no frame within half a cadence; the 16:10 one moves to index 0.
+    assert sorted(win2._measure.picks) == [0]
+    assert win2._last_restore_unmatched == 1
+    win2.close()
+
+
+def test_frames_loaded_by_hand_mark_the_project_modified_but_a_restore_does_not(tmp_path):
+    _app()
+    win = SolarDataAnalysisWindow()
+    hits = []
+    win.projectModified.connect(lambda: hits.append(1))
+    _load(win, _three_frames(), _write_frame_files(tmp_path, 3))
+    assert hits
+    meta = win._collect_session_meta()
+    win.close()
+
+    win2 = SolarDataAnalysisWindow()
+    hits2 = []
+    win2.projectModified.connect(lambda: hits2.append(1))
+    win2._pending_session_restore = meta
+    reload_dir = tmp_path / "r"
+    reload_dir.mkdir()
+    _load(win2, _three_frames(), _write_frame_files(reload_dir, 3))
+    assert hits2 == []
+    win2.close()

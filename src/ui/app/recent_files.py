@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 3.1.0
+Version 3.2.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
@@ -23,6 +23,9 @@ MAX_RECENT_ENTRIES = 10
 
 FITS_SUFFIXES = (".fit", ".fits", ".fit.gz", ".fits.gz")
 PROJECT_SUFFIX = ".efaproj"
+#: Solar Image Analysis sessions written before v3.2; opened as an import.
+LEGACY_SOLAR_SUFFIX = ".ecsolar"
+PROJECT_SUFFIXES = (PROJECT_SUFFIX, LEGACY_SOLAR_SUFFIX)
 
 
 def is_fits_path(path) -> bool:
@@ -30,7 +33,12 @@ def is_fits_path(path) -> bool:
 
 
 def is_project_path(path) -> bool:
-    return str(path or "").lower().endswith(PROJECT_SUFFIX)
+    """A project, or a legacy solar session that opens as one."""
+    return str(path or "").lower().endswith(PROJECT_SUFFIXES)
+
+
+def is_legacy_solar_session_path(path) -> bool:
+    return str(path or "").lower().endswith(LEGACY_SOLAR_SUFFIX)
 
 
 def _normalized(path) -> str:
@@ -130,7 +138,8 @@ def fits_entry_label(paths) -> str:
 def classify_dropped_paths(paths) -> tuple[str | None, object]:
     """What a drop of ``paths`` should open.
 
-    Returns ``("project", path)`` for a single project file, ``("fits", [paths])``
+    Returns ``("project", path)`` for a single project file (a legacy
+    ``.ecsolar`` session counts, and is imported), ``("fits", [paths])``
     for FITS files only (one file, or several to combine), or ``(None, reason)``
     when the drop cannot be opened as a whole.
     """
@@ -141,7 +150,7 @@ def classify_dropped_paths(paths) -> tuple[str | None, object]:
     fits_files = [path for path in files if is_fits_path(path)]
     others = [os.path.basename(path) for path in files if not is_project_path(path) and not is_fits_path(path)]
     if others:
-        return None, "Only FITS files (.fit, .fits, .fit.gz, .fits.gz) and projects (.efaproj) can be opened:\n" + "\n".join(others)
+        return None, "Only FITS files (.fit, .fits, .fit.gz, .fits.gz) and projects (.efaproj, .ecsolar) can be opened:\n" + "\n".join(others)
     if projects:
         if len(files) == 1:
             return "project", projects[0]

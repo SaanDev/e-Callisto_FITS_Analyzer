@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 3.1.0
+Version 3.2.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 
@@ -34,6 +34,9 @@ from src.backend.common.figure_export import (
 from src.backend.radio.frequency_axis import matplotlib_extent
 from src.backend.radio.radio_figures import (
     BandTrace,
+    EventLane,
+    EventMark,
+    EventMarkers,
     GoesOverlay,
     GraphText,
     Measurement,
@@ -225,6 +228,44 @@ def test_swaves_alone_fills_the_page_with_its_own_title():
     (ax,) = _plot_axes(fig)
     assert ax.get_title() == "STEREO/SWAVES — STEREO-B"
     assert not ax.patches
+
+
+def _events() -> EventMarkers:
+    return EventMarkers((
+        EventLane("Flares", (EventMark(-200.0, 300.0, "X3.9", "#d62728", "X3.9 flare"),), before=1),
+        EventLane("CMEs", (EventMark(500.0, None, "1353 km/s, halo", "#9467bd"),), after=2),
+    ))
+
+
+def test_the_event_strip_sits_above_the_spectrum_and_takes_the_title():
+    fig = dynamic_spectrum_figure(SpectrumGraph(_image(), title="With events", events=_events(), x_label="Time [s]"))
+    strip, main = _plot_axes(fig)
+    assert strip.get_title() == "With events" and main.get_title() == ""
+    assert [label.get_text() for label in strip.get_yticklabels()] == ["Flares", "CMEs"]
+    assert strip.get_xlim() == pytest.approx(main.get_xlim())  # one shared time axis
+    assert strip.get_position().y0 > main.get_position().y1
+    texts = [text.get_text() for text in strip.texts]
+    assert "< 1 more nearby" in texts and "2 more nearby >" in texts
+    labels = [child.get_text() for child in strip.get_children() if hasattr(child, "get_text")]
+    assert "X3.9" in labels and "1353 km/s, halo" in labels
+    assert strip.collections, "the flare is drawn as a bar"
+    # The flare began before the plot, so its label sits at the left edge.
+    flare_label = next(c for c in strip.get_children() if getattr(c, "get_text", lambda: "")() == "X3.9")
+    assert flare_label.xy[0] == pytest.approx(min(main.get_xlim()))
+
+
+def test_the_event_strip_goes_above_a_split_spectrum_too():
+    fig = dynamic_spectrum_figure(SpectrumGraph(_image(), title="Split", swaves=_swaves(), events=_events()))
+    strip, main, swaves = _plot_axes(fig)
+    assert strip.get_title() == "Split"
+    assert strip.get_position().y0 > main.get_position().y1 > swaves.get_position().y1
+
+
+def test_an_empty_strip_changes_nothing():
+    plain = dynamic_spectrum_figure(SpectrumGraph(_image(), title="x"))
+    empty = dynamic_spectrum_figure(SpectrumGraph(_image(), title="x", events=EventMarkers()))
+    assert len(plain.axes) == len(empty.axes)
+    assert plain.get_size_inches() == pytest.approx(empty.get_size_inches())
 
 
 def test_a_figure_needs_something_to_draw():

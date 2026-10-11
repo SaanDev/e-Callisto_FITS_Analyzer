@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 3.1.0
+Version 3.2.0
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -431,7 +431,9 @@ class MainWindow(QMainWindow):
         self.cursor_label.setText(self._format_cursor_text(x, inside))
 
     def update_summary(self, times: np.ndarray, values: np.ndarray, sources: tuple[str, ...]):
-        if len(times) == 0:
+        # Kyoto's 9999 fill hours arrive as NaN; a range of nothing but fill
+        # has no extremes to report.
+        if len(times) == 0 or not np.isfinite(np.asarray(values, dtype=float)).any():
             self._clear_info()
             return
         idx_min = int(np.nanargmin(values))
