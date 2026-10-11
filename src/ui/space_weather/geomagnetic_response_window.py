@@ -29,6 +29,7 @@ from typing import Any
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from PySide6.QtCore import QSettings, Qt, QTimer
+from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -50,9 +51,13 @@ from src.backend.space_weather.geomagnetic_context import context_csv_rows
 from src.backend.space_weather.geomagnetic_figures import (
     DEFAULT_GEO_PANELS,
     GEO_PANELS,
+    LIGHT_PALETTE,
+    GeoPalette,
+    dark_palette,
     draw_geomagnetic_panels,
     geomagnetic_figure,
     normalize_panels,
+    tighten_layout,
     total_rows,
 )
 from src.ui.space_weather.geomagnetic_controller import GeomagneticController
@@ -70,6 +75,28 @@ def _make_settings() -> QSettings:
 def _get_theme():
     app = QApplication.instance()
     return app.property("theme_manager") if app else None
+
+
+def screen_palette() -> GeoPalette:
+    """The app's light or dark colours, for drawing on the window's canvas."""
+    app = QApplication.instance()
+    if app is None:
+        return LIGHT_PALETTE
+    theme = _get_theme()
+    palette = app.palette()
+    window = palette.color(QPalette.Window)
+    dark = bool(theme.is_dark()) if theme is not None and hasattr(theme, "is_dark") else window.lightness() < 128
+    if not dark:
+        return GeoPalette(
+            foreground=palette.color(QPalette.WindowText).name(),
+            face=palette.color(QPalette.Base).name(),
+            figure=window.name(),
+        )
+    return dark_palette(
+        foreground=palette.color(QPalette.WindowText).name(),
+        face=palette.color(QPalette.Base).name(),
+        figure=window.name(),
+    )
 
 
 def load_panel_choice() -> list[str]:
@@ -102,6 +129,9 @@ class GeomagneticResponseWindow(QMainWindow):
         controller.contextChanged.connect(lambda _c: self.render())
         controller.eventChanged.connect(self._sync_event)
         controller.statusChanged.connect(self.statusBar().showMessage)
+        theme = _get_theme()
+        if theme is not None and hasattr(theme, "themeChanged"):
+            theme.themeChanged.connect(self._on_theme_changed)
         self._sync_event()
         self.render()
         try:
@@ -170,6 +200,7 @@ class GeomagneticResponseWindow(QMainWindow):
         root.addLayout(checks)
 
         self.figure = Figure(figsize=(9, 6), layout="constrained")
+        tighten_layout(self.figure)
         self.canvas = FigureCanvas(self.figure)
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.scroll = QScrollArea()
@@ -202,7 +233,9 @@ class GeomagneticResponseWindow(QMainWindow):
     # -------------------------------------------------------------- render
     def render(self) -> None:
         context = self.controller.context
+        palette = screen_palette()
         self.figure.clear()
+        self.figure.set_facecolor(palette.figure)
         rows = total_rows(self.panels)
         self.canvas.setMinimumHeight(max(300, ROW_HEIGHT_PX * max(rows, 1)))
         if context is None or rows == 0:
@@ -211,9 +244,8 @@ class GeomagneticResponseWindow(QMainWindow):
             ax.text(
                 0.5, 0.5,
                 "No geomagnetic response loaded yet." if context is None else "Choose at least one panel.",
-                ha="center", va="center", transform=ax.transAxes,
+                ha="center", va="center", transform=ax.transAxes, color=palette.foreground,
             )
-            self._apply_theme()
             self.canvas.draw_idle()
             self.notes_label.setText("")
             return
@@ -222,20 +254,13 @@ class GeomagneticResponseWindow(QMainWindow):
             axes, context, self.panels,
             radio_interval=self.controller.radio_interval,
             markers=self.controller.all_markers(),
+            palette=palette,
         )
-        self._apply_theme()
         self.canvas.draw_idle()
         self.notes_label.setText("  ·  ".join(context.notes))
 
-    def _apply_theme(self) -> None:
-        theme = _get_theme()
-        if theme is None or not hasattr(theme, "apply_mpl"):
-            return
-        for ax in self.figure.axes:
-            try:
-                theme.apply_mpl(self.figure, ax)
-            except Exception:
-                pass
+    def _on_theme_changed(self, _dark: bool = False) -> None:
+        self.render()
 
     def drawn_axes(self) -> list[Any]:
         return list(self.figure.axes)

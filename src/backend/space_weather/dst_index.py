@@ -214,7 +214,9 @@ def fetch_month_data(
             return month_data
         except requests.HTTPError as exc:
             status = getattr(getattr(exc, "response", None), "status_code", None)
-            if status == 404:
+            # Kyoto answers 403, not 404, for a real-time month that has since
+            # moved to the provisional archive (seen for 2026-04 in Oct 2026).
+            if status in (403, 404):
                 last_error = exc
                 continue
             raise DstDataError(f"Failed to download Kyoto Dst data from {url}: {exc}") from exc

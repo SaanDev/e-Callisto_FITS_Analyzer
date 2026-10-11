@@ -122,7 +122,7 @@ def test_thumbnails_get_dashed_time_lines_through_the_panels():
 
 def test_the_geomagnetic_block_has_its_own_time_axis():
     fig = build_event_figure(_spec(("spectrum",), geo=True), _data())
-    date_axes = [ax for ax in fig.axes if ax.get_xlabel() == "Time [UTC]"]
+    date_axes = [ax for ax in fig.axes if ax.get_xlabel().startswith("Time [UTC]")]
     assert date_axes
     spectrum_axes = [ax for ax in fig.axes if ax.get_xlabel().startswith("Time [UT] on 2024-05-10")]
     assert spectrum_axes

@@ -628,12 +628,18 @@ file selected in the e-CALLISTO downloader. The sidebar card summarises it; the 
 (<code>Solar Events &#8594; Geomagnetic &#8594; Geomagnetic Response…</code>) shows every panel on one UTC axis. Nothing
 ever pops up on its own.</p>
 <ul>
-<li><b>Dst / SYM-H</b>: Kyoto Dst (final, provisional or real-time, month by month) with the 1-minute SYM-H index.</li>
-<li><b>Kp</b>: GFZ Kp bars coloured by NOAA G level.</li>
+<li><b>Dst / SYM-H</b>: Kyoto Dst (final, provisional or real-time, month by month) with the 1-minute SYM-H index.
+The scale follows the data; the storm levels it reaches (moderate −50, intense −100, severe −250 nT) are dotted
+lines, and the minimum is marked with its value.</li>
+<li><b>Kp</b>: GFZ Kp bars coloured by NOAA G level, with the G1 (Kp 5) and G3 (Kp 7) levels dotted.</li>
 <li><b>IMF</b>: Bt, Bz and By (GSM).</li>
-<li><b>Plasma</b>: speed and density, temperature and dynamic pressure.</li>
+<li><b>Plasma</b>: speed and density, temperature and dynamic pressure. Each half has two scales, coloured like
+their lines.</li>
 <li><b>Ey, β, Mach</b> and <b>AE / AL / AU</b>.</li>
 </ul>
+<p>The marked times are named above the top panel; when they crowd, the names shorten (<i>CME 1330</i>,
+<i>Shock</i>, <i>Kp 9.0</i>) and the least important are left unnamed, though their lines stay. Marks outside the
+plotted span are not shown. The window follows the app's light or dark theme; exports are always black on white.</p>
 <p>The solar wind comes from OMNI 5-minute data, time-shifted to the bow shock. Where OMNI is not yet published —
 usually the last few weeks — the L1 measurements of DSCOVR or SWPC's real-time feed are used instead and labelled
 <i>L1, not time-shifted to the bow shock</i>; their Ey, β and Mach number are computed with OMNI's formulas. SYM-H and

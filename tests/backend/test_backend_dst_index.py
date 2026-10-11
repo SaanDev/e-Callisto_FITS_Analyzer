@@ -79,6 +79,31 @@ def test_fetch_month_data_falls_back_when_primary_archive_is_missing():
     assert "dst_provisional" in urls[1][0]
 
 
+def test_fetch_month_data_falls_back_when_kyoto_forbids_a_moved_realtime_month():
+    # A real-time month promoted to the provisional archive answers 403.
+    class FakeResponse:
+        def __init__(self, url: str, status_code: int, text: str):
+            self.url = url
+            self.status_code = status_code
+            self.text = text
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                error = dst.requests.HTTPError(f"{self.status_code} Client Error: Forbidden for url: {self.url}")
+                error.response = self
+                raise error
+
+    class FakeSession:
+        def get(self, url, timeout):
+            if "dst_realtime" in url:
+                return FakeResponse(url, 403, "Forbidden")
+            return FakeResponse(url, 200, REALTIME_HTML)
+
+    month = dst.fetch_month_data(2026, 4, session=FakeSession(), use_cache=False)
+
+    assert month.source_label == "Provisional"
+
+
 def test_load_dst_range_filters_samples_across_month_boundaries(monkeypatch):
     feb = dst.DstMonthData(
         year=2026,
