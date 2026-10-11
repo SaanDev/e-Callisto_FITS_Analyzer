@@ -306,6 +306,7 @@ class AcceleratedPlotWidget(QWidget):
         self._swaves_colorbar_label = ""
         self._event_view = None
         self._event_axis = None
+        self._event_parked_top_axis = None
         self._event_items = []
         self._event_edge_labels = []
         self._event_mark_labels = []
@@ -1322,7 +1323,9 @@ class AcceleratedPlotWidget(QWidget):
     # The strip lives inside the spectrum's own PlotItem, in the cell of its
     # (always hidden) top axis: the grid gives it exactly the spectrum's width,
     # so the lanes line up with the time axis at every size without any
-    # geometry syncing, and the plot title stays above both.
+    # geometry syncing, and the plot title stays above both. The top axis is
+    # taken out of the grid while the strip is up and put back afterwards —
+    # QGraphicsGridLayout does not allow two items in one cell.
     # ------------------------------------------------------------------
 
     #: Pixel height of one strip lane.
@@ -1335,14 +1338,43 @@ class AcceleratedPlotWidget(QWidget):
     def event_strip_items(self) -> list:
         return list(self._event_items)
 
+    def _free_event_strip_cell(self) -> bool:
+        """Empty the top-axis cell (1, 1) for the strip; False if it is in use."""
+        layout = self._plot.layout
+        occupant = layout.itemAt(1, 1)
+        if occupant is None:
+            return True
+        top = self._plot.getAxis("top")
+        if occupant is not top or top.isVisible():
+            return False
+        layout.removeItem(top)
+        self._event_parked_top_axis = top
+        return True
+
+    def _restore_top_axis_cell(self) -> None:
+        top = getattr(self, "_event_parked_top_axis", None)
+        self._event_parked_top_axis = None
+        if top is None:
+            return
+        try:
+            if self._plot.layout.itemAt(1, 1) is None:
+                self._plot.layout.addItem(top, 1, 1)
+        except Exception:
+            pass
+
     def _ensure_event_strip(self) -> bool:
         if not self.is_available:
             return False
         if self._event_view is not None:
             return True
         try:
+            if not self._free_event_strip_cell():
+                return False
             view = pg.ViewBox(enableMenu=False)
             view.setMouseEnabled(x=False, y=False)
+            # The link works both ways: an auto-ranging strip would widen the
+            # spectrum's time axis to fit events that run past its edges.
+            view.disableAutoRange()
             view.setXLink(self._viewbox)
             axis = pg.AxisItem("left")
             axis.linkToView(view)
@@ -1356,6 +1388,7 @@ class AcceleratedPlotWidget(QWidget):
         except Exception:
             self._event_view = None
             self._event_axis = None
+            self._restore_top_axis_cell()
             return False
 
     def clear_event_strip(self) -> None:
@@ -1377,6 +1410,7 @@ class AcceleratedPlotWidget(QWidget):
                     scene.removeItem(item)
             except Exception:
                 pass
+        self._restore_top_axis_cell()
         try:
             self._plot.layout.setRowFixedHeight(1, 0)
         except Exception:

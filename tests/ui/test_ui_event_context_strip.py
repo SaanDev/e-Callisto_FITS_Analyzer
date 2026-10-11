@@ -114,6 +114,42 @@ def test_the_hardware_strip_spans_exactly_the_spectrum_width():
     widget.close()
 
 
+def test_the_strip_takes_the_hidden_top_axis_cell_without_layout_warnings():
+    # Qt prints "QGridLayoutEngine::addItem: Can't add ... already taken" when
+    # two items share a grid cell; on Windows that only reaches a console, so
+    # the warnings are collected here instead.
+    _app()
+    from PySide6.QtCore import qInstallMessageHandler
+
+    from src.ui.widgets.accelerated_plot_widget import AcceleratedPlotWidget
+
+    messages: list[str] = []
+    previous = qInstallMessageHandler(lambda _mode, _context, message: messages.append(str(message)))
+    try:
+        widget = AcceleratedPlotWidget(use_opengl=False)
+        widget.resize(900, 600)
+        widget.show()
+        widget.update_image(np.random.rand(30, 60), extent=[0.0, 1800.0, 20.0, 80.0], cmap="viridis", title="t")
+        top = widget._plot.getAxis("top")
+        markers = build_event_markers(_result(), ec.SOURCES, BASE, 0.0, 1800.0)
+        for _ in range(2):
+            assert widget.set_event_strip(markers)
+            assert widget.set_event_strip(markers)  # redraw in place
+            _flush()
+            assert widget._plot.layout.itemAt(1, 1) is widget._event_view
+            # The X3.9 flare runs past both edges; the linked strip must not
+            # widen the spectrum's time range to fit it.
+            x0, x1 = widget._viewbox.viewRange()[0]
+            assert x0 == pytest.approx(0.0, abs=1.0) and x1 == pytest.approx(1800.0, abs=1.0)
+            widget.clear()
+            assert widget._plot.layout.itemAt(1, 1) is top and not top.isVisible()
+            widget.update_image(np.random.rand(30, 60), extent=[0.0, 1800.0, 20.0, 80.0], cmap="viridis", title="t")
+        widget.close()
+    finally:
+        qInstallMessageHandler(previous)
+    assert not [message for message in messages if "QGridLayoutEngine" in message]
+
+
 def _fits(tmp_path):
     from tests.helpers.learmonth import write_test_callisto_fit
 
