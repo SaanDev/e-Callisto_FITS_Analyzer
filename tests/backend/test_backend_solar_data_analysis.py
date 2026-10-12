@@ -691,3 +691,144 @@ def test_make_magnetogram_composite_resamples_mismatched_shape():
     mag[4:8, 4:8] = 500.0
     comp = make_magnetogram_composite(base, FakeMap(mag), base_colormap="gray", threshold_gauss=100.0)
     assert comp.data.shape == (32, 32, 3)
+
+
+# -- Movie orientation and frame captions ------------------------------------------
+
+
+def test_movie_frames_play_north_up():
+    """Rows are stored bottom-up (FITS); a video's first row is its top."""
+    data = np.zeros((8, 8))
+    data[6:, :] = 100.0  # high row index = solar north
+    frame = render_movie_frames([FakeMap(data)], mode="raw", colormap_name="gray")[0]
+    assert frame[:2].mean() > frame[-2:].mean()
+
+
+class _CaptionMap(FakeMap):
+    def __init__(self, *, observatory="SDO", instrument="AIA 2", detector="AIA", wavelength="193.0 Angstrom",
+                 date="2026-10-12T05:00:16.842", measurement=None, meta=None):
+        super().__init__(np.zeros((4, 4)))
+        self.observatory = observatory
+        self.instrument = instrument
+        self.detector = detector
+        self.wavelength = wavelength
+        self.date = date
+        if measurement is not None:
+            self.measurement = measurement
+        self.meta = dict(meta or {})
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        ({}, "SDO/AIA 193 Å"),
+        ({"observatory": "SOHO", "instrument": "LASCO", "detector": "C2", "wavelength": None}, "SOHO/LASCO C2"),
+        ({"observatory": "STEREO A", "instrument": "SECCHI", "detector": "COR2", "wavelength": "0 Angstrom"},
+         "STEREO-A/SECCHI COR2"),
+        ({"observatory": "STEREO_B", "instrument": "SECCHI", "detector": "EUVI", "wavelength": "195 Angstrom"},
+         "STEREO-B/SECCHI EUVI 195 Å"),
+        ({"observatory": "SOHO", "instrument": "EIT", "detector": "EIT", "wavelength": "304.0 Angstrom"},
+         "SOHO/EIT 304 Å"),
+        ({"instrument": "HMI_SIDE1", "detector": "HMI", "wavelength": "6173 Angstrom", "measurement": "magnetogram"},
+         "SDO/HMI magnetogram"),
+    ],
+)
+def test_movie_instrument_text_reads_the_frame_header(kwargs, expected):
+    from src.backend.solar.solar_data_analysis import movie_instrument_text
+
+    assert movie_instrument_text(_CaptionMap(**kwargs)) == expected
+
+
+def test_movie_labels_carry_each_frames_time_and_the_difference():
+    from src.backend.solar.solar_data_analysis import movie_frame_labels
+
+    frames = [
+        _CaptionMap(date="2026-10-12T05:00:16"),
+        _CaptionMap(date="2026-10-12T05:10:28"),
+        _CaptionMap(date="2026-10-13T00:01:00"),
+    ]
+    raw = movie_frame_labels(frames)
+    assert raw[0] == ("SDO/AIA 193 Å", "2026-10-12 05:00:16 UTC")
+    assert raw[2][1] == "2026-10-13 00:01:00 UTC"
+
+    # The first running-difference frame is frame 1 minus frame 0.
+    running = movie_frame_labels(frames, mode="running")
+    assert running[0][1:] == ("2026-10-12 05:10:28 UTC", "Running difference")
+    assert running[1][1] == "2026-10-12 05:10:28 UTC"
+
+    base = movie_frame_labels(frames, mode="base")
+    assert base[1][2] == "Base difference (base 05:00:16 UTC)"
+    # A base from another day gives its date too.
+    assert base[2][2] == "Base difference (base 2026-10-12 05:00:16 UTC)"
+
+    override = movie_frame_labels(frames, instrument_text="SOHO/LASCO C2 + AIA 193")
+    assert override[0][0] == "SOHO/LASCO C2 + AIA 193"
+
+
+def test_a_caption_is_one_line_on_a_stripe_along_the_bottom():
+    from src.backend.solar.solar_data_analysis import draw_frame_caption
+
+    frame = np.full((400, 400, 3), 120, dtype=np.uint8)
+    out = draw_frame_caption(frame, ["SDO/AIA 193 Å", "2026-10-12 05:00:16 UTC"])
+    assert out.shape == frame.shape and out.dtype == np.uint8
+    assert np.array_equal(frame, np.full((400, 400, 3), 120, dtype=np.uint8))  # input untouched
+
+    changed_rows = np.nonzero(np.any(out != frame, axis=(1, 2)))[0]
+    # A thin stripe at the bottom, the full width of the frame...
+    assert changed_rows.max() == 399
+    assert 8 <= len(changed_rows) <= 40
+    assert np.array_equal(out[: changed_rows.min()], frame[: changed_rows.min()])
+    stripe = out[changed_rows.min():]
+    assert np.all(stripe[:, -3:] < 120)
+    # ...with white text starting at its left end.
+    text_cols = np.nonzero(np.any(stripe >= 230, axis=(0, 2)))[0]
+    assert text_cols.size and text_cols.min() < 20 and text_cols.max() < 380
+
+
+def test_a_narrow_crop_stacks_the_fields_and_nothing_draws_nothing():
+    from src.backend.solar.solar_data_analysis import draw_frame_caption
+
+    small = np.full((120, 90, 3), 100, dtype=np.uint8)
+    out = draw_frame_caption(small, ["STEREO-A/SECCHI COR2", "2026-10-12 05:00:16 UTC"])
+    assert out.shape == small.shape
+    changed_rows = np.nonzero(np.any(out != small, axis=(1, 2)))[0]
+    assert changed_rows.max() == 119
+    assert np.array_equal(out[:40], small[:40])
+    assert np.array_equal(draw_frame_caption(small, []), small)
+
+
+def test_export_movie_prints_each_frames_caption(monkeypatch, tmp_path):
+    class FakeWriter:
+        def __init__(self):
+            self.frames = []
+
+        def append_data(self, frame):
+            self.frames.append(np.asarray(frame).copy())
+
+        def close(self):
+            pass
+
+    writers = []
+
+    class FakeImageIO:
+        @staticmethod
+        def get_writer(path, **kwargs):
+            writers.append(FakeWriter())
+            return writers[-1]
+
+    monkeypatch.setattr(solar_mod, "_import_imageio_v2", lambda: FakeImageIO)
+    frames = [FakeMap(np.full((200, 200), 5.0)) for _ in range(2)]
+    export_movie(frames, AiaMovieExportSpec(path=str(tmp_path / "plain.gif")))
+    export_movie(
+        frames,
+        AiaMovieExportSpec(
+            path=str(tmp_path / "labelled.gif"),
+            frame_labels=(("SDO/AIA 193 Å", "2026-02-10 01:00:00 UTC"), ("SDO/AIA 193 Å", "2026-02-10 01:01:00 UTC")),
+        ),
+    )
+    plain, labelled = writers
+    for index in range(2):
+        assert not np.array_equal(plain.frames[index][-20:], labelled.frames[index][-20:])
+        assert np.array_equal(plain.frames[index][:150], labelled.frames[index][:150])
+    # The two frames carry different times, so their captions differ.
+    assert not np.array_equal(labelled.frames[0][-20:], labelled.frames[1][-20:])

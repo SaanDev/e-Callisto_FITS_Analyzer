@@ -133,6 +133,9 @@ class SunPyQuerySpec:
     max_records: int = 200
     product: str | None = None  # HMI observable: magnetogram/continuum/dopplergram
     level: str | None = None  # Processing level, e.g. GOES/SUVI "1b" or "2"
+    # Which archive answers the search: "sunpy" (Fido), "aia_synoptic" or
+    # "helioviewer_jp2" (see data_products). The direct archives bypass Fido.
+    archive: str = "sunpy"
 
 
 @dataclass(frozen=True)
@@ -865,8 +868,61 @@ def fetch(
     selected_rows: Sequence[int] | None = None,
     *,
     progress_cb: Callable[[int, str], None] | None = None,
+    byte_progress_cb: Callable[[Any], None] | None = None,
     cancel_cb: Callable[[], bool] | None = None,
     fido_client: Any | None = None,
+) -> SunPyFetchResult:
+    """Download the selected rows through the VSO direct path, then Fido.
+
+    ``progress_cb`` gets coarse per-file percentages. ``byte_progress_cb``, when
+    given, gets an ``AggregateProgress`` several times a second with the bytes
+    actually transferred, the speed and an ETA — the direct path reports every
+    chunk and the Fido fallback is watched through the cache folder.
+    """
+    reporter = None
+    if byte_progress_cb is not None and search_result.raw_response is not None:
+        from src.backend.services.download_manager import TransferReporter
+
+        requested = _normalize_selected_rows(selected_rows, len(search_result.rows))
+        reporter = TransferReporter(
+            len(requested),
+            callback=byte_progress_cb,
+            size_hint=_row_size_hint(search_result, requested),
+        ).start()
+    try:
+        return _fetch_impl(
+            search_result,
+            cache_dir,
+            selected_rows,
+            progress_cb=progress_cb,
+            cancel_cb=cancel_cb,
+            fido_client=fido_client,
+            reporter=reporter,
+        )
+    finally:
+        if reporter is not None:
+            reporter.stop()
+
+
+def _row_size_hint(search_result: SunPySearchResult, requested: Sequence[int]) -> int | None:
+    """Median archive-reported size of the requested rows (a first guess only)."""
+    sizes = sorted(
+        size
+        for size in (_parse_size_bytes(search_result.rows[i].size) for i in requested if i < len(search_result.rows))
+        if size
+    )
+    return sizes[len(sizes) // 2] if sizes else None
+
+
+def _fetch_impl(
+    search_result: SunPySearchResult,
+    cache_dir: str | Path,
+    selected_rows: Sequence[int] | None = None,
+    *,
+    progress_cb: Callable[[int, str], None] | None = None,
+    cancel_cb: Callable[[], bool] | None = None,
+    fido_client: Any | None = None,
+    reporter: Any | None = None,
 ) -> SunPyFetchResult:
     if search_result.raw_response is None:
         raise ValueError("Search result does not contain a raw response object for fetching.")
@@ -899,9 +955,15 @@ def fetch(
         priority,
     )
 
+    reported_paths = 0
+
     def _mark_processed(delta: int):
-        nonlocal processed_rows
+        nonlocal processed_rows, reported_paths
         processed_rows += int(max(0, delta))
+        if reporter is not None:
+            arrived = downloaded_paths[reported_paths:]
+            reported_paths = len(downloaded_paths)
+            reporter.watched_finished(int(max(0, delta)), arrived)
         if progress_cb is not None:
             label = "high-resolution frame" if priority else "selection"
             progress_cb(
@@ -941,6 +1003,7 @@ def fetch(
                 progress_cb=progress_cb,
                 cancel_cb=cancel_cb,
                 priority=priority,
+                reporter=reporter,
             )
             downloaded_paths.extend(direct_paths)
             errors.extend(direct_errors)
@@ -962,6 +1025,10 @@ def fetch(
         fido_client = _import_fido()
 
     batches = _build_row_batches(search_result, remaining_requested, max_batch_size=max_batch_size)
+    if reporter is not None and batches:
+        # parfive streams these itself; watch the cache folder grow instead.
+        reported_paths = len(downloaded_paths)
+        reporter.watch_directory(cache_root)
     for batch_idx, batch in enumerate(batches, start=1):
         if _is_cancelled(cancel_cb):
             cancelled = True
@@ -993,6 +1060,8 @@ def fetch(
             cancelled = True
             _logger.info("fetch cancelled after batch %d/%d", batch_idx, len(batches))
             break
+    if reporter is not None:
+        reporter.stop_watching()
 
     deduped_paths = _dedupe_preserve_order(downloaded_paths)
     failed_rows = _failed_rows_from_errors(errors)
@@ -1033,6 +1102,7 @@ def fetch_via_jsoc(
     cancel_cb: Callable[[], bool] | None = None,
     jsoc_client: Any | None = None,
     download_manager: Any | None = None,
+    status_cb: Callable[[str], None] | None = None,
 ) -> SunPyFetchResult:
     """Download SDO/AIA frames through the JSOC fast path.
 
@@ -1045,9 +1115,13 @@ def fetch_via_jsoc(
     The download engine skips files already complete in ``cache_dir`` (JSOC
     filenames are deterministic per record), which is the persistent cross-
     session cache.
+
+    ``status_cb`` hears what happens before the first byte moves: asking JSOC
+    for the file list and, for binned or cutout frames, waiting while JSOC
+    builds them. A Stop during that wait returns a cancelled result.
     """
     from src.backend.services.download_manager import DownloadItem, DownloadManager
-    from src.backend.solar.jsoc_client import export_urls
+    from src.backend.solar.jsoc_client import JsocCancelled, export_urls
 
     spec = search_result.spec
     rows = search_result.rows
@@ -1063,25 +1137,40 @@ def fetch_via_jsoc(
     cadence = cadence_seconds if cadence_seconds is not None else spec.sample_seconds
     is_hmi = str(getattr(spec, "instrument", "") or "").upper() == "HMI"
 
-    if is_hmi:
-        export = export_urls(
-            start=start,
-            end=end,
-            product=str(spec.product or "magnetogram"),
-            email=str(email),
-            cadence_seconds=cadence,
-            process=process,
-            client=jsoc_client,
+    if status_cb is not None:
+        status_cb(
+            "Asking JSOC to build the reduced frames…" if process else "Asking JSOC for the file list…"
         )
-    else:
-        export = export_urls(
-            start=start,
-            end=end,
-            wavelength_angstrom=(spec.wavelength_angstrom or 193.0),
-            email=str(email),
-            cadence_seconds=cadence,
-            process=process,
-            client=jsoc_client,
+    wait_kwargs: dict[str, Any] = {}
+    if status_cb is not None or cancel_cb is not None:
+        wait_kwargs = {"status_cb": status_cb, "cancel_cb": cancel_cb}
+    try:
+        if is_hmi:
+            export = export_urls(
+                start=start,
+                end=end,
+                product=str(spec.product or "magnetogram"),
+                email=str(email),
+                cadence_seconds=cadence,
+                process=process,
+                client=jsoc_client,
+                **wait_kwargs,
+            )
+        else:
+            export = export_urls(
+                start=start,
+                end=end,
+                wavelength_angstrom=(spec.wavelength_angstrom or 193.0),
+                email=str(email),
+                cadence_seconds=cadence,
+                process=process,
+                client=jsoc_client,
+                **wait_kwargs,
+            )
+    except JsocCancelled:
+        _logger.info("JSOC fetch cancelled while the export was staging")
+        return SunPyFetchResult(
+            paths=[], requested_count=len(requested), failed_count=0, errors=[], cancelled=True
         )
 
     cache_root = Path(cache_dir).expanduser().resolve()
@@ -1177,8 +1266,13 @@ def load_downloaded(
     timeseries_loader: Callable[..., Any] | None = None,
     instrument: str | None = None,
     level: str | None = None,
+    progress_cb: Callable[[int, int], None] | None = None,
 ) -> SunPyLoadResult:
     """Load downloaded files into maps/timeseries.
+
+    With ``progress_cb`` maps are read one file at a time and ``(done, total)``
+    is reported after each, instead of one silent ``Map(paths, sequence=True)``
+    call that can take a minute for a long full-resolution sequence.
 
     ``level`` is the processing level these files were *requested* at. It is
     carried into the result metadata so the analyzer knows which archive product
@@ -1212,7 +1306,10 @@ def load_downloaded(
                 per_file = True
             else:
                 map_loader = _import_map_loader()
-        loaded = _load_maps(map_loader, normalized, per_file=per_file)
+        if progress_cb is not None:
+            loaded = _load_maps_with_progress(map_loader, normalized, progress_cb)
+        else:
+            loaded = _load_maps(map_loader, normalized, per_file=per_file)
         maps = _extract_maps(loaded)
         meta = {
             "n_frames": len(maps),
@@ -1272,6 +1369,7 @@ def normalize_query_spec(spec: SunPyQuerySpec) -> SunPyQuerySpec:
         max_records=max(1, int(spec.max_records or 1)),
         product=(str(spec.product).strip().lower() if spec.product else None),
         level=(str(spec.level).strip().lower() if spec.level else None),
+        archive=str(getattr(spec, "archive", "") or "sunpy").strip().lower(),
     )
 
 
@@ -1842,6 +1940,7 @@ def _download_vso_direct_items(
     progress_cb: Callable[[int, str], None] | None = None,
     cancel_cb: Callable[[], bool] | None = None,
     priority: bool = False,
+    reporter: Any | None = None,
 ) -> tuple[list[str], list[str], bool]:
     if not items:
         return [], [], False
@@ -1864,6 +1963,10 @@ def _download_vso_direct_items(
     def worker(item: _DirectDownloadItem) -> tuple[_DirectDownloadItem, str | None, str | None]:
         if _is_cancelled(cancel_cb):
             return item, None, "cancelled"
+        extra: dict[str, Any] = {}
+        if reporter is not None:
+            name = str(item.fileid or "") or _guess_filename_from_url(item.url)
+            extra["bytes_cb"] = lambda done, total: reporter.file_bytes(item.row_index, done, total, name=name)
         try:
             path = _download_direct_item(
                 item,
@@ -1871,6 +1974,7 @@ def _download_vso_direct_items(
                 priority=priority,
                 cancel_cb=cancel_cb,
                 progress_cb=lambda fraction, text: report(item, fraction, text),
+                **extra,
             )
             return item, path, None
         except Exception as exc:
@@ -1881,6 +1985,8 @@ def _download_vso_direct_items(
         futures = [executor.submit(worker, item) for item in items]
         for future in as_completed(futures):
             item, path, error = future.result()
+            if reporter is not None:
+                reporter.file_finished(item.row_index, path=path, ok=bool(path), name=str(item.fileid or ""))
             if path:
                 paths.append(path)
                 report(item, 1.0, f"Downloaded {len(paths)}/{len(items)} direct AIA file(s).")
@@ -1905,11 +2011,12 @@ def _download_direct_item(
     priority: bool = False,
     cancel_cb: Callable[[], bool] | None = None,
     progress_cb: Callable[[float, str], None] | None = None,
+    bytes_cb: Callable[[int, int | None], None] | None = None,
 ) -> str:
     target = _direct_download_target_path(item, cache_root)
     if target.exists() and target.stat().st_size > 0:
         if progress_cb is not None:
-            progress_cb(1.0, f"Using cached AIA file {target.name}")
+            progress_cb(1.0, f"Using cached file {target.name}")
         return str(target.resolve())
 
     candidate_urls = tuple(_dedupe_preserve_order([*(item.urls or ()), item.url]))
@@ -1929,6 +2036,7 @@ def _download_direct_item(
                 priority=priority,
                 cancel_cb=cancel_cb,
                 progress_cb=progress_cb,
+                **({"bytes_cb": bytes_cb} if bytes_cb is not None else {}),
             )
         except Exception as exc:
             last_error = exc
@@ -1953,6 +2061,7 @@ def _download_direct_url_to_path(
     priority: bool = False,
     cancel_cb: Callable[[], bool] | None = None,
     progress_cb: Callable[[float, str], None] | None = None,
+    bytes_cb: Callable[[int, int | None], None] | None = None,
 ) -> str:
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = target.with_name(f"{target.name}.part")
@@ -1962,22 +2071,29 @@ def _download_direct_url_to_path(
     downloaded = 0
 
     if progress_cb is not None:
-        progress_cb(0.01, f"Starting {target.name}")
+        # The VSO/JSOC export CGI can take many seconds to send its first byte.
+        progress_cb(0.01, f"Waiting for the archive to start sending {target.name}...")
     try:
         request = Request(url, headers={"User-Agent": "eCallisto-SunPy/1.0"})
         with urlopen(request, timeout=float(timeout_seconds)) as response:
             content_length = _response_content_length(response)
             if content_length:
                 expected_bytes = content_length
+            if bytes_cb is not None:
+                bytes_cb(0, expected_bytes or None)
             with open(tmp_path, "wb") as handle:
                 while True:
                     if _is_cancelled(cancel_cb):
                         raise RuntimeError("Download cancelled.")
-                    chunk = response.read(1024 * 1024)
+                    # read(n) blocks until n bytes arrive, so a smaller chunk
+                    # keeps byte progress (and Stop) responsive on slow links.
+                    chunk = response.read(256 * 1024)
                     if not chunk:
                         break
                     handle.write(chunk)
                     downloaded += len(chunk)
+                    if bytes_cb is not None:
+                        bytes_cb(downloaded, expected_bytes or None)
                     now = time.monotonic()
                     if progress_cb is not None and (now - last_report >= 0.35 or downloaded >= expected_bytes > 0):
                         last_report = now
@@ -3137,6 +3253,21 @@ def _load_maps(map_loader: Callable[..., Any], paths: list[str], *, per_file: bo
         return map_loader(paths, sequence=True)
     except TypeError:
         return map_loader(paths)
+
+
+def _load_maps_with_progress(
+    map_loader: Callable[..., Any],
+    paths: list[str],
+    progress_cb: Callable[[int, int], None],
+) -> list[Any]:
+    maps: list[Any] = []
+    for index, path in enumerate(paths):
+        maps.extend(_extract_maps(map_loader(path)))
+        try:
+            progress_cb(index + 1, len(paths))
+        except Exception:
+            pass
+    return maps
 
 
 def _load_timeseries(timeseries_loader: Callable[..., Any], paths: list[str]) -> Any:

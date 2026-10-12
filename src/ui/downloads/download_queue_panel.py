@@ -42,6 +42,10 @@ from src.backend.services.download_manager import (
     format_speed,
 )
 
+#: Bytes a transfer must have moved before its ETA is shown (unless a file has
+#: already finished).
+_ETA_SETTLE_BYTES = 1024 * 1024
+
 _STATUS_LABELS = {
     "queued": "Queued",
     STATUS_DOWNLOADING: "Downloading",
@@ -125,6 +129,15 @@ class DownloadProgressPanel(QWidget):
         if text:
             self.stats_label.setText(str(text))
 
+    def set_phase(self, text: str) -> None:
+        """Caption a phase with no byte counts (searching, loading, drawing).
+
+        Clears the speed/ETA read-out, which only means something while bytes
+        are moving.
+        """
+        self.stats_label.setText(str(text or ""))
+        self.eta_label.setText("")
+
     def update_aggregate(self, agg: Any, *, drive_bar: bool = True) -> None:
         """Render an :class:`AggregateProgress` snapshot.
 
@@ -149,7 +162,13 @@ class DownloadProgressPanel(QWidget):
         if speed and speed > 0:
             eta_text = f"{format_speed(speed)}"
             if eta is not None:
-                eta_text += f"  ·  ETA {format_eta(eta)}"
+                # The first kilobytes arrive while connections are still being
+                # set up, so an ETA from them reads minutes for a seconds-long
+                # download. Wait for a finished file or a megabyte.
+                settled = int(getattr(agg, "files_done", 0) or 0) > 0 or int(
+                    getattr(agg, "bytes_done", 0) or 0
+                ) >= _ETA_SETTLE_BYTES
+                eta_text += f"  ·  ETA {format_eta(eta)}" if settled else "  ·  ETA estimating…"
         self.eta_label.setText(eta_text)
 
         per_file = list(getattr(agg, "per_file", []) or [])

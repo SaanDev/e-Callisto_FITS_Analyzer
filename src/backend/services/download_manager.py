@@ -117,6 +117,10 @@ class AggregateProgress:
     eta_seconds: float | None = None
     per_file: list[FileProgress] = field(default_factory=list)
     active_names: list[str] = field(default_factory=list)
+    # Completion worked out by the producer when it knows better than the byte
+    # and file counts above (e.g. TransferReporter's estimated total for a
+    # downloader it can only watch). The UI prefers it when present.
+    fraction_hint: float | None = None
 
     @property
     def fraction(self) -> float:
@@ -313,14 +317,24 @@ class CacheByteMonitor:
         self._last_done = 0
 
     def _snapshot(self) -> dict[str, int]:
+        # On Windows a directory listing reports the size recorded in the
+        # directory entry, which NTFS only refreshes when a writer closes the
+        # file, so a file mid-download reads as 0 bytes until it is complete.
+        # Files that appeared since the baseline are therefore stat'ed by path,
+        # which asks the file itself.
+        baseline = getattr(self, "_baseline", None)
         out: dict[str, int] = {}
         try:
             for entry in os.scandir(self.cache_dir):
-                if entry.is_file():
-                    try:
-                        out[entry.path] = entry.stat().st_size
-                    except OSError:
+                try:
+                    if not entry.is_file():
                         continue
+                    if baseline is not None and entry.path not in baseline:
+                        out[entry.path] = os.stat(entry.path).st_size
+                    else:
+                        out[entry.path] = entry.stat().st_size
+                except OSError:
+                    continue
         except (FileNotFoundError, NotADirectoryError):
             pass
         return out
@@ -353,6 +367,238 @@ class CacheByteMonitor:
             bytes_total=total,
             speed_bps=speed,
             eta_seconds=eta,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Progress for downloads not run by DownloadManager
+# ---------------------------------------------------------------------------
+class TransferReporter:
+    """Byte-level :class:`AggregateProgress` for a fetch this module does not run.
+
+    The VSO path downloads in two ways: its direct-URL threads report every
+    chunk (:meth:`file_bytes`), while the SunPy/parfive fallback can only be
+    watched through the cache directory it writes into
+    (:meth:`watch_directory`). This merges both into one honest snapshot.
+
+    Nobody knows the batch's total size up front — the VSO size column gives
+    *uncompressed* sizes, several times what is transferred — so the total is
+    estimated as the sizes of the files already finished plus, for every file
+    not finished, its ``Content-Length`` when known or else the mean size of the
+    finished ones (``size_hint`` until the first one finishes). The estimate
+    firms up as files complete; the reported fraction never falls below the
+    finished-file fraction and never goes backwards.
+
+    A poller thread emits a snapshot every ``interval`` seconds between
+    :meth:`start` and :meth:`stop`, so the speed and ETA keep moving even while
+    no chunk arrives. It stays silent until the first file starts, so whatever
+    precedes the transfer (resolving URLs) keeps its own status. Thread-safe.
+    """
+
+    def __init__(
+        self,
+        files_total: int,
+        *,
+        callback: Callable[[AggregateProgress], None] | None,
+        size_hint: int | None = None,
+        interval: float = 0.25,
+    ):
+        import threading
+
+        self.files_total = max(0, int(files_total))
+        self._callback = callback
+        self._size_hint = int(size_hint) if size_hint and size_hint > 0 else None
+        self._interval = max(0.05, float(interval))
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._meter = _SpeedMeter()
+        # Direct downloads: key -> FileProgress.
+        self._slots: dict[object, FileProgress] = {}
+        self._finished_sizes: list[int] = []
+        self._files_done = 0
+        self._transferred = 0
+        # Watched (parfive) phases.
+        self._monitor: CacheByteMonitor | None = None
+        self._watched_done = 0       # bytes of watch phases already closed
+        self._watched_seen = 0       # bytes seen in the current phase
+        self._watched_finished = 0   # bytes of files finished in the current phase
+        self._last_fraction = 0.0
+        self._started = False
+
+    # -- lifecycle -------------------------------------------------------
+    def start(self) -> "TransferReporter":
+        import threading
+
+        if self._callback is None or self._thread is not None:
+            return self
+        self._thread = threading.Thread(target=self._poll, name="transfer-reporter", daemon=True)
+        self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread, self._thread = self._thread, None
+        if thread is not None:
+            thread.join(timeout=2.0)
+        self.emit()
+
+    def _poll(self) -> None:
+        while not self._stop.wait(self._interval):
+            self.emit()
+
+    def emit(self) -> None:
+        if self._callback is None or not self._started:
+            return
+        try:
+            self._callback(self.snapshot())
+        except Exception:
+            _logger.debug("transfer progress callback raised", exc_info=True)
+
+    # -- direct downloads ------------------------------------------------
+    def file_bytes(self, key: object, done: int, total: int | None = None, *, name: str | None = None) -> None:
+        """A direct download of ``key`` has ``done`` of ``total`` bytes."""
+        with self._lock:
+            self._started = True
+            slot = self._slots.get(key)
+            if slot is None:
+                slot = FileProgress(name=str(name or key))
+                self._slots[key] = slot
+            if slot.is_terminal:
+                return
+            done = max(0, int(done))
+            if done > slot.bytes_done:
+                self._transferred += done - slot.bytes_done
+            slot.bytes_done = done
+            if total and total > 0:
+                slot.bytes_total = int(total)
+            slot.status = STATUS_DOWNLOADING
+
+    def file_finished(
+        self,
+        key: object,
+        *,
+        path: str | Path | None = None,
+        ok: bool = True,
+        cached: bool = False,
+        name: str | None = None,
+    ) -> None:
+        """A direct download of ``key`` ended (downloaded, cached or failed)."""
+        size = _safe_size(path) if path else 0
+        with self._lock:
+            self._started = True
+            slot = self._slots.get(key)
+            if slot is None:
+                slot = FileProgress(name=str(name or (Path(path).name if path else key)))
+                self._slots[key] = slot
+            if slot.is_terminal:
+                return
+            if ok:
+                size = size or slot.bytes_done
+                slot.bytes_done = size
+                slot.bytes_total = size
+                slot.status = STATUS_CACHED if cached else STATUS_DONE
+                slot.path = str(path) if path else None
+                if size > 0:
+                    self._finished_sizes.append(size)
+            else:
+                slot.bytes_total = slot.bytes_done
+                slot.status = STATUS_FAILED
+            self._files_done += 1
+
+    # -- watched downloads -----------------------------------------------
+    def watch_directory(self, directory: str | Path) -> None:
+        """Start attributing growth of ``directory`` to the transfer."""
+        with self._lock:
+            self._close_watch_locked()
+            self._monitor = CacheByteMonitor(directory)
+            self._started = True
+
+    def stop_watching(self) -> None:
+        with self._lock:
+            self._close_watch_locked()
+
+    def _close_watch_locked(self) -> None:
+        if self._monitor is not None:
+            self._sample_watch_locked()
+            self._watched_done += max(self._watched_seen, self._watched_finished)
+        self._monitor = None
+        self._watched_seen = 0
+        self._watched_finished = 0
+
+    def _sample_watch_locked(self) -> None:
+        if self._monitor is None:
+            return
+        seen = self._monitor.bytes_downloaded()
+        if seen > self._watched_seen:
+            self._transferred += seen - self._watched_seen
+            self._watched_seen = seen
+
+    def watched_finished(self, count: int, paths: Sequence[str | Path] = ()) -> None:
+        """``count`` watched files ended; ``paths`` are the ones that arrived."""
+        sizes = [_safe_size(path) for path in paths]
+        with self._lock:
+            self._files_done += max(0, int(count))
+            for size in sizes:
+                if size > 0:
+                    self._finished_sizes.append(size)
+                    self._watched_finished += size
+
+    # -- snapshot --------------------------------------------------------
+    def snapshot(self, now: float | None = None) -> AggregateProgress:
+        with self._lock:
+            self._sample_watch_locked()
+            slots = [replace(slot) for slot in self._slots.values()]
+            finished_sizes = list(self._finished_sizes)
+            files_done = min(self._files_done, self.files_total) if self.files_total else self._files_done
+            transferred = self._transferred
+            watched_inflight = max(0, self._watched_seen - self._watched_finished)
+            watched_closed = self._watched_done
+            watched_finished = self._watched_finished
+
+        if finished_sizes:
+            per_file = sum(finished_sizes) / len(finished_sizes)
+        else:
+            known = [slot.bytes_total for slot in slots if slot.bytes_total]
+            per_file = (sum(known) / len(known)) if known else (self._size_hint or 0)
+
+        inflight = [slot for slot in slots if not slot.is_terminal]
+        direct_done = sum(slot.bytes_done for slot in slots)
+        direct_total = sum(
+            slot.bytes_total if slot.is_terminal else max(slot.bytes_total or per_file, slot.bytes_done)
+            for slot in slots
+        )
+        not_started = max(0, self.files_total - files_done - len(inflight))
+        bytes_done = int(direct_done + watched_closed + watched_finished + watched_inflight)
+        rest = max(not_started * per_file, watched_inflight)
+        bytes_total = int(direct_total + watched_closed + watched_finished + rest)
+        total_known = bytes_total > 0 and (per_file > 0 or not_started == 0)
+        if bytes_total < bytes_done:
+            bytes_total = bytes_done
+
+        file_fraction = (files_done / self.files_total) if self.files_total else 0.0
+        byte_fraction = (bytes_done / bytes_total) if total_known and bytes_total > 0 else 0.0
+        fraction = max(file_fraction, min(byte_fraction, 1.0))
+        if self.files_total and files_done < self.files_total:
+            # Until the last file lands the batch is not done, whatever the
+            # estimate says.
+            fraction = min(fraction, 0.995)
+        with self._lock:
+            fraction = max(fraction, self._last_fraction)
+            self._last_fraction = fraction
+
+        speed = self._meter.update(transferred, now=now)
+        eta = compute_eta(bytes_done, bytes_total, speed) if total_known else None
+        return AggregateProgress(
+            files_total=self.files_total,
+            files_done=files_done,
+            bytes_done=bytes_done,
+            bytes_total=bytes_total if total_known else None,
+            speed_bps=speed,
+            eta_seconds=eta,
+            per_file=slots,
+            active_names=[slot.name for slot in inflight],
+            fraction_hint=fraction,
         )
 
 

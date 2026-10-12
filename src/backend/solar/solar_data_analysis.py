@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
+import re
 from typing import Any, Iterable, Sequence
 
 import numpy as np
@@ -74,6 +76,9 @@ class AiaMovieExportSpec:
     scale: str = "linear"
     # Divide frames by EXPTIME before differencing (set when exposures vary).
     normalize_exposure: bool = False
+    # Text printed in each frame's top-left corner, one tuple of lines per
+    # frame (see movie_frame_labels). Empty: a clean movie.
+    frame_labels: tuple[tuple[str, ...], ...] = ()
 
 
 class AiaArrayMap:
@@ -141,6 +146,7 @@ def load_aia_maps_streaming(
     progress_cb: Any | None = None,
     cancel_cb: Any | None = None,
     map_loader: Any | None = None,
+    jp2_max_px: int | None = None,
 ) -> AiaFrameSet:
     """Load AIA FITS one file at a time, reporting progress.
 
@@ -149,6 +155,9 @@ def load_aia_maps_streaming(
     Loading file by file lets a worker thread report ``progress_cb(done, total)``
     and stop early via ``cancel_cb()``. A single unreadable file is skipped
     rather than failing the whole load.
+
+    Helioviewer JPEG2000 files (``.jp2``) are decoded by ``helioviewer_jp2``,
+    which sunpy cannot do without glymur, capped at ``jp2_max_px`` per side.
     """
     normalized = [str(Path(p).expanduser().resolve()) for p in paths if str(p).strip()]
     if not normalized:
@@ -156,9 +165,18 @@ def load_aia_maps_streaming(
 
     if map_loader is None:
         try:
-            from sunpy.map import Map as map_loader
+            from sunpy.map import Map as fits_loader
         except Exception as exc:
             raise RuntimeError(f"SunPy map loading is not available: {exc}") from exc
+        from src.backend.solar.data_products import DEFAULT_JP2_MAX_PX
+        from src.backend.solar.helioviewer_jp2 import is_jp2_path, load_jp2_file
+
+        max_px = DEFAULT_JP2_MAX_PX if jp2_max_px is None else int(jp2_max_px)
+
+        def map_loader(path: str) -> Any:
+            if is_jp2_path(path):
+                return load_jp2_file(path, max_px=max_px)
+            return fits_loader(path)
 
     maps: list[Any] = []
     loaded_paths: list[str] = []
@@ -887,13 +905,17 @@ def iter_rendered_movie_frames(
     scale: str = "linear",
     normalize: bool = False,
 ):
-    """Yield rendered RGB uint8 frames one at a time.
+    """Yield rendered RGB uint8 frames one at a time, solar north up.
 
     Streaming avoids holding every rendered frame in memory at once, which for
     full-resolution AIA (≈50 MB per RGB frame) otherwise exhausts RAM and hangs
     the app. Difference modes keep only the base/previous frame in hand. Mirrors
     :func:`difference_sequence` exactly so the output matches the preview
     (including exposure normalisation when ``normalize`` is set).
+
+    Frame data is stored FITS-style, row 0 at the bottom, and the window draws
+    it that way (``origin="lower"``). A video's first row is its top, so the
+    rows are reversed here; written as stored, movies played south up.
     """
     n = len(frames)
     if n == 0:
@@ -919,12 +941,13 @@ def iter_rendered_movie_frames(
         return arr
 
     def _render(arr: np.ndarray) -> np.ndarray:
-        return array_to_rgb_uint8(
+        rgb = array_to_rgb_uint8(
             apply_display_scale(arr, scale),
             percentile_low=p_low,
             percentile_high=p_high,
             colormap_name=colormap_name,
         )
+        return np.ascontiguousarray(rgb[::-1])
 
     if mode_key in {"base", "base_difference"}:
         base = _cropped(0)
@@ -1004,6 +1027,12 @@ def export_movie(
         scale=spec.scale,
         normalize=bool(getattr(spec, "normalize_exposure", False)),
     )
+    labels = list(getattr(spec, "frame_labels", ()) or ())
+    if labels:
+        frame_iter = (
+            draw_frame_caption(frame, labels[index] if index < len(labels) else ())
+            for index, frame in enumerate(frame_iter)
+        )
     _write_movie_stream(
         out_path,
         frame_iter,
@@ -1013,6 +1042,182 @@ def export_movie(
         progress_cb=progress_cb,
         cancel_cb=cancel_cb,
     )
+
+
+# --- Movie frame captions -----------------------------------------------------
+
+
+def _first_word(text: str) -> str:
+    """'AIA 2' -> 'AIA', 'HMI_SIDE1' -> 'HMI' (instrument names carry unit numbers)."""
+    match = re.match(r"[A-Za-z]+", str(text or "").strip())
+    return match.group(0).upper() if match else ""
+
+
+def _frame_wavelength_angstrom(frame: Any) -> float | None:
+    value = getattr(frame, "wavelength", None)
+    number: float | None = None
+    try:
+        unit = getattr(value, "unit", None)
+        if unit is not None:
+            import astropy.units as u
+
+            number = float(value.to_value(u.AA))
+        elif value is not None:
+            match = re.search(r"[-+]?\d+(?:\.\d+)?", str(value))
+            number = float(match.group(0)) if match else None
+    except Exception:
+        number = None
+    if number is None:
+        try:
+            number = float(_frame_meta_get(frame, "wavelnth"))
+        except (TypeError, ValueError):
+            number = None
+    return number if number is not None and number > 0 else None
+
+
+def movie_instrument_text(frame: Any) -> str:
+    """'SDO/AIA 193 Å', 'SOHO/LASCO C2', 'STEREO-A/SECCHI COR2', 'SDO/HMI magnetogram'."""
+    observatory = _safe_text(getattr(frame, "observatory", "")) or _safe_text(
+        _frame_meta_get(frame, "obsrvtry", "telescop")
+    )
+    observatory = re.sub(r"[\s_]+", "-", observatory.strip())
+    if observatory.upper().startswith("STEREO"):
+        observatory = observatory.upper()
+    instrument = _first_word(_safe_text(getattr(frame, "instrument", "")) or _safe_text(_frame_meta_get(frame, "instrume")))
+    detector = (_safe_text(getattr(frame, "detector", "")) or _safe_text(_frame_meta_get(frame, "detector"))).upper()
+
+    if observatory and instrument and observatory.upper() != instrument:
+        text = f"{observatory}/{instrument}"
+    else:
+        text = instrument or observatory
+    if detector and detector != instrument:
+        text = f"{text} {detector}".strip()
+    if instrument == "HMI":
+        product = _safe_text(getattr(frame, "measurement", "")) or _safe_text(_frame_meta_get(frame, "content"))
+        if product and not re.match(r"^[\d.]", product):
+            text = f"{text} {product.lower()}"
+    else:
+        wavelength = _frame_wavelength_angstrom(frame)
+        if wavelength is not None:
+            text = f"{text} {wavelength:g} Å"
+    return text.strip() or "Solar image"
+
+
+def _utc_text(when: datetime | None, *, with_date: bool = True) -> str:
+    if when is None:
+        return ""
+    return f"{when:%Y-%m-%d %H:%M:%S} UTC" if with_date else f"{when:%H:%M:%S} UTC"
+
+
+def movie_frame_labels(
+    frames: Sequence[Any],
+    *,
+    mode: str = "raw",
+    instrument_text: str | None = None,
+) -> tuple[tuple[str, ...], ...]:
+    """Caption lines for every movie frame: instrument, UTC date and time, and
+    for a difference movie which difference it shows.
+
+    A running-difference movie's first frame shows frame 1 minus frame 0 (see
+    :func:`iter_rendered_movie_frames`), so it carries frame 1's time; every
+    other frame carries its own. ``instrument_text`` replaces the instrument
+    line, for frames whose own header does not describe them (composites).
+    """
+    mode_key = str(mode or "raw").strip().lower()
+    running = mode_key in {"running", "running_difference"}
+    base = mode_key in {"base", "base_difference"}
+    times = [frame_observation_time(frame) for frame in frames]
+    labels: list[tuple[str, ...]] = []
+    for index, frame in enumerate(frames):
+        shown = 1 if running and index == 0 and len(frames) > 1 else index
+        lines = [instrument_text or movie_instrument_text(frames[shown]), _utc_text(times[shown])]
+        if running:
+            lines.append("Running difference")
+        elif base:
+            reference = times[0]
+            same_day = reference is not None and times[shown] is not None and reference.date() == times[shown].date()
+            stamp = _utc_text(reference, with_date=not same_day)
+            lines.append(f"Base difference (base {stamp})" if stamp else "Base difference")
+        labels.append(tuple(line for line in lines if line))
+    return tuple(labels)
+
+
+@lru_cache(maxsize=16)
+def _caption_font(size: int) -> Any:
+    """DejaVu Sans (shipped with matplotlib, so present in every build)."""
+    from PIL import ImageFont
+
+    try:
+        from matplotlib import font_manager
+
+        path = font_manager.findfont(font_manager.FontProperties(family="DejaVu Sans"), fallback_to_default=True)
+        return ImageFont.truetype(path, int(size))
+    except Exception:
+        pass
+    try:
+        return ImageFont.load_default(size=int(size))
+    except TypeError:  # Pillow < 10.1 has one bitmap size
+        return ImageFont.load_default()
+
+
+#: Between a caption's fields on the stripe.
+CAPTION_SEPARATOR = "  ·  "
+
+
+def draw_frame_caption(frame: Any, lines: Sequence[str]) -> np.ndarray:
+    """``frame`` with ``lines`` printed on a stripe along its bottom edge.
+
+    The fields go on one line at the bottom-left, white on a half-transparent
+    dark stripe across the full width. The text is about 2.6% of the frame's
+    smaller side (a 1024² movie gets ~27 px) and shrinks when a narrow crop
+    would not fit the line; when even small text cannot fit, the fields are
+    stacked instead. Only the stripe is touched.
+    """
+    from PIL import Image, ImageDraw
+
+    arr = np.asarray(frame, dtype=np.uint8)
+    parts = [str(line).strip() for line in (lines or ()) if str(line or "").strip()]
+    if not parts or arr.ndim != 3 or arr.shape[2] < 3:
+        return arr
+    height, width = arr.shape[:2]
+
+    start_size = max(9, min(110, int(round(min(height, width) * 0.026))))
+    size = start_size
+    text_lines = [CAPTION_SEPARATOR.join(parts)]
+    measure = ImageDraw.Draw(Image.new("L", (1, 1)))
+    while True:
+        font = _caption_font(size)
+        pad = max(3, size // 3)
+        widest = max(measure.textlength(line, font=font) for line in text_lines)
+        if widest + 2 * pad <= width:
+            break
+        if size > 9:
+            size -= 1
+            continue
+        if len(text_lines) == 1 and len(parts) > 1:
+            text_lines, size = parts, start_size  # too narrow for one line
+            continue
+        break
+    ascent, descent = font.getmetrics()
+    line_height = ascent + descent
+    gap = max(1, size // 6)
+    pad_y = max(2, size // 4)
+    stripe_h = min(height, line_height * len(text_lines) + gap * (len(text_lines) - 1) + 2 * pad_y)
+    y0 = height - stripe_h
+
+    text = Image.new("L", (width, stripe_h), 0)
+    draw = ImageDraw.Draw(text)
+    y = pad_y
+    for line in text_lines:
+        draw.text((pad, y), line, fill=255, font=font)
+        y += line_height + gap
+    alpha = np.asarray(text, dtype=np.float32)[..., None] / 255.0
+
+    out = np.array(arr[..., :3], dtype=np.uint8, copy=True)
+    stripe = out[y0:].astype(np.float32) * 0.35
+    stripe = stripe * (1.0 - alpha) + 255.0 * alpha
+    out[y0:] = np.clip(stripe, 0, 255).astype(np.uint8)
+    return out
 
 
 def write_movie_frames(

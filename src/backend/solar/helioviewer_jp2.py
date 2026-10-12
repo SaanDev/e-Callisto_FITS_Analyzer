@@ -445,15 +445,73 @@ def parse_jp2_header(xml_text: str) -> dict[str, Any]:
     return header
 
 
-def decode_jp2_pixels(raw: bytes) -> np.ndarray:
-    """Pixels as float32 in FITS row order (row 0 at the bottom)."""
+def decode_jp2_pixels(raw: bytes, *, reduce: int = 0) -> np.ndarray:
+    """Pixels as float32 in FITS row order (row 0 at the bottom).
+
+    ``reduce`` decodes at 1/2**reduce of the native size. JPEG2000 stores those
+    resolutions in the codestream, so a reduced decode is much faster than a
+    full one, not slower.
+    """
     from PIL import Image
 
     with Image.open(io.BytesIO(raw)) as image:
+        if reduce > 0:
+            image.reduce = int(reduce)
         pixels = np.asarray(image)
     if pixels.ndim == 3:
         pixels = pixels[..., 0]
     return np.ascontiguousarray(np.flipud(pixels)).astype(np.float32)
+
+
+def jp2_native_size(raw: bytes) -> tuple[int, int]:
+    """(width, height) of a JP2 from its header, without decoding it."""
+    from PIL import Image
+
+    with Image.open(io.BytesIO(raw)) as image:
+        return int(image.size[0]), int(image.size[1])
+
+
+def reduce_levels_for(native_px: int, max_px: int) -> int:
+    """How many halvings bring ``native_px`` down to at most ``max_px``.
+
+    ``max_px`` of 0 (or less) keeps the native size.
+    """
+    if max_px <= 0 or native_px <= max_px:
+        return 0
+    levels = 0
+    size = int(native_px)
+    while size > max_px and levels < 5:
+        size = (size + 1) // 2
+        levels += 1
+    return levels
+
+
+def scale_header_for_reduce(header: dict[str, Any], levels: int, shape: tuple[int, int]) -> dict[str, Any]:
+    """The header of a frame decoded ``levels`` halvings below its native size.
+
+    Pixels grow by ``2**levels``: the plate scale and any CD matrix scale up,
+    the reference pixel moves to the same point of the coarser grid and the
+    solar radius in pixels shrinks. ``shape`` is the decoded (rows, columns).
+    """
+    if levels <= 0:
+        return dict(header)
+    factor = float(2**levels)
+    scaled = dict(header)
+    for key in ("cdelt1", "cdelt2", "cd1_1", "cd1_2", "cd2_1", "cd2_2"):
+        value = scaled.get(key)
+        if isinstance(value, (int, float)):
+            scaled[key] = float(value) * factor
+    # FITS pixel p (1-based centres) maps to (p - 0.5) / factor + 0.5.
+    for key in ("crpix1", "crpix2"):
+        value = scaled.get(key)
+        if isinstance(value, (int, float)):
+            scaled[key] = (float(value) - 0.5) / factor + 0.5
+    value = scaled.get("r_sun")
+    if isinstance(value, (int, float)):
+        scaled["r_sun"] = float(value) / factor
+    scaled["naxis1"] = int(shape[1])
+    scaled["naxis2"] = int(shape[0])
+    return scaled
 
 
 def normalise_header(header: dict[str, Any]) -> dict[str, Any]:
@@ -483,15 +541,74 @@ def normalise_header(header: dict[str, Any]) -> dict[str, Any]:
     return fixed
 
 
-def jp2_to_map(raw: bytes) -> Any:
-    """A ``sunpy.map.Map`` from a Helioviewer JP2, oriented and located correctly."""
+def jp2_to_map(raw: bytes, *, max_px: int = 0) -> Any:
+    """A ``sunpy.map.Map`` from a Helioviewer JP2, oriented and located correctly.
+
+    ``max_px`` caps the larger side of the decoded image (0 keeps the native
+    size); the header is rescaled to match, so coordinates stay exact.
+    """
     import sunpy.map
 
     xml_text = jp2_xml_text(raw)
     if xml_text is None:
         raise HelioviewerJP2Error("The JP2 file carries no metadata box.")
     header = normalise_header(parse_jp2_header(xml_text))
-    return sunpy.map.Map((decode_jp2_pixels(raw), header))
+    levels = 0
+    if max_px > 0:
+        levels = reduce_levels_for(max(jp2_native_size(raw)), int(max_px))
+    pixels = decode_jp2_pixels(raw, reduce=levels)
+    header = scale_header_for_reduce(header, levels, pixels.shape)
+    return sunpy.map.Map((pixels, header))
+
+
+#: Header key stamped on every frame decoded from a JP2. Eight characters, so it
+#: survives a FITS export of the frame as a real keyword.
+QUICKLOOK_KEY = "ecalprod"
+QUICKLOOK_VALUE = "HV-JP2"
+#: The JP2's own larger side in pixels, before any reduced decode.
+NATIVE_SIZE_KEY = "ecalnatv"
+#: Why the analysis tools treat these frames differently, for status text.
+QUICKLOOK_NOTE = "JP2 quicklook: 8-bit display values, not calibrated data"
+
+
+def is_jp2_path(path: str | Path) -> bool:
+    return str(path).lower().endswith((".jp2", ".jpx"))
+
+
+def load_jp2_file(path: str | Path, *, max_px: int = 0) -> Any:
+    """A map from a JP2 on disk, marked as a quicklook frame.
+
+    The marker travels in the map's metadata, so whatever later holds the frame
+    (the analysis window, a project, a FITS export) can tell it apart from
+    calibrated data. Exposure time is dropped: JP2 pixels are display bytes, and
+    normalising them by exposure manufactures differences between frames.
+    """
+    raw = Path(path).read_bytes()
+    if not raw.startswith(JP2_SIGNATURE):
+        raise HelioviewerJP2Error(f"{Path(path).name} is not a JPEG2000 image.")
+    frame = jp2_to_map(raw, max_px=int(max_px or 0))
+    meta = frame.meta
+    meta[QUICKLOOK_KEY] = QUICKLOOK_VALUE
+    try:
+        meta[NATIVE_SIZE_KEY] = int(max(jp2_native_size(raw)))
+    except Exception:
+        pass
+    meta.pop("exptime", None)
+    # The original header's BUNIT ("DN") describes the FITS the JP2 was made
+    # from, not these bytes.
+    meta.pop("bunit", None)
+    return frame
+
+
+def is_quicklook_frame(frame: Any) -> bool:
+    """Whether ``frame`` was decoded from a Helioviewer JP2."""
+    meta = getattr(frame, "meta", None)
+    if meta is None:
+        return False
+    try:
+        return str(meta.get(QUICKLOOK_KEY, "") or "").strip().upper() == QUICKLOOK_VALUE
+    except Exception:
+        return False
 
 
 # --- Sequences ----------------------------------------------------------------

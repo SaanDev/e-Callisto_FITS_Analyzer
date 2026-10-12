@@ -418,3 +418,41 @@ def test_export_hmi_vector_urls_requires_email_and_urls():
             email="sci@example.org",
             client=_FakeClient([]),
         )
+
+
+# ---------------------------------------------------------------------------
+# Staged exports: elapsed-time status and Stop
+# ---------------------------------------------------------------------------
+class _SlowRequest:
+    def __init__(self, seconds, error=None):
+        self.seconds = seconds
+        self.error = error
+
+    def wait(self):
+        import time as _time
+
+        _time.sleep(self.seconds)
+        if self.error is not None:
+            raise self.error
+
+
+def test_a_staged_export_reports_how_long_it_has_been_waiting():
+    statuses = []
+    jc._wait_for_request(_SlowRequest(0.6), staged=True, status_cb=statuses.append)
+    assert statuses and "elapsed" in statuses[0]
+
+
+def test_stop_ends_the_wait_for_a_staged_export():
+    with pytest.raises(jc.JsocCancelled):
+        jc._wait_for_request(_SlowRequest(30), staged=True, cancel_cb=lambda: True)
+
+
+def test_a_failed_staged_export_is_still_a_jsoc_error():
+    with pytest.raises(jc.JsocError, match="did not complete"):
+        jc._wait_for_request(_SlowRequest(0.0, RuntimeError("status 4")), staged=True, status_cb=lambda _t: None)
+
+
+def test_transfer_seconds_estimate_matches_the_frame_estimate():
+    total, seconds = jc.estimate_download(4, jc.SIZE_BIN4)
+    assert jc.estimate_transfer_seconds(total) == pytest.approx(seconds)
+    assert jc.estimate_transfer_seconds(0) == 0.0

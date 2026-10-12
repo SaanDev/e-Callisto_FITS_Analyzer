@@ -22,7 +22,14 @@ from PySide6.QtWidgets import QApplication
 
 from src.backend.solar.jsoc_client import SIZE_BIN2, SIZE_CUTOUT, SIZE_FULL
 from src.backend.solar.solar_data_analysis import AiaFrameSet, AiaMetadataRegion, frame_observation_time
-from src.backend.solar.sunpy_archive import DATA_KIND_MAP, SunPyQuerySpec, SunPySearchResult, SunPySearchRow
+from src.backend.solar.sunpy_archive import (
+    DATA_KIND_MAP,
+    SunPyFetchResult,
+    SunPyLoadResult,
+    SunPyQuerySpec,
+    SunPySearchResult,
+    SunPySearchRow,
+)
 from src.ui.solar import solar_data_analysis_window as solar_mod
 from src.ui.solar.solar_data_analysis_window import SolarDataAnalysisWindow
 from src.ui.widgets.collapsible_sections import section_for
@@ -1041,41 +1048,78 @@ def test_solar_data_window_byte_progress_drives_bar_and_defers_ticks():
     win.close()
 
 
-def test_solar_data_window_progress_pulses_during_long_download(monkeypatch):
+def test_solar_data_window_progress_holds_still_between_reports():
+    # A slow transfer with no new report must neither creep toward a made-up
+    # number nor turn itself into a busy bar (the old 86% soft cap).
     _app()
     win = SolarDataAnalysisWindow()
-    clock = {"now": 10.0}
-    monkeypatch.setattr(solar_mod.time, "monotonic", lambda: clock["now"])
-
     win._set_busy(True, "Downloading")
-    win._on_worker_progress(5, "Downloading high-resolution batch 1/2...")
-    win._progress_value = 5
-    win.progress.setValue(5)
-    clock["now"] = 11.0
-    win._tick_progress()
+    win._on_worker_progress(20, "Downloading batch 1/2...")
+    for _ in range(60):
+        win._tick_progress()
 
-    assert win.progress.value() == 6
-    assert win._progress_activity is True
+    assert win.progress.maximum() == 100
+    assert win.progress.value() == 20
+    assert not win._progress_timer.isActive()
     win._set_busy(False)
     win.close()
 
 
-def test_solar_data_window_progress_enters_busy_mode_at_soft_cap(monkeypatch):
+def test_solar_data_window_progress_is_busy_only_while_nothing_is_measurable():
     _app()
     win = SolarDataAnalysisWindow()
-    clock = {"now": 10.0}
-    monkeypatch.setattr(solar_mod.time, "monotonic", lambda: clock["now"])
-
     win._set_busy(True, "Downloading")
-    win._on_worker_progress(5, "Downloading high-resolution batch 1/2...")
-    win._progress_value = 86
-    win._progress_target = 5
-    win._progress_soft_cap = 86
-    win.progress.setValue(86)
-    clock["now"] = 11.0
-    win._tick_progress()
-
+    win._on_worker_progress(None, "JSOC is preparing the export on its servers… 0:12 elapsed")
     assert win.progress.maximum() == 0
+    assert "0:12 elapsed" in win.progress_panel.stats_label.text()
+
+    # The first measurable report brings the determinate bar back.
+    win._on_worker_progress(5, "Downloaded 0/3 frame(s) via JSOC (fast path)")
+    assert win.progress.maximum() == 100
+    win._set_busy(False)
+    win.close()
+
+
+def test_solar_data_window_byte_progress_prefers_the_producers_estimate():
+    from src.backend.services.download_manager import AggregateProgress
+
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._set_busy(True, "Downloading")
+    # No byte total and no finished file, but the VSO reporter knows better.
+    win._on_byte_progress(
+        AggregateProgress(files_total=4, files_done=0, bytes_done=10, bytes_total=None, fraction_hint=0.5)
+    )
+    assert win.progress.value() == 45  # 5 + 0.5 * 80
+    win._set_busy(False)
+    win.close()
+
+
+def test_solar_data_window_download_reaches_100_only_after_frames_are_drawn(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._search_result = _aia_search_result()
+    win._set_busy(True, "Downloading")
+    win._on_worker_progress(97, "Preparing the display...")
+
+    seen = {}
+    real_apply = win._apply_loaded_frames
+
+    def spy(frames, *, paths, metadata):
+        seen["value"] = win.progress.value()
+        seen["phase"] = win.progress_panel.stats_label.text()
+        real_apply(frames, paths=paths, metadata=metadata)
+
+    monkeypatch.setattr(win, "_apply_loaded_frames", spy)
+    frames = [FakeMap(np.ones((8, 8))), FakeMap(np.full((8, 8), 2.0))]
+    win._on_load_finished(
+        SunPyFetchResult(paths=["a.fits", "b.fits"], requested_count=2, failed_count=0, errors=[]),
+        SunPyLoadResult(data_kind=DATA_KIND_MAP, paths=["a.fits", "b.fits"], maps_or_timeseries=frames, metadata={}),
+    )
+
+    assert seen["value"] == 98
+    assert "Drawing 2 frame" in seen["phase"]
+    assert win.progress.value() == 100
     win._set_busy(False)
     win.close()
 
@@ -3771,3 +3815,349 @@ def test_unknown_baseline_asks_instead_of_failing(monkeypatch):
 
     assert asked and "archive product" in asked[0]
     win.close()
+
+
+# -- Download products (FITS full / FITS reduced / JP2) ----------------------------
+
+
+def _product_items(win):
+    model = win.product_combo.model()
+    return {
+        win.product_combo.itemData(i): model.item(i).isEnabled() for i in range(win.product_combo.count())
+    }
+
+
+def _choose_product(win, product):
+    win.product_combo.setCurrentIndex(win.product_combo.findData(product))
+
+
+def test_product_defaults_to_full_fits_and_offers_all_three_for_aia():
+    _app()
+    win = SolarDataAnalysisWindow()
+    assert win._current_product() == solar_mod.PRODUCT_FITS_FULL
+    assert _product_items(win) == {
+        solar_mod.PRODUCT_FITS_FULL: True,
+        solar_mod.PRODUCT_FITS_REDUCED: True,
+        solar_mod.PRODUCT_JP2: True,
+    }
+    assert win.frame_size_stack.currentWidget() is win.frame_size_combo
+    assert win._build_query_spec().archive == solar_mod.ARCHIVE_SUNPY
+    win.close()
+
+
+def test_jp2_product_swaps_controls_and_targets_helioviewer():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win.high_resolution_check.setChecked(True)
+    _choose_product(win, solar_mod.PRODUCT_JP2)
+
+    assert win.frame_size_stack.currentWidget() is win.jp2_size_combo
+    # Helioviewer is plain HTTP: no JSOC source/e-mail, no VSO high-res mode.
+    assert not win.source_combo.isEnabled()
+    assert not win.jsoc_email_edit.isEnabled()
+    assert not win.high_resolution_check.isEnabled()
+    spec = win._build_query_spec()
+    assert spec.archive == solar_mod.ARCHIVE_HELIOVIEWER_JP2
+    assert spec.resolution is None
+    assert "JP2 quicklook" in win.size_estimate_label.text() or "Select frames" in win.size_estimate_label.text()
+    win.close()
+
+
+def test_unoffered_products_are_greyed_and_the_choice_returns_with_the_observable():
+    _app()
+    win = SolarDataAnalysisWindow()
+    _choose_product(win, solar_mod.PRODUCT_JP2)
+
+    # SUVI is in neither Helioviewer nor a reduced-FITS archive.
+    _select_observable(win, "GOES/SUVI 171 A")
+    items = _product_items(win)
+    assert items[solar_mod.PRODUCT_JP2] is False
+    assert items[solar_mod.PRODUCT_FITS_REDUCED] is False
+    assert win._current_product() == solar_mod.PRODUCT_FITS_FULL
+    reason = win.product_combo.itemData(win.product_combo.findData(solar_mod.PRODUCT_JP2), Qt.ToolTipRole)
+    assert "JP2" in reason
+
+    # Back on an observable Helioviewer has, the user's JP2 choice is back too.
+    win.wavelength_combo.setCurrentText("AIA 193 A")
+    assert win._current_product() == solar_mod.PRODUCT_JP2
+
+    # LASCO has JP2 but no reduced FITS.
+    _select_observable(win, "SOHO/LASCO C2")
+    items = _product_items(win)
+    assert items[solar_mod.PRODUCT_JP2] is True
+    assert items[solar_mod.PRODUCT_FITS_REDUCED] is False
+    assert win._current_product() == solar_mod.PRODUCT_JP2
+    win.close()
+
+
+def test_frame_size_and_product_stay_in_step():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win.frame_size_combo.setCurrentIndex(win.frame_size_combo.findData(SIZE_BIN2))
+    assert win._current_product() == solar_mod.PRODUCT_FITS_REDUCED
+    assert win._build_query_spec().archive == solar_mod.ARCHIVE_SUNPY
+
+    win.frame_size_combo.setCurrentIndex(win.frame_size_combo.findData(SIZE_FULL))
+    assert win._current_product() == solar_mod.PRODUCT_FITS_FULL
+
+    # Picking "reduced" restores the last reduced size the user chose.
+    _choose_product(win, solar_mod.PRODUCT_FITS_REDUCED)
+    assert win._frame_size_mode() == SIZE_BIN2
+
+    # The synoptic size needs no e-mail, so the JSOC fields grey out.
+    win.frame_size_combo.setCurrentIndex(win.frame_size_combo.findData(solar_mod.SIZE_SYNOPTIC))
+    assert win._build_query_spec().archive == solar_mod.ARCHIVE_AIA_SYNOPTIC
+    assert not win.jsoc_email_edit.isEnabled()
+    assert "no e-mail" in win.size_estimate_label.text() or "Select frames" in win.size_estimate_label.text()
+    win.close()
+
+
+def test_aia_1700_has_no_synoptic_frames():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win.wavelength_combo.setCurrentText("AIA 1700 A")
+    _choose_product(win, solar_mod.PRODUCT_FITS_REDUCED)
+    index = win.frame_size_combo.findData(solar_mod.SIZE_SYNOPTIC)
+    assert win.frame_size_combo.model().item(index).isEnabled() is False
+    assert win._frame_size_mode() in solar_mod.JSOC_SIZES
+    win.close()
+
+
+def test_product_choice_is_remembered_across_windows():
+    _app()
+    first = SolarDataAnalysisWindow()
+    _choose_product(first, solar_mod.PRODUCT_JP2)
+    first.jp2_size_combo.setCurrentIndex(first.jp2_size_combo.findData(1024))
+    first.close()
+
+    second = SolarDataAnalysisWindow()
+    assert second._current_product() == solar_mod.PRODUCT_JP2
+    assert second._jp2_max_px() == 1024
+    second.close()
+
+
+def test_changing_product_drops_rows_listed_for_another_archive():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._search_result = _aia_search_result()
+    win._populate_results_table(win._search_result)
+    assert win.results_table.rowCount() == 1
+
+    _choose_product(win, solar_mod.PRODUCT_JP2)
+    assert win._search_result is None
+    assert win.results_table.rowCount() == 0
+    assert "Fetch Records" in win.archive_results_status_label.text()
+    win.close()
+
+
+def _jp2_search_result():
+    from src.backend.solar.direct_archives import DirectFile
+
+    when = datetime(2026, 10, 10, 12, 0, 0)
+    spec = SunPyQuerySpec(
+        start_dt=when,
+        end_dt=when + timedelta(hours=1),
+        spacecraft="SDO",
+        instrument="AIA",
+        wavelength_angstrom=193.0,
+        archive=solar_mod.ARCHIVE_HELIOVIEWER_JP2,
+    )
+    rows = [
+        SunPySearchRow(
+            start=when, end=when, source="SDO", instrument="SDO/AIA 193 Å JP2",
+            provider="Helioviewer", fileid="hv11_20261010T120000.jp2", size="≈1.0 MB",
+        )
+    ]
+    files = [DirectFile(url="https://example.invalid/a.jp2", filename="hv11_20261010T120000.jp2", when=when)]
+    return SunPySearchResult(
+        spec=spec, data_kind=DATA_KIND_MAP, rows=rows, raw_response=files, row_index_map=[(0, 0)]
+    )
+
+
+def test_loading_jp2_rows_skips_jsoc_and_passes_the_decode_size(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    _choose_product(win, solar_mod.PRODUCT_JP2)
+    win.jp2_size_combo.setCurrentIndex(win.jp2_size_combo.findData(1024))
+    win._search_result = _jp2_search_result()
+    win.jsoc_email_edit.setText("")
+    monkeypatch.setattr(win, "_checked_rows", lambda: [0])
+    started = []
+    monkeypatch.setattr(win, "_start_worker", lambda worker: started.append(worker))
+    monkeypatch.setattr(solar_mod.QMessageBox, "information", lambda *a, **k: pytest.fail("no prompt expected"))
+
+    win.download_and_load_selected()
+
+    assert len(started) == 1
+    worker = started[0]
+    assert worker.jp2_max_px == 1024
+    assert worker.prefer_jsoc is False
+    assert worker.jsoc_process is None
+    assert worker.search_result.spec.archive == solar_mod.ARCHIVE_HELIOVIEWER_JP2
+    win._set_busy(False)
+    win.close()
+
+
+def _quicklook_frame(value):
+    frame = FakeMap(np.full((8, 8), float(value)))
+    frame.meta = {"instrume": "AIA", "ecalprod": "HV-JP2"}
+    return frame
+
+
+def test_jp2_frames_disable_intensity_tools_and_say_so(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    _load_frames(win, monkeypatch, [_quicklook_frame(1), _quicklook_frame(2)])
+
+    assert win._loaded_is_quicklook()
+    assert not win.quicklook_badge.isHidden()
+    for widget in (win.lightcurve_btn, win.stats_tool_btn, win.detect_regions_btn, win.apply_level_btn):
+        assert not widget.isEnabled()
+        assert "JP2 quicklook" in widget.toolTip()
+    assert not win.detect_regions_action.isEnabled()
+    assert win.calibration_group.isVisibleTo(win) is False
+    assert "JP2 quicklook" in win._frame_title(win._map_frames[0], 0)
+    assert "JP2 quicklook" in win.load_summary_label.text()
+    # The geometry and difference tools stay available.
+    assert win.difference_mode_btn.isEnabled()
+    assert win.export_movie_btn.isEnabled()
+
+    # A menu or shortcut reaching a gated tool gets an explanation, not a result.
+    told = []
+    monkeypatch.setattr(solar_mod.QMessageBox, "information", lambda *a, **k: told.append(a[2]))
+    win.show_region_lightcurve()
+    assert told and "JP2 quicklook" in told[0]
+
+    # FITS frames bring everything back.
+    _load_frames(win, monkeypatch, [FakeMap(np.ones((8, 8))), FakeMap(np.full((8, 8), 2.0))])
+    assert not win._loaded_is_quicklook()
+    assert win.quicklook_badge.isHidden()
+    assert win.lightcurve_btn.isEnabled()
+    assert "JP2 quicklook" not in win.lightcurve_btn.toolTip()
+    win.close()
+
+
+def test_project_query_records_and_restores_the_product(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    _choose_product(win, solar_mod.PRODUCT_JP2)
+    win.jp2_size_combo.setCurrentIndex(win.jp2_size_combo.findData(1024))
+    query = win._project_source_query()
+    assert query["product"] == solar_mod.PRODUCT_JP2
+    assert query["jp2_max_px"] == 1024
+    win.close()
+
+    other = SolarDataAnalysisWindow()
+    assert other._current_product() == solar_mod.PRODUCT_JP2  # remembered
+    _choose_product(other, solar_mod.PRODUCT_FITS_FULL)
+    searched = []
+    monkeypatch.setattr(other, "search_archives", lambda: searched.append(other._build_query_spec()))
+    meta = {
+        "source": {
+            "start": "2026-10-10T12:00:00",
+            "end": "2026-10-10T13:00:00",
+            "observable_data": ["AIA", 193.0],
+            "frame_times": [],
+            "query": query,
+        }
+    }
+    other._refetch_project_frames(meta, missing=2)
+    assert searched and searched[0].archive == solar_mod.ARCHIVE_HELIOVIEWER_JP2
+    assert other._jp2_max_px() == 1024
+    other._pending_session_restore = None
+    other._pending_session_fetch = None
+    other.close()
+
+
+def test_old_projects_refetch_full_fits(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    _choose_product(win, solar_mod.PRODUCT_JP2)
+    searched = []
+    monkeypatch.setattr(win, "search_archives", lambda: searched.append(win._build_query_spec()))
+    meta = {
+        "source": {
+            "start": "2026-10-10T12:00:00",
+            "end": "2026-10-10T13:00:00",
+            "observable_data": ["AIA", 193.0],
+            "query": {"instrument": "AIA", "archive_source": "auto"},
+        }
+    }
+    win._refetch_project_frames(meta, missing=1)
+    assert searched and searched[0].archive == solar_mod.ARCHIVE_SUNPY
+    win._pending_session_restore = None
+    win._pending_session_fetch = None
+    win.close()
+
+
+# -- Movie frame labels ----------------------------------------------------------
+
+
+def _start_movie_export(win, monkeypatch, tmp_path):
+    monkeypatch.setattr(solar_mod, "pick_export_path", lambda *a, **k: (str(tmp_path / "m.gif"), ""))
+    started = []
+    monkeypatch.setattr(win, "_start_worker", lambda worker: started.append(worker))
+    win.export_movie()
+    assert len(started) == 1
+    return started[0]._spec
+
+
+def _timed_map(value, date):
+    frame = FakeMap(np.full((8, 8), float(value)))
+    frame.date = date
+    return frame
+
+
+def test_movie_export_labels_every_frame_by_default(monkeypatch, tmp_path):
+    _app()
+    win = SolarDataAnalysisWindow()
+    assert win.movie_labels_check.isChecked()
+    win._apply_loaded_frames(
+        [_timed_map(1, "2026-02-10T01:00:00"), _timed_map(2, "2026-02-10T01:02:00")], paths=[], metadata={}
+    )
+    win.movie_content_combo.setCurrentText("Base Difference")
+    spec = _start_movie_export(win, monkeypatch, tmp_path)
+    assert spec.frame_labels == (
+        ("SDO/AIA 193 Å", "2026-02-10 01:00:00 UTC", "Base difference (base 01:00:00 UTC)"),
+        ("SDO/AIA 193 Å", "2026-02-10 01:02:00 UTC", "Base difference (base 01:00:00 UTC)"),
+    )
+    win.close()
+
+
+def test_unticking_frame_labels_exports_a_clean_movie(monkeypatch, tmp_path):
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames([_timed_map(1, "2026-02-10T01:00:00")], paths=[], metadata={})
+    win.movie_labels_check.setChecked(False)
+    assert _start_movie_export(win, monkeypatch, tmp_path).frame_labels == ()
+    win.close()
+
+
+def test_composite_movie_labels_name_the_layers_and_the_build_mode(monkeypatch, tmp_path):
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
+    win._composite_frames = _rgb_composites()
+    win._composite_labels = ["AIA 193"]
+    win._composite_mode = "running"
+    win.movie_content_combo.setCurrentText("Frames")  # changed after the build
+
+    spec = _start_movie_export(win, monkeypatch, tmp_path)
+    assert spec.mode == "raw"
+    first = spec.frame_labels[0]
+    assert first[0].endswith("+ AIA 193")
+    assert first[-1] == "Running difference"
+    win.close()
+
+
+def test_frame_label_choice_travels_with_the_project():
+    _app()
+    win = SolarDataAnalysisWindow()
+    win.movie_labels_check.setChecked(False)
+    view = win._collect_session_meta()["view"]
+    assert view["movie_labels"] is False
+    other = SolarDataAnalysisWindow()
+    other._restore_view_widgets(view)
+    assert other.movie_labels_check.isChecked() is False
+    win.close()
+    other.close()

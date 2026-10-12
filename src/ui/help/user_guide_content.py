@@ -364,6 +364,25 @@ so recent searches return raw frames and older ones calibrated frames; either wa
 observation. Because the two products differ in calibration and data type, a window that straddles the
 boundary loads as two configuration groups. <b>Live Preview</b> opens Helioviewer quicklook imagery for both
 SOHO instruments, which is the only way to see the most recent EIT frames.</p>
+<p><b>Download products.</b> The <b>Product</b> box under Download options chooses what <b>Fetch Records</b>
+lists and <b>Load Selected</b> downloads; it remembers your last choice. <i>FITS · full resolution</i> is the
+archive's own calibrated files (largest and slowest). <i>FITS · reduced size</i> is for SDO only: the AIA
+<i>Synoptic 1024²</i> frame size reads JSOC's level-1.5 synoptic archive with no e-mail (2-minute cadence, about
+a week behind real time, with a near-real-time set covering the latest days; 1700 Å is not in it), and the
+Binned ½, Binned ¼ and Cutout sizes are made by JSOC and need the JSOC notify e-mail. <i>JP2 · quicklook</i>
+downloads Helioviewer JPEG2000 images for AIA, HMI (magnetogram, continuum), EIT, LASCO and STEREO EUVI/COR1/COR2 —
+a few hundred kilobytes each and listed in seconds, so it is the fast way to inspect an event; its Frame size
+decodes AIA/HMI's 4096² images at up to 2048 or 1024 px to save memory, with coordinates kept exact. JP2 pixels
+are 8-bit display values, not calibrated data: viewing, differences, movies, geometry measurements and
+derotation work, while processing levels, light curves, Region Stats and active-region detection are disabled,
+and a <i>JP2 quicklook · not calibrated</i> badge and the figure titles say so. Products an observable does not
+have (SUVI and HI have no JP2; only SDO has reduced FITS) are greyed out with the reason in their tooltip.</p>
+<p><b>Download progress.</b> The bar under the image follows the real transfer on every source: bytes done of
+the expected total, speed and time remaining, with <b>Show file details</b> listing each file. While nothing can
+be measured — an archive search, or JSOC building binned or cutout frames, which can take minutes — the bar is a
+busy indicator and the line under it says what is being waited for. After the transfer it counts the frames as
+they are read, and reaches 100% only once they are on screen. <b>Stop</b> cancels a search, the wait for JSOC
+or the transfer; files already downloaded stay in the cache.</p>
 <ul>
 <li><b>Controls column</b> (left): numbered panels for <b>1 Data Source</b>, <b>2 Archive Results</b>, and
 <b>3 Analysis</b>, plus Movie Export, Display and Crop, Coronagraph Tools, Heliospheric Imager (J-map),
@@ -380,6 +399,10 @@ TIFF or JPG in light mode and the OriginPro style.</li>
 <li><b>Common actions</b>: fetch or find archive records, load local FITS, plot frames, running/base difference,
 crop by ROI, detect bright active regions, fetch NOAA/HEK labels, build RGB composites, and export plots,
 cropped FITS, CSV, GIF, or MP4.</li>
+<li><b>Movies</b> (Movie Export card, or <b>Export MP4</b> above the image) play north up, as on screen, with
+the playback speed and the current colormap, scale, clip and crop. With <b>Frame labels</b> ticked (the default)
+each frame carries its instrument and UTC observation date and time on a thin stripe along the bottom, plus
+which difference it shows in a running- or base-difference movie; untick it for a clean movie.</li>
 <li><b>Project</b>: the frames, view, crop and measurements are part of the main window's project
 (<code>Project &#8594; Save Project</code>, <code>Ctrl+S</code> / <code>Ctrl+Shift+S</code>). A linked project whose
 frames have been moved or cleared from the cache fetches them again from the archive; measurements are matched

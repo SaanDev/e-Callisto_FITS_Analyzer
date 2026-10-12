@@ -19,6 +19,7 @@ from src.backend.services.download_manager import (
     CacheByteMonitor,
     DownloadItem,
     DownloadManager,
+    TransferReporter,
     _SpeedMeter,
     compute_eta,
     format_bytes,
@@ -301,3 +302,88 @@ def test_download_reports_failure_for_missing_url(http_server, tmp_path):
     result = mgr.download([DownloadItem(url=f"{base}/missing.fits", dest=tmp_path / "missing.fits")])
     assert result.paths == []
     assert len(result.errors) == 1
+
+
+# ---------------------------------------------------------------------------
+# TransferReporter (progress for the VSO direct path and the Fido fallback)
+# ---------------------------------------------------------------------------
+def test_transfer_reporter_is_silent_until_a_transfer_starts():
+    seen = []
+    reporter = TransferReporter(3, callback=seen.append)
+    reporter.emit()
+    assert seen == []
+    reporter.file_bytes("a", 10, 100)
+    reporter.emit()
+    assert len(seen) == 1
+
+
+def test_transfer_reporter_estimates_from_finished_files_not_the_size_column(tmp_path):
+    # The VSO size column says 64 MB (uncompressed); real files are 1 KB.
+    reporter = TransferReporter(4, callback=None, size_hint=64 * 1024**2)
+    first = tmp_path / "a.fits"
+    first.write_bytes(b"x" * 1000)
+    reporter.file_bytes("a", 1000, 1000)
+    reporter.file_finished("a", path=first)
+
+    snap = reporter.snapshot()
+    assert snap.files_done == 1
+    # 1 finished (1000 B) + 3 not started at the finished mean.
+    assert snap.bytes_total == 4000
+    assert snap.fraction_hint == pytest.approx(0.25)
+
+
+def test_transfer_reporter_counts_bytes_in_flight_and_never_goes_backwards(tmp_path):
+    reporter = TransferReporter(2, callback=None)
+    reporter.file_bytes("a", 500, 1000)
+    reporter.file_bytes("b", 250, 1000)
+    snap = reporter.snapshot()
+    assert snap.bytes_done == 750 and snap.bytes_total == 2000
+    assert snap.fraction_hint == pytest.approx(0.375)
+    assert {p.name for p in snap.per_file} == {"a", "b"}
+
+    # A mirror retry restarts a file from zero; the bar must not drop.
+    reporter.file_bytes("a", 0, 1000)
+    assert reporter.snapshot().fraction_hint == pytest.approx(0.375)
+
+
+def test_transfer_reporter_stays_below_one_until_the_last_file_lands(tmp_path):
+    reporter = TransferReporter(2, callback=None)
+    done = tmp_path / "a.fits"
+    done.write_bytes(b"x" * 100)
+    reporter.file_finished("a", path=done)
+    reporter.file_bytes("b", 100, 100)  # all bytes in, not yet renamed
+    assert reporter.snapshot().fraction_hint < 1.0
+    reporter.file_finished("b", path=done)
+    assert reporter.snapshot().fraction_hint == pytest.approx(1.0)
+
+
+def test_transfer_reporter_watches_a_folder_it_cannot_instrument(tmp_path):
+    (tmp_path / "old.fits").write_bytes(b"o" * 999)
+    reporter = TransferReporter(2, callback=None)
+    reporter.watch_directory(tmp_path)
+    partial = tmp_path / "new.fits"
+    partial.write_bytes(b"n" * 300)
+    snap = reporter.snapshot()
+    assert snap.bytes_done == 300  # the pre-existing file is not counted
+    assert snap.files_done == 0
+
+    partial.write_bytes(b"n" * 600)
+    reporter.watched_finished(1, [partial])
+    snap = reporter.snapshot()
+    assert snap.files_done == 1
+    assert snap.bytes_done == 600
+    # One more file expected at the finished mean.
+    assert snap.bytes_total == 1200
+    reporter.stop_watching()
+
+
+def test_transfer_reporter_polls_while_started():
+    import time as _time
+
+    seen = []
+    reporter = TransferReporter(1, callback=seen.append, interval=0.05).start()
+    reporter.file_bytes("a", 1, 10)
+    _time.sleep(0.3)
+    reporter.stop()
+    assert len(seen) >= 2
+    assert isinstance(seen[-1], AggregateProgress)

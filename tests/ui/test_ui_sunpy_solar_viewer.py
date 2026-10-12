@@ -1150,3 +1150,96 @@ def test_save_files_as_copies_loaded_files(tmp_path, monkeypatch):
     assert (dest / "a.fits").exists()
     assert (dest / "b.fits").exists()
     win.close()
+
+
+# -- Direct archives (Helioviewer JP2 / AIA synoptic) ---------------------------
+
+
+def _jp2_search_result():
+    from dataclasses import replace
+
+    from src.backend.solar.direct_archives import DirectFile
+
+    spec = replace(_sample_query(), archive="helioviewer_jp2")
+    when = spec.start_dt
+    rows = [
+        SunPySearchRow(start=when, end=when, source="SDO", instrument="AIA JP2", provider="Helioviewer",
+                       fileid="hv11_a.jp2", size=""),
+        SunPySearchRow(start=when, end=when, source="SDO", instrument="AIA JP2", provider="Helioviewer",
+                       fileid="hv11_b.jp2", size=""),
+    ]
+    files = [DirectFile("https://x/a", "hv11_a.jp2", when), DirectFile("https://x/b", "hv11_b.jp2", when)]
+    return SunPySearchResult(spec=spec, data_kind=DATA_KIND_MAP, rows=rows, raw_response=files,
+                             row_index_map=[(0, 0), (0, 1)])
+
+
+def test_worker_routes_direct_archive_searches_past_fido(monkeypatch):
+    from dataclasses import replace
+
+    _app()
+    calls = []
+    monkeypatch.setattr(viewer_mod, "search", lambda *a, **k: pytest.fail("Fido must not be asked"))
+    monkeypatch.setattr(
+        viewer_mod, "search_direct",
+        lambda spec, **k: calls.append(spec.archive) or _sample_search_result(),
+    )
+    worker = viewer_mod.SunPyWorker("search", query_spec=replace(_sample_query(), archive="aia_synoptic"))
+    found = []
+    worker.search_finished.connect(found.append)
+    worker.run()
+    assert calls == ["aia_synoptic"] and found
+
+
+def test_worker_downloads_jp2_rows_and_decodes_them_at_the_chosen_size(monkeypatch, tmp_path):
+    _app()
+    monkeypatch.setattr(viewer_mod, "fetch", lambda *a, **k: pytest.fail("VSO must not be asked"))
+    monkeypatch.setattr(viewer_mod, "fetch_via_jsoc", lambda *a, **k: pytest.fail("JSOC must not be asked"))
+
+    def fake_fetch_direct(search_result, cache_dir, selected_rows=None, *, progress_cb=None,
+                          byte_progress_cb=None, cancel_cb=None):
+        assert byte_progress_cb is not None
+        return SunPyFetchResult(paths=["a.jp2", "b.jp2"], requested_count=2, failed_count=0, errors=[])
+
+    decoded = {}
+
+    def fake_load(paths, *, max_px, progress_cb=None, cancel_cb=None):
+        decoded["max_px"] = max_px
+        for index in range(len(paths)):
+            progress_cb(index + 1, len(paths))
+        return SunPyLoadResult(data_kind=DATA_KIND_MAP, paths=list(paths), maps_or_timeseries=[], metadata={})
+
+    monkeypatch.setattr(viewer_mod, "fetch_direct", fake_fetch_direct)
+    monkeypatch.setattr(viewer_mod, "load_jp2_frames", fake_load)
+    worker = viewer_mod.SunPyWorker(
+        "fetch_load", search_result=_jp2_search_result(), selected_rows=[0, 1], cache_dir=tmp_path, jp2_max_px=1024
+    )
+    progress = []
+    finished = []
+    worker.progress.connect(lambda value, text: progress.append((value, text)))
+    worker.load_finished.connect(lambda *a: finished.append(a))
+    worker.run()
+
+    assert finished and decoded["max_px"] == 1024
+    values = [value for value, _ in progress if value is not None]
+    # Loading fills 86..96, the window draws the rest; the worker never says 100.
+    assert [v for v in values if v >= 86] == [86, 91, 96, 97]
+    assert 100 not in values
+    assert progress[-1][1].startswith("Preparing the display")
+
+
+def test_worker_passes_jsoc_staging_status_as_busy_progress(monkeypatch, tmp_path):
+    _app()
+
+    def fake_jsoc(*_a, status_cb=None, **_k):
+        status_cb("JSOC is preparing the export on its servers… 0:05 elapsed")
+        return SunPyFetchResult(paths=["/x.fits"], requested_count=1, failed_count=0, errors=[])
+
+    monkeypatch.setattr(viewer_mod, "fetch_via_jsoc", fake_jsoc)
+    worker = viewer_mod.SunPyWorker(
+        "fetch_load", search_result=_aia_search_result(), selected_rows=[0], cache_dir=tmp_path,
+        jsoc_email="sci@example.org", prefer_jsoc=True,
+    )
+    progress = []
+    worker.progress.connect(lambda value, text: progress.append((value, text)))
+    worker._run_fetch_load()
+    assert (None, "JSOC is preparing the export on its servers… 0:05 elapsed") in progress

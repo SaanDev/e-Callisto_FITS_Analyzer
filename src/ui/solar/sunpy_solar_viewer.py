@@ -41,6 +41,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.backend.solar.data_products import (
+    ARCHIVE_HELIOVIEWER_JP2,
+    DEFAULT_JP2_MAX_PX,
+    is_direct_archive,
+    normalize_jp2_max_px,
+)
+from src.backend.solar.direct_archives import fetch_direct, find_latest_direct, load_jp2_frames, search_direct
 from src.backend.solar.sunpy_analysis import summarize_map_roi, summarize_xrs_interval
 from src.backend.solar.sunpy_archive import (
     DATA_KIND_MAP,
@@ -112,6 +119,7 @@ class SunPyWorker(QObject):
         jsoc_email: str | None = None,
         prefer_jsoc: bool = False,
         jsoc_process: dict | None = None,
+        jp2_max_px: int | None = None,
     ):
         super().__init__()
         self.mode = str(mode or "").strip().lower()
@@ -122,6 +130,8 @@ class SunPyWorker(QObject):
         self.jsoc_email = str(jsoc_email or "").strip()
         self.prefer_jsoc = bool(prefer_jsoc)
         self.jsoc_process = jsoc_process or None
+        # Largest side JP2 frames are decoded to (None: the default size).
+        self.jp2_max_px = jp2_max_px
         self._cancel_event = threading.Event()
 
     def cancel(self):
@@ -133,15 +143,23 @@ class SunPyWorker(QObject):
             if self.mode == "search":
                 if self.query_spec is None:
                     raise ValueError("Search mode requires a query spec.")
-                self.progress.emit(None, "Searching SunPy archives...")
-                # For lagging archives (the SOHO instruments) an empty selected
-                # window falls back to the nearest available data, not nothing.
-                result = search(
-                    self.query_spec,
-                    allow_time_fallback=True,
-                    progress_cb=self.progress.emit,
-                    cancel_cb=self._cancel_event.is_set,
-                )
+                if is_direct_archive(getattr(self.query_spec, "archive", None)):
+                    self.progress.emit(None, "Listing files...")
+                    result = search_direct(
+                        self.query_spec,
+                        progress_cb=self.progress.emit,
+                        cancel_cb=self._cancel_event.is_set,
+                    )
+                else:
+                    self.progress.emit(None, "Searching SunPy archives...")
+                    # For lagging archives (the SOHO instruments) an empty selected
+                    # window falls back to the nearest available data, not nothing.
+                    result = search(
+                        self.query_spec,
+                        allow_time_fallback=True,
+                        progress_cb=self.progress.emit,
+                        cancel_cb=self._cancel_event.is_set,
+                    )
                 if self._cancel_event.is_set():
                     self.cancelled.emit()
                     return
@@ -153,7 +171,12 @@ class SunPyWorker(QObject):
                 if self.query_spec is None:
                     raise ValueError("Find-latest mode requires a query spec.")
                 self.progress.emit(None, "Scanning the archive for the latest available data...")
-                result = find_latest_search(
+                finder = (
+                    find_latest_direct
+                    if is_direct_archive(getattr(self.query_spec, "archive", None))
+                    else find_latest_search
+                )
+                result = finder(
                     self.query_spec,
                     progress_cb=self.progress.emit,
                     cancel_cb=self._cancel_event.is_set,
@@ -202,15 +225,10 @@ class SunPyWorker(QObject):
                         f"{hint}\n\nDownload errors:\n{details or '(No downloader details were returned.)'}{more}"
                     )
 
-                self.progress.emit(88, "Loading downloaded files...")
-                load_result = load_downloaded(
-                    fetch_result.paths,
-                    data_kind=self.search_result.data_kind,
-                    instrument=self.search_result.spec.instrument,
-                    level=self.search_result.spec.level,
-                )
-                self.progress.emit(96, "Finalizing data...")
-                self.progress.emit(100, "Data loaded.")
+                load_result = self._load_fetched(list(fetch_result.paths))
+                # Not 100%: the window still has to draw the frames. It
+                # finishes the bar itself once they are on screen.
+                self.progress.emit(97, "Preparing the display...")
                 self.load_finished.emit(fetch_result, load_result)
                 return
 
@@ -218,12 +236,51 @@ class SunPyWorker(QObject):
         except Exception:
             self.failed.emit(traceback.format_exc())
 
+    # Bar bands of a download: search/prepare below 5, transfer 5-85, loading
+    # the files 86-96, drawing them (done by the window) 97-100.
+    LOAD_BAND = (86, 96)
+
+    def _load_fetched(self, paths: list[str]) -> SunPyLoadResult:
+        """Read the downloaded files, reporting each one inside the load band."""
+        low, high = self.LOAD_BAND
+        total = len(paths)
+        self.progress.emit(low, f"Loading {total} downloaded file(s)...")
+
+        def _loading(done: int, count: int) -> None:
+            value = low + int(round((high - low) * done / max(1, count)))
+            self.progress.emit(value, f"Loading frame {done} of {count}...")
+
+        spec = self.search_result.spec
+        if getattr(spec, "archive", None) == ARCHIVE_HELIOVIEWER_JP2:
+            max_px = DEFAULT_JP2_MAX_PX if self.jp2_max_px is None else self.jp2_max_px
+            return load_jp2_frames(paths, max_px=normalize_jp2_max_px(max_px), progress_cb=_loading)
+        return load_downloaded(
+            paths,
+            data_kind=self.search_result.data_kind,
+            instrument=spec.instrument,
+            level=spec.level,
+            progress_cb=_loading if self.search_result.data_kind == DATA_KIND_MAP else None,
+        )
+
     def _run_fetch_load(self) -> SunPyFetchResult:
         """Download the selection, preferring the JSOC fast path with an
         automatic VSO fallback (fastest-source-first / racing)."""
 
         def _coarse(value, text):
+            if value is None:
+                self.progress.emit(None, text)
+                return
             self.progress.emit(5 + int(max(0, min(100, int(value))) * 0.80), text)
+
+        if is_direct_archive(getattr(self.search_result.spec, "archive", None)):
+            return fetch_direct(
+                self.search_result,
+                self.cache_dir,
+                selected_rows=self.selected_rows,
+                progress_cb=_coarse,
+                byte_progress_cb=self.byte_progress.emit,
+                cancel_cb=self._cancel_event.is_set,
+            )
 
         if self._should_try_jsoc():
             from src.backend.solar.jsoc_client import JsocError
@@ -238,6 +295,7 @@ class SunPyWorker(QObject):
                     progress_cb=_coarse,
                     byte_progress_cb=self.byte_progress.emit,
                     cancel_cb=self._cancel_event.is_set,
+                    status_cb=lambda text: self.progress.emit(None, text),
                 )
                 if result.paths or getattr(result, "cancelled", False):
                     return result
@@ -247,14 +305,15 @@ class SunPyWorker(QObject):
             except Exception as exc:  # noqa: BLE001 - never strand the user on JSOC
                 self.progress.emit(5, f"JSOC fast path failed ({exc}); using VSO...")
 
-        # VSO path: origin's fetch() reports byte-accurate progress through
-        # progress_cb itself (its direct-download path streams with real byte
-        # fractions), so there is no separate byte_progress channel here.
+        # VSO path: per-file percentages through progress_cb, and the bytes in
+        # flight (direct URLs chunk by chunk, Fido by watching the cache folder)
+        # through byte_progress.
         return fetch(
             self.search_result,
             self.cache_dir,
             selected_rows=self.selected_rows,
             progress_cb=_coarse,
+            byte_progress_cb=self.byte_progress.emit,
             cancel_cb=self._cancel_event.is_set,
         )
 

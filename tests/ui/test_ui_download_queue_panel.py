@@ -100,3 +100,35 @@ def test_panel_indeterminate_mode():
     panel.set_indeterminate("Preparing download session...")
     assert panel.bar.maximum() == 0
     assert "Preparing" in panel.stats_label.text()
+
+
+def test_panel_holds_the_eta_back_while_the_first_bytes_trickle_in():
+    _app()
+    panel = DownloadProgressPanel()
+    early = AggregateProgress(
+        files_total=6, files_done=0, bytes_done=8 * 1024, bytes_total=6 * 1024**2,
+        speed_bps=7 * 1024, eta_seconds=900.0,
+    )
+    panel.update_aggregate(early, drive_bar=False)
+    assert "/s" in panel.eta_label.text()
+    assert "estimating" in panel.eta_label.text()
+    assert "15m" not in panel.eta_label.text()
+
+    settled = AggregateProgress(
+        files_total=6, files_done=0, bytes_done=2 * 1024**2, bytes_total=6 * 1024**2,
+        speed_bps=1024**2, eta_seconds=4.0,
+    )
+    panel.update_aggregate(settled, drive_bar=False)
+    assert "ETA 4s" in panel.eta_label.text()
+
+
+def test_panel_phase_caption_clears_the_speed_readout():
+    _app()
+    panel = DownloadProgressPanel()
+    panel.update_aggregate(
+        AggregateProgress(files_total=1, files_done=1, bytes_done=10, bytes_total=10, speed_bps=5, eta_seconds=0.0),
+        drive_bar=False,
+    )
+    panel.set_phase("Loading frame 1 of 1...")
+    assert panel.stats_label.text() == "Loading frame 1 of 1..."
+    assert panel.eta_label.text() == ""

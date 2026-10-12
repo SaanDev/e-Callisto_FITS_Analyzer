@@ -27,7 +27,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import logging
-from typing import Any, Sequence
+import threading
+import time
+from typing import Any, Callable, Sequence
 
 _logger = logging.getLogger("ecallisto.sunpy")
 
@@ -140,12 +142,16 @@ def per_frame_bytes(mode: str) -> int:
     return _PER_FRAME_BYTES.get(str(mode or SIZE_FULL), _PER_FRAME_BYTES[SIZE_FULL])
 
 
+def estimate_transfer_seconds(total_bytes: int) -> float:
+    """Rough time to move ``total_bytes`` at the assumed sustained throughput."""
+    return total_bytes / _ESTIMATE_THROUGHPUT_BPS if total_bytes else 0.0
+
+
 def estimate_download(n_frames: int, mode: str) -> tuple[int, float]:
     """Return ``(estimated_bytes, estimated_seconds)`` for a UI hint."""
     n = max(0, int(n_frames))
     total = n * per_frame_bytes(mode)
-    seconds = total / _ESTIMATE_THROUGHPUT_BPS if total else 0.0
-    return total, seconds
+    return total, estimate_transfer_seconds(total)
 
 
 @dataclass(frozen=True)
@@ -166,6 +172,10 @@ class JsocExportResult:
 
 class JsocError(RuntimeError):
     """Raised when a JSOC request cannot be built or resolved."""
+
+
+class JsocCancelled(JsocError):
+    """The caller stopped waiting for a staged JSOC export."""
 
 
 class JsocEmptyRecordSetError(JsocError):
@@ -376,6 +386,8 @@ def export_urls(
     protocol: str = "as-is",
     client: Any | None = None,
     drms_module: Any | None = None,
+    status_cb: Callable[[str], None] | None = None,
+    cancel_cb: Callable[[], bool] | None = None,
 ) -> JsocExportResult:
     """Resolve direct download URLs for an AIA or HMI query via JSOC export.
 
@@ -385,7 +397,9 @@ def export_urls(
     ``method='url_quick'`` + ``protocol='as-is'`` skips the staging queue and
     returns the compressed segments directly — the fast path. A ``process`` dict
     (e.g. ``im_patch`` cutouts or ``rebin``) forces a staged ``method='url'``
-    export because the server must generate new files.
+    export because the server must generate new files. Staging can take
+    minutes; ``status_cb`` hears how long it has been waiting, and ``cancel_cb``
+    stops the wait with :class:`JsocCancelled`.
     """
     email = str(email or "").strip()
     if not email:
@@ -436,7 +450,12 @@ def export_urls(
     except Exception as exc:
         raise JsocError(f"JSOC export failed: {exc}") from exc
 
-    _wait_for_request(request, staged=bool(process) or effective_method == "url")
+    _wait_for_request(
+        request,
+        staged=bool(process) or effective_method == "url",
+        status_cb=status_cb,
+        cancel_cb=cancel_cb,
+    )
     urls = _extract_urls(request)
     if not urls:
         raise JsocError(
@@ -447,13 +466,56 @@ def export_urls(
     return JsocExportResult(series=series, recordset=recordset, urls=urls, record_count=len(urls))
 
 
-def _wait_for_request(request: Any, *, staged: bool) -> None:
+def _wait_for_request(
+    request: Any,
+    *,
+    staged: bool,
+    status_cb: Callable[[str], None] | None = None,
+    cancel_cb: Callable[[], bool] | None = None,
+) -> None:
     waiter = getattr(request, "wait", None)
-    if staged and callable(waiter):
+    if not (staged and callable(waiter)):
+        return
+    if status_cb is None and cancel_cb is None:
         try:
             waiter()
         except Exception as exc:
             raise JsocError(f"JSOC export did not complete: {exc}") from exc
+        return
+
+    # drms' wait() owns the polling rules (status codes, not-found retries);
+    # run it aside so this thread can report the elapsed time and honour Stop.
+    # On Stop the daemon thread is simply abandoned: it only sleeps and polls.
+    outcome: dict[str, BaseException] = {}
+
+    def _wait() -> None:
+        try:
+            waiter()
+        except BaseException as exc:  # noqa: BLE001 - re-raised below
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=_wait, name="jsoc-export-wait", daemon=True)
+    thread.start()
+    started = time.monotonic()
+    last_second = -1
+    while thread.is_alive():
+        thread.join(0.25)
+        if cancel_cb is not None and _safe_bool(cancel_cb):
+            raise JsocCancelled("Stopped while JSOC was preparing the export.")
+        elapsed = int(time.monotonic() - started)
+        if status_cb is not None and elapsed != last_second:
+            last_second = elapsed
+            minutes, seconds = divmod(elapsed, 60)
+            status_cb(f"JSOC is preparing the export on its servers… {minutes}:{seconds:02d} elapsed")
+    if "error" in outcome:
+        raise JsocError(f"JSOC export did not complete: {outcome['error']}") from outcome["error"]
+
+
+def _safe_bool(callback: Callable[[], bool]) -> bool:
+    try:
+        return bool(callback())
+    except Exception:
+        return False
 
 
 def _is_empty_recordset_error(exc: Exception) -> bool:

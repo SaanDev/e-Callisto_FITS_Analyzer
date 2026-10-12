@@ -616,3 +616,58 @@ def test_an_empty_range_says_which_channel_and_when():
     session = _Session({"getJPX": _Resp(payload={"frames": []})})
     with pytest.raises(hv.HelioviewerJP2Error, match="no STEREO-A COR2 frames between 2012-07-12 16:00"):
         hv.fetch_range(hv.source_by_key("COR2-A"), datetime(2012, 7, 12, 16), datetime(2012, 7, 12, 17), session=session)
+
+
+# --- Reduced decoding and quicklook frames ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("native", "max_px", "levels"),
+    [(4096, 2048, 1), (4096, 1024, 2), (1024, 2048, 0), (4096, 0, 0), (1000, 300, 2)],
+)
+def test_reduce_levels_bring_the_image_under_the_cap(native, max_px, levels):
+    assert hv.reduce_levels_for(native, max_px) == levels
+
+
+def test_a_reduced_header_keeps_the_same_sky():
+    header = {"cdelt1": 0.6, "cdelt2": 0.6, "crpix1": 2048.5, "crpix2": 2048.5, "r_sun": 1600.0}
+    scaled = hv.scale_header_for_reduce(header, 2, (1024, 1024))
+    assert scaled["cdelt1"] == pytest.approx(2.4)
+    assert scaled["crpix1"] == pytest.approx(512.5)
+    assert scaled["r_sun"] == pytest.approx(400.0)
+    assert (scaled["naxis1"], scaled["naxis2"]) == (1024, 1024)
+    assert hv.scale_header_for_reduce(header, 0, (8, 8)) == header
+
+
+def test_a_capped_decode_returns_a_smaller_map_on_the_same_sky():
+    fits = lasco_fits(NAXIS1=64, NAXIS2=64, CRPIX1=32.5, CRPIX2=32.5, CDELT1=10.0, CDELT2=10.0)
+    raw = make_jp2(np.zeros((64, 64)), _xml(fits, helioviewer=HV_LASCO))
+    full = hv.jp2_to_map(raw)
+    small = hv.jp2_to_map(raw, max_px=16)
+    assert small.data.shape == (16, 16)
+    assert small.scale.axis1.value == pytest.approx(4 * full.scale.axis1.value)
+    # The reference point is the same sky position on both grids.
+    assert small.reference_coordinate.Tx.value == pytest.approx(full.reference_coordinate.Tx.value)
+    assert (small.reference_pixel.x.value + 0.5) * 4 == pytest.approx(full.reference_pixel.x.value + 0.5)
+
+
+def test_a_loaded_jp2_is_marked_and_loses_its_fits_photometry_keys(tmp_path: Path):
+    path = tmp_path / "hv4_x.jp2"
+    path.write_bytes(make_jp2(np.zeros((16, 16)), _xml(lasco_fits(NAXIS1=16, NAXIS2=16))))
+    frame = hv.load_jp2_file(path)
+    assert hv.is_quicklook_frame(frame)
+    assert "exptime" not in frame.meta and "bunit" not in frame.meta
+    assert hv.is_jp2_path(path) and not hv.is_jp2_path("a.fits")
+
+    junk = tmp_path / "junk.jp2"
+    junk.write_bytes(b"<html>")
+    with pytest.raises(hv.HelioviewerJP2Error):
+        hv.load_jp2_file(junk)
+
+
+def test_a_fits_frame_is_not_a_quicklook():
+    class _Frame:
+        meta = {"instrume": "AIA"}
+
+    assert not hv.is_quicklook_frame(_Frame())
+    assert not hv.is_quicklook_frame(object())

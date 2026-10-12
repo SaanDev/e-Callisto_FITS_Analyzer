@@ -1771,3 +1771,75 @@ def test_find_latest_search_returns_none_when_no_recent_data(monkeypatch):
     )
     result = sa.find_latest_search(spec, now=now, chunk_days=20, max_lookback_days=200)
     assert result is None
+
+
+def test_fetch_reports_direct_download_bytes(tmp_path: Path, monkeypatch):
+    search_result = _fake_vso_search_result(row_count=2)
+
+    def fake_download_direct_item(item, cache_root, *, priority=False, cancel_cb=None, progress_cb=None, bytes_cb=None):
+        path = tmp_path / f"direct_{item.row_index}.fits"
+        path.write_bytes(b"x" * 400)
+        if bytes_cb is not None:
+            bytes_cb(200, 400)
+            bytes_cb(400, 400)
+        return str(path.resolve())
+
+    monkeypatch.setattr(sa, "_download_direct_item", fake_download_direct_item)
+    snapshots = []
+    out = sa.fetch(search_result, tmp_path, selected_rows=[0, 1], byte_progress_cb=snapshots.append)
+
+    assert out.failed_count == 0 and len(out.paths) == 2
+    final = snapshots[-1]
+    assert final.files_total == 2 and final.files_done == 2
+    assert final.bytes_done == 800
+    assert final.fraction_hint == pytest.approx(1.0)
+    assert len(final.per_file) == 2
+
+
+def test_fetch_via_jsoc_returns_a_cancelled_result_when_stopped_while_staging(tmp_path: Path, monkeypatch):
+    from src.backend.solar import jsoc_client
+
+    def fake_export_urls(**kwargs):
+        assert kwargs["status_cb"] is not None and kwargs["cancel_cb"] is not None
+        kwargs["status_cb"]("JSOC is preparing the export on its servers… 0:03 elapsed")
+        raise jsoc_client.JsocCancelled("stopped")
+
+    monkeypatch.setattr(jsoc_client, "export_urls", fake_export_urls)
+    statuses = []
+    out = sa.fetch_via_jsoc(
+        _fake_vso_search_result(row_count=1),
+        tmp_path,
+        [0],
+        email="sci@example.org",
+        process={"rebin": {"method": "boxcar", "scale": 0.5}},
+        cancel_cb=lambda: True,
+        status_cb=statuses.append,
+    )
+    assert out.cancelled is True and out.paths == []
+    assert statuses[0].startswith("Asking JSOC to build")
+    assert "elapsed" in statuses[-1]
+
+
+def test_load_downloaded_reports_each_file(tmp_path: Path):
+    loaded = []
+
+    def loader(path):
+        loaded.append(path)
+        return f"map:{Path(path).name}"
+
+    paths = []
+    for name in ("a.fits", "b.fits", "c.fits"):
+        (tmp_path / name).write_bytes(b"x")
+        paths.append(tmp_path / name)
+    progress = []
+    result = sa.load_downloaded(
+        paths, sa.DATA_KIND_MAP, map_loader=loader, progress_cb=lambda d, n: progress.append((d, n))
+    )
+    assert progress == [(1, 3), (2, 3), (3, 3)]
+    assert result.maps_or_timeseries == ["map:a.fits", "map:b.fits", "map:c.fits"]
+
+
+def test_the_archive_choice_survives_normalisation():
+    spec = sa.normalize_query_spec(_mk_query(archive="HELIOVIEWER_JP2"))
+    assert spec.archive == "helioviewer_jp2"
+    assert sa.normalize_query_spec(_mk_query()).archive == "sunpy"

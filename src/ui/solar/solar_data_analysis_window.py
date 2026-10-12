@@ -8,14 +8,13 @@ Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 from __future__ import annotations
 
 import csv
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import re
 import shutil
 import threading
-import time
 import traceback
 from typing import Any
 
@@ -85,6 +84,8 @@ from src.backend.solar.solar_data_analysis import (
     load_aia_maps_streaming,
     make_composite,
     make_magnetogram_composite,
+    movie_frame_labels,
+    movie_instrument_text,
     partition_frames_by_config,
     radio_euv_lag,
     write_cropped_fits,
@@ -152,6 +153,7 @@ from src.backend.solar.jsoc_client import (
     SIZE_FULL,
     JsocError,
     estimate_download,
+    estimate_transfer_seconds,
     size_process,
 )
 from src.backend.solar.sunpy_archive import (
@@ -161,6 +163,30 @@ from src.backend.solar.sunpy_archive import (
     SunPyQuerySpec,
     SunPySearchResult,
 )
+from src.backend.solar.data_products import (
+    ARCHIVE_AIA_SYNOPTIC,
+    ARCHIVE_HELIOVIEWER_JP2,
+    ARCHIVE_SUNPY,
+    DEFAULT_JP2_MAX_PX,
+    JP2_MAX_PX_LABELS,
+    JP2_MAX_PX_OPTIONS,
+    JSOC_SIZES,
+    PRODUCT_FITS_FULL,
+    PRODUCT_FITS_REDUCED,
+    PRODUCT_JP2,
+    PRODUCT_LABELS,
+    PRODUCTS,
+    REDUCED_SIZES,
+    SIZE_SYNOPTIC,
+    archive_for,
+    frame_bytes_estimate,
+    is_direct_archive,
+    normalize_jp2_max_px,
+    products_for,
+    reduced_sizes_for,
+    unavailable_reason,
+)
+from src.backend.solar.helioviewer_jp2 import NATIVE_SIZE_KEY, QUICKLOOK_NOTE, is_jp2_path, is_quicklook_frame
 from src.ui.downloads.download_queue_panel import DownloadProgressPanel
 from src.ui.common.font_utils import preferred_monospace_font_family
 from src.ui.common.gui_shared import fit_window_to_screen, pick_export_path, screen_available_geometry
@@ -919,16 +945,18 @@ class CompositeBuildWorker(QObject):
 
 class MapLoadWorker(QObject):
     """Loads local AIA FITS off the UI thread, one file at a time, so uploading
-    a large set of high-resolution frames does not freeze the window."""
+    a large set of high-resolution frames does not freeze the window. JP2
+    quicklooks are decoded at most ``jp2_max_px`` per side."""
 
     load_progress = Signal(int, int)            # done, total
     finished = Signal(object, object, object)   # frames, paths, metadata
     failed = Signal(str)
     cancelled = Signal()
 
-    def __init__(self, paths: list[str]):
+    def __init__(self, paths: list[str], *, jp2_max_px: int | None = None):
         super().__init__()
         self._paths = list(paths)
+        self._jp2_max_px = jp2_max_px
         self._cancel = threading.Event()
 
     def cancel(self):
@@ -937,10 +965,15 @@ class MapLoadWorker(QObject):
     @Slot()
     def run(self):
         try:
+            # The decode size only concerns JP2 files.
+            extra = {}
+            if any(is_jp2_path(path) for path in self._paths):
+                extra["jp2_max_px"] = self._jp2_max_px
             frame_set = load_aia_maps_streaming(
                 self._paths,
                 progress_cb=lambda done, total: self.load_progress.emit(int(done), int(total)),
                 cancel_cb=self._cancel.is_set,
+                **extra,
             )
             if self._cancel.is_set():
                 self.cancelled.emit()
@@ -1990,9 +2023,6 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self._busy = False
         self._progress_target = 0
         self._progress_value = 0
-        self._progress_activity = False
-        self._progress_soft_cap = 0
-        self._progress_last_pulse = 0.0
         self._byte_active = False
         self._byte_bar_value = 0
         self._pending_close = False
@@ -2018,6 +2048,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self.pyqt_canvas.set_click_callback(self._on_plot_canvas_click)
         self._connect_signals()
         self._restore_jsoc_settings()
+        self._restore_product_settings()
         self.jsoc_email_edit.editingFinished.connect(self._save_jsoc_settings)
         self.source_combo.currentIndexChanged.connect(lambda _i: self._save_jsoc_settings())
         if self.theme is not None and hasattr(self.theme, "themeChanged"):
@@ -2145,11 +2176,24 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self.coord_readout_label = QLabel("")
         self.coord_readout_label.setObjectName("SolarCoordReadout")
         self.coord_readout_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        # Shown while JP2 quicklook frames are loaded, so nobody mistakes their
+        # display bytes for calibrated intensities.
+        self.quicklook_badge = QLabel("JP2 quicklook · not calibrated", header_bar)
+        self.quicklook_badge.setObjectName("SolarQuicklookBadge")
+        self.quicklook_badge.setToolTip(
+            "These frames are Helioviewer JPEG2000 quicklooks: 8-bit display values\n"
+            "with the instrument's own scaling, not calibrated data. Viewing,\n"
+            "differences, movies, geometry measurements and derotation work;\n"
+            "processing levels, light curves, region statistics and active-region\n"
+            "detection are disabled. Load FITS for photometry."
+        )
+        self.quicklook_badge.setVisible(False)
         self.quick_mp4_btn = QPushButton("Export MP4")
         self.quick_mp4_btn.setEnabled(False)
         self.quick_mp4_btn.setToolTip(
             "One-click MP4 of the loaded sequence with the current display settings."
         )
+        top_row.addWidget(self.quicklook_badge)
         top_row.addWidget(self.coord_readout_label, 1)
         top_row.addWidget(self.quick_mp4_btn)
         plot_layout.addWidget(header_bar)
@@ -2617,6 +2661,9 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             accent_soft = "#16365f"
             accent_muted = "#7ea6dd"
             hover = "#1e2940"
+            warn_bg = "#3d3112"
+            warn_border = "#7a5d1a"
+            warn_text = "#f4d38a"
         else:
             panel_bg = "#eef2f8"
             viewer_bg = "#e7edf5"
@@ -2633,6 +2680,9 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             accent_soft = "#e3eeff"
             accent_muted = "#7ba3dd"
             hover = "#f0f5fc"
+            warn_bg = "#fff4dc"
+            warn_border = "#efc777"
+            warn_text = "#7a5200"
         mono_font = preferred_monospace_font_family()
         central.setStyleSheet(
             f"""
@@ -2697,6 +2747,14 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             QLabel#SolarCoordReadout {{
                 color: {muted};
                 font-family: "{mono_font}", monospace;
+            }}
+            QLabel#SolarQuicklookBadge {{
+                color: {warn_text};
+                background: {warn_bg};
+                border: 1px solid {warn_border};
+                border-radius: 6px;
+                padding: 2px 8px;
+                font-weight: 600;
             }}
             QLabel#SolarFrameLabel,
             QLabel#SolarLoadSummary,
@@ -3043,6 +3101,36 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             "Request SunPy/VSO full-resolution AIA products. Files are larger, but cropped views preserve more detail."
         )
 
+        # What to download: the archive's full FITS, a reduced FITS, or a
+        # Helioviewer JP2 quicklook (see data_products). Items an observable
+        # does not offer are greyed out with the reason as their tooltip.
+        self.product_combo = QComboBox()
+        for product in PRODUCTS:
+            self.product_combo.addItem(PRODUCT_LABELS[product], userData=product)
+        self.product_combo.setToolTip(
+            "FITS · full resolution: the archive's own calibrated files (largest, slowest).\n"
+            "FITS · reduced size: smaller SDO FITS — AIA synoptic 1024² frames (no e-mail)\n"
+            "  or JSOC server-side binning/cutouts (needs the JSOC e-mail).\n"
+            "JP2 · quicklook: Helioviewer JPEG2000 browse images — a few hundred KB each and\n"
+            "  listed in seconds. Their pixels are 8-bit display values, so they are for\n"
+            "  inspection; intensity-based tools are disabled for them."
+        )
+        self.jp2_size_combo = QComboBox()
+        for max_px in JP2_MAX_PX_OPTIONS:
+            self.jp2_size_combo.addItem(JP2_MAX_PX_LABELS[max_px], userData=max_px)
+        self.jp2_size_combo.setCurrentIndex(self.jp2_size_combo.findData(DEFAULT_JP2_MAX_PX))
+        self.jp2_size_combo.setToolTip(
+            "Largest side a JP2 frame is decoded to. JPEG2000 decodes at ½ or ¼ size\n"
+            "almost for free, which keeps long AIA/HMI sequences (4096² natively) light.\n"
+            "The download is the same either way; coordinates stay exact."
+        )
+        # The product the user picked. The combo can show another one when the
+        # observable does not offer it (SUVI has no JP2), and returns to this
+        # as soon as the observable does.
+        self._preferred_product = PRODUCT_FITS_FULL
+        self._preferred_reduced_size = SIZE_SYNOPTIC
+        self._syncing_product = False
+
         self.source_combo = QComboBox()
         self.source_combo.addItem("Auto (JSOC → VSO)", userData="auto")
         self.source_combo.addItem("JSOC (fast)", userData="jsoc")
@@ -3061,13 +3149,17 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
 
         self.frame_size_combo = QComboBox()
         self.frame_size_combo.addItem("Full disk (4096²)", userData=SIZE_FULL)
+        self.frame_size_combo.addItem("Synoptic 1024² (no e-mail)", userData=SIZE_SYNOPTIC)
         self.frame_size_combo.addItem("Binned ½ (2048²)", userData=SIZE_BIN2)
         self.frame_size_combo.addItem("Binned ¼ (1024²)", userData=SIZE_BIN4)
         self.frame_size_combo.addItem("Cutout (region)", userData=SIZE_CUTOUT)
         self.frame_size_combo.setToolTip(
-            "Smaller frames download much faster. Binned and cutout frames are\n"
-            "produced server-side by JSOC, so only the reduced data is transferred\n"
-            "(these modes require the JSOC source + e-mail)."
+            "Smaller frames download much faster.\n"
+            "Synoptic: JSOC's 1024² level-1.5 AIA archive over plain HTTP, no e-mail\n"
+            "  needed (2-min cadence; about a week behind real time, with a 3-min\n"
+            "  near-real-time set covering the latest days).\n"
+            "Binned and cutout frames are produced server-side by JSOC, so only the\n"
+            "  reduced data is transferred (these need the JSOC e-mail)."
         )
 
         # Cutout centre/box (arcsec from disk centre), shown only for Cutout mode.
@@ -3121,6 +3213,10 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         row += 1
         layout.addWidget(self._subheading("Download options"), row, 0, 1, 2)
         row += 1
+        layout.addWidget(self._field_label("Product"), row, 0, 1, 2)
+        row += 1
+        layout.addWidget(self.product_combo, row, 0, 1, 2)
+        row += 1
         layout.addWidget(self._field_label("Source"), row, 0)
         layout.addWidget(self._field_label("JSOC notify e-mail"), row, 1)
         row += 1
@@ -3129,7 +3225,12 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
 
         row += 1
         layout.addWidget(self._field_label("Frame size"), row, 0)
-        layout.addWidget(self.frame_size_combo, row, 1)
+        # One cell, two combos: the FITS sizes, or the JP2 decode size.
+        self.frame_size_stack = QStackedWidget()
+        self.frame_size_stack.addWidget(self.frame_size_combo)
+        self.frame_size_stack.addWidget(self.jp2_size_combo)
+        self.frame_size_stack.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        layout.addWidget(self.frame_size_stack, row, 1)
         row += 1
         layout.addWidget(self.cutout_widget, row, 0, 1, 2)
         row += 1
@@ -3285,6 +3386,14 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         )
         self.movie_format_combo = QComboBox()
         self.movie_format_combo.addItems(["MP4", "GIF"])
+        self.movie_labels_check = QCheckBox("Frame labels (instrument, date, time)")
+        self.movie_labels_check.setChecked(True)
+        self.movie_labels_check.setToolTip(
+            "Print each frame's instrument and UTC observation date and time on a\n"
+            "thin stripe along the bottom of the movie, so they play along with the\n"
+            "frames. Difference movies also say which difference they show.\n"
+            "Untick for a clean movie."
+        )
         self.export_movie_btn = QPushButton("Build Movie…")
 
         hint = QLabel(
@@ -3298,8 +3407,9 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         layout.addWidget(self.movie_content_combo, 0, 1)
         layout.addWidget(self._field_label("Format"), 1, 0)
         layout.addWidget(self.movie_format_combo, 1, 1)
-        layout.addWidget(self.export_movie_btn, 2, 0, 1, 2)
-        layout.addWidget(hint, 3, 0, 1, 2)
+        layout.addWidget(self.movie_labels_check, 2, 0, 1, 2)
+        layout.addWidget(self.export_movie_btn, 3, 0, 1, 2)
+        layout.addWidget(hint, 4, 0, 1, 2)
 
     def _build_calibration_group(self, parent_layout: QVBoxLayout) -> None:
         """Processing-level selector.
@@ -3872,7 +3982,9 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self.deselect_all_results_btn.clicked.connect(self.deselect_all_results)
         self.save_disk_btn.clicked.connect(self.save_selected_to_disk)
         self.wavelength_combo.currentIndexChanged.connect(self._on_query_wavelength_changed)
-        self.frame_size_combo.currentIndexChanged.connect(lambda _i: self._on_frame_size_changed())
+        self.frame_size_combo.currentIndexChanged.connect(self._on_frame_size_user_changed)
+        self.product_combo.currentIndexChanged.connect(self._on_product_changed)
+        self.jp2_size_combo.currentIndexChanged.connect(self._on_jp2_size_changed)
         for _spin in (self.cutout_w_spin, self.cutout_h_spin):
             _spin.valueChanged.connect(lambda _v: self._update_size_estimate())
         self.results_table.itemChanged.connect(lambda _item: self._update_size_estimate())
@@ -3926,7 +4038,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         # Measurement tools (controller owns the click state machine).
         self.ruler_tool_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("ruler", on))
         self.profile_tool_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("profile", on))
-        self.stats_tool_btn.clicked.connect(lambda: self._measure.report_region_stats())
+        self.stats_tool_btn.clicked.connect(self._report_region_stats)
         self.height_time_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("height_time", on))
         self.circle_tool_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("circle_fit", on))
         self.clear_measure_btn.clicked.connect(self.clear_all_measurements)
@@ -4189,8 +4301,51 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
                 )
             else:
                 widget.setToolTip(self._sdo_only_tooltips.get(widget, ""))
+        self._apply_quicklook_gating()
         self.export_regions_btn.setEnabled(bool(self._regions))
         self._sync_menu_action_state(loaded=bool(loaded))
+
+    # -- JP2 quicklook frames ------------------------------------------------
+    QUICKLOOK_DISABLED_TIP = (
+        "Not available for JP2 quicklook frames: their pixels are 8-bit display "
+        "values, not calibrated data. Load FITS for this tool."
+    )
+
+    def _loaded_is_quicklook(self) -> bool:
+        """Whether the loaded frames were decoded from Helioviewer JP2s."""
+        frames = self._original_frames or self._map_frames
+        return bool(frames) and is_quicklook_frame(frames[0])
+
+    def _quicklook_gated_widgets(self) -> tuple[QWidget, ...]:
+        """Tools that read pixel values as intensities."""
+        return (
+            self.lightcurve_btn,
+            self.stats_tool_btn,
+            self.detect_regions_btn,
+            self.level_combo,
+            self.apply_level_btn,
+        )
+
+    def _apply_quicklook_gating(self) -> None:
+        if not hasattr(self, "_quicklook_tooltips"):
+            self._quicklook_tooltips = {w: w.toolTip() for w in self._quicklook_gated_widgets()}
+        quicklook = self._loaded_is_quicklook()
+        for widget in self._quicklook_gated_widgets():
+            if quicklook:
+                widget.setEnabled(False)
+                widget.setToolTip(self.QUICKLOOK_DISABLED_TIP)
+            else:
+                widget.setToolTip(self._quicklook_tooltips.get(widget, ""))
+        if quicklook and self.stats_tool_btn.isCheckable() and self.stats_tool_btn.isChecked():
+            self.stats_tool_btn.setChecked(False)
+        self.quicklook_badge.setVisible(quicklook)
+
+    def _refuse_for_quicklook(self, title: str) -> bool:
+        """Explain and return True when an intensity tool is asked of JP2 frames."""
+        if not self._loaded_is_quicklook():
+            return False
+        QMessageBox.information(self, title, self.QUICKLOOK_DISABLED_TIP)
+        return True
 
     def _set_busy(self, busy: bool, text: str = ""):
         self._busy = bool(busy)
@@ -4216,18 +4371,14 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             self.progress.setRange(0, 100)
             self._progress_value = 0
             self._progress_target = 0
-            self._progress_activity = False
-            self._progress_soft_cap = 0
-            self._progress_last_pulse = time.monotonic()
             self._byte_active = False
             self._byte_bar_value = 0
             self.progress.setValue(0)
             if text:
                 self.statusBar().showMessage(text)
+                self.progress_panel.set_phase(text)
         else:
             self._progress_timer.stop()
-            self._progress_activity = False
-            self._progress_soft_cap = 0
             self._byte_active = False
             self.progress_panel.reset()
         self._sync_menu_action_state(loaded=bool(self._map_frames))
@@ -4279,54 +4430,60 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         if loaded and self._loaded_instrument_class() in (CORONAGRAPH, HELIOSPHERIC):
             for action in (self.composite_action, self.detect_regions_action, self.labels_action):
                 action.setEnabled(False)
+        if loaded and self._loaded_is_quicklook():
+            self.detect_regions_action.setEnabled(False)
         self.plot_action.setEnabled(not busy)
         self.export_regions_action.setEnabled((not busy) and has_regions)
 
     def _tick_progress(self) -> None:
+        """Ease the bar toward the last reported value, never past it.
+
+        The bar only ever shows what a worker reported. Between reports it
+        holds still; when nothing can be measured (a search, JSOC building
+        files) the worker reports ``None`` and the bar turns into a busy
+        indicator instead of creeping toward a made-up number.
+        """
         if self.progress.maximum() <= 0:
+            self._progress_timer.stop()
             return
         target = int(max(0, min(100, self._progress_target)))
         current = int(max(0, min(100, self._progress_value)))
-        if current >= target:
-            if self._progress_activity and current < int(self._progress_soft_cap):
-                now = time.monotonic()
-                if now - float(self._progress_last_pulse) >= 0.7:
-                    self._progress_last_pulse = now
-                    current = min(int(self._progress_soft_cap), current + 1)
-                    self._progress_value = current
-                    self.progress.setValue(current)
-                return
-            if self._progress_activity and current >= int(self._progress_soft_cap):
-                self.progress.setRange(0, 0)
-                self._progress_timer.stop()
-                return
+        if current == target:
             self._progress_timer.stop()
             return
-        delta = target - current
-        step = max(1, min(10, int(round(delta * 0.35))))
-        current = min(target, current + step)
+        if current > target:
+            # A fallback (JSOC -> VSO) starts its transfer over.
+            current = target
+        else:
+            step = max(1, min(10, int(round((target - current) * 0.35))))
+            current = min(target, current + step)
         self._progress_value = current
         self.progress.setValue(current)
 
-    def _update_progress_activity(self, value: object, text: object) -> None:
-        message = str(text or "").lower()
-        active = any(word in message for word in ("downloading", "downloaded", "fetched", "fetching"))
-        loading = any(word in message for word in ("loading", "finalizing", "finalising"))
-        if value is None:
-            self._progress_activity = False
-            self._progress_soft_cap = 0
-            return
-        if active:
-            self._progress_activity = True
-            self._progress_soft_cap = 86
-            return
-        if loading:
-            self._progress_activity = True
-            self._progress_soft_cap = 96
-            return
-        if self._progress_target >= 95:
-            self._progress_activity = False
-            self._progress_soft_cap = 0
+    def _show_progress_value(self, value: int, phase: str = "") -> None:
+        """Put the bar straight at ``value`` with ``phase`` as its caption."""
+        self._progress_timer.stop()
+        if self.progress.maximum() <= 0:
+            self.progress.setRange(0, 100)
+        value = int(max(0, min(100, value)))
+        self._progress_value = self._progress_target = value
+        self.progress.setValue(value)
+        if phase:
+            self.progress_panel.set_phase(phase)
+
+    def _begin_drawing_phase(self, frame_count: int) -> None:
+        """Last step of a load: the frames are in memory, now they are drawn.
+
+        Drawing runs on this thread, so the bar is painted once before it
+        starts; otherwise it would sit at the worker's last value while the
+        window looks frozen.
+        """
+        self._byte_active = False
+        self._show_progress_value(98, f"Drawing {int(frame_count)} frame(s)…")
+        self.progress_panel.repaint()
+
+    def _finish_progress(self) -> None:
+        self._show_progress_value(100, "Done.")
 
     def _current_observable(self) -> tuple[str, Any]:
         """Return (instrument, value) for the selected observable.
@@ -4339,6 +4496,10 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         return "AIA", 193.0
 
     def _build_query_spec(self) -> SunPyQuerySpec:
+        """The search for the selected observable, window and product."""
+        return replace(self._build_observable_spec(), archive=self._current_archive())
+
+    def _build_observable_spec(self) -> SunPyQuerySpec:
         start_dt = self.start_dt_edit.dateTime().toPython().replace(tzinfo=None)
         end_dt = self.end_dt_edit.dateTime().toPython().replace(tzinfo=None)
         sample_seconds = int(self.sample_seconds_spin.value() or 0)
@@ -4417,7 +4578,11 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             instrument="AIA",
             wavelength_angstrom=float(value or 193.0),
             sample_seconds=sample_seconds if sample_seconds > 0 else None,
-            resolution=AIA_FULL_RESOLUTION if self.high_resolution_check.isChecked() else None,
+            resolution=(
+                AIA_FULL_RESOLUTION
+                if self.high_resolution_check.isChecked() and self._current_product() == PRODUCT_FITS_FULL
+                else None
+            ),
             max_records=int(self.max_records_spin.value()),
         )
 
@@ -4555,6 +4720,31 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         if not self._confirm_high_resolution_download(selected_rows):
             return
 
+        # JP2 quicklooks and AIA synoptic frames are plain URLs listed by the
+        # search itself: no JSOC e-mail, export or frame-size processing.
+        archive = str(getattr(self._search_result.spec, "archive", ARCHIVE_SUNPY) or ARCHIVE_SUNPY)
+        if is_direct_archive(archive):
+            effective_cache = Path(target_dir) if target_dir else self.cache_dir
+            self._save_target_dir = str(effective_cache) if target_dir else None
+            count = len(selected_rows)
+            if target_dir:
+                text = f"Downloading {count} file(s) to {effective_cache}..."
+            elif archive == ARCHIVE_HELIOVIEWER_JP2:
+                text = f"Downloading {count} JP2 quicklook frame(s) from Helioviewer..."
+            else:
+                text = f"Downloading {count} AIA synoptic frame(s) from JSOC..."
+            self._set_busy(True, text)
+            self._start_worker(
+                SunPyWorker(
+                    "fetch_load",
+                    search_result=self._search_result,
+                    selected_rows=selected_rows,
+                    cache_dir=effective_cache,
+                    jp2_max_px=self._jp2_max_px(),
+                )
+            )
+            return
+
         # SOHO/LASCO is VSO-only: no JSOC fast path, no server-side binning or
         # cutout, so bypass the JSOC e-mail / frame-size handling entirely.
         is_lasco = self._current_observable()[0] == "LASCO"
@@ -4563,7 +4753,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         else:
             email, prefer_jsoc = self._jsoc_params()
             size_mode = self._frame_size_mode()
-            needs_jsoc = size_mode != SIZE_FULL
+            needs_jsoc = size_mode in JSOC_SIZES
 
             if (str(self.source_combo.currentData() or "") == "jsoc" or needs_jsoc) and not email:
                 reason = (
@@ -4658,6 +4848,171 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         except Exception:
             pass
 
+    # -- Download product -------------------------------------------------
+    PRODUCT_SETTINGS_KEY = "solar/download_product"
+    REDUCED_SIZE_SETTINGS_KEY = "solar/reduced_size"
+    JP2_SIZE_SETTINGS_KEY = "solar/jp2_max_px"
+
+    def _current_product(self) -> str:
+        return str(self.product_combo.currentData() or PRODUCT_FITS_FULL)
+
+    def _current_archive(self) -> str:
+        """The archive the next search runs against (see data_products)."""
+        return archive_for(self._current_product(), self._frame_size_mode())
+
+    def _jp2_max_px(self) -> int:
+        return normalize_jp2_max_px(self.jp2_size_combo.currentData())
+
+    def _restore_product_settings(self) -> None:
+        try:
+            settings = self._app_settings()
+            product = str(settings.value(self.PRODUCT_SETTINGS_KEY, PRODUCT_FITS_FULL) or "")
+            reduced = str(settings.value(self.REDUCED_SIZE_SETTINGS_KEY, SIZE_SYNOPTIC) or "")
+            jp2_px = settings.value(self.JP2_SIZE_SETTINGS_KEY, DEFAULT_JP2_MAX_PX)
+        except Exception:
+            return
+        self._set_product(product, frame_size=reduced, jp2_max_px=jp2_px)
+
+    def _save_product_settings(self) -> None:
+        try:
+            settings = self._app_settings()
+            settings.setValue(self.PRODUCT_SETTINGS_KEY, self._preferred_product)
+            settings.setValue(self.REDUCED_SIZE_SETTINGS_KEY, self._preferred_reduced_size)
+            settings.setValue(self.JP2_SIZE_SETTINGS_KEY, int(self._jp2_max_px()))
+        except Exception:
+            pass
+
+    def _set_product(self, product: str, *, frame_size: Any = None, jp2_max_px: Any = None) -> None:
+        """Choose a product (and its sizes) without saving it as the user's default.
+
+        Used when settings or a project restore the choice; the combos then
+        follow the observable as if the user had picked it.
+        """
+        if product in PRODUCTS:
+            self._preferred_product = str(product)
+        if frame_size in REDUCED_SIZES:
+            self._preferred_reduced_size = str(frame_size)
+        if jp2_max_px is not None:
+            index = self.jp2_size_combo.findData(normalize_jp2_max_px(jp2_max_px))
+            if index >= 0:
+                was = self.jp2_size_combo.blockSignals(True)
+                self.jp2_size_combo.setCurrentIndex(index)
+                self.jp2_size_combo.blockSignals(was)
+        self._apply_observable_download_gating()
+        self._on_frame_size_changed()
+
+    def _on_product_changed(self, _index: int = -1) -> None:
+        if self._syncing_product:
+            return
+        self._preferred_product = self._current_product()
+        self._save_product_settings()
+        self._after_download_choice_changed()
+
+    def _on_frame_size_user_changed(self, _index: int = -1) -> None:
+        # Picking a size picks the FITS tier it belongs to: full disk is
+        # "FITS · full resolution", anything smaller "FITS · reduced size".
+        if not self._syncing_product:
+            mode = self._frame_size_mode()
+            if mode == SIZE_FULL:
+                self._preferred_product = PRODUCT_FITS_FULL
+            else:
+                self._preferred_product = PRODUCT_FITS_REDUCED
+                self._preferred_reduced_size = mode
+            self._save_product_settings()
+            self._after_download_choice_changed()
+        self._on_frame_size_changed()
+
+    def _on_jp2_size_changed(self, _index: int = -1) -> None:
+        if not self._syncing_product:
+            self._save_product_settings()
+
+    def _after_download_choice_changed(self) -> None:
+        self._apply_observable_download_gating()
+        self._on_frame_size_changed()
+        self._drop_results_from_other_archive()
+
+    def _drop_results_from_other_archive(self) -> None:
+        """Forget listed rows that belong to another product's archive.
+
+        Load Selected downloads what the rows describe, so rows listed as VSO
+        FITS must not quietly stay on screen once JP2 is chosen; the user is
+        asked to fetch again instead.
+        """
+        result = self._search_result
+        if result is None:
+            return
+        listed = str(getattr(result.spec, "archive", ARCHIVE_SUNPY) or ARCHIVE_SUNPY)
+        if listed == self._current_archive():
+            return
+        self._search_result = None
+        self.results_table.setRowCount(0)
+        self.download_load_btn.setEnabled(False)
+        self._set_results_selection_controls_enabled(False)
+        self.archive_results_status_label.setText(
+            f"Product changed to {self.product_combo.currentText()}. "
+            "Press Fetch Records to list its files."
+        )
+        self._sync_menu_action_state(loaded=bool(self._map_frames))
+        self._update_size_estimate()
+
+    @staticmethod
+    def _set_combo_item_enabled(combo: QComboBox, index: int, enabled: bool, reason: str = "") -> None:
+        model = combo.model()
+        item = model.item(index) if hasattr(model, "item") else None
+        if item is not None:
+            item.setEnabled(bool(enabled))
+        combo.setItemData(index, reason or None, Qt.ToolTipRole)
+
+    def _sync_product_controls(self) -> None:
+        """Make the product and size combos agree with the selected observable.
+
+        Products and sizes the observable does not offer are greyed out with the
+        reason as tooltip. The shown product is the user's preferred one when
+        offered, else full FITS; the frame-size combo shows the product's size
+        and swaps for the JP2 decode-size combo when JP2 is chosen.
+        """
+        instrument, value = self._current_observable()
+        offered = products_for(instrument, value)
+        sizes = reduced_sizes_for(instrument, value)
+        self._syncing_product = True
+        try:
+            for index in range(self.product_combo.count()):
+                product = str(self.product_combo.itemData(index))
+                self._set_combo_item_enabled(
+                    self.product_combo, index, product in offered, unavailable_reason(product, instrument, value)
+                )
+            product = self._preferred_product if self._preferred_product in offered else PRODUCT_FITS_FULL
+            index = self.product_combo.findData(product)
+            if index >= 0 and self.product_combo.currentIndex() != index:
+                self.product_combo.setCurrentIndex(index)
+
+            for index in range(self.frame_size_combo.count()):
+                mode = str(self.frame_size_combo.itemData(index))
+                offered_size = mode == SIZE_FULL or mode in sizes
+                self._set_combo_item_enabled(
+                    self.frame_size_combo,
+                    index,
+                    offered_size,
+                    "" if offered_size else "Not offered for this observable.",
+                )
+            if product == PRODUCT_FITS_REDUCED:
+                if self._preferred_reduced_size in sizes:
+                    mode = self._preferred_reduced_size
+                else:
+                    # e.g. synoptic preferred, but AIA 1700 has no synoptic set.
+                    mode = self._frame_size_mode()
+                    mode = mode if mode in sizes else sizes[0]
+            else:
+                mode = SIZE_FULL
+            index = self.frame_size_combo.findData(mode)
+            if index >= 0 and self.frame_size_combo.currentIndex() != index:
+                self.frame_size_combo.setCurrentIndex(index)
+            self.frame_size_stack.setCurrentWidget(
+                self.jp2_size_combo if product == PRODUCT_JP2 else self.frame_size_combo
+            )
+        finally:
+            self._syncing_product = False
+
     # -- Frame size (Phase 3) ---------------------------------------------
     def _frame_size_mode(self) -> str:
         return str(self.frame_size_combo.currentData() or SIZE_FULL)
@@ -4677,13 +5032,26 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
 
     def _update_size_estimate(self) -> None:
         mode = self._frame_size_mode()
+        product = self._current_product()
         n_frames = self._estimated_frame_count()
-        total_bytes, seconds = estimate_download(n_frames, mode)
         if n_frames <= 0:
             self.size_estimate_label.setText("Select frames to see a size estimate.")
             return
-        needs_jsoc = mode != SIZE_FULL
-        suffix = "  (JSOC only)" if needs_jsoc else ""
+        instrument, value = self._current_observable()
+        per_frame = frame_bytes_estimate(product, mode, instrument, value)
+        if per_frame is None:
+            total_bytes, seconds = estimate_download(n_frames, mode)
+        else:
+            total_bytes = n_frames * per_frame
+            seconds = estimate_transfer_seconds(total_bytes)
+        if product == PRODUCT_JP2:
+            suffix = "  (JP2 quicklook)"
+        elif mode == SIZE_SYNOPTIC:
+            suffix = "  (no e-mail needed)"
+        elif mode in JSOC_SIZES:
+            suffix = "  (JSOC only)"
+        else:
+            suffix = ""
         self.size_estimate_label.setText(
             f"≈ {n_frames} frame(s) · ~{format_bytes(total_bytes)} · ~{format_eta(seconds)}{suffix}"
         )
@@ -4691,6 +5059,8 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
     def _frame_size_process(self, *, t_ref: str | None = None) -> dict | None:
         """Build the JSOC process dict for the chosen frame size (or None)."""
         mode = self._frame_size_mode()
+        if mode not in JSOC_SIZES:
+            return None
         if mode == SIZE_CUTOUT:
             cutout = (
                 float(self.cutout_x_spin.value()),
@@ -4868,6 +5238,8 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             self._byte_active = False
 
         if value is None:
+            # Nothing measurable is moving (a search, JSOC building files):
+            # a busy bar, with the phase saying what is being waited for.
             self.progress.setRange(0, 0)
             self._progress_timer.stop()
         else:
@@ -4877,11 +5249,10 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             self._progress_target = max(0, min(100, int(value)))
             if not self._progress_timer.isActive():
                 self._progress_timer.start()
-        self._update_progress_activity(value, text)
-        if self._progress_activity and not self._progress_timer.isActive() and self.progress.maximum() > 0:
-            self._progress_timer.start()
         if text:
             self.statusBar().showMessage(str(text))
+            if not self._byte_active:
+                self.progress_panel.set_phase(str(text))
 
     @Slot(object)
     def _on_byte_progress(self, agg: object):
@@ -4896,10 +5267,18 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self._byte_active = True
         self._progress_timer.stop()
         try:
-            # File-count based fraction (plus in-flight partials): honest and
-            # smooth even when the source doesn't report total bytes upfront.
+            # The producer's own estimate when it has one (the VSO path, whose
+            # total is worked out as files finish); otherwise finished files
+            # plus the live fraction of each in flight, which stays smooth even
+            # when the source doesn't report sizes upfront.
+            hint = getattr(agg, "fraction_hint", None)
             getter = getattr(agg, "progress_fraction", None)
-            fraction = float(getter()) if callable(getter) else float(getattr(agg, "fraction", 0.0) or 0.0)
+            if hint is not None:
+                fraction = float(hint)
+            elif callable(getter):
+                fraction = float(getter())
+            else:
+                fraction = float(getattr(agg, "fraction", 0.0) or 0.0)
         except Exception:
             fraction = 0.0
         bar_value = 5 + int(round(max(0.0, min(1.0, fraction)) * 80))
@@ -5005,14 +5384,28 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         target = self._spec_target_label(result.spec)
         if self._pending_session_fetch is not None:
             self._select_rows_for_project_restore(result)
+        archive = str(getattr(result.spec, "archive", ARCHIVE_SUNPY) or ARCHIVE_SUNPY)
         if not result.rows:
             self.archive_results_status_label.setText(f"No {target} archive records found for this query.")
-            hint = (
-                "\nTip: the calibrated archives lag real time — SOHO/LASCO is often a year "
-                "or more behind — so recent windows can be empty even while the instrument "
-                "is observing. Use Data → Find Latest Available to jump to the newest records"
-            )
-            if str(result.spec.instrument or "").upper() == "LASCO":
+            if archive == ARCHIVE_HELIOVIEWER_JP2:
+                hint = (
+                    "\nTip: Helioviewer holds no JP2 quicklooks for this window. Use "
+                    "Data → Find Latest Available to jump to its newest frames"
+                )
+            elif archive == ARCHIVE_AIA_SYNOPTIC:
+                hint = (
+                    "\nTip: the synoptic archive covers SDO/AIA from 2010 to about 20 minutes "
+                    "ago; a gap in the window means AIA was not observing. Use "
+                    "Data → Find Latest Available to jump to the newest frames"
+                )
+            else:
+                hint = (
+                    "\nTip: the calibrated archives lag real time — SOHO/LASCO is often a year "
+                    "or more behind — so recent windows can be empty even while the instrument "
+                    "is observing. Use Data → Find Latest Available to jump to the newest records, "
+                    "or switch the product to JP2 quicklook, which is close to real time"
+                )
+            if archive == ARCHIVE_SUNPY and str(result.spec.instrument or "").upper() == "LASCO":
                 hint += ", or the Live Preview button for near-real-time Helioviewer quicklooks"
             self.analysis_text.setPlainText(
                 f"No {target} records found for the selected time range.{hint}."
@@ -5023,7 +5416,12 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             # Both the Find-Latest path and the empty-window fallback return data
             # for a different window than requested — reflect the real one.
             self._sync_time_fields_from_spec(result.spec)
-        quality_text = " high-resolution" if result.spec.resolution is not None else ""
+        if archive == ARCHIVE_HELIOVIEWER_JP2:
+            quality_text = " JP2 quicklook"
+        elif archive == ARCHIVE_AIA_SYNOPTIC:
+            quality_text = " synoptic 1024²"
+        else:
+            quality_text = " high-resolution" if result.spec.resolution is not None else ""
         self.archive_results_status_label.setText(
             f"{len(result.rows)}{quality_text} record(s) found. Checked rows will be downloaded with Load Selected."
         )
@@ -5053,7 +5451,9 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         frames = extract_map_frames(load_result.maps_or_timeseries)
         metadata = dict(load_result.metadata or {})
         metadata["resolution_requested"] = getattr(self._search_result.spec, "resolution", None) is not None
+        self._begin_drawing_phase(len(frames))
         self._apply_loaded_frames(frames, paths=list(fetch_result.paths), metadata=metadata)
+        self._finish_progress()
 
     @Slot(object)
     def _on_metadata_finished(self, metadata_obj: object):
@@ -5117,12 +5517,14 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             self,
             "Load Local Solar FITS",
             "",
-            "FITS files (*.fit *.fits *.fit.gz *.fits.gz *.fts)",
+            "Solar images (*.fit *.fits *.fit.gz *.fits.gz *.fts *.jp2);;"
+            "FITS files (*.fit *.fits *.fit.gz *.fits.gz *.fts);;"
+            "Helioviewer JP2 quicklooks (*.jp2)",
         )
         if paths:
             self.load_local_paths(paths)
 
-    def load_local_paths(self, paths: list[str]) -> None:
+    def load_local_paths(self, paths: list[str], *, jp2_max_px: int | None = None) -> None:
         paths = [str(p) for p in (paths or []) if str(p).strip()]
         if not paths:
             return
@@ -5130,26 +5532,26 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             QMessageBox.information(self, "Load Local Solar FITS", "Another operation is still running.")
             return
         self._save_target_dir = None
-        self._set_busy(True, f"Loading {len(paths)} FITS file(s)…")
-        self.progress_panel.set_status_text("Reading files…")
-        self._start_worker(MapLoadWorker(paths))
+        self._set_busy(True, f"Loading {len(paths)} file(s)…")
+        self.progress_panel.set_phase("Reading files…")
+        max_px = self._jp2_max_px() if jp2_max_px is None else normalize_jp2_max_px(jp2_max_px)
+        self._start_worker(MapLoadWorker(paths, jp2_max_px=max_px))
 
     @Slot(int, int)
     def _on_load_maps_progress(self, done: int, total: int):
         total = max(1, int(total))
-        pct = int(max(0, min(100, int(done) * 100 / total)))
-        if self.progress.maximum() <= 0:
-            self.progress.setRange(0, 100)
-        self.progress.setValue(pct)
-        self.progress_panel.set_status_text(f"Loading frame {int(done)} of {total}  ·  {pct}%")
+        # Reading the files fills the bar to 96%; drawing them takes the rest.
+        pct = int(max(0, min(96, int(done) * 96 / total)))
+        self._show_progress_value(pct, f"Loading frame {int(done)} of {total}…")
         self.statusBar().showMessage(f"Loading FITS: frame {int(done)}/{total}", 2000)
 
     @Slot(object, object, object)
     def _on_local_maps_loaded(self, frames: object, paths: object, metadata: object):
         try:
-            self._apply_loaded_frames(
-                list(frames or []), paths=list(paths or []), metadata=dict(metadata or {})
-            )
+            frames = list(frames or [])
+            self._begin_drawing_phase(len(frames))
+            self._apply_loaded_frames(frames, paths=list(paths or []), metadata=dict(metadata or {}))
+            self._finish_progress()
         except Exception as exc:
             self._on_worker_failed(str(exc))
 
@@ -5250,6 +5652,11 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
                 f"Loaded {len(self._map_frames)} {self._loaded_instrument_label()} frame(s).", 5000
             )
         self._save_target_dir = None
+        if self._loaded_is_quicklook():
+            dropped_note += (
+                f"\n{QUICKLOOK_NOTE}. Processing levels, light curves, region statistics "
+                "and active-region detection are disabled; load FITS for photometry."
+            )
         self.analysis_text.setPlainText(status + dropped_note)
         details_bar = self.analysis_text.verticalScrollBar()
         details_bar.setValue(details_bar.maximum())
@@ -5289,6 +5696,8 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             )
         if self._exposure_varies:
             parts.append("differences in DN/s")
+        if self._loaded_is_quicklook():
+            parts.append("JP2 quicklook (not calibrated)")
         self.load_summary_label.setText(" · ".join(parts))
 
     def _loaded_instrument_label(self, frames: list[Any] | None = None) -> str:
@@ -5352,6 +5761,15 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             return "Resolution: unknown."
         height = int(shape[0])
         width = int(shape[1])
+        if self._loaded_is_quicklook():
+            meta = getattr(frames[0], "meta", None) or {}
+            try:
+                native = int(meta.get(NATIVE_SIZE_KEY) or 0)
+            except (TypeError, ValueError):
+                native = 0
+            if native > max(width, height):
+                return f"Resolution: {width} x {height} px (JP2 quicklook, decoded down from {native} px)."
+            return f"Resolution: {width} x {height} px (JP2 quicklook at its native size)."
         requested = bool(self._map_metadata.get("resolution_requested"))
         quality = "full-resolution requested" if requested else "native archive/file resolution"
         if min(width, height) >= 3000:
@@ -5378,7 +5796,14 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             return None
         return (start, end)
 
+    def _report_region_stats(self) -> None:
+        if self._refuse_for_quicklook("Region Stats"):
+            return
+        self._measure.report_region_stats()
+
     def show_region_lightcurve(self) -> None:
+        if self._refuse_for_quicklook("Region Light Curve"):
+            return
         if not self._map_frames:
             QMessageBox.information(
                 self,
@@ -5697,31 +6122,43 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         return text or self._default_aia_colormap_name()
 
     def _apply_observable_download_gating(self) -> None:
-        """Enable the SDO-only download controls only for SDO observables.
+        """Enable the download controls the selected observable and product use.
 
-        SOHO/LASCO is VSO-only and full-disk only, with no JSOC fast path, no
-        server-side binning/cutout and no reduced-resolution product, so the
-        Download Source, JSOC e-mail, Frame Size, cutout and high-resolution
-        controls are greyed out (and Frame Size forced to Full disk) when a
-        LASCO observable is selected. Re-evaluated whenever the observable
-        changes or the busy state toggles.
+        The product combo offers what the observable has (see data_products).
+        The JSOC source/e-mail, frame size, cutout and high-resolution controls
+        are SDO-only: SOHO, STEREO and GOES are served full-disk by the VSO or
+        NOAA with no JSOC fast path or server-side binning, so for them these
+        are greyed out (and Frame Size forced to Full disk). The JSOC source and
+        e-mail are also greyed out for the synoptic and JP2 archives, which are
+        plain HTTP. Re-evaluated whenever the observable, the product or the
+        busy state changes.
         """
         if not hasattr(self, "source_combo"):
             return
+        self._sync_product_controls()
         instrument = self._current_observable()[0]
         is_sdo = instrument in ("AIA", "HMI")
         is_aia = instrument == "AIA"
         has_quicklook = instrument in HELIOVIEWER_OBSERVABLES
         busy = bool(getattr(self, "_busy", False))
-        for widget in (self.source_combo, self.jsoc_email_edit, self.frame_size_combo, self.cutout_widget):
-            widget.setEnabled(is_sdo and not busy)
+        product = self._current_product()
+        # The JSOC source and e-mail only matter for the Fido/JSOC archive; the
+        # synoptic and JP2 archives are plain HTTP.
+        uses_jsoc = is_sdo and archive_for(product, self._frame_size_mode()) == ARCHIVE_SUNPY
+        for widget in (self.source_combo, self.jsoc_email_edit):
+            widget.setEnabled(uses_jsoc and not busy)
+        self.frame_size_combo.setEnabled(is_sdo and not busy)
+        self.cutout_widget.setEnabled(is_sdo and not busy)
+        self.product_combo.setEnabled(not busy)
+        self.jp2_size_combo.setEnabled(not busy)
         # Helioviewer near-real-time preview only exists for the SOHO instruments.
         if hasattr(self, "live_preview_btn"):
             self.live_preview_btn.setEnabled(has_quicklook)
         if hasattr(self, "live_preview_action"):
             self.live_preview_action.setEnabled(has_quicklook)
-        # High-resolution VSO is an AIA-only product (HMI/LASCO have none).
-        self.high_resolution_check.setEnabled(is_aia and not busy)
+        # High-resolution VSO is an AIA-only product (HMI/LASCO have none), and
+        # only means something for the full-resolution FITS.
+        self.high_resolution_check.setEnabled(is_aia and product == PRODUCT_FITS_FULL and not busy)
         if not is_aia:
             self.high_resolution_check.setChecked(False)
         if not is_sdo:
@@ -6232,6 +6669,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
                 return
 
         self._composite_pending_labels = [str(s.label) for s in specs]
+        self._composite_pending_mode = mode
         self.overlay_progress.setValue(0)
         self.overlay_progress.setVisible(True)
         self._set_busy(True, "Building the overlay composite…")
@@ -6264,6 +6702,8 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             return
         self._composite_frames = frames
         self._composite_labels = list(getattr(self, "_composite_pending_labels", []) or [])
+        # The differencing is baked into the composite's pixels at build time.
+        self._composite_mode = str(getattr(self, "_composite_pending_mode", "raw") or "raw")
         self._refresh_overlay_note()
         self._render_current_frame()
         if notes:
@@ -6765,6 +7205,9 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             return
         frames = self._leveled_frames or self._map_frames
         options: tuple[LevelOption, ...] = levels_for_frame(frames[0]) if frames else ()
+        if self._loaded_is_quicklook():
+            # Calibration levels describe FITS data; JP2 quicklooks have none.
+            options = ()
 
         self.level_combo.blockSignals(True)
         self.level_combo.clear()
@@ -6800,6 +7243,8 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
 
     def apply_calibration_level(self) -> None:
         """Re-derive the sequence at the level chosen in the combo."""
+        if self._refuse_for_quicklook("Processing Level"):
+            return
         if self.is_operation_running():
             QMessageBox.information(
                 self, "Processing Level", "Another operation is still running."
@@ -7207,6 +7652,8 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         idx = self.frame_size_combo.findData(SIZE_FULL)
         if idx >= 0:
             self.frame_size_combo.setCurrentIndex(idx)
+        self._set_product(PRODUCT_FITS_FULL, frame_size=SIZE_SYNOPTIC, jp2_max_px=DEFAULT_JP2_MAX_PX)
+        self._save_product_settings()
         self.cutout_x_spin.setValue(0.0)
         self.cutout_y_spin.setValue(0.0)
         self.cutout_w_spin.setValue(500.0)
@@ -7220,6 +7667,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self.grid_check.setChecked(True)
         self.colorbar_check.setChecked(True)
         self.region_overlay_check.setChecked(True)
+        self.movie_labels_check.setChecked(True)
         self.crop_x0_spin.setValue(-1100.0)
         self.crop_x1_spin.setValue(1100.0)
         self.crop_y0_spin.setValue(-1100.0)
@@ -7281,6 +7729,8 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         return "some items in use were skipped" if skipped else f"{cache_path}"
 
     def detect_active_regions(self):
+        if self._refuse_for_quicklook("Active Regions"):
+            return
         if self._current_map_data is None:
             QMessageBox.information(self, "Active Regions", "Load or render a solar disk frame first.")
             return
@@ -7765,6 +8215,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             "clip_high": float(self.clip_high_slider.value()),
             "difference_mode": self.movie_content_combo.currentText(),
             "movie_format": self.movie_format_combo.currentText(),
+            "movie_labels": bool(self.movie_labels_check.isChecked()),
             "nrgf": bool(self.nrgf_check.isChecked()),
             "fps": float(self.fps_spin.value()),
             "solar_limb": bool(self.solar_limb_check.isChecked()),
@@ -7894,6 +8345,11 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             "observable": _normalize_observable_data(value),
             "level": self._base_level,
             "archive_source": str(self.source_combo.currentData() or "auto"),
+            # Re-fetching must ask for the same product: JP2 frames re-downloaded
+            # as full FITS would be different data under the same measurements.
+            "product": self._current_product(),
+            "frame_size": self._frame_size_mode(),
+            "jp2_max_px": int(self._jp2_max_px()),
         }
 
     def project_part_payload(self, storage: str) -> tuple[dict[str, Any], dict[str, str]]:
@@ -7965,7 +8421,12 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self._pending_session_restore = meta
         self.statusBar().showMessage(f"Opening project: loading {len(paths)} solar frame(s)…", 6000)
         # Frames load asynchronously; _apply_loaded_frames applies the restore.
-        self.load_local_paths(paths)
+        query = dict(dict(meta.get("source") or {}).get("query") or {})
+        if query.get("jp2_max_px") is not None and any(is_jp2_path(path) for path in paths):
+            # JP2 frames come back at the size their measurements were made on.
+            self.load_local_paths(paths, jp2_max_px=query.get("jp2_max_px"))
+        else:
+            self.load_local_paths(paths)
 
     @staticmethod
     def _project_can_refetch(meta: dict[str, Any]) -> bool:
@@ -7987,6 +8448,12 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             index = self.source_combo.findData(str(archive_source))
             if index >= 0:
                 self.source_combo.setCurrentIndex(index)
+        # Projects written before products existed downloaded full FITS.
+        self._set_product(
+            str(query.get("product") or PRODUCT_FITS_FULL),
+            frame_size=query.get("frame_size"),
+            jp2_max_px=query.get("jp2_max_px"),
+        )
         if query.get("level"):
             self._requested_level = str(query.get("level"))
         self._pending_session_restore = meta
@@ -8303,6 +8770,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             (self.region_overlay_check, view.get("region_overlay")),
             (self.solar_limb_check, view.get("solar_limb")),
             (self.nrgf_check, view.get("nrgf")),
+            (self.movie_labels_check, view.get("movie_labels")),
         ):
             if value is not None:
                 was = check.blockSignals(True)
@@ -8478,10 +8946,31 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             scale=self.scale_combo.currentText(),
             # Match the preview: difference movies normalise unequal exposures.
             normalize_exposure=bool(self._exposure_varies) and movie_mode != "raw",
+            frame_labels=self._movie_frame_labels(movie_frames, movie_mode),
         )
         self._set_busy(True, f"Exporting movie ({len(movie_frames)} frame(s))…")
         self.progress_panel.set_status_text("Preparing export…")
         self._start_worker(MovieExportWorker(movie_frames, spec))
+
+    def _movie_frame_labels(self, movie_frames: list[Any], movie_mode: str) -> tuple[tuple[str, ...], ...]:
+        """The caption of every movie frame, or nothing when labels are off.
+
+        A composite is exported as finished RGB frames ("raw"), but its pixels
+        were differenced with the mode it was built with and it shows several
+        instruments, so its caption says both.
+        """
+        if not self.movie_labels_check.isChecked():
+            return ()
+        if self._composite_frames and len(self._composite_frames) == len(self._map_frames):
+            layers = [label for label in self._composite_labels if label]
+            base = movie_instrument_text(self._map_frames[0]) if self._map_frames else ""
+            text = " + ".join([base, *layers]) if base else " + ".join(layers)
+            return movie_frame_labels(
+                movie_frames,
+                mode=str(getattr(self, "_composite_mode", "raw") or "raw"),
+                instrument_text=text or None,
+            )
+        return movie_frame_labels(movie_frames, mode=movie_mode)
 
     @Slot(int, int)
     def _on_export_progress(self, done: int, total: int):
@@ -8560,6 +9049,10 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             chunks.append(wl)
         if date:
             chunks.append(f"{date} UTC" if "UTC" not in date.upper() else date)
+        if self._loaded_is_quicklook():
+            # Every figure made from these frames says what they are, cropped
+            # or derotated ones included.
+            chunks.append("JP2 quicklook")
         return " | ".join([x for x in chunks if x]) or f"Frame {frame_index + 1}"
 
     def _frame_wavelength_text(self) -> str:
