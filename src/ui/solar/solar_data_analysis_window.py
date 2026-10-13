@@ -186,7 +186,13 @@ from src.backend.solar.data_products import (
     reduced_sizes_for,
     unavailable_reason,
 )
-from src.backend.solar.helioviewer_jp2 import NATIVE_SIZE_KEY, QUICKLOOK_NOTE, is_jp2_path, is_quicklook_frame
+from src.backend.solar.helioviewer_jp2 import (
+    NATIVE_SIZE_KEY,
+    QUICKLOOK_NOTE,
+    is_jp2_path,
+    is_quicklook_frame,
+    load_jp2_file,
+)
 from src.ui.downloads.download_queue_panel import DownloadProgressPanel
 from src.ui.common.font_utils import preferred_monospace_font_family
 from src.ui.common.gui_shared import fit_window_to_screen, pick_export_path, screen_available_geometry
@@ -468,6 +474,10 @@ class CompositeBuildWorker(QObject):
     # the selection is thinned evenly across the loaded time range.
     MAX_LAYER_FILES = 48
 
+    # JP2 layers are decoded at most this size. Inside a LASCO C2 occulter the
+    # Sun is ~160 px across, so 1024 px still oversamples it several times.
+    JP2_LAYER_MAX_PX = 1024
+
     def __init__(
         self,
         base_frames: list[Any],
@@ -602,6 +612,8 @@ class CompositeBuildWorker(QObject):
         dated = [t for t in base_times if isinstance(t, datetime)]
         if not dated:
             raise RuntimeError("The loaded frames carry no observation times to match against.")
+        if str(getattr(spec, "source", "fits") or "fits") == "jp2":
+            return self._jp2_layer_sources(spec, dated)
         margin = timedelta(minutes=self._window_minutes)
         query = build_spec_for_observable(
             spec.instrument, spec.value, min(dated) - margin, max(dated) + margin,
@@ -631,10 +643,48 @@ class CompositeBuildWorker(QObject):
             raise RuntimeError(f"No {spec.label} files could be downloaded.")
         return paths, [self._header_time(p) for p in paths]
 
+    def _jp2_layer_sources(self, spec: Any, dated: list[datetime]) -> tuple[list[str], list[Any]]:
+        """A layer from Helioviewer's JP2 archive: list, pick one per base frame, download.
+
+        The listing carries every frame's exact time, so nothing has to be
+        opened to time-match.
+        """
+        from src.backend.solar.data_products import ARCHIVE_HELIOVIEWER_JP2
+        from src.backend.solar.direct_archives import fetch_direct, search_jp2
+        from src.backend.solar.sunpy_archive import build_spec_for_observable
+
+        margin = timedelta(minutes=self._window_minutes)
+        query = replace(
+            build_spec_for_observable(
+                spec.instrument, spec.value, min(dated) - margin, max(dated) + margin, max_records=100_000
+            ),
+            sample_seconds=None,
+            archive=ARCHIVE_HELIOVIEWER_JP2,
+        )
+        self.progress.emit(None, f"Listing {spec.label} frames on Helioviewer…")
+        result = search_jp2(query, cancel_cb=self._cancel.is_set)
+        rows = list(result.rows or [])
+        if not rows:
+            raise RuntimeError(self._no_records_message(spec, dated))
+        selected = self._rows_for_times(rows, dated, limit=self.MAX_LAYER_FILES)
+        self.progress.emit(
+            None, f"Downloading {spec.label} ({len(selected)} JP2 frame(s) from Helioviewer)…"
+        )
+        fetched = fetch_direct(result, self._cache_dir, selected, cancel_cb=self._cancel.is_set)
+        paths = list(fetched.paths or [])
+        if not paths:
+            detail = f" ({fetched.errors[0]})" if fetched.errors else ""
+            raise RuntimeError(f"No {spec.label} JP2 frames could be downloaded{detail}.")
+        when_by_name = {item.filename: item.when for item in result.raw_response or []}
+        return paths, [when_by_name.get(Path(path).name) for path in paths]
+
     def _load_one_layer_frame(self, path: str, spec: Any) -> Any:
         """Build a single sunpy Map for one layer file."""
         from src.backend.solar.solar_data_analysis import extract_map_frames
         from src.backend.solar.sunpy_archive import DATA_KIND_MAP, load_downloaded
+
+        if is_jp2_path(path):
+            return load_jp2_file(path, max_px=self.JP2_LAYER_MAX_PX)
 
         loaded = load_downloaded(
             [path], DATA_KIND_MAP, instrument=str(spec.instrument or "")
@@ -689,6 +739,49 @@ class CompositeBuildWorker(QObject):
         shape = tuple(_np.asarray(getattr(frame, "data")).shape[:2])
         return (shape, _get("cdelt1", "CDELT1"), _get("crpix1", "CRPIX1"), _get("crpix2", "CRPIX2"))
 
+    @classmethod
+    def _reproject_layer(cls, source: Any, target: Any, spec: Any, screen: str) -> Any:
+        """``source`` on ``target``'s grid, as float32 with NaN where it has no data.
+
+        Pixels beyond the layer's outer edge are discarded by the blend, so a
+        layer that only reaches a few solar radii (the AIA Sun in a LASCO C2
+        occulter spans ~360 of 1024 px) is reprojected onto just the box around
+        that edge — reprojection cost follows the number of output pixels.
+        """
+        import astropy.units as u
+        import numpy as _np
+
+        from src.backend.solar.multiview import reproject_map_to
+
+        shape = _np.asarray(getattr(target, "data")).shape[:2]
+        box = None
+        try:
+            (cx, cy), rsun_px = cls._frame_geometry(target)
+            _inner, outer = spec.resolved_fov()
+            reach = (float(outer) + float(spec.feather_rsun)) * float(rsun_px) + 3.0
+            x0, x1 = max(0, int(cx - reach)), min(shape[1], int(cx + reach) + 1)
+            y0, y1 = max(0, int(cy - reach)), min(shape[0], int(cy + reach) + 1)
+            if (x1 - x0) * (y1 - y0) < 0.6 * shape[0] * shape[1] and x1 > x0 and y1 > y0:
+                box = (x0, x1, y0, y1)
+        except Exception:
+            box = None
+        if box is None:
+            reprojected = reproject_map_to(source, target, screen=screen)
+            return _np.asarray(getattr(reprojected, "data"), dtype=_np.float32)
+
+        x0, x1, y0, y1 = box
+        sub = target.submap([x0, y0] * u.pix, top_right=[x1 - 1, y1 - 1] * u.pix)
+        part = _np.asarray(getattr(reproject_map_to(source, sub, screen=screen), "data"), dtype=_np.float32)
+        # Where the submap starts in the full grid: its reference pixel moved by
+        # exactly the offset of its first pixel.
+        dx = int(round(float(target.wcs.wcs.crpix[0]) - float(sub.wcs.wcs.crpix[0])))
+        dy = int(round(float(target.wcs.wcs.crpix[1]) - float(sub.wcs.wcs.crpix[1])))
+        out = _np.full(shape, _np.nan, dtype=_np.float32)
+        h = max(0, min(part.shape[0], shape[0] - dy))
+        w = max(0, min(part.shape[1], shape[1] - dx))
+        out[dy : dy + h, dx : dx + w] = part[:h, :w]
+        return out
+
     @staticmethod
     def _difference(arrays: dict[int, Any], order: list[int], mode: str) -> dict[int, Any]:
         """Difference a layer within its own series, keyed by source-frame index.
@@ -733,11 +826,12 @@ class CompositeBuildWorker(QObject):
             from src.backend.solar.coronagraph import solar_center_from_meta
             from src.backend.solar.coronagraph_composite import (
                 composite_frame,
+                default_fov_rsun,
                 layer_alpha,
                 match_layer_frames,
                 rsun_pixels,
             )
-            from src.backend.solar.multiview import observer_separation_deg, reproject_map_to
+            from src.backend.solar.multiview import observer_separation_deg
             from src.backend.solar.solar_data_analysis import frame_observation_time
 
             base_frames = self._base_frames
@@ -826,8 +920,7 @@ class CompositeBuildWorker(QObject):
                         source = self._load_one_layer_frame(paths[index], spec)
                         for geom in needed[index]:
                             target = base_frames[representative[geom]]
-                            reprojected = reproject_map_to(source, target, screen=screen)
-                            data = _np.asarray(getattr(reprojected, "data"), dtype=_np.float32)
+                            data = self._reproject_layer(source, target, spec, screen)
                             if not _np.isfinite(data).any():
                                 warnings.append(
                                     f"{spec.label} frame {index}: no overlap with the base field of view."
@@ -851,8 +944,13 @@ class CompositeBuildWorker(QObject):
                 sample_geom, sample_index = next(iter(sorted(arrays)))
                 sample = arrays[(sample_geom, sample_index)]
                 centre_s, rsun_s = self._frame_geometry(base_frames[representative[sample_geom]])
+                # Coverage of the instrument's own field of view: a layer may be
+                # allowed to reach further (the AIA Sun reaches out to the
+                # occulter), which says nothing about how much of it survived.
+                own_outer = default_fov_rsun(spec.instrument, spec.value)[1]
+                band_spec = replace(spec, outer_rsun=min(spec.resolved_fov()[1], own_outer))
                 band = layer_alpha(
-                    _np.ones_like(sample), spec, center=centre_s, rsun_px=rsun_s
+                    _np.ones_like(sample), band_spec, center=centre_s, rsun_px=rsun_s
                 ) > 0
                 if band.any():
                     coverage = float(_np.isfinite(sample[band]).mean())
@@ -3674,6 +3772,18 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         )
         self.nrgf_check.setEnabled(False)
         layout.addWidget(self.nrgf_check, 0, 0, 1, 2)
+
+        self.aia_sun_check = QCheckBox("AIA 193 Sun in the occulter")
+        self.aia_sun_check.setToolTip(
+            "Fill the occulted centre of SOHO/LASCO C2/C3 frames with the SDO/AIA 193 Å\n"
+            "image nearest each frame's time, so an eruption on the disk and the CME in\n"
+            "the corona are seen together. The whole AIA image is kept, corona included,\n"
+            "at true scale (small in C3). Frames come from Helioviewer's JP2 archive, and\n"
+            "the layer appears in Overlay Layers, where it can be tuned or rebuilt."
+        )
+        self.aia_sun_check.setEnabled(False)
+        self._syncing_aia_sun = False
+        layout.addWidget(self.aia_sun_check, 1, 0, 1, 2)
         group.setVisible(False)
 
     def _build_overlay_group(self, parent_layout: QVBoxLayout) -> None:
@@ -4053,6 +4163,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         )
         self.nrgf_check.toggled.connect(lambda _checked: self._render_current_frame())
         self.movie_content_combo.currentTextChanged.connect(lambda _t: self._sync_nrgf_enabled())
+        self.aia_sun_check.toggled.connect(self._on_aia_sun_toggled)
         self.hi_jmap_btn.clicked.connect(self.build_hi_jmap)
         self.vector_load_btn.clicked.connect(self.load_vector_field_files)
         self.vector_download_btn.clicked.connect(self.download_vector_field)
@@ -4270,6 +4381,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         if not loaded and self.pan_zoom_check.isChecked():
             self.pan_zoom_check.setChecked(False)
         self._sync_nrgf_enabled()
+        self._sync_aia_sun_control()
         if not loaded and hasattr(self, "_measure"):
             for btn in (
                 self.ruler_tool_btn,
@@ -4381,6 +4493,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             self._progress_timer.stop()
             self._byte_active = False
             self.progress_panel.reset()
+        self._sync_aia_sun_control()
         self._sync_menu_action_state(loaded=bool(self._map_frames))
 
     def _sync_menu_action_state(self, *, loaded: bool) -> None:
@@ -6379,6 +6492,57 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self._sync_tracking_panel_visibility()
         self._notify_project_modified()
 
+    def _sync_aia_sun_control(self) -> None:
+        """Tick the AIA Sun box when its layer is active; enable it for LASCO frames.
+
+        The box mirrors the layer stack rather than holding its own state, so
+        removing or un-ticking the layer in Overlay Layers, or restoring a
+        project, is reflected here.
+        """
+        if not hasattr(self, "aia_sun_check"):
+            return
+        from src.backend.solar.coronagraph_composite import is_aia_sun_layer
+
+        base = (getattr(self, "_original_frames", None) or getattr(self, "_map_frames", None) or [None])[0]
+        is_lasco = base is not None and self._frame_lasco_detector(base) is not None
+        self.aia_sun_check.setEnabled(bool(is_lasco) and not getattr(self, "_busy", False))
+        specs = getattr(self, "_overlay_specs", None) or []
+        active = any(is_aia_sun_layer(spec) and spec.enabled for spec in specs)
+        if self.aia_sun_check.isChecked() != active:
+            self._syncing_aia_sun = True
+            try:
+                self.aia_sun_check.setChecked(active)
+            finally:
+                self._syncing_aia_sun = False
+
+    def _on_aia_sun_toggled(self, checked: bool) -> None:
+        """Add the AIA 193 Sun layer and build, or remove it and restore the view."""
+        if self._syncing_aia_sun:
+            return
+        from src.backend.solar.coronagraph_composite import aia_sun_layer, is_aia_sun_layer
+
+        others = [spec for spec in self._overlay_specs if not is_aia_sun_layer(spec)]
+        if checked:
+            base = (self._original_frames or self._map_frames or [None])[0]
+            detector = self._frame_lasco_detector(base) if base is not None else None
+            if detector is None:
+                self._sync_aia_sun_control()
+                return
+            self._overlay_specs = [*others, aia_sun_layer("LASCO", detector)]
+            self._invalidate_composite()
+            self._refresh_overlay_list()
+            if not self.build_composite():
+                # Refused (busy, declined, unusable frames): leave things as they were.
+                self._overlay_specs = others
+                self._refresh_overlay_list()
+            return
+        self._overlay_specs = others
+        self._refresh_overlay_list()
+        if any(spec.enabled for spec in others) and self._composite_frames:
+            self.build_composite()
+        else:
+            self.clear_composite()
+
     def _sync_nrgf_enabled(self) -> None:
         """NRGF applies to plain frames only — differences already remove the
         radial background, so the toggle greys out in difference modes."""
@@ -6467,6 +6631,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self.overlay_list.blockSignals(blocked)
         self._sync_overlay_editor()
         self._refresh_overlay_note()
+        self._sync_aia_sun_control()
 
     def _refresh_overlay_note(self) -> None:
         """One-line summary under the list: layer count and the approximate flag."""
@@ -6534,6 +6699,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             self._overlay_specs[row] = _replace(self._overlay_specs[row], enabled=enabled)
             self._invalidate_composite("layer toggled")
         self._refresh_overlay_note()
+        self._sync_aia_sun_control()
 
     def add_overlay_layer(self) -> None:
         """Add the selected observable to the layer stack."""
@@ -6601,17 +6767,20 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self._refresh_overlay_note()
         self._render_current_frame()
 
-    def build_composite(self) -> None:
-        """Download, reproject and blend every enabled layer over the series."""
+    def build_composite(self) -> bool:
+        """Download, reproject and blend every enabled layer over the series.
+
+        Returns whether the build started.
+        """
         from src.backend.solar.coronagraph_composite import LayerSpec, layer_config_hash
 
         if self.is_operation_running():
             QMessageBox.information(self, "Overlay Layers", "Another operation is still running.")
-            return
+            return False
         base_frames = self._original_frames or self._map_frames
         if not base_frames:
             QMessageBox.information(self, "Overlay Layers", "Load a coronagraph series first.")
-            return
+            return False
         if not hasattr(base_frames[0], "reproject_to"):
             QMessageBox.warning(
                 self,
@@ -6620,11 +6789,11 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
                 "so other instruments cannot be reprojected onto them. Reload the\n"
                 "series from the archive and build the composite before cropping.",
             )
-            return
+            return False
         specs = [s for s in self._overlay_specs if s.enabled]
         if not specs:
             QMessageBox.information(self, "Overlay Layers", "Add at least one layer first.")
-            return
+            return False
 
         detector = self._frame_lasco_detector(base_frames[0]) or ""
         base_spec = LayerSpec(
@@ -6651,7 +6820,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
                 f"images ({len(base_frames)} frames at {shape[1]}x{shape[0]}).\n\n"
                 "Load a shorter time range, a coarser cadence, or crop before building.",
             )
-            return
+            return False
 
         estimate = len(base_frames) * len(specs)
         reprojections = min(estimate, CompositeBuildWorker.MAX_LAYER_FILES * len(specs))
@@ -6666,7 +6835,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
                 "Continue?",
             )
             if answer != QMessageBox.Yes:
-                return
+                return False
 
         self._composite_pending_labels = [str(s.label) for s in specs]
         self._composite_pending_mode = mode
@@ -6683,6 +6852,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
                 difference_mode=mode,
             )
         )
+        return True
 
     def _on_composite_progress(self, done: int, total: int) -> None:
         if total > 0:

@@ -121,6 +121,10 @@ class LayerSpec:
     feather_rsun: float = 0.15
     screen: str = SCREEN_AUTO
     enabled: bool = True
+    #: Where the layer's frames come from: the archive's FITS (``"fits"``) or
+    #: Helioviewer's JPEG2000 quicklooks (``"jp2"``), which are a megabyte
+    #: instead of tens and already display-scaled.
+    source: str = "fits"
 
     def resolved_fov(self) -> tuple[float, float]:
         """Inner/outer radius in R_sun, falling back to the instrument default."""
@@ -138,6 +142,47 @@ class LayerSpec:
     def is_approximate(self) -> bool:
         """True when this layer's reprojection uses a non-surface screen."""
         return self.resolved_screen() in APPROXIMATE_SCREENS
+
+
+LAYER_SOURCE_FITS = "fits"
+LAYER_SOURCE_JP2 = "jp2"
+
+#: Label of the one-click AIA 193 Sun layer (Coronagraph Tools).
+AIA_SUN_LABEL = "AIA 193 Sun"
+
+
+def aia_sun_layer(base_instrument: str, base_value: Any = None) -> LayerSpec:
+    """The AIA 193 Å image placed in a coronagraph's occulted centre.
+
+    The whole AIA frame is kept — disk and off-limb corona out to the image
+    edges, about 1.3 R☉ at the sides and 1.8 R☉ in the corners — so the layer
+    reaches out to the base's occulter edge and stops there, never painting
+    over the coronagraph's own data. A spherical screen is what keeps the
+    off-limb corona: a surface screen drops every pixel beyond the limb. SDO and
+    SOHO look at the Sun along the same line, so for LASCO the corona lands
+    where it belongs to about 1%. Frames come from Helioviewer's JP2 archive
+    (about 1 MB each, already display-scaled, hence the linear stretch).
+    """
+    occulter, _outer = default_fov_rsun(base_instrument, base_value)
+    return LayerSpec(
+        instrument="AIA",
+        value=193.0,
+        label=AIA_SUN_LABEL,
+        colormap="sdoaia193",
+        scale="linear",
+        clip_low=0.5,
+        clip_high=99.9,
+        gamma=1.0,
+        inner_rsun=0.0,
+        outer_rsun=float(occulter) if occulter > 0 else 2.2,
+        feather_rsun=0.05,
+        screen=SCREEN_SPHERICAL,
+        source=LAYER_SOURCE_JP2,
+    )
+
+
+def is_aia_sun_layer(spec: Any) -> bool:
+    return str(getattr(spec, "instrument", "")).upper() == "AIA" and getattr(spec, "label", "") == AIA_SUN_LABEL
 
 
 def resolve_detector(instrument: str, value: Any) -> str | None:

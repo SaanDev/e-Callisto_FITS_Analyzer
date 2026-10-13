@@ -4161,3 +4161,167 @@ def test_frame_label_choice_travels_with_the_project():
     assert other.movie_labels_check.isChecked() is False
     win.close()
     other.close()
+
+
+# -- AIA 193 Sun in the LASCO occulter ---------------------------------------------------
+
+
+class _ReprojectableLasco(FakeCoronagraphMap):
+    """Passes build_composite's world-coordinate check; the worker is never run."""
+
+    def reproject_to(self, *_args, **_kwargs):  # pragma: no cover - presence is the point
+        raise AssertionError("not expected to run in this test")
+
+
+def _reprojectable_lasco(count=3, detector="C2"):
+    return [_ReprojectableLasco(frame.data, detector) for frame in _coronagraph_frames(count, detector)]
+
+
+def test_the_aia_sun_box_is_offered_for_lasco_frames_only():
+    _app()
+    win = SolarDataAnalysisWindow()
+    assert not win.aia_sun_check.isEnabled()
+    win._apply_loaded_frames(_reprojectable_lasco(), paths=[], metadata={})
+    assert win.aia_sun_check.isEnabled()
+
+    cor2 = FakeCoronagraphMap(np.ones((64, 64)), "COR2")
+    cor2.instrument = "SECCHI"
+    cor2.observatory = "STEREO A"
+    win._apply_loaded_frames([cor2, cor2], paths=[], metadata={})
+    assert not win.aia_sun_check.isEnabled()
+    win.close()
+
+
+def test_ticking_the_aia_sun_adds_its_layer_and_builds_and_unticking_restores(monkeypatch):
+    from src.backend.solar.coronagraph_composite import AIA_SUN_LABEL
+
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames(_reprojectable_lasco(detector="C3"), paths=[], metadata={})
+    started = []
+    monkeypatch.setattr(win, "_start_worker", lambda worker: started.append(worker))
+
+    win.aia_sun_check.setChecked(True)
+    assert len(started) == 1 and isinstance(started[0], solar_mod.CompositeBuildWorker)
+    (spec,) = started[0]._layer_specs
+    assert spec.label == AIA_SUN_LABEL and spec.source == "jp2"
+    assert spec.resolved_fov() == (0.0, 3.7)
+    assert win.overlay_list.count() == 1
+
+    win._set_busy(False)
+    win._composite_frames = _rgb_composites()
+    win.aia_sun_check.setChecked(False)
+    assert win._overlay_specs == []
+    assert win._composite_frames == []
+    assert len(started) == 1  # nothing left to build
+    win.close()
+
+
+def test_a_refused_build_leaves_the_aia_sun_box_unticked(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    # Plain arrays without world coordinates cannot be reprojected onto.
+    win._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
+    warned = []
+    monkeypatch.setattr(solar_mod.QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
+    win.aia_sun_check.setChecked(True)
+    assert warned
+    assert win._overlay_specs == []
+    assert not win.aia_sun_check.isChecked()
+    win.close()
+
+
+def test_the_aia_sun_box_follows_the_layer_stack(monkeypatch):
+    from dataclasses import asdict
+
+    from src.backend.solar.coronagraph_composite import aia_sun_layer
+
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames(_reprojectable_lasco(), paths=[], metadata={})
+    monkeypatch.setattr(win, "_start_worker", lambda worker: pytest.fail("no build expected"))
+
+    # A restored project brings the layer back (to be rebuilt by hand).
+    win._restore_overlay_layers({"layers": [asdict(aia_sun_layer("LASCO", "C2"))]})
+    assert win.aia_sun_check.isChecked()
+    assert win._overlay_specs[0].source == "jp2"
+
+    # Un-ticking the row in Overlay Layers un-ticks the box.
+    win.overlay_list.item(0).setCheckState(Qt.Unchecked)
+    assert not win.aia_sun_check.isChecked()
+    win.close()
+
+
+def test_a_jp2_layer_is_listed_downloaded_and_decoded_from_helioviewer(monkeypatch, tmp_path):
+    from src.backend.solar import direct_archives
+    from src.backend.solar.coronagraph_composite import aia_sun_layer, LayerSpec
+
+    base_times = [datetime(2026, 9, 20, 12, 0), datetime(2026, 9, 20, 12, 12)]
+    listed = [datetime(2026, 9, 20, 11, 59, 53), datetime(2026, 9, 20, 12, 5), datetime(2026, 9, 20, 12, 11, 41)]
+    queries = []
+
+    def fake_search(query, **_kwargs):
+        queries.append(query)
+        files = [direct_archives.DirectFile(f"https://x/{i}", f"hv11_{i}.jp2", when) for i, when in enumerate(listed)]
+        rows = [SunPySearchRow(w, w, "SDO", "AIA", "Helioviewer", f.filename, "") for w, f in zip(listed, files)]
+        return direct_archives._result(query, files, rows)
+
+    def fake_fetch(result, cache_dir, selected, **_kwargs):
+        names = [result.raw_response[i].filename for i in selected]
+        return SunPyFetchResult(paths=[str(tmp_path / n) for n in names], requested_count=len(names),
+                                failed_count=0, errors=[])
+
+    monkeypatch.setattr(direct_archives, "search_jp2", fake_search)
+    monkeypatch.setattr(direct_archives, "fetch_direct", fake_fetch)
+    worker = solar_mod.CompositeBuildWorker(
+        [], LayerSpec("LASCO", "C2"), [aia_sun_layer("LASCO", "C2")], window_minutes=10, cache_dir=tmp_path
+    )
+    paths, times = worker._layer_sources(aia_sun_layer("LASCO", "C2"), base_times)
+
+    assert queries[0].archive == "helioviewer_jp2" and queries[0].instrument == "AIA"
+    # The frame nearest each base time; times come from the listing, not a FITS header.
+    assert [p.split("\\")[-1].split("/")[-1] for p in paths] == ["hv11_0.jp2", "hv11_2.jp2"]
+    assert times == [listed[0], listed[2]]
+
+    decoded = []
+    monkeypatch.setattr(solar_mod, "load_jp2_file", lambda path, max_px: decoded.append(max_px) or "map")
+    assert worker._load_one_layer_frame(paths[0], aia_sun_layer("LASCO", "C2")) == "map"
+    assert decoded == [solar_mod.CompositeBuildWorker.JP2_LAYER_MAX_PX]
+
+
+def test_a_layer_is_reprojected_only_inside_its_reach_with_the_same_result():
+    pytest.importorskip("sunpy.map")
+    pytest.importorskip("reproject")
+    import astropy.units as u
+    import sunpy.map
+    from astropy.coordinates import SkyCoord
+    from sunpy.coordinates import frames
+    from sunpy.map.header_helper import make_fitswcs_header
+
+    from src.backend.solar.coronagraph_composite import aia_sun_layer
+    from src.backend.solar.multiview import reproject_map_to
+
+    stamp = "2026-09-20T12:00:00"
+    observer = SkyCoord(0 * u.deg, 0 * u.deg, 1.0 * u.AU, frame=frames.HeliographicStonyhurst, obstime=stamp)
+
+    def make(size, scale, instrument, detector, fill):
+        ref = SkyCoord(0 * u.arcsec, 0 * u.arcsec, obstime=stamp, observer=observer, frame="helioprojective")
+        header = make_fitswcs_header(
+            fill(size), ref, reference_pixel=[(size - 1) / 2, (size - 1) / 2] * u.pix,
+            scale=[scale, scale] * u.arcsec / u.pix, instrument=instrument, detector=detector,
+            observatory="SOHO" if instrument == "LASCO" else "SDO",
+            wavelength=None if instrument == "LASCO" else 193 * u.AA,
+        )
+        header["rsun_ref"] = 695_700_000.0
+        header["rsun_obs"] = 960.0
+        return sunpy.map.Map(fill(size), header)
+
+    base = make(160, 95.2, "LASCO", "C2", lambda n: np.zeros((n, n), np.float32))
+    source = make(128, 19.2, "AIA", "AIA", lambda n: np.arange(n * n, dtype=np.float32).reshape(n, n))
+    spec = aia_sun_layer("LASCO", "C2")
+
+    boxed = solar_mod.CompositeBuildWorker._reproject_layer(source, base, spec, "spherical")
+    full = np.asarray(reproject_map_to(source, base, screen="spherical").data, dtype=np.float32)
+    assert boxed.shape == full.shape
+    assert np.array_equal(np.isfinite(boxed), np.isfinite(full))
+    assert np.allclose(boxed[np.isfinite(boxed)], full[np.isfinite(full)])

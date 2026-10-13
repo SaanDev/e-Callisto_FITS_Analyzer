@@ -399,6 +399,12 @@ TIFF or JPG in light mode and the OriginPro style.</li>
 <li><b>Common actions</b>: fetch or find archive records, load local FITS, plot frames, running/base difference,
 crop by ROI, detect bright active regions, fetch NOAA/HEK labels, build RGB composites, and export plots,
 cropped FITS, CSV, GIF, or MP4.</li>
+<li><b>AIA 193 Sun in the occulter</b> (Coronagraph Tools, SOHO/LASCO C2 and C3 frames): one tick fills each
+frame's occulted centre with the SDO/AIA 193 Å image nearest its time, so an eruption on the disk and the CME in the
+corona are seen together. The whole AIA image is kept, off-limb corona included, at true scale (it is small in C3)
+and never covers LASCO's own field. The AIA frames come from Helioviewer's JP2 archive, so a day's series builds in
+seconds; the result plays, measures and exports like the plain frames, with the layer listed in <b>Overlay Layers</b>
+for fine-tuning. Untick to return to the plain LASCO frames.</li>
 <li><b>Movies</b> (Movie Export card, or <b>Export MP4</b> above the image) play north up, as on screen, with
 the playback speed and the current colormap, scale, clip and crop. With <b>Frame labels</b> ticked (the default)
 each frame carries its instrument and UTC observation date and time on a thin stripe along the bottom, plus

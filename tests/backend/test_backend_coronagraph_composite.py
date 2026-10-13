@@ -472,3 +472,48 @@ def test_gamma_of_one_is_a_no_op():
 def test_gamma_is_part_of_the_cache_token():
     base = LayerSpec("AIA", 193.0, "AIA")
     assert layer_config_hash([base]) != layer_config_hash([replace_gamma(base, 0.5)])
+
+
+# -- The one-click AIA 193 Sun layer ---------------------------------------------------
+
+
+def test_the_aia_sun_layer_reaches_out_to_the_occulter():
+    from src.backend.solar import coronagraph_composite as cc
+
+    c2 = cc.aia_sun_layer("LASCO", "C2")
+    c3 = cc.aia_sun_layer("LASCO", "C3")
+    assert c2.resolved_fov() == (0.0, 2.2)
+    assert c3.resolved_fov() == (0.0, 3.7)
+    # Spherical screen keeps the off-limb corona; JP2 frames are already scaled.
+    assert c2.resolved_screen() == cc.SCREEN_SPHERICAL
+    assert c2.source == cc.LAYER_SOURCE_JP2 and c2.scale == "linear"
+    assert cc.is_aia_sun_layer(c2)
+    assert not cc.is_aia_sun_layer(cc.LayerSpec("AIA", 193.0, label="AIA 193 A"))
+    assert cc.LayerSpec("AIA").source == cc.LAYER_SOURCE_FITS
+
+
+def test_the_whole_aia_square_is_painted_inside_the_occulter_and_nothing_outside():
+    from src.backend.solar import coronagraph_composite as cc
+
+    size, rsun_px = 200, 20.0
+    center = (100.0, 100.0)
+    yy, xx = np.mgrid[0:size, 0:size]
+    radius = np.hypot(xx - center[0], yy - center[1]) / rsun_px
+    base = np.where(radius > 2.2, 50.0 + radius, 0.0)  # occulted centre is blank
+    base_spec = cc.LayerSpec("LASCO", "C2", colormap="gray", scale="linear")
+
+    # AIA's frame is a square reaching 1.28 R_sun at the sides, ~1.8 in the corners.
+    half = int(1.28 * rsun_px)
+    aia = np.full((size, size), np.nan)
+    aia[100 - half : 100 + half + 1, 100 - half : 100 + half + 1] = 80.0 + radius[
+        100 - half : 100 + half + 1, 100 - half : 100 + half + 1
+    ]
+    spec = cc.aia_sun_layer("LASCO", "C2")
+    with_sun = cc.composite_frame(base, base_spec, [(spec, aia)], center=center, rsun_px=rsun_px)
+    plain = cc.composite_frame(base, base_spec, [], center=center, rsun_px=rsun_px)
+
+    corner = (100 - half + 1, 100 - half + 1)  # ~1.7 R_sun: corona, not disk
+    assert radius[corner] > 1.6
+    assert with_sun[corner].sum() > plain[corner].sum()
+    outside = radius > 2.3
+    assert np.array_equal(with_sun[outside], plain[outside])
