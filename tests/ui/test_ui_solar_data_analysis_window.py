@@ -4456,3 +4456,61 @@ def test_composite_movie_frames_match_the_screen(monkeypatch, tmp_path):
     assert np.array_equal(np.asarray(frames[2].data), on_screen)
     win._set_busy(False)
     win.close()
+
+# -- The AIA Sun's own colormap -------------------------------------------------------------
+
+
+def test_the_aia_colormap_picker_follows_the_aia_sun_box():
+    _app()
+    win = SolarDataAnalysisWindow()
+    assert win.aia_sun_cmap_combo.currentText() == "sdoaia193"
+    assert not win.aia_sun_cmap_combo.isEnabled()
+    win._apply_loaded_frames(_reprojectable_lasco(), paths=[], metadata={})
+    assert win.aia_sun_cmap_combo.isEnabled()
+    win.close()
+
+
+def test_ticking_the_aia_sun_uses_the_chosen_colormap(monkeypatch):
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames(_reprojectable_lasco(), paths=[], metadata={})
+    started = []
+    monkeypatch.setattr(win, "_start_worker", lambda worker: started.append(worker))
+    win.aia_sun_cmap_combo.setCurrentText("sdoaia304")
+    assert win._overlay_specs == []  # remembered until the box is ticked
+
+    win.aia_sun_check.setChecked(True)
+    (spec,) = started[0]._layer_specs
+    assert spec.colormap == "sdoaia304"
+    win._set_busy(False)
+    win.close()
+
+
+def test_changing_the_aia_colormap_restyles_only_the_aia_sun_without_a_rebuild(monkeypatch):
+    win = _composite_window(monkeypatch)
+    monkeypatch.setattr(win, "_start_worker", lambda worker: pytest.fail("no rebuild expected"))
+    stack = win._composite_stack
+    before = _painted(win)
+
+    win.aia_sun_cmap_combo.setCurrentText("gray")
+    after = _painted(win)
+    assert win._composite_stack is stack
+    assert win._overlay_specs[0].colormap == "gray"
+    disk = after[29:35, 29:35]
+    assert np.all(disk[..., 0] == disk[..., 1]) and np.all(disk[..., 1] == disk[..., 2])  # grey disk
+    assert not np.array_equal(before[29:35, 29:35], disk)
+    assert np.array_equal(before[2:12, 2:12], after[2:12, 2:12])  # LASCO untouched
+    win.close()
+
+
+def test_the_aia_colormap_picker_and_overlay_layers_stay_in_step(monkeypatch):
+    win = _composite_window(monkeypatch)
+    win.overlay_list.setCurrentRow(0)
+
+    win.aia_sun_cmap_combo.setCurrentText("hot")
+    assert win.overlay_colormap_combo.currentText() == "hot"
+
+    win.overlay_colormap_combo.setCurrentText("sdoaia171")
+    assert win._overlay_specs[0].colormap == "sdoaia171"
+    assert win.aia_sun_cmap_combo.currentText() == "sdoaia171"
+    win.close()

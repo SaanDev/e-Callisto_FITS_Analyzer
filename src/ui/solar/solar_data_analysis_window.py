@@ -215,6 +215,8 @@ SOLAR_ISSUES_URL = "https://github.com/SaanDev/e-Callisto_FITS_Analyzer/issues"
 
 AIA_WAVELENGTHS = (94, 131, 171, 193, 211, 304, 335, 1600, 1700)
 AIA_COLORMAPS = tuple(f"sdoaia{value}" for value in AIA_WAVELENGTHS)
+# Colormaps offered for the AIA 193 Sun layer: the AIA passband maps first.
+AIA_SUN_COLORMAPS = (*AIA_COLORMAPS, "gray", "hot", "inferno", "magma", "plasma", "viridis", "cividis")
 AIA_FULL_RESOLUTION = 1.0
 AIA_HIGH_RES_WARN_ROWS = 8
 
@@ -3748,6 +3750,17 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self.aia_sun_check.setEnabled(False)
         self._syncing_aia_sun = False
         layout.addWidget(self.aia_sun_check, 1, 0, 1, 2)
+
+        self.aia_sun_cmap_combo = QComboBox()
+        self.aia_sun_cmap_combo.addItems(list(AIA_SUN_COLORMAPS))
+        self.aia_sun_cmap_combo.setCurrentText("sdoaia193")
+        self.aia_sun_cmap_combo.setToolTip(
+            "Colormap of the AIA Sun image. Applies at once, without rebuilding;\n"
+            "the LASCO colormap is set under Display & Crop."
+        )
+        self.aia_sun_cmap_combo.setEnabled(False)
+        layout.addWidget(self._field_label("AIA colormap"), 2, 0)
+        layout.addWidget(self.aia_sun_cmap_combo, 2, 1)
         group.setVisible(False)
 
     def _build_overlay_group(self, parent_layout: QVBoxLayout) -> None:
@@ -4128,6 +4141,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self.nrgf_check.toggled.connect(lambda _checked: self._render_current_frame())
         self.movie_content_combo.currentTextChanged.connect(lambda _t: self._sync_nrgf_enabled())
         self.aia_sun_check.toggled.connect(self._on_aia_sun_toggled)
+        self.aia_sun_cmap_combo.currentTextChanged.connect(self._on_aia_sun_colormap_changed)
         self.hi_jmap_btn.clicked.connect(self.build_hi_jmap)
         self.vector_load_btn.clicked.connect(self.load_vector_field_files)
         self.vector_download_btn.clicked.connect(self.download_vector_field)
@@ -6534,15 +6548,20 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
 
         base = (getattr(self, "_original_frames", None) or getattr(self, "_map_frames", None) or [None])[0]
         is_lasco = base is not None and self._frame_lasco_detector(base) is not None
-        self.aia_sun_check.setEnabled(bool(is_lasco) and not getattr(self, "_busy", False))
+        enabled = bool(is_lasco) and not getattr(self, "_busy", False)
+        self.aia_sun_check.setEnabled(enabled)
+        self.aia_sun_cmap_combo.setEnabled(enabled)
         specs = getattr(self, "_overlay_specs", None) or []
-        active = any(is_aia_sun_layer(spec) and spec.enabled for spec in specs)
-        if self.aia_sun_check.isChecked() != active:
-            self._syncing_aia_sun = True
-            try:
+        sun = next((spec for spec in specs if is_aia_sun_layer(spec)), None)
+        active = sun is not None and sun.enabled
+        self._syncing_aia_sun = True
+        try:
+            if self.aia_sun_check.isChecked() != active:
                 self.aia_sun_check.setChecked(active)
-            finally:
-                self._syncing_aia_sun = False
+            if sun is not None and self.aia_sun_cmap_combo.currentText() != sun.colormap:
+                self.aia_sun_cmap_combo.setCurrentText(sun.colormap)
+        finally:
+            self._syncing_aia_sun = False
 
     def _on_aia_sun_toggled(self, checked: bool) -> None:
         """Add the AIA 193 Sun layer and build, or remove it and restore the view."""
@@ -6557,7 +6576,11 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             if detector is None:
                 self._sync_aia_sun_control()
                 return
-            self._overlay_specs = [*others, aia_sun_layer("LASCO", detector)]
+            layer = replace(
+                aia_sun_layer("LASCO", detector),
+                colormap=self.aia_sun_cmap_combo.currentText().strip() or "sdoaia193",
+            )
+            self._overlay_specs = [*others, layer]
             self._invalidate_composite()
             self._refresh_overlay_list()
             if not self.build_composite():
@@ -6572,6 +6595,21 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             self._render_current_frame()
         else:
             self.clear_composite()
+
+    def _on_aia_sun_colormap_changed(self, text: str) -> None:
+        """Restyle the AIA Sun layer; drawn at once, nothing is rebuilt."""
+        if self._syncing_aia_sun:
+            return
+        from src.backend.solar.coronagraph_composite import is_aia_sun_layer
+
+        colormap = str(text or "").strip()
+        index = next((i for i, spec in enumerate(self._overlay_specs) if is_aia_sun_layer(spec)), None)
+        if not colormap or index is None:
+            return  # remembered by the combo for the next tick
+        self._overlay_specs[index] = replace(self._overlay_specs[index], colormap=colormap)
+        if self._selected_overlay_index() == index:
+            self._sync_overlay_editor()
+        self._apply_layer_edit(self._overlay_specs[index])
 
     def _sync_nrgf_enabled(self) -> None:
         """NRGF applies to plain frames only — differences already remove the
@@ -6731,6 +6769,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         built = None
         if stack is not None:
             built = next((s for s in stack.specs if layer_identity(s) == layer_identity(edited)), None)
+        self._sync_aia_sun_control()
         if built is None or edited.resolved_fov()[1] > built.resolved_fov()[1] + 1e-6:
             self._invalidate_composite("layer settings changed")
             return

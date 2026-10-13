@@ -405,8 +405,10 @@ corona are seen together. The whole AIA image is kept, off-limb corona included,
 and never covers LASCO's own field. The AIA frames come from Helioviewer's JP2 archive, so a day's series builds in
 seconds. The layers are blended each time a frame is drawn, so the colormap, contrast sliders, scale, NRGF filter
 and running or base difference keep working on the composite (in a difference view the AIA image is differenced too),
-and it plays, measures and exports like the plain frames. The layer is listed in <b>Overlay Layers</b>, where its
-colormap, opacity and midtones change instantly. Untick to return to the plain LASCO frames.</li>
+and it plays, measures and exports like the plain frames. <b>AIA colormap</b>, just below the tick box, recolours
+the AIA image at once (AIA passband maps, grey, hot, inferno and others) while the LASCO colormap stays under Display
+&amp; Crop. The layer is also listed in <b>Overlay Layers</b>, where its colormap, opacity and midtones change
+instantly. Untick to return to the plain LASCO frames.</li>
 <li><b>Movies</b> (Movie Export card, or <b>Export MP4</b> above the image) play north up, as on screen, with
 the playback speed and the current colormap, scale, clip and crop. With <b>Frame labels</b> ticked (the default)
 each frame carries its instrument and UTC observation date and time on a thin stripe along the bottom, plus
