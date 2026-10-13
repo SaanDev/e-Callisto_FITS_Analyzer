@@ -2295,6 +2295,27 @@ def _coronagraph_frames(count=3, detector="C2", size=64):
     return [FakeCoronagraphMap(1000.0 / radius, detector) for _ in range(count)]
 
 
+def _fake_stack(count=3, size=64, *, label="AIA 193 A", value=200.0, instrument="AIA", layer_value=193.0):
+    """A built overlay stack: one layer that is ``value`` across the frame."""
+    from src.backend.solar.coronagraph_composite import LayerPlane, LayerSpec, LayerStack
+
+    spec = LayerSpec(instrument, layer_value, label, colormap="sdoaia193", scale="linear",
+                     inner_rsun=0.0, outer_rsun=10.0, feather_rsun=0.01)
+    return LayerStack(
+        specs=[spec],
+        planes=[{("g", 0): LayerPlane(np.full((size, size), value, np.float32), 0, 0)}],
+        keys=[[("g", 0)] * count],
+        centers=[(size / 2.0, size / 2.0)] * count,
+        rsun_px=[size / 4.0] * count,
+        shapes=[(size, size)] * count,
+    )
+
+
+def _with_aia_layer(win):
+    win.overlay_add_combo.setCurrentIndex(win.overlay_add_combo.findText("AIA 193 A"))
+    win.add_overlay_layer()
+
+
 def _rgb_composites(count=3, size=64):
     frames = []
     for _ in range(count):
@@ -2386,10 +2407,9 @@ def test_composite_renders_as_rgb_without_a_colorbar():
     _app()
     win = SolarDataAnalysisWindow()
     win._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
-    win.overlay_add_combo.setCurrentIndex(win.overlay_add_combo.findText("AIA 193 A"))
-    win.add_overlay_layer()
+    _with_aia_layer(win)
 
-    win._composite_frames = _rgb_composites()
+    win._composite_stack = _fake_stack()
     win._render_current_frame()
 
     canvas = win._active_canvas()
@@ -2402,9 +2422,8 @@ def test_composite_renders_as_rgb_without_a_colorbar():
     assert not canvas.has_visible_colorbar()
     # region_stats and the measure tools need a 2-D array.
     assert win._current_map_data.ndim == 2
-    # No build ran here (the cache was seeded directly), so the title falls back
-    # to the generic wording rather than naming layers it cannot vouch for.
-    assert "overlay composite" in win.plot_title_label.text()
+    # The title names the layers actually drawn.
+    assert "+ AIA 193 A" in win.plot_title_label.text()
     win.close()
 
 
@@ -2414,7 +2433,8 @@ def test_composite_survives_region_stats():
 
     win = SolarDataAnalysisWindow()
     win._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
-    win._composite_frames = _rgb_composites()
+    _with_aia_layer(win)
+    win._composite_stack = _fake_stack()
     win._render_current_frame()
 
     stats = region_stats(win._current_map_data, (10, 30, 10, 30))
@@ -2422,16 +2442,25 @@ def test_composite_survives_region_stats():
     win.close()
 
 
-def test_editing_a_layer_invalidates_the_composite():
+def test_layer_styling_applies_live_and_only_a_wider_reach_needs_a_rebuild():
     _app()
     win = SolarDataAnalysisWindow()
     win._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
-    win.overlay_add_combo.setCurrentIndex(win.overlay_add_combo.findText("AIA 193 A"))
-    win.add_overlay_layer()
-    win._composite_frames = _rgb_composites()
+    _with_aia_layer(win)
+    stack = _fake_stack()
+    win._composite_stack = stack
+    win._render_current_frame()
+    before = np.asarray(win._active_canvas().map_image.image).copy()
 
-    win.overlay_opacity_slider.setValue(50)
-    assert win._composite_frames == []
+    # Opacity, colormap and the like are applied when drawing: no rebuild.
+    win.overlay_opacity_slider.setValue(30)
+    assert win._composite_stack is stack
+    after = np.asarray(win._active_canvas().map_image.image)
+    assert not np.array_equal(before, after)
+
+    # Reaching further than the layer was reprojected for needs new pixels.
+    win.overlay_outer_spin.setValue(win._overlay_specs[0].resolved_fov()[1] + 50.0)
+    assert win._composite_stack is None
     win.close()
 
 
@@ -2439,12 +2468,11 @@ def test_clear_composite_keeps_the_layer_stack():
     _app()
     win = SolarDataAnalysisWindow()
     win._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
-    win.overlay_add_combo.setCurrentIndex(win.overlay_add_combo.findText("AIA 193 A"))
-    win.add_overlay_layer()
-    win._composite_frames = _rgb_composites()
+    _with_aia_layer(win)
+    win._composite_stack = _fake_stack()
 
     win.clear_composite()
-    assert win._composite_frames == []
+    assert win._composite_stack is None
     assert len(win._overlay_specs) == 1
     canvas = win._active_canvas()
     assert np.asarray(canvas.map_image.image).ndim == 2
@@ -2455,13 +2483,12 @@ def test_loading_a_new_series_drops_layers_and_composite():
     _app()
     win = SolarDataAnalysisWindow()
     win._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
-    win.overlay_add_combo.setCurrentIndex(win.overlay_add_combo.findText("AIA 193 A"))
-    win.add_overlay_layer()
-    win._composite_frames = _rgb_composites()
+    _with_aia_layer(win)
+    win._composite_stack = _fake_stack()
 
     win._apply_loaded_frames(_coronagraph_frames(detector="C3"), paths=[], metadata={})
     assert win._overlay_specs == []
-    assert win._composite_frames == []
+    assert win._composite_stack is None
     assert win.overlay_list.count() == 0
     win.close()
 
@@ -2513,7 +2540,8 @@ def test_composite_export_uses_raw_rgb_frames(monkeypatch, tmp_path):
     _app()
     win = SolarDataAnalysisWindow()
     win._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
-    win._composite_frames = _rgb_composites()
+    _with_aia_layer(win)
+    win._composite_stack = _fake_stack()
     win._render_current_frame()
 
     out = tmp_path / "movie.gif"
@@ -2593,21 +2621,22 @@ def test_composite_worker_row_selection_deduplicates():
     assert solar_mod.CompositeBuildWorker._rows_for_times(rows, targets) == [0]
 
 
-def test_composite_worker_difference_uses_the_layers_own_cadence():
-    arrays = {0: np.full((2, 2), 1.0), 2: np.full((2, 2), 5.0), 5: np.full((2, 2), 9.0)}
-    running = solar_mod.CompositeBuildWorker._difference(arrays, [0, 2, 5], "running")
-    # Index 2 differences against index 0 (its own predecessor), not a base frame.
-    assert running[2].mean() == pytest.approx(4.0)
-    assert running[5].mean() == pytest.approx(4.0)
+def test_layer_differences_use_the_layers_own_cadence():
+    from src.backend.solar.coronagraph_composite import LayerPlane, LayerStack
 
-    base = solar_mod.CompositeBuildWorker._difference(arrays, [0, 2, 5], "base")
-    assert base[0].mean() == pytest.approx(0.0)
-    assert base[5].mean() == pytest.approx(8.0)
+    planes = {("g", i): LayerPlane(np.full((2, 2), v, np.float32)) for i, v in ((0, 1.0), (2, 5.0), (5, 9.0))}
+    # Five base frames; the slower layer repeats its frames between them.
+    keys = [("g", 0), ("g", 0), ("g", 2), ("g", 5), ("g", 5)]
+    stack = LayerStack([object()], [planes], [keys], [(1.0, 1.0)] * 5, [1.0] * 5, [(2, 2)] * 5)
 
-    # Raw mode and single-frame series are passed straight through.
-    assert solar_mod.CompositeBuildWorker._difference(arrays, [0, 2, 5], "raw") is arrays
-    single = {0: arrays[0]}
-    assert solar_mod.CompositeBuildWorker._difference(single, [0], "running") is single
+    # Source 2 differences against source 0 (its own predecessor), not a base frame.
+    assert stack.plane(0, 2, "running").data.mean() == pytest.approx(4.0)
+    assert stack.plane(0, 3, "running").data.mean() == pytest.approx(4.0)
+    # The first frame shows the first change, as the base view does.
+    assert stack.plane(0, 0, "running").data.mean() == pytest.approx(4.0)
+    assert stack.plane(0, 4, "base").data.mean() == pytest.approx(8.0)
+    assert stack.plane(0, 0, "base").data.mean() == pytest.approx(0.0)
+    assert stack.plane(0, 3, "raw") is planes[("g", 5)]
 
 
 def test_composite_worker_builds_frames_end_to_end(monkeypatch):
@@ -2642,18 +2671,20 @@ def test_composite_worker_builds_frames_end_to_end(monkeypatch):
 
     worker = solar_mod.CompositeBuildWorker(
         base_frames,
-        LayerSpec("LASCO", "C2", "C2", colormap="soholasco2", scale="linear"),
         [LayerSpec("AIA", 193.0, "AIA 193", colormap="sdoaia193", scale="linear")],
     )
     captured = {}
-    worker.finished.connect(lambda frames, notes: captured.update(frames=frames, notes=notes))
+    worker.finished.connect(lambda stack, notes: captured.update(stack=stack, notes=notes))
     worker.run()
 
-    assert "frames" in captured, captured
-    assert len(captured["frames"]) == 3
-    for rgb in captured["frames"]:
-        assert rgb.dtype == np.uint8
-        assert rgb.shape == (64, 64, 3)
+    assert "stack" in captured, captured
+    stack = captured["stack"]
+    assert len(stack) == 3
+    assert [s.label for s in stack.specs] == ["AIA 193"]
+    # Every base frame has a layer frame, kept as data on the base grid.
+    for frame in range(3):
+        plane = stack.plane(0, frame)
+        assert plane is not None and plane.data.dtype == np.float32
     # Nothing was skipped or dropped. The observer note is expected: these fakes
     # carry no DSUN_OBS, exactly like real LASCO level-0.5 headers.
     assert not [n for n in captured["notes"] if "failed" in n or "no matching" in n]
@@ -2673,15 +2704,14 @@ def test_composite_worker_drops_a_failing_layer_with_a_warning(monkeypatch):
 
     worker = solar_mod.CompositeBuildWorker(
         base_frames,
-        LayerSpec("LASCO", "C2", "C2", colormap="soholasco2", scale="linear"),
         [LayerSpec("AIA", 193.0, "AIA 193")],
     )
     captured = {}
-    worker.finished.connect(lambda frames, notes: captured.update(frames=frames, notes=notes))
+    worker.finished.connect(lambda stack, notes: captured.update(stack=stack, notes=notes))
     worker.run()
 
-    # The base still composites; the failure is reported, not raised.
-    assert len(captured["frames"]) == 2
+    # The build finishes without the layer; the failure is reported, not raised.
+    assert len(captured["stack"]) == 2 and captured["stack"].specs == []
     assert any("No AIA 193 records" in note for note in captured["notes"])
 
 
@@ -2705,14 +2735,13 @@ def test_composite_worker_reports_reprojection_failure(monkeypatch):
 
     worker = solar_mod.CompositeBuildWorker(
         _coronagraph_frames(count=2),
-        LayerSpec("LASCO", "C2", "C2", colormap="soholasco2", scale="linear"),
         [LayerSpec("AIA", 193.0, "AIA 193")],
     )
     captured = {}
-    worker.finished.connect(lambda frames, notes: captured.update(frames=frames, notes=notes))
+    worker.finished.connect(lambda stack, notes: captured.update(stack=stack, notes=notes))
     worker.run()
 
-    assert len(captured["frames"]) == 2
+    assert len(captured["stack"]) == 2
     assert any("reprojection failed" in note for note in captured["notes"])
 
 
@@ -2721,7 +2750,6 @@ def test_composite_worker_emits_cancelled(monkeypatch):
 
     worker = solar_mod.CompositeBuildWorker(
         _coronagraph_frames(count=2),
-        LayerSpec("LASCO", "C2", "C2"),
         [LayerSpec("AIA", 193.0, "AIA 193")],
     )
     worker.cancel()
@@ -2735,7 +2763,7 @@ def test_composite_worker_emits_cancelled(monkeypatch):
 def test_composite_worker_requires_base_frames():
     from src.backend.solar.coronagraph_composite import LayerSpec
 
-    worker = solar_mod.CompositeBuildWorker([], LayerSpec("LASCO", "C2", "C2"), [])
+    worker = solar_mod.CompositeBuildWorker([], [])
     seen = {}
     worker.failed.connect(lambda tb: seen.update(tb=tb))
     worker.run()
@@ -2781,19 +2809,19 @@ def test_composite_worker_handles_mixed_image_geometries(monkeypatch):
 
     worker = solar_mod.CompositeBuildWorker(
         base_frames,
-        LayerSpec("LASCO", "C3", "C3", colormap="soholasco3", scale="linear"),
         [LayerSpec("LASCO", "C2", "C2", colormap="soholasco2", scale="linear")],
         window_minutes=120,
     )
     captured = {}
-    worker.finished.connect(lambda frames, notes: captured.update(frames=frames, notes=notes))
+    worker.finished.connect(lambda stack, notes: captured.update(stack=stack, notes=notes))
     worker.run()
 
-    frames, notes = captured["frames"], captured["notes"]
-    assert len(frames) == 4
-    # Each composite matches the shape of the base frame it came from.
-    assert [f.shape[:2] for f in frames] == [(64, 64), (32, 32), (64, 64), (32, 32)]
-    assert all(f.dtype == np.uint8 for f in frames)
+    stack, notes = captured["stack"], captured["notes"]
+    assert len(stack) == 4
+    # Each frame keeps the shape of its own grid, and its layer was reprojected
+    # onto that grid.
+    assert stack.shapes == [(64, 64), (32, 32), (64, 64), (32, 32)]
+    assert [stack.plane(0, i).data.shape for i in range(4)] == [(64, 64), (32, 32), (64, 64), (32, 32)]
     assert any("mixes 2 image geometries" in note for note in notes)
 
 
@@ -2829,14 +2857,13 @@ def test_composite_worker_reports_an_empty_time_window(monkeypatch):
         lambda self, path, spec: layer_frames[int(path[5:-5])],
     )
     worker = solar_mod.CompositeBuildWorker(
-        base_frames, LayerSpec("LASCO", "C3", "C3"),
-        [LayerSpec("LASCO", "C2", "C2")], window_minutes=30,
+        base_frames, [LayerSpec("LASCO", "C2", "C2")], window_minutes=30,
     )
     captured = {}
-    worker.finished.connect(lambda frames, notes: captured.update(frames=frames, notes=notes))
+    worker.finished.connect(lambda stack, notes: captured.update(stack=stack, notes=notes))
     worker.run()
 
-    assert len(captured["frames"]) == 2
+    assert len(captured["stack"]) == 2
     assert any("none fell within" in note and "widen" in note.lower()
                for note in captured["notes"])
 
@@ -2899,7 +2926,7 @@ def test_no_records_message_explains_a_pre_launch_date():
     """Asking for AIA over 1997 LASCO must say why, not just 'no records'."""
     from src.backend.solar.coronagraph_composite import LayerSpec
 
-    worker = solar_mod.CompositeBuildWorker([], LayerSpec("LASCO", "C2", "C2"), [])
+    worker = solar_mod.CompositeBuildWorker([], [])
     message = worker._no_records_message(
         LayerSpec("AIA", 193.0, "AIA 193"),
         [datetime(1997, 11, 14, 3, 0), datetime(1997, 11, 14, 5, 0)],
@@ -2912,9 +2939,7 @@ def test_no_records_message_explains_a_pre_launch_date():
 def test_no_records_message_for_a_date_the_instrument_covers():
     from src.backend.solar.coronagraph_composite import LayerSpec
 
-    worker = solar_mod.CompositeBuildWorker(
-        [], LayerSpec("LASCO", "C2", "C2"), [], window_minutes=30
-    )
+    worker = solar_mod.CompositeBuildWorker([], [], window_minutes=30)
     message = worker._no_records_message(
         LayerSpec("AIA", 193.0, "AIA 193"),
         [datetime(2020, 8, 16, 9, 0), datetime(2020, 8, 16, 11, 0)],
@@ -2923,8 +2948,8 @@ def test_no_records_message_for_a_date_the_instrument_covers():
     assert "Widen" in message
 
 
-def test_raw_mode_does_not_materialise_every_base_frame(monkeypatch):
-    """Raw builds must read base pixels per frame, not hold the whole series."""
+def test_a_build_does_not_hold_the_base_series(monkeypatch):
+    """The build keeps only layer data; base pixels are read when drawn."""
     from src.backend.solar.coronagraph_composite import LayerSpec
 
     reads = {"n": 0}
@@ -2945,15 +2970,12 @@ def test_raw_mode_does_not_materialise_every_base_frame(monkeypatch):
         frame.date = f"2020-08-16T09:{i * 10:02d}:00"
         frames.append(frame)
 
-    worker = solar_mod.CompositeBuildWorker(
-        frames, LayerSpec("LASCO", "C3", "C3", scale="linear"), [], difference_mode="raw"
-    )
+    worker = solar_mod.CompositeBuildWorker(frames, [])
     captured = {}
-    worker.finished.connect(lambda f, n: captured.update(frames=f))
+    worker.finished.connect(lambda stack, n: captured.update(stack=stack))
     worker.run()
-    assert len(captured["frames"]) == 4
-    # Composited lazily: no dict of every frame's pixels is built up front.
-    assert reads["n"] > 0
+    assert len(captured["stack"]) == 4
+    assert captured["stack"].planes == []
 
 
 # --------------------------------------------------------------------------- #
@@ -3137,24 +3159,22 @@ def test_gamma_slider_writes_back_to_the_selected_layer():
 
 
 def test_title_names_the_layers_actually_composited():
-    """Regression: the title read the live spec list, so editing or clearing
-    the stack after a build made it claim "+ 0 overlay layer(s)" over a
-    composite that plainly showed one."""
+    """The title names exactly the layers drawn — never "+ 0 overlay layer(s)"."""
     _app()
     win = SolarDataAnalysisWindow()
     win._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
-    win.overlay_add_combo.setCurrentIndex(win.overlay_add_combo.findText("AIA 193 A"))
-    win.add_overlay_layer()
+    _with_aia_layer(win)
 
     win._composite_pending_labels = ["AIA 193 A"]
-    win._on_composite_finished(_rgb_composites(), [])
-    assert "AIA 193 A" in win.plot_title_label.text()
+    win._on_composite_finished(_fake_stack(), [])
+    assert "+ AIA 193 A" in win.plot_title_label.text()
 
-    # Emptying the stack must not rewrite the title of the composite on screen.
+    # A layer removed from the stack is no longer drawn, and the title says so.
     win._overlay_specs = []
     win._render_current_frame()
-    assert "AIA 193 A" in win.plot_title_label.text()
+    assert "AIA 193 A" not in win.plot_title_label.text()
     assert "0 overlay" not in win.plot_title_label.text()
+    assert np.asarray(win._active_canvas().map_image.image).ndim == 2
     win.close()
 
 
@@ -3162,8 +3182,9 @@ def test_clearing_the_composite_drops_its_labels():
     _app()
     win = SolarDataAnalysisWindow()
     win._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
+    _with_aia_layer(win)
     win._composite_pending_labels = ["AIA 193 A"]
-    win._on_composite_finished(_rgb_composites(), [])
+    win._on_composite_finished(_fake_stack(), [])
     win.clear_composite()
     assert win._composite_labels == []
     assert "AIA 193 A" not in win.plot_title_label.text()
@@ -3199,13 +3220,12 @@ def test_partial_overlap_is_reported(monkeypatch):
 
     worker = solar_mod.CompositeBuildWorker(
         base_frames,
-        LayerSpec("LASCO", "C2", "C2", colormap="soholasco2", scale="linear"),
         [LayerSpec("SECCHI", ("STEREO_A", "EUVI", 195.0), "EUVI 195",
                    inner_rsun=0.0, outer_rsun=1.7)],
         window_minutes=240,
     )
     captured = {}
-    worker.finished.connect(lambda f, n: captured.update(frames=f, notes=n))
+    worker.finished.connect(lambda stack, n: captured.update(stack=stack, notes=n))
     worker.run()
 
     notes = captured["notes"]
@@ -4133,19 +4153,19 @@ def test_unticking_frame_labels_exports_a_clean_movie(monkeypatch, tmp_path):
     win.close()
 
 
-def test_composite_movie_labels_name_the_layers_and_the_build_mode(monkeypatch, tmp_path):
+def test_composite_movie_labels_name_the_layers_and_the_current_mode(monkeypatch, tmp_path):
     _app()
     win = SolarDataAnalysisWindow()
     win._apply_loaded_frames(_coronagraph_frames(), paths=[], metadata={})
-    win._composite_frames = _rgb_composites()
-    win._composite_labels = ["AIA 193"]
-    win._composite_mode = "running"
-    win.movie_content_combo.setCurrentText("Frames")  # changed after the build
+    _with_aia_layer(win)
+    win._composite_stack = _fake_stack()
+    monkeypatch.setattr(win, "_set_difference_mode", lambda mode: None)
+    win.movie_content_combo.setCurrentText("Running Difference")
 
     spec = _start_movie_export(win, monkeypatch, tmp_path)
-    assert spec.mode == "raw"
+    assert spec.mode == "raw"  # the frames are blended RGB already
     first = spec.frame_labels[0]
-    assert first[0].endswith("+ AIA 193")
+    assert first[0].endswith("+ AIA 193 A")
     assert first[-1] == "Running difference"
     win.close()
 
@@ -4209,10 +4229,10 @@ def test_ticking_the_aia_sun_adds_its_layer_and_builds_and_unticking_restores(mo
     assert win.overlay_list.count() == 1
 
     win._set_busy(False)
-    win._composite_frames = _rgb_composites()
+    win._composite_stack = _fake_stack(label=AIA_SUN_LABEL)
     win.aia_sun_check.setChecked(False)
     assert win._overlay_specs == []
-    assert win._composite_frames == []
+    assert win._composite_stack is None
     assert len(started) == 1  # nothing left to build
     win.close()
 
@@ -4274,7 +4294,7 @@ def test_a_jp2_layer_is_listed_downloaded_and_decoded_from_helioviewer(monkeypat
     monkeypatch.setattr(direct_archives, "search_jp2", fake_search)
     monkeypatch.setattr(direct_archives, "fetch_direct", fake_fetch)
     worker = solar_mod.CompositeBuildWorker(
-        [], LayerSpec("LASCO", "C2"), [aia_sun_layer("LASCO", "C2")], window_minutes=10, cache_dir=tmp_path
+        [], [aia_sun_layer("LASCO", "C2")], window_minutes=10, cache_dir=tmp_path
     )
     paths, times = worker._layer_sources(aia_sun_layer("LASCO", "C2"), base_times)
 
@@ -4320,8 +4340,119 @@ def test_a_layer_is_reprojected_only_inside_its_reach_with_the_same_result():
     source = make(128, 19.2, "AIA", "AIA", lambda n: np.arange(n * n, dtype=np.float32).reshape(n, n))
     spec = aia_sun_layer("LASCO", "C2")
 
-    boxed = solar_mod.CompositeBuildWorker._reproject_layer(source, base, spec, "spherical")
+    plane = solar_mod.CompositeBuildWorker._reproject_layer(source, base, spec, "spherical")
+    assert plane.data.shape[0] < 160 and plane.data.shape[1] < 160  # only the box is kept
+    boxed = np.full((160, 160), np.nan, np.float32)
+    h, w = plane.data.shape
+    boxed[plane.y0 : plane.y0 + h, plane.x0 : plane.x0 + w] = plane.data
     full = np.asarray(reproject_map_to(source, base, screen="spherical").data, dtype=np.float32)
     assert boxed.shape == full.shape
     assert np.array_equal(np.isfinite(boxed), np.isfinite(full))
     assert np.allclose(boxed[np.isfinite(boxed)], full[np.isfinite(full)])
+
+
+# -- Live composites: the view controls keep working with overlay layers ----------------
+
+
+def _composite_window(monkeypatch):
+    from src.backend.solar.coronagraph_composite import AIA_SUN_LABEL, LayerPlane, aia_sun_layer
+
+    _app()
+    win = SolarDataAnalysisWindow()
+    frames = _coronagraph_frames(count=3)
+    yy, xx = np.mgrid[0:64, 0:64]
+    for i, frame in enumerate(frames):
+        # A bright blob moving outward, as a CME front would.
+        frame.data = frame.data + 400.0 * np.exp(-((xx - 10 - 12 * i) ** 2 + (yy - 50) ** 2) / 20.0)
+    win._apply_loaded_frames(frames, paths=[], metadata={})
+    win._overlay_specs = [aia_sun_layer("LASCO", "C2")]
+    stack = _fake_stack(label=AIA_SUN_LABEL, layer_value=193.0)
+    # A small disk in the centre, brightening too.
+    for i in range(3):
+        disk = np.full((64, 64), np.nan, np.float32)
+        disk[28:36, 28:36] = 100.0 + 50.0 * i + 5.0 * np.arange(8)[None, :]
+        stack.planes[0][("g", i)] = LayerPlane(disk, 0, 0)
+    stack.keys[0] = [("g", 0), ("g", 1), ("g", 2)]
+    stack.specs[0] = aia_sun_layer("LASCO", "C2")
+    win._composite_stack = stack
+    win._refresh_overlay_list()
+    return win
+
+
+def _painted(win):
+    win._render_current_frame()
+    return np.asarray(win._active_canvas().map_image.image).copy()
+
+
+def test_colormap_contrast_and_scale_change_a_composite(monkeypatch):
+    win = _composite_window(monkeypatch)
+    original = _painted(win)
+    assert original.ndim == 3
+
+    win.colormap_combo.setCurrentText("gray")
+    grey = _painted(win)
+    assert not np.array_equal(original, grey)
+    corona = grey[5:20, 5:20]
+    assert np.all(corona[..., 0] == corona[..., 1])  # the LASCO part is grey now
+    assert not np.array_equal(grey[30:34, 30:34, 0], grey[30:34, 30:34, 2])  # AIA keeps its own colours
+
+    win.clip_high_slider.setValue(60.0)
+    assert not np.array_equal(grey, _painted(win))
+    contrast = _painted(win)
+    win.scale_combo.setCurrentText("log" if win.scale_combo.currentText() != "log" else "linear")
+    assert not np.array_equal(contrast, _painted(win))
+    win.close()
+
+
+def test_running_difference_and_nrgf_apply_to_a_composite(monkeypatch):
+    win = _composite_window(monkeypatch)
+    win._current_frame_index = 1
+    plain = _painted(win)
+
+    win.movie_content_combo.setCurrentText("Running Difference")
+    diff = _painted(win)
+    assert "Running Difference" in win.plot_title_label.text()
+    assert "+ AIA 193 Sun" in win.plot_title_label.text()
+    assert not np.array_equal(plain, diff)
+    # The AIA layer is differenced in step: frame 1 minus frame 0 is a flat +50.
+    plane = win._composite_stack.plane(0, 1, "running")
+    assert np.nanmax(plane.data) == pytest.approx(50.0)
+
+    win.movie_content_combo.setCurrentText("Frames")
+    win.nrgf_check.setChecked(True)
+    filtered = _painted(win)
+    assert "(NRGF)" in win.plot_title_label.text()
+    assert not np.array_equal(plain, filtered)
+    win.close()
+
+
+def test_a_cropped_composite_stays_registered(monkeypatch):
+    win = _composite_window(monkeypatch)
+    win._composite_stack = win._composite_stack.cropped((16, 48, 16, 48))
+    from src.backend.solar.solar_data_analysis import crop_maps
+
+    win._map_frames = crop_maps(win._map_frames, (16, 48, 16, 48))
+    painted = _painted(win)
+    assert painted.shape == (32, 32, 3)
+    plane = win._composite_stack.plane(0, 0)
+    assert (plane.y0, plane.x0) == (0, 0) and plane.data.shape == (32, 32)
+    assert np.isfinite(plane.data[12:20, 12:20]).all()  # the disk moved with the crop
+    win.close()
+
+
+def test_composite_movie_frames_match_the_screen(monkeypatch, tmp_path):
+    win = _composite_window(monkeypatch)
+    win.colormap_combo.setCurrentText("gray")
+    win.movie_content_combo.setCurrentText("Running Difference")
+    win._current_frame_index = 2
+    on_screen = _painted(win)
+
+    monkeypatch.setattr(solar_mod, "pick_export_path", lambda *a, **k: (str(tmp_path / "m.gif"), ""))
+    started = []
+    monkeypatch.setattr(win, "_start_worker", lambda worker: started.append(worker))
+    win.export_movie()
+    frames = started[0]._frames
+    assert started[0]._spec.mode == "raw"
+    assert np.array_equal(np.asarray(frames[2].data), on_screen)
+    win._set_busy(False)
+    win.close()

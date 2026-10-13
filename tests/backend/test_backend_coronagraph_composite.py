@@ -517,3 +517,69 @@ def test_the_whole_aia_square_is_painted_inside_the_occulter_and_nothing_outside
     assert with_sun[corner].sum() > plain[corner].sum()
     outside = radius > 2.3
     assert np.array_equal(with_sun[outside], plain[outside])
+
+
+# -- Live composites: layers kept as data, blended when drawn -------------------------
+
+
+def _disk_case():
+    from src.backend.solar import coronagraph_composite as cc
+
+    size, rsun_px, center = 120, 15.0, (60.0, 60.0)
+    yy, xx = np.mgrid[0:size, 0:size]
+    radius = np.hypot(xx - center[0], yy - center[1]) / rsun_px
+    base = np.where(radius > 2.2, 40.0 + 10.0 * np.sin(xx / 7.0), 0.0)
+    disk = np.where(radius < 1.6, 80.0 + xx * 0.5, np.nan).astype(np.float32)
+    spec = cc.aia_sun_layer("LASCO", "C2")
+    base_spec = cc.LayerSpec("LASCO", "C2", colormap="gray", scale="linear")
+    return cc, base, disk, spec, base_spec, center, rsun_px
+
+
+def test_blending_a_built_stack_matches_the_one_shot_compositor():
+    cc, base, disk, spec, base_spec, center, rsun_px = _disk_case()
+    stack = cc.LayerStack([spec], [{("g", 0): cc.LayerPlane(disk)}], [[("g", 0)]], [center], [rsun_px], [disk.shape])
+    expected = cc.composite_frame(base, base_spec, [(spec, disk)], center=center, rsun_px=rsun_px)
+    assert np.array_equal(cc.blend_stack_frame(base, base_spec, stack, 0), expected)
+
+    # Only the box around the disk needs keeping; the result is the same.
+    rows, cols = np.nonzero(np.isfinite(disk))
+    y0, y1, x0, x1 = rows.min() - 2, rows.max() + 3, cols.min() - 2, cols.max() + 3
+    boxed = cc.LayerStack(
+        [spec], [{("g", 0): cc.LayerPlane(disk[y0:y1, x0:x1], y0, x0)}], [[("g", 0)]], [center], [rsun_px], [disk.shape]
+    )
+    assert np.array_equal(cc.blend_stack_frame(base, base_spec, boxed, 0), expected)
+
+
+def test_the_base_styling_changes_only_the_base_and_current_layer_styling_applies():
+    cc, base, disk, spec, base_spec, center, rsun_px = _disk_case()
+    stack = cc.LayerStack([spec], [{("g", 0): cc.LayerPlane(disk)}], [[("g", 0)]], [center], [rsun_px], [disk.shape])
+    grey = cc.blend_stack_frame(base, base_spec, stack, 0)
+    red = cc.blend_stack_frame(base, cc.LayerSpec("LASCO", "C2", colormap="soholasco2", scale="linear"), stack, 0)
+    inside = (60, 60)
+    outside = (5, 60)
+    assert np.array_equal(grey[inside], red[inside])
+    assert not np.array_equal(grey[outside], red[outside])
+
+    from dataclasses import replace
+
+    hidden = cc.blend_stack_frame(base, base_spec, stack, 0, specs=[replace(spec, enabled=False)])
+    plain = cc.composite_frame(base, base_spec, [], center=center, rsun_px=rsun_px)
+    assert np.array_equal(hidden, plain)
+    assert np.array_equal(cc.blend_stack_frame(base, base_spec, stack, 0, specs=[None]), plain)
+
+
+def test_cropping_a_stack_keeps_layers_registered():
+    cc, base, disk, spec, base_spec, center, rsun_px = _disk_case()
+    stack = cc.LayerStack([spec], [{("g", 0): cc.LayerPlane(disk)}], [[("g", 0)]], [center], [rsun_px], [disk.shape])
+    bounds = (30, 100, 20, 90)  # x0, x1, y0, y1
+    cropped = stack.cropped(bounds)
+    assert cropped.centers == [(30.0, 40.0)]
+    assert cropped.shapes == [(70, 70)]
+    expected = cc.blend_stack_frame(base, base_spec, stack, 0)[20:90, 30:100]
+    got = cc.blend_stack_frame(base[20:90, 30:100], base_spec, cropped, 0)
+    # The base's own percentile stretch is computed over the crop, so compare
+    # where the layer is drawn.
+    plane = cropped.plane(0, 0)
+    region = np.isfinite(plane.data)
+    assert np.array_equal(got[plane.y0 : plane.y0 + plane.data.shape[0], plane.x0 : plane.x0 + plane.data.shape[1]][region],
+                          expected[plane.y0 : plane.y0 + plane.data.shape[0], plane.x0 : plane.x0 + plane.data.shape[1]][region])

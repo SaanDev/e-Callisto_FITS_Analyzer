@@ -51,7 +51,7 @@ def window():
     _app()
     win = SolarDataAnalysisWindow()
     win._map_frames = _frames()
-    win._composite_frames = []
+    win._composite_stack = None
     win._exposure_varies = False
     win.frame_slider.setMaximum(len(win._map_frames) - 1)
     try:

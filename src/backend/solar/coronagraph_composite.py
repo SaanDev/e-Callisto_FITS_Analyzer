@@ -459,6 +459,177 @@ def composite_frame(
 
 
 # --------------------------------------------------------------------------- #
+# Live composites: layers kept as data, blended at display time
+# --------------------------------------------------------------------------- #
+@dataclass
+class LayerPlane:
+    """One reprojected layer frame on (a box of) the base grid.
+
+    ``data`` is float32 with NaN where the layer has nothing; ``(y0, x0)`` is
+    where the box starts in the base frame. A disk layer inside a LASCO C2
+    occulter needs ~360 of the frame's 1024 px, so storing only the box keeps a
+    long series light.
+    """
+
+    data: np.ndarray
+    y0: int = 0
+    x0: int = 0
+
+
+@dataclass
+class LayerStack:
+    """Reprojected overlay layers for every base frame, blended when drawn.
+
+    A composite used to be baked into RGB at build time, which froze the base
+    frame's colormap, clip, scale, filter and difference mode at whatever they
+    were then. Keeping the layers as data and blending per draw lets every view
+    control keep working on a composite, and layer styling apply without a
+    rebuild.
+
+    ``planes[layer]`` maps a key — ``(geometry, source_index)`` — to a plane;
+    ``keys[layer][frame]`` is the key a base frame shows (``None`` when that
+    layer had no frame near it). Differencing is done in the layer's own
+    cadence, against its own previous source frame on the same geometry, so a
+    slower layer does not difference to blank when consecutive base frames
+    share a source frame.
+    """
+
+    specs: list[LayerSpec]
+    planes: list[dict[Any, LayerPlane]]
+    keys: list[list[Any]]
+    centers: list[tuple[float, float]]
+    rsun_px: list[float]
+    shapes: list[tuple[int, int]]
+
+    def __len__(self) -> int:
+        return len(self.centers)
+
+    def plane(self, layer: int, frame: int, mode: str = "raw") -> LayerPlane | None:
+        """Layer ``layer`` for base frame ``frame``, differenced per ``mode``."""
+        if not (0 <= layer < len(self.keys)) or not (0 <= frame < len(self.keys[layer])):
+            return None
+        key = self.keys[layer][frame]
+        planes = self.planes[layer]
+        if key is None or key not in planes:
+            return None
+        current = planes[key]
+        mode = str(mode or "raw").strip().lower()
+        if mode not in ("running", "base"):
+            return current
+        geometry = key[0] if isinstance(key, tuple) else None
+        order = sorted(
+            (k for k in planes if (k[0] if isinstance(k, tuple) else None) == geometry),
+            key=lambda k: k[1] if isinstance(k, tuple) else k,
+        )
+        if len(order) < 2:
+            return current
+        position = order.index(key)
+        if mode == "base":
+            data = current.data - planes[order[0]].data
+        elif position > 0:
+            data = current.data - planes[order[position - 1]].data
+        else:
+            # The first frame shows the first change, as the base view does.
+            data = planes[order[1]].data - current.data
+        return LayerPlane(data.astype(np.float32, copy=False), current.y0, current.x0)
+
+    def cropped(self, bounds: tuple[int, int, int, int]) -> "LayerStack":
+        """The stack for frames cropped to ``(x0, x1, y0, y1)`` of each frame."""
+        cx0, cx1, cy0, cy1 = (int(v) for v in bounds)
+        new_planes: list[dict[Any, LayerPlane]] = []
+        for planes in self.planes:
+            cut: dict[Any, LayerPlane] = {}
+            for key, plane in planes.items():
+                h, w = plane.data.shape[:2]
+                top, left = max(plane.y0, cy0), max(plane.x0, cx0)
+                bottom, right = min(plane.y0 + h, cy1), min(plane.x0 + w, cx1)
+                if bottom <= top or right <= left:
+                    continue
+                cut[key] = LayerPlane(
+                    plane.data[top - plane.y0 : bottom - plane.y0, left - plane.x0 : right - plane.x0],
+                    top - cy0,
+                    left - cx0,
+                )
+            new_planes.append(cut)
+        return LayerStack(
+            specs=list(self.specs),
+            planes=new_planes,
+            keys=[list(keys) for keys in self.keys],
+            centers=[(cx - cx0, cy - cy0) for cx, cy in self.centers],
+            rsun_px=list(self.rsun_px),
+            shapes=[(max(0, min(h, cy1) - cy0), max(0, min(w, cx1) - cx0)) for h, w in self.shapes],
+        )
+
+
+def layer_identity(spec: Any) -> tuple:
+    """What makes two specs the same layer, whatever their styling."""
+    value = getattr(spec, "value", None)
+    if isinstance(value, list):
+        value = tuple(value)
+    return (str(getattr(spec, "instrument", "")).upper(), value, str(getattr(spec, "label", "")))
+
+
+def blend_stack_frame(
+    base_data: Any,
+    base_spec: LayerSpec,
+    stack: LayerStack,
+    frame: int,
+    *,
+    mode: str = "raw",
+    specs: Sequence[LayerSpec | None] | None = None,
+) -> np.ndarray:
+    """One composite frame: ``base_data`` as given, the stack's layers over it.
+
+    ``base_data`` is the base frame exactly as the view processed it (filtered,
+    differenced); ``base_spec`` carries the view's colormap, scale and clip.
+    ``specs`` gives each stack layer's *current* styling (``None`` or disabled
+    leaves it out); by default the styling it was built with. Each layer is
+    painted only inside its box, widest field of view first.
+    """
+    out = layer_rgb(base_data, base_spec)
+    base_plane = np.asarray(base_data, dtype=float)
+    if base_plane.ndim == 3:
+        base_plane = np.nanmean(base_plane[..., :3], axis=2)
+    out = np.where(np.isfinite(base_plane)[..., None], out, 0.0)
+    if not (0 <= frame < len(stack)):
+        return np.clip(out * 255.0, 0.0, 255.0).astype(np.uint8)
+    center = stack.centers[frame]
+    rsun = stack.rsun_px[frame]
+    styles = list(specs) if specs is not None else list(stack.specs)
+
+    layers: list[tuple[LayerSpec, LayerPlane]] = []
+    for index, spec in enumerate(styles):
+        if spec is None or not spec.enabled:
+            continue
+        plane = stack.plane(index, frame, mode)
+        if plane is not None:
+            layers.append((spec, plane))
+    for spec, plane in order_layers(layers):
+        h, w = plane.data.shape[:2]
+        top, left = max(0, plane.y0), max(0, plane.x0)
+        bottom, right = min(out.shape[0], plane.y0 + h), min(out.shape[1], plane.x0 + w)
+        if bottom <= top or right <= left:
+            continue
+        data = plane.data[top - plane.y0 : bottom - plane.y0, left - plane.x0 : right - plane.x0]
+        inner, outer = spec.resolved_fov()
+        alpha = radial_alpha_mask(
+            data.shape[:2],
+            (center[0] - left, center[1] - top),
+            rsun,
+            inner_rsun=inner,
+            outer_rsun=outer,
+            feather_rsun=spec.feather_rsun,
+        )
+        alpha = np.where(np.isfinite(data), alpha * float(np.clip(spec.opacity, 0.0, 1.0)), 0.0)
+        if not (alpha > 0).any():
+            continue
+        rgb = layer_rgb(data, spec, visible=alpha > 0.0)
+        region = out[top:bottom, left:right]
+        out[top:bottom, left:right] = rgb * alpha[..., None] + region * (1.0 - alpha[..., None])
+    return np.clip(out * 255.0, 0.0, 255.0).astype(np.uint8)
+
+
+# --------------------------------------------------------------------------- #
 # Time matching
 # --------------------------------------------------------------------------- #
 def match_layer_frames(

@@ -62,7 +62,6 @@ from PySide6.QtWidgets import (
 )
 
 from src.backend.solar.solar_data_analysis import (
-    AiaArrayMap,
     AiaCompositeSpec,
     AiaMovieExportSpec,
     AiaRegion,
@@ -70,7 +69,6 @@ from src.backend.solar.solar_data_analysis import (
     apply_display_scale,
     finite_percentiles,
     subsample_for_statistics,
-    crop_array,
     crop_maps,
     detect_active_regions,
     export_movie,
@@ -448,23 +446,45 @@ class MovieExportWorker(QObject):
             self.failed.emit(traceback.format_exc())
 
 
+class _LazyRgbFrame:
+    """A movie frame whose RGB pixels are produced when the exporter reads them.
+
+    Composite movies are blended frame by frame inside the export worker rather
+    than all at once on the UI thread. Carries the base frame's metadata so the
+    exporter and the captions treat it like the frame it stands for.
+    """
+
+    def __init__(self, render: Any, index: int, source: Any):
+        self._render = render
+        self._index = int(index)
+        self.meta = dict(getattr(source, "meta", None) or {})
+        for attr in ("observatory", "instrument", "detector", "wavelength", "date", "nickname"):
+            setattr(self, attr, getattr(source, attr, ""))
+
+    @property
+    def data(self) -> np.ndarray:
+        return self._render(self._index)
+
+
 class CompositeBuildWorker(QObject):
-    """Downloads, reprojects and blends overlay layers off the UI thread.
+    """Downloads and reprojects overlay layers off the UI thread.
 
-    The whole pipeline lives in one worker — search, fetch, load, reproject,
-    composite — because the stages are strictly sequential per layer and a single
-    worker keeps cancellation and progress reporting in one place. Reprojection
-    alone runs seconds per frame, so this must never touch the render path.
+    The whole pipeline lives in one worker — search, fetch, load, reproject —
+    because the stages are strictly sequential per layer and a single worker
+    keeps cancellation and progress reporting in one place. Reprojection alone
+    runs seconds per frame, so this must never touch the render path.
 
-    Emits ``finished(composites, warnings)`` where ``composites`` is one RGB
-    uint8 array per base frame. Layers that fail (no archive data, unusable WCS)
-    are dropped with a warning rather than aborting the build: a partial
+    Emits ``finished(stack, warnings)`` where ``stack`` is a
+    :class:`LayerStack`: the layers as reprojected data for every base frame,
+    blended when drawn so the view's colormap, clip, scale, filter and
+    difference mode keep applying. Layers that fail (no archive data, unusable
+    WCS) are dropped with a warning rather than aborting the build: a partial
     composite is still worth looking at.
     """
 
     progress = Signal(object, object)      # percent-or-None, status text
     build_progress = Signal(int, int)      # done, total
-    finished = Signal(object, object)      # list[np.ndarray], list[str]
+    finished = Signal(object, object)      # LayerStack, list[str]
     failed = Signal(str)
     cancelled = Signal()
 
@@ -481,20 +501,16 @@ class CompositeBuildWorker(QObject):
     def __init__(
         self,
         base_frames: list[Any],
-        base_spec: Any,
         layer_specs: list[Any],
         *,
         window_minutes: int = 30,
         cache_dir: Any = None,
-        difference_mode: str = "raw",
     ):
         super().__init__()
         self._base_frames = list(base_frames)
-        self._base_spec = base_spec
         self._layer_specs = list(layer_specs)
         self._window_minutes = max(1, int(window_minutes))
         self._cache_dir = cache_dir
-        self._difference_mode = str(difference_mode or "raw").strip().lower()
         self._cancel = threading.Event()
 
     def cancel(self):
@@ -741,16 +757,19 @@ class CompositeBuildWorker(QObject):
 
     @classmethod
     def _reproject_layer(cls, source: Any, target: Any, spec: Any, screen: str) -> Any:
-        """``source`` on ``target``'s grid, as float32 with NaN where it has no data.
+        """``source`` reprojected onto ``target``'s grid, as a :class:`LayerPlane`.
 
         Pixels beyond the layer's outer edge are discarded by the blend, so a
         layer that only reaches a few solar radii (the AIA Sun in a LASCO C2
         occulter spans ~360 of 1024 px) is reprojected onto just the box around
-        that edge — reprojection cost follows the number of output pixels.
+        that edge — reprojection cost follows the number of output pixels — and
+        only that box is kept. Targets that cannot be cut (no world
+        coordinates to cut by) are reprojected whole.
         """
         import astropy.units as u
         import numpy as _np
 
+        from src.backend.solar.coronagraph_composite import LayerPlane
         from src.backend.solar.multiview import reproject_map_to
 
         shape = _np.asarray(getattr(target, "data")).shape[:2]
@@ -765,49 +784,24 @@ class CompositeBuildWorker(QObject):
                 box = (x0, x1, y0, y1)
         except Exception:
             box = None
-        if box is None:
-            reprojected = reproject_map_to(source, target, screen=screen)
-            return _np.asarray(getattr(reprojected, "data"), dtype=_np.float32)
-
-        x0, x1, y0, y1 = box
-        sub = target.submap([x0, y0] * u.pix, top_right=[x1 - 1, y1 - 1] * u.pix)
-        part = _np.asarray(getattr(reproject_map_to(source, sub, screen=screen), "data"), dtype=_np.float32)
-        # Where the submap starts in the full grid: its reference pixel moved by
-        # exactly the offset of its first pixel.
-        dx = int(round(float(target.wcs.wcs.crpix[0]) - float(sub.wcs.wcs.crpix[0])))
-        dy = int(round(float(target.wcs.wcs.crpix[1]) - float(sub.wcs.wcs.crpix[1])))
-        out = _np.full(shape, _np.nan, dtype=_np.float32)
-        h = max(0, min(part.shape[0], shape[0] - dy))
-        w = max(0, min(part.shape[1], shape[1] - dx))
-        out[dy : dy + h, dx : dx + w] = part[:h, :w]
-        return out
-
-    @staticmethod
-    def _difference(arrays: dict[int, Any], order: list[int], mode: str) -> dict[int, Any]:
-        """Difference a layer within its own series, keyed by source-frame index.
-
-        Differencing against the layer's own previous frame (not the previous
-        *base* frame) matters when cadences differ: consecutive base frames often
-        match the same slower layer frame, which would otherwise give a blank
-        difference.
-        """
-        if mode not in ("running", "base") or len(order) < 2:
-            return arrays
-        out: dict[int, Any] = {}
-        first = arrays[order[0]]
-        for position, index in enumerate(order):
-            current = arrays[index]
-            if mode == "base":
-                reference = first
-            else:
-                reference = arrays[order[position - 1]] if position > 0 else arrays[order[1]]
+        if box is not None and hasattr(target, "submap"):
+            x0, x1, y0, y1 = box
             try:
-                out[index] = (
-                    current - reference if mode == "base" or position > 0 else reference - current
+                sub = target.submap([x0, y0] * u.pix, top_right=[x1 - 1, y1 - 1] * u.pix)
+                part = _np.asarray(
+                    getattr(reproject_map_to(source, sub, screen=screen), "data"), dtype=_np.float32
                 )
-            except Exception:
-                out[index] = current
-        return out
+                # Where the submap starts in the full grid: its reference pixel
+                # moved by exactly the offset of its first pixel.
+                dx = int(round(float(target.wcs.wcs.crpix[0]) - float(sub.wcs.wcs.crpix[0])))
+                dy = int(round(float(target.wcs.wcs.crpix[1]) - float(sub.wcs.wcs.crpix[1])))
+                h = max(0, min(part.shape[0], shape[0] - dy))
+                w = max(0, min(part.shape[1], shape[1] - dx))
+                return LayerPlane(_np.ascontiguousarray(part[:h, :w]), dy, dx)
+            except (AttributeError, ValueError, TypeError):
+                pass
+        reprojected = reproject_map_to(source, target, screen=screen)
+        return LayerPlane(_np.asarray(getattr(reprojected, "data"), dtype=_np.float32), 0, 0)
 
     @Slot()
     def run(self):
@@ -823,13 +817,11 @@ class CompositeBuildWorker(QObject):
         try:
             import numpy as _np
 
-            from src.backend.solar.coronagraph import solar_center_from_meta
             from src.backend.solar.coronagraph_composite import (
-                composite_frame,
+                LayerStack,
                 default_fov_rsun,
-                layer_alpha,
                 match_layer_frames,
-                rsun_pixels,
+                radial_alpha_mask,
             )
             from src.backend.solar.multiview import observer_separation_deg
             from src.backend.solar.solar_data_analysis import frame_observation_time
@@ -873,7 +865,9 @@ class CompositeBuildWorker(QObject):
             # Reprojection is keyed by (base geometry, layer frame) so a slower
             # layer cadence and a uniform base series both stay at one
             # reprojection per distinct pairing.
-            resolved: list[tuple[Any, dict[tuple, Any], list[int | None]]] = []
+            built_specs: list[Any] = []
+            built_planes: list[dict[tuple, Any]] = []
+            built_keys: list[list[Any]] = []
             for spec in self._layer_specs:
                 if not spec.enabled:
                     continue
@@ -907,7 +901,7 @@ class CompositeBuildWorker(QObject):
                         needed.setdefault(index, [])
                         if geometry_of[i] not in needed[index]:
                             needed[index].append(geometry_of[i])
-                arrays: dict[tuple, Any] = {}
+                planes: dict[tuple, Any] = {}
                 for done, index in enumerate(sorted(needed), start=1):
                     if self._cancel.is_set():
                         self.cancelled.emit()
@@ -920,19 +914,20 @@ class CompositeBuildWorker(QObject):
                         source = self._load_one_layer_frame(paths[index], spec)
                         for geom in needed[index]:
                             target = base_frames[representative[geom]]
-                            data = self._reproject_layer(source, target, spec, screen)
-                            if not _np.isfinite(data).any():
+                            plane = self._reproject_layer(source, target, spec, screen)
+                            if not _np.isfinite(plane.data).any():
                                 warnings.append(
                                     f"{spec.label} frame {index}: no overlap with the base field of view."
                                 )
                                 continue
-                            arrays[(geom, index)] = data
+                            planes[(geom, index)] = plane
                     except Exception as exc:
                         warnings.append(f"{spec.label} frame {index}: reprojection failed ({exc}).")
                     finally:
                         # Drop the full-resolution source before opening the next.
                         del source
-                if not arrays:
+                    self.build_progress.emit(done, len(needed))
+                if not planes:
                     warnings.append(f"{spec.label}: no frame could be placed onto the base view.")
                     continue
 
@@ -941,19 +936,24 @@ class CompositeBuildWorker(QObject):
                 # the part of the Sun both spacecraft can see survives, so the
                 # layer shows up as a crescent rather than a full disk — correct,
                 # but baffling unless it is stated.
-                sample_geom, sample_index = next(iter(sorted(arrays)))
-                sample = arrays[(sample_geom, sample_index)]
-                centre_s, rsun_s = self._frame_geometry(base_frames[representative[sample_geom]])
+                sample_geom, sample_index = next(iter(sorted(planes)))
+                sample = planes[(sample_geom, sample_index)]
+                (cx, cy), rsun_s = self._frame_geometry(base_frames[representative[sample_geom]])
                 # Coverage of the instrument's own field of view: a layer may be
                 # allowed to reach further (the AIA Sun reaches out to the
                 # occulter), which says nothing about how much of it survived.
-                own_outer = default_fov_rsun(spec.instrument, spec.value)[1]
-                band_spec = replace(spec, outer_rsun=min(spec.resolved_fov()[1], own_outer))
-                band = layer_alpha(
-                    _np.ones_like(sample), band_spec, center=centre_s, rsun_px=rsun_s
+                inner, outer = spec.resolved_fov()
+                own_outer = min(outer, default_fov_rsun(spec.instrument, spec.value)[1])
+                band = radial_alpha_mask(
+                    sample.data.shape[:2],
+                    (cx - sample.x0, cy - sample.y0),
+                    rsun_s,
+                    inner_rsun=inner,
+                    outer_rsun=own_outer,
+                    feather_rsun=spec.feather_rsun,
                 ) > 0
                 if band.any():
-                    coverage = float(_np.isfinite(sample[band]).mean())
+                    coverage = float(_np.isfinite(sample.data[band]).mean())
                     if coverage < 0.6:
                         try:
                             separation = observer_separation_deg(
@@ -968,16 +968,15 @@ class CompositeBuildWorker(QObject):
                             f"base view, so it appears as a partial disk.{why}, and only the region "
                             "both spacecraft can see survives the reprojection."
                         )
-                for geom in geometry:
-                    order = sorted(index for (g, index) in arrays if g == geom)
-                    if len(order) < 2:
-                        continue
-                    subset = {index: arrays[(geom, index)] for index in order}
-                    for index, value in self._difference(subset, order, self._difference_mode).items():
-                        arrays[(geom, index)] = value
-                resolved.append((spec, arrays, matches))
+                built_specs.append(spec)
+                built_planes.append(planes)
+                built_keys.append(
+                    [
+                        (geometry_of[i], index) if index is not None and (geometry_of[i], index) in planes else None
+                        for i, index in enumerate(matches)
+                    ]
+                )
 
-            # --- blend one composite per base frame --------------------------
             # Centre and solar radius are per frame: a summed frame has half the
             # pixel scale of a full-resolution one, so sharing a mask would put
             # every layer boundary at the wrong radius.
@@ -985,58 +984,21 @@ class CompositeBuildWorker(QObject):
                 key: self._frame_geometry(base_frames[idxs[0]])
                 for key, idxs in geometry.items()
             }
-
-            # Only difference modes need every base frame in hand at once; in raw
-            # mode each is read as it is composited. At float64 a 112-frame
-            # 1024x1024 series is ~940 MB held for no reason, which on top of the
-            # layer data was enough to get the process killed.
-            if self._difference_mode in ("running", "base"):
-                base_arrays = {
-                    i: _np.asarray(getattr(f, "data"), dtype=_np.float32)
-                    for i, f in enumerate(base_frames)
-                }
-                base_arrays = self._difference(
-                    base_arrays, sorted(base_arrays), self._difference_mode
-                )
-
-                def _base_array(index: int) -> Any:
-                    return base_arrays[index]
-            else:
-
-                def _base_array(index: int) -> Any:
-                    return _np.asarray(getattr(base_frames[index], "data"), dtype=_np.float32)
-
-            composites: list[Any] = []
-            skipped = 0
-            total = len(base_frames)
-            for i in range(total):
-                if self._cancel.is_set():
-                    self.cancelled.emit()
-                    return
-                geom = geometry_of[i]
-                centre, rsun_px = geometry_cache[geom]
-                layers = []
-                for spec, arrays, matches in resolved:
-                    index = matches[i] if i < len(matches) else None
-                    data = arrays.get((geom, index)) if index is not None else None
-                    if data is None:
-                        skipped += 1
-                    else:
-                        layers.append((spec, data))
-                composites.append(
-                    composite_frame(
-                        _base_array(i), self._base_spec, layers,
-                        center=centre, rsun_px=rsun_px,
-                    )
-                )
-                self.build_progress.emit(i + 1, total)
-
+            stack = LayerStack(
+                specs=built_specs,
+                planes=built_planes,
+                keys=built_keys,
+                centers=[tuple(geometry_cache[geometry_of[i]][0]) for i in range(len(base_frames))],
+                rsun_px=[float(geometry_cache[geometry_of[i]][1]) for i in range(len(base_frames))],
+                shapes=[tuple(_np.asarray(getattr(f, "data")).shape[:2]) for f in base_frames],
+            )
+            skipped = sum(1 for keys in built_keys for key in keys if key is None)
             if skipped:
                 warnings.append(
                     f"{skipped} frame-layer pairing(s) had no matching overlay image; "
                     "those frames show the base view alone."
                 )
-            self.finished.emit(composites, warnings)
+            self.finished.emit(stack, warnings)
         except Exception:
             self.failed.emit(traceback.format_exc())
 
@@ -2111,7 +2073,9 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         # replacing them, so _current_map_data stays the 2-D base array that the
         # measure/stats tools require (region_stats rejects 3-D input).
         self._overlay_specs: list[Any] = []
-        self._composite_frames: list[Any] = []
+        # Built overlay layers (coronagraph_composite.LayerStack), blended over
+        # the processed base frame on every draw; None when there is none.
+        self._composite_stack: Any = None
         self._composite_token: str = ""
         # Labels of the layers the current composite was actually built from.
         # The title reads from this, not from _overlay_specs, so editing or
@@ -5734,7 +5698,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self._reset_derotation_state()
         # A composite belongs to the series it was built from; a new load makes
         # both the pixels and the layers' time matching meaningless.
-        self._composite_frames = []
+        self._composite_stack = None
         self._composite_token = ""
         self._composite_labels = []
         self._overlay_specs = []
@@ -6098,72 +6062,17 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             return
 
         idx = max(0, min(self._current_frame_index, len(self._map_frames) - 1))
-        frame = self._map_frames[idx]
-        current = self._prepare_map_array(getattr(frame, "data"), "current frame")
-        title = self._frame_title(frame, idx)
+        frame, current, title = self._processed_frame(idx, mode=self._movie_mode(), nrgf=self._nrgf_active())
 
-        mode = self._movie_mode()
-        # Frames with unequal EXPTIME must be differenced in rate units (DN/s):
-        # subtracting raw DN would show the exposure ratio as false brightening.
-        normalize = bool(self._exposure_varies) and mode in ("base", "running")
-        unit_suffix = ", DN/s" if normalize else ""
-
-        def _diff_ready(source_frame: Any, arr: np.ndarray) -> np.ndarray:
-            if not normalize:
-                return arr
-            exptime = frame_exposure_time(source_frame)
-            return arr / exptime if exptime and exptime > 0 else arr
-
-        if mode == "base" and len(self._map_frames) > 1:
-            base = self._prepare_map_array(getattr(self._map_frames[0], "data"), "base frame")
-            if base.shape == current.shape:
-                current = _diff_ready(frame, current) - _diff_ready(self._map_frames[0], base)
-                title += f" (Base Difference{unit_suffix})"
-            else:
-                title += " (raw — size differs from base frame)"
-        elif mode == "running" and len(self._map_frames) > 1:
-            # Difference against the neighbour only when it shares this frame's
-            # size; never label a raw frame as a difference (see the load-time
-            # config partitioning that normally prevents this).
-            differenced = False
-            if idx == 0:
-                other = self._prepare_map_array(getattr(self._map_frames[1], "data"), "next frame")
-                if other.shape == current.shape:
-                    current = _diff_ready(self._map_frames[1], other) - _diff_ready(frame, current)
-                    differenced = True
-            else:
-                prev_frame = self._map_frames[idx - 1]
-                prev = self._prepare_map_array(getattr(prev_frame, "data"), "previous frame")
-                if prev.shape == current.shape:
-                    current = _diff_ready(frame, current) - _diff_ready(prev_frame, prev)
-                    differenced = True
-            title += (
-                f" (Running Difference{unit_suffix})"
-                if differenced
-                else " (raw — no matching frame to difference)"
-            )
-        elif (
-            mode == "raw"
-            and getattr(self, "nrgf_check", None) is not None
-            and self.nrgf_check.isChecked()
-            and self._effective_instrument_class() == CORONAGRAPH
-        ):
-            # NRGF flattens the corona's radial fall-off on plain frames only;
-            # difference modes already remove the static background.
-            current = self._nrgf_filter_frame(frame, current)
-            title += " (NRGF)"
-
-        # A built composite is already display-ready RGB: it carries each layer's
-        # own colormap and stretch, so the global scale/clip and the colorbar do
-        # not apply to it. It replaces only what is painted — `current` stays the
-        # 2-D base array that the measure and statistics tools work on.
+        # A built composite blends its layers over the frame exactly as processed
+        # above — this frame's difference, filter, colormap, clip and scale — so
+        # every view control keeps working on it. `current` stays the 2-D base
+        # array the measure and statistics tools work on.
         composite = None
-        if self._composite_frames and idx < len(self._composite_frames):
-            composite = self._composite_frames[idx]
-            if self._composite_labels:
-                title += " + " + " + ".join(self._composite_labels)
-            else:
-                title += " + overlay composite"
+        if self._has_live_composite():
+            composite = self._composite_rgb(idx, current)
+            labels = [s.label for s in self._live_layer_specs() if s is not None and s.enabled]
+            title += " + " + (" + ".join(labels) if labels else "overlay composite")
 
         if composite is not None:
             display_data = composite
@@ -6208,6 +6117,126 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self._refresh_pfss_overlay()
         if hasattr(self, "_measure"):
             self._measure.on_frame_changed()
+
+    def _nrgf_active(self) -> bool:
+        """Whether the NRGF filter applies to what is on screen."""
+        return bool(
+            self._movie_mode() == "raw"
+            and getattr(self, "nrgf_check", None) is not None
+            and self.nrgf_check.isChecked()
+            and self._effective_instrument_class() == CORONAGRAPH
+        )
+
+    def _processed_frame(
+        self, idx: int, *, mode: str, nrgf: bool, frames: list[Any] | None = None
+    ) -> tuple[Any, np.ndarray, str]:
+        """Frame ``idx`` as the view shows it: ``(frame, 2-D data, title)``.
+
+        Differenced per ``mode`` and NRGF-filtered when ``nrgf`` is set. Reads no
+        widget, so a movie export can call it from its worker thread with the
+        settings captured when the export started.
+        """
+        frames = self._map_frames if frames is None else frames
+        frame = frames[idx]
+        current = self._prepare_map_array(getattr(frame, "data"), "current frame")
+        title = self._frame_title(frame, idx)
+
+        # Frames with unequal EXPTIME must be differenced in rate units (DN/s):
+        # subtracting raw DN would show the exposure ratio as false brightening.
+        normalize = bool(self._exposure_varies) and mode in ("base", "running")
+        unit_suffix = ", DN/s" if normalize else ""
+
+        def _diff_ready(source_frame: Any, arr: np.ndarray) -> np.ndarray:
+            if not normalize:
+                return arr
+            exptime = frame_exposure_time(source_frame)
+            return arr / exptime if exptime and exptime > 0 else arr
+
+        if mode == "base" and len(frames) > 1:
+            base = self._prepare_map_array(getattr(frames[0], "data"), "base frame")
+            if base.shape == current.shape:
+                current = _diff_ready(frame, current) - _diff_ready(frames[0], base)
+                title += f" (Base Difference{unit_suffix})"
+            else:
+                title += " (raw — size differs from base frame)"
+        elif mode == "running" and len(frames) > 1:
+            # Difference against the neighbour only when it shares this frame's
+            # size; never label a raw frame as a difference (see the load-time
+            # config partitioning that normally prevents this).
+            differenced = False
+            if idx == 0:
+                other = self._prepare_map_array(getattr(frames[1], "data"), "next frame")
+                if other.shape == current.shape:
+                    current = _diff_ready(frames[1], other) - _diff_ready(frame, current)
+                    differenced = True
+            else:
+                prev_frame = frames[idx - 1]
+                prev = self._prepare_map_array(getattr(prev_frame, "data"), "previous frame")
+                if prev.shape == current.shape:
+                    current = _diff_ready(frame, current) - _diff_ready(prev_frame, prev)
+                    differenced = True
+            title += (
+                f" (Running Difference{unit_suffix})"
+                if differenced
+                else " (raw — no matching frame to difference)"
+            )
+        elif nrgf:
+            # NRGF flattens the corona's radial fall-off on plain frames only;
+            # difference modes already remove the static background.
+            current = self._nrgf_filter_frame(frame, current)
+            title += " (NRGF)"
+        return frame, current, title
+
+    # -- live overlay composites ------------------------------------------------
+    def _live_layer_specs(self, stack: Any = None) -> list[Any]:
+        """Each built layer's *current* styling from Overlay Layers.
+
+        ``None`` for a layer since removed from the stack; a layer's enabled
+        flag, colormap, scale, opacity and midtones apply without a rebuild.
+        """
+        from src.backend.solar.coronagraph_composite import layer_identity
+
+        stack = self._composite_stack if stack is None else stack
+        if stack is None:
+            return []
+        current = {layer_identity(spec): spec for spec in self._overlay_specs}
+        return [current.get(layer_identity(spec)) for spec in stack.specs]
+
+    def _has_live_composite(self) -> bool:
+        stack = self._composite_stack
+        return (
+            stack is not None
+            and len(stack) == len(self._map_frames)
+            and any(spec is not None and spec.enabled for spec in self._live_layer_specs(stack))
+        )
+
+    def _composite_base_spec(self) -> Any:
+        """The base frame's styling: the view's own colormap, scale and clip."""
+        from src.backend.solar.coronagraph_composite import LayerSpec
+
+        low = min(float(self.clip_low_slider.value()), float(self.clip_high_slider.value()) - 0.1)
+        high = max(float(self.clip_high_slider.value()), low + 0.1)
+        return LayerSpec(
+            instrument="BASE",
+            label=self._loaded_instrument_label(),
+            colormap=self._resolved_colormap_name(),
+            scale=self.scale_combo.currentText(),
+            clip_low=low,
+            clip_high=high,
+            gamma=1.0,
+        )
+
+    def _composite_rgb(self, idx: int, current: np.ndarray) -> np.ndarray:
+        from src.backend.solar.coronagraph_composite import blend_stack_frame
+
+        return blend_stack_frame(
+            current,
+            self._composite_base_spec(),
+            self._composite_stack,
+            idx,
+            mode=self._movie_mode(),
+            specs=self._live_layer_specs(),
+        )
 
     def _nrgf_filter_frame(self, frame: Any, current: np.ndarray) -> np.ndarray:
         """NRGF-filter a coronagraph frame; fall back to the raw array on error."""
@@ -6538,8 +6567,9 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             return
         self._overlay_specs = others
         self._refresh_overlay_list()
-        if any(spec.enabled for spec in others) and self._composite_frames:
-            self.build_composite()
+        if self._has_live_composite():
+            # The other layers are still built; just stop drawing this one.
+            self._render_current_frame()
         else:
             self.clear_composite()
 
@@ -6646,7 +6676,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             self.overlay_note_label.setText(f"{len(specs)} active layer(s).")
         has_layers = bool(specs) and bool(self._map_frames)
         self.overlay_build_btn.setEnabled(has_layers and not self._busy)
-        self.overlay_clear_btn.setEnabled(bool(self._composite_frames))
+        self.overlay_clear_btn.setEnabled(self._composite_stack is not None)
 
     def _sync_overlay_editor(self) -> None:
         """Load the selected layer's style into the editor widgets."""
@@ -6676,7 +6706,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         index = self._selected_overlay_index()
         if not (0 <= index < len(self._overlay_specs)):
             return
-        self._overlay_specs[index] = _replace(
+        edited = _replace(
             self._overlay_specs[index],
             colormap=self.overlay_colormap_combo.currentText().strip() or "inferno",
             scale=self.overlay_scale_combo.currentText().strip() or "log",
@@ -6685,7 +6715,27 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             inner_rsun=float(self.overlay_inner_spin.value()),
             outer_rsun=float(self.overlay_outer_spin.value()),
         )
-        self._invalidate_composite("layer settings changed")
+        self._overlay_specs[index] = edited
+        self._apply_layer_edit(edited)
+
+    def _apply_layer_edit(self, edited: Any) -> None:
+        """Redraw with an edited layer, or drop the composite if it must be rebuilt.
+
+        Styling is applied at draw time. Only a layer that now reaches further
+        than it was reprojected for — or one that was never built — needs the
+        archive and reprojection again.
+        """
+        from src.backend.solar.coronagraph_composite import layer_identity
+
+        stack = self._composite_stack
+        built = None
+        if stack is not None:
+            built = next((s for s in stack.specs if layer_identity(s) == layer_identity(edited)), None)
+        if built is None or edited.resolved_fov()[1] > built.resolved_fov()[1] + 1e-6:
+            self._invalidate_composite("layer settings changed")
+            return
+        self._refresh_overlay_note()
+        self._render_current_frame()
 
     def _on_overlay_item_changed(self, item: Any) -> None:
         """Mirror a row's tick box into its spec's ``enabled`` flag."""
@@ -6697,7 +6747,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         enabled = item.checkState() == Qt.Checked
         if enabled != self._overlay_specs[row].enabled:
             self._overlay_specs[row] = _replace(self._overlay_specs[row], enabled=enabled)
-            self._invalidate_composite("layer toggled")
+            self._apply_layer_edit(self._overlay_specs[row])
         self._refresh_overlay_note()
         self._sync_aia_sun_control()
 
@@ -6748,10 +6798,10 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
 
     def _invalidate_composite(self, reason: str = "") -> None:
         """Drop composited pixels whose inputs no longer apply."""
-        if not self._composite_frames:
+        if self._composite_stack is None:
             self._refresh_overlay_note()
             return
-        self._composite_frames = []
+        self._composite_stack = None
         self._composite_token = ""
         self._composite_labels = []
         self._refresh_overlay_note()
@@ -6761,18 +6811,18 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
 
     def clear_composite(self) -> None:
         """Return to the plain loaded frames, keeping the layer stack intact."""
-        self._composite_frames = []
+        self._composite_stack = None
         self._composite_token = ""
         self._composite_labels = []
         self._refresh_overlay_note()
         self._render_current_frame()
 
     def build_composite(self) -> bool:
-        """Download, reproject and blend every enabled layer over the series.
+        """Download and reproject every enabled layer; they are blended when drawn.
 
         Returns whether the build started.
         """
-        from src.backend.solar.coronagraph_composite import LayerSpec, layer_config_hash
+        from src.backend.solar.coronagraph_composite import layer_config_hash
 
         if self.is_operation_running():
             QMessageBox.information(self, "Overlay Layers", "Another operation is still running.")
@@ -6795,18 +6845,9 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             QMessageBox.information(self, "Overlay Layers", "Add at least one layer first.")
             return False
 
-        detector = self._frame_lasco_detector(base_frames[0]) or ""
-        base_spec = LayerSpec(
-            instrument=str(getattr(base_frames[0], "instrument", "") or "LASCO").upper(),
-            value=detector,
-            label=self._loaded_instrument_label(),
-            colormap=self._resolved_colormap_name(),
-            scale=self.scale_combo.currentText(),
-            clip_low=float(self.clip_low_slider.value()),
-            clip_high=float(self.clip_high_slider.value()),
-        )
-        mode = self._movie_mode()
-        self._composite_token = layer_config_hash(specs, extra=f"{base_spec}|{mode}")
+        # Only what reprojection depends on: the base's styling and difference
+        # mode are applied when drawing.
+        self._composite_token = layer_config_hash(specs)
 
         # Composited pixels are held for the whole series, so check the cost up
         # front rather than discovering it when the OS kills the process.
@@ -6838,18 +6879,15 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
                 return False
 
         self._composite_pending_labels = [str(s.label) for s in specs]
-        self._composite_pending_mode = mode
         self.overlay_progress.setValue(0)
         self.overlay_progress.setVisible(True)
         self._set_busy(True, "Building the overlay composite…")
         self._start_worker(
             CompositeBuildWorker(
                 base_frames,
-                base_spec,
                 specs,
                 window_minutes=int(self.overlay_window_spin.value()),
                 cache_dir=self.cache_dir,
-                difference_mode=mode,
             )
         )
         return True
@@ -6858,22 +6896,21 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         if total > 0:
             self.overlay_progress.setValue(int(round(100.0 * done / total)))
 
-    def _on_composite_finished(self, composites: Any, warnings: Any) -> None:
+    def _on_composite_finished(self, stack: Any, warnings: Any) -> None:
         self.overlay_progress.setVisible(False)
-        frames = list(composites or [])
         notes = list(warnings or [])
-        if not frames:
+        if stack is None or not getattr(stack, "specs", None):
             self._composite_token = ""
+            self._composite_stack = None
             QMessageBox.warning(
                 self,
                 "Overlay Layers",
                 "No composite could be built.\n\n" + ("\n".join(notes) or "No layers produced data."),
             )
+            self._render_current_frame()
             return
-        self._composite_frames = frames
+        self._composite_stack = stack
         self._composite_labels = list(getattr(self, "_composite_pending_labels", []) or [])
-        # The differencing is baked into the composite's pixels at build time.
-        self._composite_mode = str(getattr(self, "_composite_pending_mode", "raw") or "raw")
         self._refresh_overlay_note()
         self._render_current_frame()
         if notes:
@@ -6921,7 +6958,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
                 continue
 
         self._overlay_specs = specs
-        self._composite_frames = []
+        self._composite_stack = None
         self._composite_token = ""
         self._composite_labels = []
         self._refresh_overlay_list()
@@ -7308,12 +7345,10 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         try:
             bounds = self._crop_bounds_from_axis_fields(self._current_map_data.shape)
             self._map_frames = crop_maps(self._map_frames, bounds)
-            # Composited pixels are on the uncropped grid; crop them alongside the
-            # frames so the two stay the same shape.
-            if self._composite_frames:
-                self._composite_frames = [
-                    crop_array(rgb, bounds) for rgb in self._composite_frames
-                ]
+            # Overlay layers are on the uncropped grid; crop them alongside the
+            # frames so the two stay registered.
+            if self._composite_stack is not None:
+                self._composite_stack = self._composite_stack.cropped(bounds)
             self._regions = []
             self.region_table.setRowCount(0)
             self._current_frame_index = 0
@@ -7628,7 +7663,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         }
         # The cut-out is a new grid: composites and region hits belong to the
         # full frames they were measured on.
-        self._composite_frames = []
+        self._composite_stack = None
         self._composite_token = ""
         self._crop_applied = False
         self._applied_crop_arcsec = None
@@ -7657,7 +7692,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             return
         self._map_frames = list(self._leveled_frames)
         self._reset_derotation_state()
-        self._composite_frames = []
+        self._composite_stack = None
         self._composite_token = ""
         self._crop_applied = False
         self._applied_crop_arcsec = None
@@ -7675,7 +7710,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             self._reset_derotation_state()
             self._crop_applied = False
             self._applied_crop_arcsec = None
-            self._composite_frames = []
+            self._composite_stack = None
             self._composite_token = ""
             message += "\nThe previous crop/derotation was cleared — re-apply it if you need it."
 
@@ -7722,7 +7757,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self._reset_derotation_state()
         # Composites were cropped in step with the frames, so they cannot be
         # un-cropped; drop them and let the user rebuild on the restored series.
-        self._composite_frames = []
+        self._composite_stack = None
         self._composite_token = ""
         self._composite_labels = []
         self._crop_applied = False
@@ -9091,17 +9126,19 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         if self.crop_check.isChecked() and self._current_map_data is not None:
             crop_bounds = self._crop_bounds_from_axis_fields(self._current_map_data.shape)
 
-        # A built composite is already rendered RGB carrying each layer's own
-        # colormap and stretch, and the difference mode was applied per layer at
-        # build time. Exporting it as "raw" frames therefore reproduces exactly
-        # what is on screen: apply_display_scale and array_to_rgb_uint8 both pass
-        # RGB through untouched, and crop_array handles it.
+        # A composite is exported as RGB frames blended exactly as on screen —
+        # the processed base (difference, NRGF, colormap, clip, scale) with the
+        # layers over it — and then written as "raw": apply_display_scale and
+        # array_to_rgb_uint8 pass RGB through untouched, and crop_array handles
+        # it. Each frame is blended when the export worker reads it, with the
+        # settings captured here, so the window stays responsive.
         movie_frames = self._map_frames
         movie_mode = self._movie_mode()
-        if self._composite_frames and len(self._composite_frames) == len(self._map_frames):
+        label_frames = self._map_frames
+        if self._has_live_composite():
+            render = self._composite_renderer()
             movie_frames = [
-                AiaArrayMap(rgb, base, nickname="Overlay composite")
-                for rgb, base in zip(self._composite_frames, self._map_frames)
+                _LazyRgbFrame(render, index, base) for index, base in enumerate(self._map_frames)
             ]
             movie_mode = "raw"
 
@@ -9116,30 +9153,45 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             scale=self.scale_combo.currentText(),
             # Match the preview: difference movies normalise unequal exposures.
             normalize_exposure=bool(self._exposure_varies) and movie_mode != "raw",
-            frame_labels=self._movie_frame_labels(movie_frames, movie_mode),
+            frame_labels=self._movie_frame_labels(label_frames, self._movie_mode()),
         )
         self._set_busy(True, f"Exporting movie ({len(movie_frames)} frame(s))…")
         self.progress_panel.set_status_text("Preparing export…")
         self._start_worker(MovieExportWorker(movie_frames, spec))
 
+    def _composite_renderer(self) -> Any:
+        """``render(index) -> RGB`` for composite movie frames, settings frozen now.
+
+        Reads no widget when called, so the export worker can run it.
+        """
+        from src.backend.solar.coronagraph_composite import blend_stack_frame
+
+        mode = self._movie_mode()
+        nrgf = self._nrgf_active()
+        base_spec = self._composite_base_spec()
+        stack = self._composite_stack
+        specs = self._live_layer_specs(stack)
+        frames = list(self._map_frames)
+
+        def render(index: int) -> np.ndarray:
+            _frame, current, _title = self._processed_frame(index, mode=mode, nrgf=nrgf, frames=frames)
+            return blend_stack_frame(current, base_spec, stack, index, mode=mode, specs=specs)
+
+        return render
+
     def _movie_frame_labels(self, movie_frames: list[Any], movie_mode: str) -> tuple[tuple[str, ...], ...]:
         """The caption of every movie frame, or nothing when labels are off.
 
-        A composite is exported as finished RGB frames ("raw"), but its pixels
-        were differenced with the mode it was built with and it shows several
-        instruments, so its caption says both.
+        A composite shows several instruments, so its caption names the base
+        and every layer drawn on it.
         """
         if not self.movie_labels_check.isChecked():
             return ()
-        if self._composite_frames and len(self._composite_frames) == len(self._map_frames):
-            layers = [label for label in self._composite_labels if label]
+        if self._has_live_composite():
+            layers = [s.label for s in self._live_layer_specs() if s is not None and s.enabled and s.label]
             base = movie_instrument_text(self._map_frames[0]) if self._map_frames else ""
             text = " + ".join([base, *layers]) if base else " + ".join(layers)
-            return movie_frame_labels(
-                movie_frames,
-                mode=str(getattr(self, "_composite_mode", "raw") or "raw"),
-                instrument_text=text or None,
-            )
+            return movie_frame_labels(movie_frames, mode=movie_mode, instrument_text=text or None)
         return movie_frame_labels(movie_frames, mode=movie_mode)
 
     @Slot(int, int)
