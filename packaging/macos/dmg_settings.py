@@ -11,7 +11,7 @@ dmgbuild settings for the macOS disk image.
 Invoked by build_macos_dmg.sh as:
     dmgbuild -s packaging/macos/dmg_settings.py \
              -D app=dist/"e-Callisto FITS Analyzer.app" \
-             "e-CALLISTO FITS Analyzer 3.1.1" out.dmg
+             "e-CALLISTO FITS Analyzer 3.2.0" out.dmg
 
 `defines` is supplied by dmgbuild from the -D flags.
 """
