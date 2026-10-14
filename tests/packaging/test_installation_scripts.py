@@ -1,12 +1,14 @@
 """
 e-CALLISTO FITS Analyzer
-Version 3.1.0
+Version 3.1.1
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
 
 
 from pathlib import Path
+
+import pytest
 
 from scripts import install_requirements
 
@@ -158,6 +160,52 @@ def test_pyinstaller_specs_bundle_aiapy_with_its_data_files():
         encoding="utf-8"
     )
     assert "aiapy==" in requirements
+
+
+def test_pyinstaller_specs_bundle_cdflib_with_its_leap_second_table():
+    """SWAVES decoding imports cdflib, which reads CDFLeapSeconds.txt on import.
+
+    py2app copies the package whole; PyInstaller needs hook-cdflib.py, or the
+    Windows/Linux builds fail every SWAVES day with "[Errno 2] No such file or
+    directory: '..._internal\\cdflib\\CDFLeapSeconds.txt'".
+    """
+    spec_paths = [
+        ROOT / "packaging" / "pyinstaller" / "FITS_Analyzer.spec",
+        ROOT / "packaging" / "pyinstaller" / "FITS_Analyzer_linux.spec",
+        ROOT / "packaging" / "pyinstaller" / "FITS_Analyzer_win.spec",
+    ]
+    for path in spec_paths:
+        text = path.read_text(encoding="utf-8")
+        assert '"cdflib"' in text
+        assert 'hookspath=[str(HERE / "hooks")]' in text
+
+    hook = (ROOT / "packaging" / "pyinstaller" / "hooks" / "hook-cdflib.py").read_text(
+        encoding="utf-8"
+    )
+    assert "collect_data_files(" in hook
+    assert '"cdflib"' in hook
+
+    macos_setup = (ROOT / "packaging" / "macos" / "setup.py").read_text(encoding="utf-8")
+    assert '"cdflib"' in macos_setup
+
+
+def test_cdflib_hook_collects_the_leap_second_table():
+    """The hook must actually resolve the file cdflib opens at import time."""
+    pytest.importorskip("PyInstaller")
+    cdflib = pytest.importorskip("cdflib")
+    from cdflib import epochs
+
+    namespace = {}
+    hook_path = ROOT / "packaging" / "pyinstaller" / "hooks" / "hook-cdflib.py"
+    exec(compile(hook_path.read_text(encoding="utf-8"), str(hook_path), "exec"), namespace)
+
+    collected = {
+        (Path(src).name, Path(dest).as_posix()) for src, dest in namespace["datas"]
+    }
+    # Bundled beside cdflib/epochs.py, which is where LEAPSEC_FILE points.
+    assert Path(epochs.LEAPSEC_FILE).name == "CDFLeapSeconds.txt"
+    assert Path(epochs.LEAPSEC_FILE).parent == Path(cdflib.__file__).resolve().parent
+    assert ("CDFLeapSeconds.txt", "cdflib") in collected
 
 
 def test_pyinstaller_specs_bundle_sunkit_magex_with_its_compiled_tracer():
