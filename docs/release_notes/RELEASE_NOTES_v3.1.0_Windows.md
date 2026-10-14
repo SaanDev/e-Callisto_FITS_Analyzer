@@ -1,8 +1,14 @@
-# e-CALLISTO FITS Analyzer v3.1.0 — Windows
+# e-CALLISTO FITS Analyzer v3.1.1 — Windows
+
+v3.1.1 is a bug-fix release of v3.1.0. It includes every v3.1.0 feature described below, plus the fixes listed under **Bug fixes in v3.1.1**.
+
+## Bug fixes in v3.1.1
+
+- **STEREO/WAVES (SWAVES) radio data:** opening a SWAVES day from **Solar Events → Radio Bursts → SWAVES** failed in the packaged application with `[Errno 2] No such file or directory: '…\_internal\cdflib\CDFLeapSeconds.txt'`. The leap-second table that the CDF reader needs to decode SWAVES time stamps was left out of the installer. It is now included, and STEREO-A and STEREO-B data open normally. The Linux package had the same problem and is fixed as well; the macOS app was not affected.
+
+## What's new in v3.1.0
 
 v3.1.0 adds automatic ridge tracking and a choice of coronal density models to radio burst analysis, multi-view GCS CME and shock fitting, PFSS coronal magnetic field modelling in Solar Image Analysis, and publication-style figure exports. Files and projects can now be dropped onto the window or reopened from recent lists, and the e-CALLISTO downloader lists the stations that actually observed on the chosen day.
-
-## What's new
 
 ### Radio burst analysis
 
@@ -41,7 +47,7 @@ v3.1.0 adds automatic ridge tracking and a choice of coronal density models to r
 
 - The station lists in the Single Station, Multi-Station Event and Spectral Overview tabs are read from the archive for the selected UTC day, replacing the fixed station list. Station names that change over time are shown as the archive records them for that day. Lookups are cached.
 
-## Fixes and improvements
+## Fixes and improvements in v3.1.0
 
 - Fixed SDO/AIA level 1.5 in the packaged application, which reported that `aiapy` was missing even though it was bundled.
 - Opening Solar Image Analysis no longer loads the PFSS modelling stack, so the window opens noticeably faster. If PFSS is unavailable, the card is disabled and explains why.
@@ -51,14 +57,14 @@ v3.1.0 adds automatic ridge tracking and a choice of coronal density models to r
 
 ## Windows installation
 
-**Installer:** `e-CALLISTO_FITS_Analyzer_v3.1.0_Setup.exe`
+**Installer:** `e-CALLISTO_FITS_Analyzer_v3.1.1_Setup.exe`
 
 1. Download the installer from the release assets.
 2. Close any running instance of e-CALLISTO FITS Analyzer.
 3. Run the installer and approve the Windows administrator prompt.
 4. Follow the setup wizard, then launch the application from the Start menu or the optional desktop shortcut.
 
-The installer upgrades an existing v3.x installation, including the v3.1.0 beta, in place. It requires 64-bit Windows 10 or 11.
+The installer upgrades an existing v3.x installation, including v3.1.0 and the v3.1.0 beta, in place. It requires 64-bit Windows 10 or 11.
 
 ## Notes
 
