@@ -1,0 +1,25 @@
+[package]
+name = "callisto-lite"
+description = "e-CALLISTO FITS Analyzer Lite: the radio part of the e-CALLISTO FITS Analyzer, in Rust"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+default-run = "callisto-lite"
+
+[dependencies]
+anyhow.workspace = true
+callisto-core = { path = "../callisto-core" }
+chrono.workspace = true
+eframe.workspace = true
+egui.workspace = true
+egui_extras.workspace = true
+fontdb.workspace = true
+image.workspace = true
+rfd.workspace = true
+serde.workspace = true
+ttf-parser.workspace = true
+
+[dev-dependencies]
+egui_kittest.workspace = true
+image.workspace = true

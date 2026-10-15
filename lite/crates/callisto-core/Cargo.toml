@@ -1,0 +1,18 @@
+[package]
+name = "callisto-core"
+description = "Data handling for e-CALLISTO FITS Analyzer Lite: FITS reading, joining, processing and rendering"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+colorous.workspace = true
+flate2.workspace = true
+image.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
