@@ -1,0 +1,91 @@
+name: Lite (Rust)
+
+# e-CALLISTO FITS Analyzer Lite, in lite/. See lite/PLAN.md.
+
+on:
+  push:
+    paths:
+      - "lite/**"
+      - "assets/**"
+      - "src/backend/radio/**"
+      - "src/backend/common/**"
+      - "src/backend/services/update_checker.py"
+      - ".github/workflows/lite.yml"
+  pull_request:
+    paths:
+      - "lite/**"
+      - "assets/**"
+      - "src/backend/radio/**"
+      - "src/backend/common/**"
+      - "src/backend/services/update_checker.py"
+      - ".github/workflows/lite.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: lite-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Build and test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    defaults:
+      run:
+        working-directory: lite
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: lite
+      - name: Linux libraries for the window toolkit
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            mesa-vulkan-drivers fonts-dejavu-core
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      # The references were captured from the full app on Windows, so only
+      # the Windows runner compares against them. It has no GPU, so this also
+      # proves the software adapter (WARP) draws the window.
+      - name: Screenshots against the full app
+        if: runner.os == 'Windows'
+        run: cargo test -p callisto-lite --test screenshots -- --ignored --nocapture --test-threads 1 --skip software_adapter
+      - uses: actions/upload-artifact@v4
+        if: always() && runner.os == 'Windows'
+        with:
+          name: lite-screenshots
+          path: lite/reference/compare/
+
+  parity:
+    name: Results match the full app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Only what the full app's radio loader imports, pinned as in
+      # requirements/requirements-runtime.txt.
+      - run: pip install numpy==2.3.5 astropy==8.0.1
+      - run: python lite/parity/make_reference.py
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: lite
+      - name: Parity tests
+        working-directory: lite
+        env:
+          CALLISTO_PARITY_REQUIRED: "1"
+        run: cargo test -p callisto-core --test parity -- --nocapture

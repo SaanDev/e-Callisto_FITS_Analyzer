@@ -1,0 +1,39 @@
+[workspace]
+resolver = "3"
+members = ["crates/callisto-core", "crates/callisto-lite"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/SaanDev/e-Callisto_FITS_Analyzer"
+
+[workspace.dependencies]
+anyhow = "1.0.104"
+chrono = "0.4.45"
+colorous = "1.0.16"
+flate2 = "1.1.10"
+image = { version = "0.25.10", default-features = false, features = ["png", "tiff"] }
+ureq = "3.4.2"
+url = "2.5.8"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+eframe = { version = "0.36.2", features = ["glow", "persistence"] }
+egui = "0.36.2"
+egui_extras = { version = "0.36.2", features = ["svg"] }
+egui_kittest = { version = "0.36.2", features = ["eframe", "wgpu", "snapshot"] }
+fontdb = "0.23"
+ttf-parser = "0.25.1"
+rfd = "0.17.2"
+tiny-skia = "0.11.4"
+open = "5.4.4"
+
+# Debug builds of the GUI stack are very slow without some optimisation.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"

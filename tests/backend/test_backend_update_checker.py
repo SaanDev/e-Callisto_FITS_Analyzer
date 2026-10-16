@@ -174,6 +174,53 @@ def test_check_for_updates_uses_platform_specific_release_tag(monkeypatch):
     assert result.download_url == "https://example.com/linux-v2.2.1.deb"
 
 
+def test_check_for_updates_ignores_lite_releases(monkeypatch):
+    # Lite is released from the same repository with its own version numbers.
+    releases_payload = [
+        {
+            "tag_name": "lite-v1.0.0(Windows)",
+            "name": "e-CALLISTO FITS Analyzer Lite v1.0.0",
+            "html_url": "https://example.com/release/lite-v1.0.0",
+            "published_at": "2026-12-01T12:00:00Z",
+            "assets": [
+                {
+                    "name": "e-CALLISTO_FITS_Analyzer_Lite_v1.0.0_Setup.exe",
+                    "browser_download_url": "https://example.com/lite-v1.0.0.exe",
+                }
+            ],
+        },
+        {
+            "tag_name": "lite-v4.0.0(Windows)",
+            "name": "e-CALLISTO FITS Analyzer Lite v4.0.0",
+            "html_url": "https://example.com/release/lite-v4.0.0",
+            "published_at": "2027-01-01T12:00:00Z",
+            "assets": [],
+        },
+        {
+            "tag_name": "v3.2.0(Windows)",
+            "name": "Windows Release v3.2.0",
+            "html_url": "https://example.com/release/windows-v3.2.0",
+            "published_at": "2026-10-14T12:00:00Z",
+            "assets": [
+                {
+                    "name": "e-CALLISTO_FITS_Analyzer_v3.2.0_Setup.exe",
+                    "browser_download_url": "https://example.com/windows-v3.2.0.exe",
+                }
+            ],
+        },
+    ]
+
+    def fake_get(url, headers=None, timeout=0):
+        return FakeResponse(releases_payload)
+
+    monkeypatch.setattr(update_checker.requests, "get", fake_get)
+
+    result = update_checker.check_for_updates("3.2.0", system_name="Windows")
+    assert result.status == "up_to_date"
+    assert result.latest_version == "3.2.0"
+    assert result.release_url == "https://example.com/release/windows-v3.2.0"
+
+
 def test_check_for_updates_ignores_newer_release_from_other_platform(monkeypatch):
     releases_payload = [
         {
