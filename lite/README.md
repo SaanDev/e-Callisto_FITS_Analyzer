@@ -91,6 +91,26 @@ python lite/tools/capture_states.py lite/reference/windows dark
 Run it on macOS and Linux into `reference/macos` and `reference/linux` for
 those platforms' references.
 
+**Downloads and import.** `tools/capture_downloader.py` opens the full app's
+e-CALLISTO and Learmonth downloaders with throwaway settings, a scratch cache and
+canned network answers built from `parity/fixtures`. It saves every tab and
+state, the calendar and station popups, the previews and the import progress
+dialog. Lite's side runs on the same canned answers:
+
+```powershell
+python lite/tools/capture_downloader.py lite/reference/windows/downloads light
+python lite/tools/capture_downloader.py lite/reference/windows/downloads dark
+cargo test -p callisto-lite --test downloader_screenshots -- --ignored --nocapture --test-threads 1
+```
+
+The downloader's results and figure layouts have their own references:
+
+```powershell
+python lite/parity/make_download_reference.py
+python lite/parity/make_figure_reference.py
+cargo test -p callisto-core --test downloads_parity --test figures_parity
+```
+
 **Speed.** The plan's speed targets, timed on a folder of e-CALLISTO files
 (INDIA-GAURI focus code 02, a full day):
 

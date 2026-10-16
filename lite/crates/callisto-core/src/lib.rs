@@ -10,6 +10,7 @@ pub mod dataset;
 pub mod export;
 pub mod fits;
 pub mod image;
+pub mod mpl;
 pub mod plot;
 pub mod radio;
 pub mod render;

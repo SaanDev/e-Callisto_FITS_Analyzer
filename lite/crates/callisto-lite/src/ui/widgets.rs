@@ -30,6 +30,21 @@ fn qt_text(
     weight: Weight,
     color: Color32,
 ) -> Rect {
+    qt_text_clipped(ui, None, x, center_y, align, text, px, weight, color)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn qt_text_clipped(
+    ui: &Ui,
+    clip: Option<Rect>,
+    x: f32,
+    center_y: f32,
+    align: egui::Align,
+    text: &str,
+    px: f32,
+    weight: Weight,
+    color: Color32,
+) -> Rect {
     let font = ui_font(px, weight);
     let galley = ui.ctx().fonts_mut(|f| f.layout_no_wrap(text.to_owned(), font.clone(), color));
     let ppp = ui.ctx().pixels_per_point();
@@ -50,8 +65,17 @@ fn qt_text(
         egui::Align::Max => x - width,
     };
     let rect = Rect::from_min_size(pos2(left, top), galley.size());
-    ui.painter().galley(rect.min, galley, color);
+    match clip {
+        Some(c) => ui.painter().with_clip_rect(c.intersect(ui.clip_rect())).galley(rect.min, galley, color),
+        None => ui.painter().galley(rect.min, galley, color),
+    }
     rect
+}
+
+/// [`text_left`], clipped to `clip`.
+#[allow(clippy::too_many_arguments)]
+pub fn text_left_clipped(ui: &Ui, clip: Rect, x: f32, center_y: f32, text: &str, px: f32, weight: Weight, color: Color32) -> Rect {
+    qt_text_clipped(ui, Some(clip), x, center_y, egui::Align::Min, text, px, weight, color)
 }
 
 /// Text with its left edge at `x`, centred vertically on `center_y`.

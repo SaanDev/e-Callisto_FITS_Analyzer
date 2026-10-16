@@ -18,6 +18,35 @@ const BACKOFF_S: f64 = 0.5;
 
 static USER_AGENT: OnceLock<String> = OnceLock::new();
 
+/// Answers HTTP GETs instead of the network: `Some((status, body))`, or
+/// `None` for a connection failure. For tests and reference captures.
+pub type MockHttp = dyn Fn(&str) -> Option<(u16, Vec<u8>)> + Send + Sync;
+
+static MOCK: std::sync::RwLock<Option<std::sync::Arc<MockHttp>>> = std::sync::RwLock::new(None);
+
+/// Routes every archive, catalog and Learmonth request through `mock`
+/// (or back to the network with `None`).
+pub fn set_mock_http(mock: Option<std::sync::Arc<MockHttp>>) {
+    if let Ok(mut m) = MOCK.write() {
+        *m = mock;
+    }
+}
+
+/// The mocked answer for `url`, when a mock is installed.
+pub fn mock_get(url: &str) -> Option<Result<(u16, ureq::http::Response<ureq::Body>)>> {
+    let mock = MOCK.read().ok()?.clone()?;
+    Some(match mock(url) {
+        Some((status, body)) => {
+            let resp = ureq::http::Response::builder()
+                .status(status)
+                .body(ureq::Body::builder().data(body))
+                .map_err(|e| anyhow!(e.to_string()));
+            resp.map(|r| (status, r))
+        }
+        None => Err(anyhow!("Connection refused (mock): {url}")),
+    })
+}
+
 /// Sets the `User-Agent` sent to the archive (`"<app name>/<version>"`).
 pub fn set_user_agent(agent: &str) {
     let _ = USER_AGENT.set(agent.to_string());
@@ -39,6 +68,9 @@ pub fn agent(timeout_s: u64) -> ureq::Agent {
 /// GET with the full app's retry policy (3 retries on 429/5xx and connection
 /// errors, exponential back-off from 0.5 s). Returns the final status and body.
 pub fn get_with_retries(agent: &ureq::Agent, url: &str) -> Result<(u16, ureq::http::Response<ureq::Body>)> {
+    if let Some(mocked) = mock_get(url) {
+        return mocked;
+    }
     let mut attempt = 0;
     loop {
         match agent.get(url).call() {
@@ -149,6 +181,73 @@ pub fn join_url(base: &str, href: &str) -> String {
         let dir = &base[..base.rfind('/').map_or(base.len(), |i| i + 1)];
         format!("{dir}{href}")
     }
+}
+
+/// Why a listing could not be read: the server was not reached
+/// (`requests.RequestException`), or it answered with an error.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ListingError {
+    Unreachable(String),
+    Http(String),
+}
+
+impl std::fmt::Display for ListingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ListingError::Unreachable(m) | ListingError::Http(m) => f.write_str(m),
+        }
+    }
+}
+
+/// The body of a directory listing; any HTTP error is `HTTP <code> for <url>`.
+pub fn fetch_listing(url: &str) -> Result<String, ListingError> {
+    let (status, mut resp) =
+        get_with_retries(&agent(REQUEST_TIMEOUT_S), url).map_err(|e| ListingError::Unreachable(e.to_string()))?;
+    if status >= 400 {
+        return Err(ListingError::Http(format!("HTTP {status} for {url}")));
+    }
+    resp.body_mut()
+        .with_config()
+        .limit(64 * 1024 * 1024)
+        .read_to_string()
+        .map_err(|e| ListingError::Unreachable(e.to_string()))
+}
+
+/// `check_archive_server`: a HEAD of the archive root (8 s), then a GET.
+pub fn check_archive_server() -> (bool, String) {
+    if let Some(mocked) = mock_get(BASE_URL) {
+        return match mocked {
+            Ok((status, _)) if status >= 400 => (false, format!("HTTP {status}")),
+            Ok(_) => (true, String::new()),
+            Err(e) => (false, e.to_string()),
+        };
+    }
+    if let Ok(resp) = agent(8).head(BASE_URL).call()
+        && resp.status().as_u16() < 400
+    {
+        return (true, String::new());
+    }
+    match get_with_retries(&agent(REQUEST_TIMEOUT_S), BASE_URL) {
+        Ok((status, _)) if status >= 400 => (false, format!("HTTP {status}")),
+        Ok(_) => (true, String::new()),
+        Err(e) => (false, e.to_string()),
+    }
+}
+
+/// `fetch_day_stations`: the stations that published files on one UTC day.
+/// The archive has no directory for a day nobody has published yet, which
+/// is an empty day rather than an error.
+pub fn fetch_day_stations(date: NaiveDate) -> Result<Vec<String>> {
+    let url = day_url(date);
+    let (status, mut resp) = get_with_retries(&agent(REQUEST_TIMEOUT_S), &url)?;
+    if status == 404 {
+        return Ok(Vec::new());
+    }
+    if status >= 400 {
+        bail!("HTTP {status} for {url}");
+    }
+    let html = resp.body_mut().with_config().limit(64 * 1024 * 1024).read_to_string()?;
+    Ok(stations_in_listing(&extract_fits_links(&html)))
 }
 
 /// The FITS links of one day's listing; a missing day (404) is an empty day.

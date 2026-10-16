@@ -236,6 +236,32 @@ colours shift. Lite reproduces it for now; fixing it in both is a decision for y
 - Multi-station comparison and its export dialog; batch processing.
 - **Exit:** the same downloads and comparisons as the full app for a set of test days; dialogs match.
 
+**Status (2026-10-16), on branch `analyzer-lite`.** The download and import
+part was brought forward, ahead of Phase 2:
+
+| Item | State |
+|---|---|
+| e-CALLISTO downloader: Single Station, Multi-Station Event, Spectral Overview, Burst List tabs, cache footer (open, clear) | Done. Same messages, statuses and worker behaviour; station lists per day with the full app's cache and retry rules |
+| Previews (single and combined panels), spectral overview, burst FITS search | Done; figures are matplotlib's own layout ported to Rust |
+| Learmonth downloader (daily `.srs`, 15-minute chunks, Convert to FIT, Convert and Import) | Done; tested on a synthetic day until real samples arrive |
+| Import into the main window ("Importing FITS Files" progress, single file, combined, frequency options) | Done |
+| Compare (multi-station comparison) | Files are prepared, then a notice says comparison is not in this build yet; the window comes with the rest of Phase 3 |
+| Figure export from the overview | PNG, TIFF and SVG as matplotlib writes them; PDF and EPS embed a raster image for now |
+| Results against the full app | `downloads_parity` (listings, candidate filters, burst catalog, Learmonth chunks and FIT bytes) and `figures_parity` (every axes, text extent and tick of the preview and overview figures) pass |
+| Looks against the full app, light and dark | Downloader tabs 0.4–1.7 % of pixels differ, previews 0.6–1.0 %, Learmonth 0.7–2.3 %, calendar and station popups 3–6 %, import progress 5 % (a 200 × 70 window, so its text weighs more). What remains is ClearType text against Lite's grey anti-aliasing; field edges, tables, tab bars and figure text sit on the same pixels |
+| macOS and Linux | Not yet built or compared |
+
+Found in the full app while porting:
+
+- The event window's *Start (UTC)* and *Stop (UTC)* edits are local-time
+  `QDateTimeEdit`s. They start at local time and are then searched as UTC, which
+  is 5.5 h off on this PC. Lite uses UTC.
+- With the light theme on a dark operating system, Fusion's palette follows the
+  system. Preview figures, the preview tab bar and the calendar popup come out
+  dark. In the calendar the day numbers are drawn in the theme's dark text
+  colour on that dark base and are nearly invisible. Lite reproduces both for
+  now; fixing them in both apps is a decision for you.
+
 ### Phase 4: projects and outputs
 - `.efaproj` read and write, two-way with pass-through; recovery; Analysis Session; presets; view config.
 - Figure export in all six formats; Export to FIT; project report; provenance report; analysis log.

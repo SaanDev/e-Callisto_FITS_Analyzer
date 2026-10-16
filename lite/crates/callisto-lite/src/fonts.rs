@@ -85,6 +85,53 @@ impl QtMetrics {
 /// Ascent and descent per pixel of size, by egui family.
 static METRICS: RwLock<Option<HashMap<FontFamily, (f32, f32)>>> = RwLock::new(None);
 
+/// The regular UI face's file, for glyph ink boxes ([`MplMeasure`]).
+static UI_FACE: RwLock<Option<(std::sync::Arc<Vec<u8>>, u32)>> = RwLock::new(None);
+
+/// Runs `f` with the regular UI face (for glyph outlines), once installed.
+pub fn with_ui_face<R>(f: impl FnOnce(&ttf_parser::Face) -> R) -> Option<R> {
+    let guard = UI_FACE.read().ok()?;
+    let (data, index) = guard.as_ref()?;
+    let face = ttf_parser::Face::parse(data, *index).ok()?;
+    Some(f(&face))
+}
+
+/// matplotlib's text extents (`RendererAgg.get_text_width_height_descent`)
+/// for text drawn in the regular UI face: the advance egui lays the text
+/// out with, and the inked glyphs' height and descent.
+pub struct MplMeasure<'a> {
+    pub ctx: &'a egui::Context,
+}
+
+impl callisto_core::mpl::TextMeasure for MplMeasure<'_> {
+    fn measure(&self, text: &str, size_px: f64) -> callisto_core::mpl::TextExtent {
+        let galley = self.ctx.fonts_mut(|f| {
+            f.layout_no_wrap(text.to_owned(), FontId::proportional(size_px as f32), egui::Color32::WHITE)
+        });
+        let guard = UI_FACE.read().ok();
+        let face = guard.as_ref().and_then(|g| g.as_ref()).and_then(|(d, i)| ttf_parser::Face::parse(d, *i).ok());
+        let Some(face) = face else {
+            let w = galley.size().x as f64;
+            return callisto_core::mpl::TextExtent { width: w, height: size_px, descent: size_px * 0.22 };
+        };
+        let scale = size_px / face.units_per_em() as f64;
+        let (mut y0, mut y1) = (f64::INFINITY, f64::NEG_INFINITY);
+        let glyphs = galley.rows.first().map(|r| r.row.glyphs.as_slice()).unwrap_or(&[]);
+        for g in glyphs {
+            let Some(bb) = face.glyph_index(g.chr).and_then(|id| face.glyph_bounding_box(id)) else { continue };
+            y0 = y0.min(bb.y_min as f64 * scale);
+            y1 = y1.max(bb.y_max as f64 * scale);
+        }
+        let width = galley.size().x as f64;
+        if !y0.is_finite() {
+            return callisto_core::mpl::TextExtent { width, height: 0.0, descent: 0.0 };
+        }
+        // The full app's matplotlib (3.10) gives the pen's advance as the
+        // width (FT2Font::get_width_height), not the ink's.
+        callisto_core::mpl::TextExtent { width, height: y1 - y0, descent: -y0 }
+    }
+}
+
 fn fixed64(v: f32) -> f32 {
     (v * 64.0).round() / 64.0
 }
@@ -228,6 +275,11 @@ impl SystemFonts {
                     _ => &[400],
                 };
                 if let Some(font) = fallbacks.iter().find_map(|w| self.face(name, *w)) {
+                    if value == 400
+                        && let Ok(mut g) = UI_FACE.write()
+                    {
+                        *g = Some((std::sync::Arc::new(font.font.to_vec()), font.index));
+                    }
                     let key = format!("{name}-{value}");
                     defs.font_data.insert(key.clone(), font.into());
                     chain.push(key);

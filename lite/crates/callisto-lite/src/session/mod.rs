@@ -458,6 +458,31 @@ impl Session {
         }
     }
 
+    /// `_load_single_import_payload`: a file the downloader prepared (no
+    /// log entry, not added to Recent Files).
+    pub fn load_imported_single(&mut self, filename: String, source_path: String, res: fits_io::FitsLoadResult) {
+        let ut = extract_ut_start_sec(&res.header0);
+        self.apply_loaded_dataset(
+            Dataset {
+                raw: Arc::new(res.data),
+                freqs: Arc::new(res.freqs),
+                time: Arc::new(res.time),
+                filename: if filename.is_empty() { "Imported".into() } else { filename },
+                header0: Some(res.header0),
+                headers: res.headers,
+                source_path: Some(source_path),
+                ut_start_sec: ut,
+                combined_mode: None,
+                combined_sources: Vec::new(),
+                combined_options: None,
+                gap_rows: None,
+                frequency_step_mhz: None,
+            },
+            "Raw",
+            String::new(),
+        );
+    }
+
     /// `load_combined_into_main`.
     pub fn load_combined_into_main(&mut self, c: Combined) {
         self.apply_loaded_dataset(
@@ -507,7 +532,9 @@ impl Session {
         }
         self.plot_data(&title, PlotView::Full);
         self.refresh_timeline_panel();
-        self.log_operation(log_message);
+        if !log_message.is_empty() {
+            self.log_operation(log_message);
+        }
         if artemis_bg {
             self.show_message("ARTEMIS-IV — opened background subtracted", 8000);
         }

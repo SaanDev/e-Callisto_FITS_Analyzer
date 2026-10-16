@@ -5,6 +5,9 @@
 
 pub mod app;
 pub mod canvas;
+pub mod downloads;
+pub mod figure_export;
+pub mod figure_view;
 pub mod fonts;
 pub mod gpu;
 pub mod icons;

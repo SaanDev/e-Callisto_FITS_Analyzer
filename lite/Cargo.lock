@@ -548,6 +548,7 @@ dependencies = [
  "image",
  "serde_json",
  "ureq",
+ "url",
 ]
 
 [[package]]
@@ -561,10 +562,13 @@ dependencies = [
  "egui",
  "egui_extras",
  "egui_kittest",
+ "flate2",
  "fontdb",
  "image",
+ "open",
  "rfd",
  "serde",
+ "tiny-skia",
  "ttf-parser",
 ]
 

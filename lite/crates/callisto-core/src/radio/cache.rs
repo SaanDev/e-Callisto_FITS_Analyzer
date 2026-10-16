@@ -20,7 +20,7 @@ pub fn filename_from_url(url: &str) -> String {
     percent_decode(name).trim().to_string()
 }
 
-fn percent_decode(s: &str) -> String {
+pub(crate) fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -158,7 +158,50 @@ pub fn enforce_cache_limit(root: &Path, max_bytes: u64) -> u64 {
             freed += size;
         }
     }
+    prune_empty_dirs(root);
     freed
+}
+
+/// `_prune_empty_dirs`: removes emptied station and date folders.
+fn prune_empty_dirs(root: &Path) {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+                out.push(p);
+            }
+        }
+    }
+    let mut dirs = Vec::new();
+    walk(root, &mut dirs);
+    dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
+    for d in dirs {
+        let _ = std::fs::remove_dir(d);
+    }
+}
+
+/// `clear_cache`: deletes every cached file; returns how many entries
+/// could not be removed (files in use).
+pub fn clear_cache(root: &Path) -> usize {
+    let mut errors = 0;
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for e in entries.flatten() {
+            let p = e.path();
+            let ok = if p.is_dir() {
+                let _ = std::fs::remove_dir_all(&p);
+                true
+            } else {
+                std::fs::remove_file(&p).is_ok() || !p.exists()
+            };
+            if !ok {
+                errors += 1;
+            }
+        }
+    }
+    let _ = std::fs::create_dir_all(root);
+    errors
 }
 
 /// Python's `format_size`.

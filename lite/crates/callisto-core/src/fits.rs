@@ -173,6 +173,42 @@ impl Header {
     }
 }
 
+/// The bytes of one HDU: its header cards then END, padded with spaces to a
+/// whole block, and its data padded with zeros.
+pub fn hdu_bytes(header: &Header, data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity((header.cards.len() + 1) * CARD + data.len() + 2 * BLOCK);
+    for card in header.cards.iter().map(|c| c.raw.as_str()).chain(std::iter::once("END")) {
+        let mut line = card.as_bytes().to_vec();
+        line.resize(CARD, b' ');
+        out.extend(line);
+    }
+    out.resize(out.len().div_ceil(BLOCK) * BLOCK, b' ');
+    out.extend_from_slice(data);
+    out.resize(out.len().div_ceil(BLOCK) * BLOCK, 0);
+    out
+}
+
+/// A binary table of one row whose columns are `f64` arrays (`nD`), as
+/// e-CALLISTO stores its time and frequency axes. Returns its HDU bytes.
+pub fn axis_table_bytes(columns: &[(&str, &[f64])]) -> Vec<u8> {
+    let width: usize = columns.iter().map(|(_, v)| v.len() * 8).sum();
+    let mut h = Header::default();
+    h.set("XTENSION", HeaderValue::Str("BINTABLE".into()), "binary table extension");
+    h.set("BITPIX", HeaderValue::Int(8), "array data type");
+    h.set("NAXIS", HeaderValue::Int(2), "number of array dimensions");
+    h.set("NAXIS1", HeaderValue::Int(width as i64), "length of dimension 1");
+    h.set("NAXIS2", HeaderValue::Int(1), "length of dimension 2");
+    h.set("PCOUNT", HeaderValue::Int(0), "number of group parameters");
+    h.set("GCOUNT", HeaderValue::Int(1), "number of groups");
+    h.set("TFIELDS", HeaderValue::Int(columns.len() as i64), "number of table fields");
+    for (i, (name, values)) in columns.iter().enumerate() {
+        h.set(&format!("TTYPE{}", i + 1), HeaderValue::Str((*name).into()), "");
+        h.set(&format!("TFORM{}", i + 1), HeaderValue::Str(format!("{}D", values.len())), "");
+    }
+    let data: Vec<u8> = columns.iter().flat_map(|(_, v)| v.iter().flat_map(|x| x.to_be_bytes())).collect();
+    hdu_bytes(&h, &data)
+}
+
 #[derive(Clone, Debug)]
 pub struct Hdu {
     pub header: Header,

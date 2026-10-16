@@ -82,9 +82,50 @@ pub struct Palette {
 
     /// Qt palette `Window`: the empty plot area and the toolbar separators.
     pub qt_window: Color32,
+    /// The rest of the Qt palette (matplotlib figures, Fusion tab panes).
+    pub qt: QtPalette,
 
     /// Opacity Qt gives a disabled toolbar icon (QIcon::Disabled).
     pub disabled_icon_alpha: f32,
+}
+
+/// The Qt palette roles Fusion and `AppTheme.apply_mpl` read.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct QtPalette {
+    pub window: Color32,
+    pub window_text: Color32,
+    pub base: Color32,
+    pub button: Color32,
+    pub mid: Color32,
+    pub text: Color32,
+    pub highlight: Color32,
+}
+
+impl QtPalette {
+    pub fn new(dark: bool, os_dark: bool) -> Self {
+        if dark {
+            // AppTheme._dark_palette.
+            QtPalette { window: hex(0x2b2b2b), window_text: hex(0xf0f0f0), base: hex(0x1f1f1f), button: hex(0x353535), mid: hex(0x5a5a5a), text: hex(0xf0f0f0), highlight: hex(0x0a84ff) }
+        } else if os_dark {
+            // Fusion's standard palette, dark scheme.
+            QtPalette { window: hex(0x323232), window_text: hex(0xf0f0f0), base: hex(0x242424), button: hex(0x323232), mid: hex(0x262626), text: hex(0xf0f0f0), highlight: hex(0x308cc6) }
+        } else {
+            QtPalette { window: hex(0xefefef), window_text: hex(0x000000), base: hex(0xffffff), button: hex(0xefefef), mid: hex(0xb8b8b8), text: hex(0x000000), highlight: hex(0x308cc6) }
+        }
+    }
+
+    /// Fusion's `buttonColor`: the button colour lifted (`lighter`) and
+    /// desaturated (greys stay grey).
+    pub fn fusion_button(&self) -> Color32 {
+        let c = self.button;
+        let gray = (c.r() as i32 * 11 + c.g() as i32 * 16 + c.b() as i32 * 5) / 32;
+        lighter(c, 100 + ((180 - gray) / 6).max(1))
+    }
+
+    /// Fusion's tab-widget pane (`tabFrameColor`).
+    pub fn tab_frame(&self) -> Color32 {
+        lighter(self.fusion_button(), 104)
+    }
 }
 
 impl Palette {
@@ -134,6 +175,7 @@ impl Palette {
                 control_hover: hex(0x2f3c4d),
 
                 qt_window,
+                qt: QtPalette::new(dark, os_dark),
                 disabled_icon_alpha: 0.86,
             }
         } else {
@@ -171,6 +213,7 @@ impl Palette {
                 control_hover: hex(0xe6ecf4),
 
                 qt_window,
+                qt: QtPalette::new(dark, os_dark),
                 disabled_icon_alpha: 0.79,
             }
         }
@@ -229,6 +272,23 @@ impl Palette {
     }
 }
 
+/// `QColor::lighter(factor)` on its 16-bit HSV value, for greyish colours.
+pub fn lighter(c: Color32, factor: i32) -> Color32 {
+    let ch = |v: u8| ((v as i32 * 257 * factor / 100).min(65535) / 257) as u8;
+    Color32::from_rgb(ch(c.r()), ch(c.g()), ch(c.b()))
+}
+
+/// `QColor::darker(factor)` on its 16-bit HSV value, for greyish colours.
+pub fn darker(c: Color32, factor: i32) -> Color32 {
+    let ch = |v: u8| ((v as i32 * 257 * 100 / factor) / 257) as u8;
+    Color32::from_rgb(ch(c.r()), ch(c.g()), ch(c.b()))
+}
+
+/// `QColor::darker(factor × 100)`, roughly: each channel divided by `f`.
+pub fn darken(c: Color32, f: f32) -> Color32 {
+    scale(c, 1.0 / f)
+}
+
 fn scale(c: Color32, f: f32) -> Color32 {
     let ch = |v: u8| ((v as f32 * f).round().clamp(0.0, 255.0)) as u8;
     Color32::from_rgb(ch(c.r()), ch(c.g()), ch(c.b()))
@@ -237,6 +297,12 @@ fn scale(c: Color32, f: f32) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fusion_pane_matches_samples() {
+        // The preview window's tab pane in the light theme on a dark OS.
+        assert_eq!(QtPalette::new(false, true).tab_frame(), hex(0x3e3e3e));
+    }
 
     #[test]
     fn separators_match_fusion_samples() {

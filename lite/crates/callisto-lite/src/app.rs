@@ -5,6 +5,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::downloads::import::{ImportDialog, Outcome};
+use crate::downloads::learmonth::{LearmonthAction, LearmonthDialog};
+use crate::downloads::stations::StationService;
+use crate::downloads::{DateTimeState, DownloaderAction, DownloaderDialog};
 use crate::fonts::SystemFonts;
 use crate::menus::{Command, MenuState};
 use crate::session::{DisplayRangePreset, Notice, NoticeKind, Session};
@@ -105,6 +109,14 @@ pub fn fits_entry_label(paths: &[String]) -> String {
     }
 }
 
+/// Which window an import came from: it closes when the import succeeds
+/// (`import_success`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportSource {
+    Downloader,
+    Learmonth,
+}
+
 /// What an open input dialog is asking for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputPurpose {
@@ -133,6 +145,19 @@ pub struct LiteApp {
     pub combine_fits: Option<crate::ui::combine_dialog::CombineFitsDialog>,
     /// A name or choice being asked for, and what it is for.
     pub input: Option<(dialogs::InputDialog, InputPurpose)>,
+    /// Download → Launch FITS Downloader, and what it remembers when closed.
+    pub downloader: Option<DownloaderDialog>,
+    downloader_state: Option<DateTimeState>,
+    /// The archive's stations per day, shared by every downloader tab.
+    pub stations: StationService,
+    pub learmonth: Option<LearmonthDialog>,
+    /// The "Importing FITS Files" dialog and where the import came from.
+    pub importing: Option<(ImportDialog, Option<ImportSource>)>,
+    /// The frequency-combine options dialog is finishing an import.
+    import_combine: Option<ImportSource>,
+    /// Lite's own download caches.
+    pub cache_root: PathBuf,
+    pub learmonth_cache: PathBuf,
     commands: Vec<Command>,
     applied_theme: Option<(bool, bool)>,
     frames: u64,
@@ -153,10 +178,17 @@ impl LiteApp {
         let mut session = Session::new();
         session.freq_axis_log = settings.frequency_axis_log;
         session.prefetch_adjacent = settings.prefetch_adjacent;
-        // Lite keeps its own download cache, next to its settings.
-        let cache = eframe::storage_dir(crate::APP_NAME).map(|d| d.join("callisto_cache"));
+        // Lite keeps its own download caches, next to its settings.
+        let data_dir = eframe::storage_dir(crate::APP_NAME).unwrap_or_else(|| std::env::temp_dir().join(crate::APP_NAME));
+        let cache_root = data_dir.join("callisto_cache");
+        let learmonth_cache = data_dir.join("learmonth_cache");
         let online = std::env::var_os("CALLISTO_LITE_OFFLINE").is_none();
-        session.set_archive(cache, online);
+        session.set_archive(Some(cache_root.clone()), online);
+        let stations = if online {
+            StationService::online()
+        } else {
+            StationService::new(std::sync::Arc::new(|_| Err("The archive is offline (CALLISTO_LITE_OFFLINE).".to_owned())))
+        };
         Self {
             settings,
             os_dark_override: None,
@@ -173,6 +205,14 @@ impl LiteApp {
             display_range_dialog: None,
             combine_fits: None,
             input: None,
+            downloader: None,
+            downloader_state: None,
+            stations,
+            learmonth: None,
+            importing: None,
+            import_combine: None,
+            cache_root,
+            learmonth_cache,
             commands: Vec::new(),
             applied_theme: None,
             frames: 0,
@@ -443,7 +483,138 @@ impl LiteApp {
             Command::AddNextObservation => s.extend_timeline(Direction::Next, self.sidebar.timeline_step),
             Command::TrimTimelineStart => s.trim_timeline(true),
             Command::TrimTimelineEnd => s.trim_timeline(false),
+            Command::LaunchDownloader => {
+                if self.downloader.is_none() {
+                    let state = self.downloader_state.clone();
+                    self.downloader = Some(DownloaderDialog::new(self.cache_root.clone(), &mut self.stations, state.as_ref()));
+                }
+            }
+            Command::LaunchLearmonthDownloader => {
+                if self.learmonth.is_none() {
+                    self.learmonth = Some(LearmonthDialog::new(self.learmonth_cache.clone()));
+                }
+            }
             other => s.show_message(format!("{other:?} is not available yet in this build."), 4000),
+        }
+    }
+
+    fn notify(&mut self, kind: NoticeKind, title: &str, text: impl Into<String>) {
+        self.session.notices.push(Notice { kind, title: title.into(), text: text.into() });
+    }
+
+    /// `process_imported_files`.
+    fn process_imported_files(&mut self, ctx: &egui::Context, sources: Vec<String>, from: ImportSource) {
+        if sources.is_empty() {
+            return self.notify(NoticeKind::Warning, "No Files", "No files were received from the downloader.");
+        }
+        if self.importing.is_some() {
+            return self.notify(NoticeKind::Information, "Import In Progress", "Another FITS import is already running.");
+        }
+        self.importing = Some((ImportDialog::import(ctx, self.cache_root.clone(), sources), Some(from)));
+    }
+
+    /// `process_comparison_sources`.
+    fn process_comparison_sources(&mut self, ctx: &egui::Context, sources: Vec<String>) {
+        if sources.is_empty() {
+            return self.notify(NoticeKind::Warning, "No Files", "No files were received for comparison.");
+        }
+        if self.importing.is_some() {
+            return self.notify(NoticeKind::Information, "Comparison In Progress", "Another comparison preparation is already running.");
+        }
+        self.importing = Some((ImportDialog::compare(ctx, self.cache_root.clone(), sources), None));
+    }
+
+    /// `_emit_downloader_import_success`: the source window closes.
+    fn import_success(&mut self, from: Option<ImportSource>) {
+        match from {
+            Some(ImportSource::Downloader) => {
+                if let Some(d) = self.downloader.take() {
+                    self.downloader_state = Some(d.date_time_state());
+                }
+            }
+            Some(ImportSource::Learmonth) => self.learmonth = None,
+            None => {}
+        }
+    }
+
+    /// `_on_downloader_import_finished` and the comparison's counterpart.
+    fn finish_import(&mut self, outcome: Outcome, from: Option<ImportSource>) {
+        use callisto_core::radio::downloader::{ImportPayload, invalid_selection_text};
+        match outcome {
+            Outcome::Import(Ok(ImportPayload::Single { filename, source_path, result })) => {
+                self.session.load_imported_single(filename, source_path, *result);
+                self.import_success(from);
+            }
+            Outcome::Import(Ok(ImportPayload::Combined(c))) => {
+                self.session.load_combined_into_main(*c);
+                self.import_success(from);
+            }
+            Outcome::Import(Ok(ImportPayload::FrequencyOptionsRequired { files, relation, .. })) => {
+                let pending = crate::session::PendingCombine { paths: files, relation: Some(relation) };
+                self.combine_dialog = Some(dialogs::CombineOptionsDialog::new(&pending));
+                self.session.pending_combine = Some(pending);
+                self.import_combine = from.or(Some(ImportSource::Downloader));
+            }
+            Outcome::Import(Ok(ImportPayload::Invalid(detail))) => {
+                self.notify(NoticeKind::Warning, "Invalid Selection", invalid_selection_text(&detail));
+            }
+            Outcome::Import(Err(m)) => {
+                self.notify(NoticeKind::Critical, "Import Failed", if m.is_empty() { "Import failed.".to_owned() } else { m });
+            }
+            Outcome::Compare(Ok(paths)) if paths.is_empty() => {
+                self.notify(NoticeKind::Warning, "Comparison", "No FITS files were prepared for comparison.");
+            }
+            Outcome::Compare(Ok(paths)) => {
+                self.notify(
+                    NoticeKind::Information,
+                    "Multi-Station Comparison",
+                    format!(
+                        "{} file(s) are ready in the download cache. The multi-station comparison window is not available in this build yet.",
+                        paths.len()
+                    ),
+                );
+            }
+            Outcome::Compare(Err(m)) => {
+                let text = if m.is_empty() { "Could not prepare FITS files for comparison.".to_owned() } else { m };
+                self.notify(NoticeKind::Critical, "Comparison Failed", text);
+            }
+        }
+    }
+
+    /// The download windows, the import dialog and their results.
+    fn download_windows(&mut self, ctx: &egui::Context, palette: &Palette) {
+        let importing = self.importing.is_some();
+        if let Some(d) = &mut self.downloader {
+            d.blocked = importing;
+            match d.show(ctx, &mut self.stations, palette) {
+                Some(DownloaderAction::Import(urls)) => self.process_imported_files(ctx, urls, ImportSource::Downloader),
+                Some(DownloaderAction::Compare(urls)) => {
+                    if let Some(d) = self.downloader.take() {
+                        self.downloader_state = Some(d.date_time_state());
+                    }
+                    self.process_comparison_sources(ctx, urls);
+                }
+                Some(DownloaderAction::Close) => {
+                    if let Some(d) = self.downloader.take() {
+                        self.downloader_state = Some(d.date_time_state());
+                    }
+                }
+                None => {}
+            }
+        }
+        if let Some(l) = &mut self.learmonth {
+            l.blocked = importing;
+            match l.show(ctx, palette) {
+                Some(LearmonthAction::Import(paths)) => self.process_imported_files(ctx, paths, ImportSource::Learmonth),
+                Some(LearmonthAction::Close) => self.learmonth = None,
+                None => {}
+            }
+        }
+        if let Some((dialog, _)) = &mut self.importing
+            && let Some(outcome) = dialog.show(ctx, palette)
+        {
+            let from = self.importing.take().and_then(|(_, f)| f);
+            self.finish_import(outcome, from);
         }
     }
 
@@ -497,11 +668,14 @@ impl eframe::App for LiteApp {
             self.fonts.install_with(&ctx, (!family.is_empty()).then_some(family.as_str()));
             self.installed_graph_family = family;
         }
+        // The downloaders and the import dialog are modal (`exec()`).
+        let modal = self.downloader.is_some() || self.learmonth.is_some() || self.importing.is_some();
         if self.notice.is_none()
             && self.combine_dialog.is_none()
             && self.header_viewer.is_none()
             && self.display_range_dialog.is_none()
             && self.input.is_none()
+            && !modal
         {
             self.shortcuts(&ctx);
             self.dropped_files(&ctx);
@@ -521,6 +695,9 @@ impl eframe::App for LiteApp {
             commands: &mut self.commands,
         };
         ui::main_window(ui, state, &palette);
+        if modal {
+            crate::downloads::block_input(ui, egui::Id::new("main_window_modal"));
+        }
         self.settings.frequency_axis_log = self.session.freq_axis_log;
 
         let commands = std::mem::take(&mut self.commands);
@@ -596,13 +773,28 @@ impl eframe::App for LiteApp {
                 None => {}
             }
         }
+        self.download_windows(&ctx, &palette);
         if let Some(dialog) = &mut self.combine_dialog
             && let Some(result) = dialog.show(&ctx, &palette)
         {
             self.combine_dialog = None;
-            let before = self.session.opened.len();
-            self.session.resolve_pending_combine(result);
-            self.after_open(before);
+            if let Some(from) = self.import_combine.take() {
+                // `_on_downloader_import_finished`, frequency options chosen.
+                let pending = self.session.pending_combine.take();
+                if let (Some(pending), Some(options)) = (pending, result) {
+                    match callisto_core::radio::combine::combine_compatible(&pending.paths, options) {
+                        Ok(c) => {
+                            self.session.load_combined_into_main(c);
+                            self.import_success(Some(from));
+                        }
+                        Err(e) => self.notify(NoticeKind::Critical, "Import Failed", format!("Could not import downloaded files:\n{e}")),
+                    }
+                }
+            } else {
+                let before = self.session.opened.len();
+                self.session.resolve_pending_combine(result);
+                self.after_open(before);
+            }
         }
     }
 

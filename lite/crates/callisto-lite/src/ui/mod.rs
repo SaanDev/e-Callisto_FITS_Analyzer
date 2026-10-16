@@ -4,10 +4,13 @@
 
 pub mod combine_dialog;
 pub mod dialogs;
+pub mod itemview;
 pub mod menubar;
 pub mod sidebar;
 pub mod statusbar;
 pub mod toolbar;
+pub mod qlayout;
+pub mod qt;
 pub mod widgets;
 
 use egui::{CornerRadius, Id, Rect, Sense, Ui, pos2, vec2};
