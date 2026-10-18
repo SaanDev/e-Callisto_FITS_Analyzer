@@ -151,12 +151,25 @@ def _github_get_json(url: str, timeout: float) -> Any:
     return response.json()
 
 
+def _is_lite_release(payload: dict[str, Any]) -> bool:
+    """Releases of e-CALLISTO FITS Analyzer Lite, tagged ``lite-v…``.
+
+    Lite is released from this repository with its own version numbers
+    (starting at 1.0.0), so its releases must never be offered to, or
+    compared with, the full application.
+    """
+    tag = str(payload.get("tag_name") or "").strip().lower()
+    return tag.startswith("lite-")
+
+
 def _is_stable_release(payload: dict[str, Any]) -> bool:
     if not isinstance(payload, dict):
         return False
     if bool(payload.get("draft")):
         return False
     if bool(payload.get("prerelease")):
+        return False
+    if _is_lite_release(payload):
         return False
 
     tag = str(payload.get("tag_name") or "").strip()

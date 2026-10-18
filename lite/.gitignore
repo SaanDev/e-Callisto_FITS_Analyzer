@@ -1,0 +1,31 @@
+# Build output.
+/target
+
+# Images. The reference screenshots are captured locally with
+# tools/capture_reference.py and tools/capture_states.py; the screenshot
+# tests skip any that are missing. Comparison output lands here too.
+*.png
+/reference/compare/
+
+# Data written by parity/make_reference.py.
+/parity/out/
+
+# Data, not source: the sample observations the parity tests read (files
+# from the e-CALLISTO archive) and the layout and plot captures from the full
+# app (tools/capture_reference.py, tools/capture_states.py). Keep them on
+# disk; download or re-capture them on a new checkout.
+/parity/fixtures/
+/reference/**/*.json
+
+# Python caches from the tools and parity scripts.
+__pycache__/
+*.py[cod]
+
+# Editors and operating systems.
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
+.idea/
+.vscode/
