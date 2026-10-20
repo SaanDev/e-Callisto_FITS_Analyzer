@@ -14,7 +14,9 @@ use crate::menus::{Command, MenuState};
 use crate::session::{DisplayRangePreset, Notice, NoticeKind, Session};
 use crate::theme::{Palette, ThemeMode};
 use crate::ui::{self, dialogs, menubar::MenuBarState, sidebar::SidebarState};
+use callisto_core::analysis::light_curve::LightCurveSettings;
 use callisto_core::radio::timeline::Direction;
+use crate::ui::tool_dialogs::{FrequencyDialog, LightCurveSettingsDialog, SettingsAction, TextAnnotationDialog, TextPurpose};
 
 const SETTINGS_KEY: &str = "settings";
 /// `recent_files.MAX_RECENT_ENTRIES`.
@@ -38,6 +40,60 @@ pub struct Settings {
     pub frequency_axis_log: bool,
     /// View → display range presets, as the full app stores them.
     pub display_range_presets: Vec<DisplayRangePreset>,
+    /// Analysis → Plot Light Curves → Settings (`analysis/light_curve_settings_json`).
+    pub light_curve: LightCurvePrefs,
+}
+
+/// The light-curve settings with the full app's keys.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LightCurvePrefs {
+    /// "single" or "multiple".
+    pub mode: String,
+    pub line_color: String,
+    pub line_width: f64,
+    pub show_frequency_label: bool,
+    pub vertical_scale: f64,
+    pub opacity: f64,
+    pub line_style: String,
+}
+
+impl Default for LightCurvePrefs {
+    fn default() -> Self {
+        Self::from(&LightCurveSettings::default())
+    }
+}
+
+impl From<&LightCurveSettings> for LightCurvePrefs {
+    fn from(s: &LightCurveSettings) -> Self {
+        Self {
+            mode: if s.multiple { "multiple" } else { "single" }.into(),
+            line_color: s.line_color.clone(),
+            line_width: s.line_width,
+            show_frequency_label: s.show_frequency_label,
+            vertical_scale: s.vertical_scale,
+            opacity: s.opacity,
+            line_style: s.line_style.clone(),
+        }
+    }
+}
+
+impl LightCurvePrefs {
+    /// `_normalize_light_curve_settings`.
+    pub fn settings(&self) -> LightCurveSettings {
+        let color = callisto_core::plot::qt_raster::parse_color(&self.line_color)
+            .map_or_else(|| "#00e5ff".to_owned(), callisto_core::plot::qt_raster::color_name);
+        LightCurveSettings {
+            multiple: self.mode.eq_ignore_ascii_case("multiple"),
+            line_color: color,
+            line_width: self.line_width,
+            show_frequency_label: self.show_frequency_label,
+            vertical_scale: self.vertical_scale,
+            opacity: self.opacity,
+            line_style: self.line_style.clone(),
+        }
+        .normalized()
+    }
 }
 
 impl Default for Settings {
@@ -51,6 +107,7 @@ impl Default for Settings {
             recent_fits: Vec::new(),
             frequency_axis_log: false,
             display_range_presets: Vec::new(),
+            light_curve: LightCurvePrefs::default(),
         }
     }
 }
@@ -123,6 +180,8 @@ pub enum InputPurpose {
     SaveRangePreset,
     ApplyRangePreset,
     DeleteRangePreset,
+    EditTextLabel,
+    MoveTextLabel,
 }
 
 pub struct LiteApp {
@@ -135,6 +194,8 @@ pub struct LiteApp {
     fonts: SystemFonts,
     /// The Graph Properties family installed in egui ("" for none).
     installed_graph_family: String,
+    /// The text annotations' font families installed in egui.
+    installed_extra_families: Vec<String>,
     pub update_status: String,
     /// The message box showing, if any.
     pub notice: Option<Notice>,
@@ -145,6 +206,12 @@ pub struct LiteApp {
     pub combine_fits: Option<crate::ui::combine_dialog::CombineFitsDialog>,
     /// A name or choice being asked for, and what it is for.
     pub input: Option<(dialogs::InputDialog, InputPurpose)>,
+    /// Analysis → Plot Light Curves → Enter frequency.
+    pub light_curve_frequency: Option<FrequencyDialog>,
+    /// Analysis → Plot Light Curves → Settings... (not modal).
+    pub light_curve_settings: Option<LightCurveSettingsDialog>,
+    /// Add Text and Edit Text Label.
+    pub text_annotation: Option<TextAnnotationDialog>,
     /// Download → Launch FITS Downloader, and what it remembers when closed.
     pub downloader: Option<DownloaderDialog>,
     downloader_state: Option<DateTimeState>,
@@ -158,6 +225,8 @@ pub struct LiteApp {
     /// Lite's own download caches.
     pub cache_root: PathBuf,
     pub learmonth_cache: PathBuf,
+    /// The Maximum Intensities, Analyzer and Type II windows.
+    pub analysis: crate::analysis::AnalysisWindows,
     commands: Vec<Command>,
     applied_theme: Option<(bool, bool)>,
     frames: u64,
@@ -177,6 +246,7 @@ impl LiteApp {
         sidebar.font_families.extend(fonts.families());
         let mut session = Session::new();
         session.freq_axis_log = settings.frequency_axis_log;
+        session.tools.light_curve_settings = settings.light_curve.settings();
         session.prefetch_adjacent = settings.prefetch_adjacent;
         // Lite keeps its own download caches, next to its settings.
         let data_dir = eframe::storage_dir(crate::APP_NAME).unwrap_or_else(|| std::env::temp_dir().join(crate::APP_NAME));
@@ -197,6 +267,7 @@ impl LiteApp {
             session,
             fonts,
             installed_graph_family: String::new(),
+            installed_extra_families: Vec::new(),
             update_status: "Updates: not checked".into(),
             notice: None,
             combine_dialog: None,
@@ -205,6 +276,9 @@ impl LiteApp {
             display_range_dialog: None,
             combine_fits: None,
             input: None,
+            light_curve_frequency: None,
+            light_curve_settings: None,
+            text_annotation: None,
             downloader: None,
             downloader_state: None,
             stations,
@@ -213,6 +287,7 @@ impl LiteApp {
             import_combine: None,
             cache_root,
             learmonth_cache,
+            analysis: Default::default(),
             commands: Vec::new(),
             applied_theme: None,
             frames: 0,
@@ -228,7 +303,10 @@ impl LiteApp {
             theme: self.settings.theme_mode,
             prefetch_adjacent: self.settings.prefetch_adjacent,
             auto_clean_max_outliers: self.settings.auto_clean_max_outliers,
-            click_light_curve: false,
+            click_light_curve: self.session.tools.light_curve_click_mode,
+            has_noise: self.session.noise_reduced.is_some(),
+            has_light_curves: self.session.has_light_curves(),
+            has_ruler_measurement: self.session.has_ruler_measurement(),
         }
     }
 
@@ -316,6 +394,12 @@ impl LiteApp {
 
     /// A name or choice came back from an input dialog.
     fn finish_input(&mut self, purpose: InputPurpose, value: String) {
+        if matches!(purpose, InputPurpose::EditTextLabel | InputPurpose::MoveTextLabel) {
+            if let Some((index, _)) = self.session.text_annotations().into_iter().find(|(_, label)| *label == value) {
+                self.text_label_chosen(purpose, index);
+            }
+            return;
+        }
         let s = &mut self.session;
         let presets = &mut self.settings.display_range_presets;
         match purpose {
@@ -349,7 +433,49 @@ impl LiteApp {
                     s.show_message(format!("Deleted display range preset '{value}'."), 2500);
                 }
             }
+            InputPurpose::EditTextLabel | InputPurpose::MoveTextLabel => {}
         }
+    }
+
+    /// `_choose_text_annotation_index`: one label is taken directly, several are asked for.
+    fn choose_text_label(&mut self, purpose: InputPurpose) {
+        let title = if purpose == InputPurpose::EditTextLabel { "Edit Text Label" } else { "Move Text Label" };
+        let rows = self.session.text_annotations();
+        match rows.len() {
+            0 => {
+                self.notice = Some(Notice {
+                    kind: NoticeKind::Information,
+                    title: title.into(),
+                    text: "There are no text labels available.".into(),
+                })
+            }
+            1 => self.text_label_chosen(purpose, rows[0].0),
+            _ => {
+                let labels = rows.into_iter().map(|(_, l)| l).collect();
+                self.input = Some((dialogs::InputDialog::item(title, "Choose label:", labels), purpose));
+            }
+        }
+    }
+
+    fn text_label_chosen(&mut self, purpose: InputPurpose, index: usize) {
+        if purpose == InputPurpose::MoveTextLabel {
+            self.session.move_text_label(index);
+            return;
+        }
+        let Some(ann) = self.session.annotation(index).cloned() else { return };
+        let style = self.session.annotation_text_style(&ann);
+        self.text_annotation = Some(self.text_dialog("Edit Text Label", TextPurpose::Edit(index), &ann.text, &style));
+    }
+
+    fn text_dialog(
+        &self,
+        title: &str,
+        purpose: TextPurpose,
+        text: &str,
+        style: &callisto_core::analysis::annotations::TextStyle,
+    ) -> TextAnnotationDialog {
+        let ui_family = self.fonts.ui_family().unwrap_or("Segoe UI");
+        TextAnnotationDialog::new(title, purpose, text, style, ui_family, self.fonts.families())
     }
 
     /// `FitsHeaderViewerDialog.save_as_txt`.
@@ -404,6 +530,11 @@ impl LiteApp {
             Command::TogglePrefetch => {
                 self.settings.prefetch_adjacent = !self.settings.prefetch_adjacent;
                 s.prefetch_adjacent = self.settings.prefetch_adjacent;
+            }
+            Command::PlotMaximumIntensities | Command::OpenMaximumIntensities => {
+                s.stop_main_lasso();
+                let auto_clean = self.settings.auto_clean_max_outliers;
+                self.analysis.open_or_focus_max(&mut self.session, None, false, true, auto_clean);
             }
             Command::ToggleAutoCleanMaxOutliers => {
                 self.settings.auto_clean_max_outliers = !self.settings.auto_clean_max_outliers
@@ -494,6 +625,39 @@ impl LiteApp {
                     self.learmonth = Some(LearmonthDialog::new(self.learmonth_cache.clone()));
                 }
             }
+            Command::RulerMeasurement => s.activate_ruler_tool(),
+            Command::ClearRulerMeasurement => s.clear_ruler_measurement(true),
+            Command::EstimateDriftRate => s.activate_drift_tool(),
+            Command::IsolateBurst => s.activate_lasso(),
+            Command::LightCurveClickFrequency => {
+                let on = !s.tools.light_curve_click_mode;
+                s.set_light_curve_click_mode(on);
+            }
+            Command::ClearLightCurves => s.clear_light_curve(),
+            Command::LightCurveEnterFrequency => {
+                if s.can_plot_light_curve()
+                    && let Some((lo, hi)) = s.light_curve_frequency_limits()
+                {
+                    self.light_curve_frequency = Some(FrequencyDialog::new(lo, hi, s.light_curve_initial_frequency()));
+                }
+            }
+            Command::LightCurveSettings => match &mut self.light_curve_settings {
+                Some(d) => d.load(&s.tools.light_curve_settings),
+                None => self.light_curve_settings = Some(LightCurveSettingsDialog::new(&s.tools.light_curve_settings)),
+            },
+            Command::AddText => {
+                if s.can_start_annotation_text() {
+                    let style = s.text_annotation_style();
+                    self.text_annotation = Some(self.text_dialog("Add Text Annotation", TextPurpose::Add, "", &style));
+                }
+            }
+            Command::EditTextLabel => self.choose_text_label(InputPurpose::EditTextLabel),
+            Command::MoveTextLabel => self.choose_text_label(InputPurpose::MoveTextLabel),
+            Command::AddPolygon => s.start_annotation_polygon(),
+            Command::AddLine => s.start_annotation_line(),
+            Command::ToggleAnnotations => s.toggle_annotations_visibility(),
+            Command::DeleteLastAnnotation => s.delete_last_annotation(),
+            Command::ClearAnnotations => s.clear_annotations(),
             other => s.show_message(format!("{other:?} is not available yet in this build."), 4000),
         }
     }
@@ -663,13 +827,19 @@ impl eframe::App for LiteApp {
             palette.apply(&ctx);
             self.applied_theme = Some(key);
         }
-        if self.session.graph.font_family != self.installed_graph_family {
+        let families = self.session.annotation_font_families();
+        if self.session.graph.font_family != self.installed_graph_family || families != self.installed_extra_families {
             let family = self.session.graph.font_family.clone();
-            self.fonts.install_with(&ctx, (!family.is_empty()).then_some(family.as_str()));
+            self.fonts.install_with(&ctx, (!family.is_empty()).then_some(family.as_str()), &families);
             self.installed_graph_family = family;
+            self.installed_extra_families = families;
         }
         // The downloaders and the import dialog are modal (`exec()`).
-        let modal = self.downloader.is_some() || self.learmonth.is_some() || self.importing.is_some();
+        let modal = self.downloader.is_some()
+            || self.learmonth.is_some()
+            || self.importing.is_some()
+            || self.light_curve_frequency.is_some()
+            || self.text_annotation.is_some();
         if self.notice.is_none()
             && self.combine_dialog.is_none()
             && self.header_viewer.is_none()
@@ -684,6 +854,7 @@ impl eframe::App for LiteApp {
             ctx.request_repaint_after(wait);
         }
 
+        self.sidebar.analysis_summary = self.session.analysis_summary_text();
         let state = ui::WindowState {
             menu: self.menu_state(),
             menubar: &mut self.menubar,
@@ -714,6 +885,7 @@ impl eframe::App for LiteApp {
         if self.session.flush_deferred() {
             ctx.request_repaint();
         }
+        self.analysis.show(&ctx, &palette, &mut self.session, self.settings.auto_clean_max_outliers);
         if self.notice.is_none() && !self.session.notices.is_empty() {
             self.notice = Some(self.session.notices.remove(0));
         }
@@ -747,6 +919,36 @@ impl eframe::App for LiteApp {
             self.input = None;
             if let Some(value) = result {
                 self.finish_input(purpose, value);
+            }
+        }
+        if let Some(dialog) = &mut self.light_curve_frequency
+            && let Some(result) = dialog.show(&ctx, &palette)
+        {
+            self.light_curve_frequency = None;
+            if let Some(f) = result {
+                self.session.plot_light_curve_at_frequency(f, true);
+            }
+        }
+        if let Some(dialog) = &mut self.light_curve_settings {
+            match dialog.show(&ctx, &palette) {
+                Some(SettingsAction::Changed(settings)) => {
+                    self.settings.light_curve = LightCurvePrefs::from(&settings);
+                    self.session.set_light_curve_settings(settings);
+                }
+                Some(SettingsAction::Close) => self.light_curve_settings = None,
+                None => {}
+            }
+        }
+        if let Some(dialog) = &mut self.text_annotation
+            && let Some(result) = dialog.show(&ctx, &palette)
+        {
+            let purpose = dialog.purpose;
+            self.text_annotation = None;
+            if let Some((text, style)) = result {
+                match purpose {
+                    TextPurpose::Add => self.session.start_annotation_text(&text, style),
+                    TextPurpose::Edit(index) => self.session.edit_text_label(index, &text, &style),
+                }
             }
         }
         if let Some(dialog) = &mut self.rfi_dialog {

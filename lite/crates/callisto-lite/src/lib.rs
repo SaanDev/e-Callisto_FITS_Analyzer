@@ -3,6 +3,7 @@
 //!
 //! See `lite/PLAN.md` for scope and phases.
 
+pub mod analysis;
 pub mod app;
 pub mod canvas;
 pub mod downloads;

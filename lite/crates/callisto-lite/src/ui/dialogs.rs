@@ -561,62 +561,97 @@ pub struct InputDialog {
     pub items: Option<Vec<String>>,
     pub text: String,
     pub choice: usize,
+    window: Option<egui::Vec2>,
+    first_frame: bool,
 }
 
 impl InputDialog {
     pub fn text(title: &str, label: &str) -> Self {
-        Self { title: title.into(), label: label.into(), items: None, text: String::new(), choice: 0 }
+        Self { title: title.into(), label: label.into(), items: None, text: String::new(), choice: 0, window: None, first_frame: true }
     }
 
     pub fn item(title: &str, label: &str, items: Vec<String>) -> Self {
-        Self { title: title.into(), label: label.into(), items: Some(items), text: String::new(), choice: 0 }
+        Self { title: title.into(), label: label.into(), items: Some(items), text: String::new(), choice: 0, window: None, first_frame: true }
+    }
+
+    /// The label, the field and the button box (`QInputDialogPrivate::ensureLayout`).
+    fn layout(&self, ui: &Ui) -> super::qlayout::Layout {
+        use super::qlayout::{BoxLayout, Policy, Size, WidgetSpec};
+        let label_w = super::qt::text_w_hint(ui, &self.label);
+        let label = WidgetSpec::new("input_label", Size::new(label_w, 16), Policy::Minimum, Policy::Fixed);
+        let field = match &self.items {
+            Some(items) => {
+                let refs: Vec<&str> = items.iter().map(String::as_str).collect();
+                super::qt::combo_spec(ui, "input_field", &refs)
+            }
+            None => super::qt::line_edit_spec("input_field"),
+        };
+        let buttons = BoxLayout::h([0; 4], 6)
+            .stretch(1)
+            .widget(super::qt::button_spec(ui, "input_ok", "OK", false))
+            .widget(super::qt::button_spec(ui, "input_cancel", "Cancel", false));
+        BoxLayout::v([11; 4], 6).widget(label).widget(field).add(buttons.into_item()).into()
+    }
+
+    /// The contents; `Some(Some(value))` on OK, `Some(None)` on Cancel.
+    pub fn frame(&mut self, ui: &mut Ui, p: &Palette) -> Option<Option<String>> {
+        super::qt::with_app_style(|| self.contents(ui, p))
+    }
+
+    fn contents(&mut self, ui: &mut Ui, p: &Palette) -> Option<Option<String>> {
+        let layout = self.layout(ui);
+        let r = ui.max_rect();
+        let g = layout.layout_window(super::qlayout::Size::new(r.width().round() as i32, r.height().round() as i32));
+        let at = |id: &str| g.rect(id).to_egui(r.min);
+        let label = at("input_label");
+        widgets::text_left(ui, label.left(), label.center().y, &self.label, 12.0, Weight::Regular, p.text);
+        let field = at("input_field");
+        let mut enter = false;
+        let first = std::mem::take(&mut self.first_frame);
+        match &self.items {
+            Some(items) => {
+                // The combo box has the focus when the dialog opens.
+                if first {
+                    ui.memory_mut(|m| m.request_focus(Id::new("input_choice")));
+                }
+                if let Some(i) = super::qt::combo(ui, field, Id::new("input_choice"), items, Some(self.choice), "", true, p) {
+                    self.choice = i;
+                }
+            }
+            None => {
+                super::qt::line_edit(ui, field, Id::new("input_text"), &mut self.text, "", true, p);
+                ui.memory_mut(|m| m.request_focus(Id::new("input_text")));
+                enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+            }
+        }
+        if super::qt::button(ui, at("input_ok"), Id::new("input_ok"), "OK", false, true, p).clicked() || enter {
+            let value = match &self.items {
+                Some(items) => items.get(self.choice).cloned().unwrap_or_default(),
+                None => self.text.clone(),
+            };
+            return Some(Some(value));
+        }
+        if super::qt::button(ui, at("input_cancel"), Id::new("input_cancel"), "Cancel", false, true, p).clicked()
+            || ui.input(|i| i.key_pressed(egui::Key::Escape))
+        {
+            return Some(None);
+        }
+        None
     }
 
     /// `Some(Some(value))` on OK, `Some(None)` on Cancel.
     pub fn show(&mut self, ctx: &egui::Context, p: &Palette) -> Option<Option<String>> {
         let id = format!("input:{}", self.title);
         let title = self.title.clone();
-        dialog_window(ctx, &id, &title, vec2(320.0, 9.0 * 2.0 + 22.0 + 32.0 + 12.0 + 46.0), p, None, |ui| {
-            let full = ui.max_rect().shrink(9.0);
-            widgets::text_left(ui, full.left(), full.top() + 11.0, &self.label, 12.0, Weight::Regular, p.text);
-            let field = Rect::from_min_size(pos2(full.left(), full.top() + 22.0), vec2(full.width(), 32.0));
-            let mut enter = false;
-            match &self.items {
-                Some(items) => {
-                    let labels: Vec<&str> = items.iter().map(String::as_str).collect();
-                    if let Some(i) = widgets::combo(ui, field, Id::new("input_choice"), &labels, self.choice, true, p) {
-                        self.choice = i;
-                    }
-                }
-                None => {
-                    widgets::qt_box(ui, field, 10.0, p.input_bg, p.accent);
-                    let inner = field.shrink2(vec2(9.0, 1.0));
-                    let resp = ui.put(
-                        inner,
-                        egui::TextEdit::singleline(&mut self.text)
-                            .font(ui_font(12.0, Weight::Regular))
-                            .frame(egui::Frame::NONE)
-                            .vertical_align(egui::Align::Center),
-                    );
-                    resp.request_focus();
-                    enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                }
+        let size = self.window.unwrap_or(vec2(273.0, 138.0));
+        dialog_window(ctx, &id, &title, size, p, None, |ui| {
+            let hint = self.layout(ui).size_hint();
+            let want = vec2(hint.w as f32, hint.h as f32);
+            if self.window != Some(want) {
+                self.window = Some(want);
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(want));
             }
-            let cancel = Rect::from_min_size(pos2(full.right() - BUTTON_W, full.bottom() - 46.0), vec2(BUTTON_W, 46.0));
-            let ok = cancel.translate(vec2(-BUTTON_W - 6.0, 0.0));
-            if widgets::dialog_button(ui, ok, Id::new("input_ok"), "OK", true, p).clicked() || enter {
-                let value = match &self.items {
-                    Some(items) => items.get(self.choice).cloned().unwrap_or_default(),
-                    None => self.text.clone(),
-                };
-                return Some(Some(value));
-            }
-            if widgets::dialog_button(ui, cancel, Id::new("input_cancel"), "Cancel", true, p).clicked()
-                || ui.input(|i| i.key_pressed(egui::Key::Escape))
-            {
-                return Some(None);
-            }
-            None
+            self.frame(ui, p)
         })
     }
 }

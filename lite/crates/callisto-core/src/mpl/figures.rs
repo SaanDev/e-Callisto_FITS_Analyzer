@@ -56,6 +56,12 @@ fn colorbar_axes(position: [f64; 4], box_aspect: Option<(f64, (f64, f64))>, imag
         texts: Vec::new(),
         spine_color: fg,
         spine_width_pt: 1.5,
+        title: None,
+        title_pad_pt: 6.0,
+        scatters: Vec::new(),
+        lines: Vec::new(),
+        legend: None,
+        axis_zorder: 1.5,
     }
 }
 
@@ -107,6 +113,12 @@ pub fn preview_figure(data: &Array2, freqs: &[f64], times: &[f64], width: f64, h
         texts: Vec::new(),
         spine_color: c.text,
         spine_width_pt: 1.5,
+        title: None,
+        title_pad_pt: 6.0,
+        scatters: Vec::new(),
+        lines: Vec::new(),
+        legend: None,
+        axis_zorder: 1.5,
     };
     let bar = colorbar_axes(
         cbar,
@@ -208,6 +220,12 @@ pub fn overview_figure(result: &OverviewResult, width: f64, height: f64) -> Figu
             texts,
             spine_color: BLACK,
             spine_width_pt: 1.5,
+            title: None,
+            title_pad_pt: 6.0,
+            scatters: Vec::new(),
+            lines: Vec::new(),
+            legend: None,
+            axis_zorder: 1.5,
         });
     }
     axes.push(colorbar_axes(

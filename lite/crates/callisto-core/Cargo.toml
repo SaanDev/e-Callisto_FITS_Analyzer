@@ -12,6 +12,7 @@ chrono.workspace = true
 colorous.workspace = true
 flate2.workspace = true
 image.workspace = true
+tiny-skia.workspace = true
 ureq.workspace = true
 url.workspace = true
 

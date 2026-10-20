@@ -3,6 +3,7 @@
 //! No GUI code lives here, so everything can be tested headless and compared
 //! with the full app's Python results (see `lite/parity`).
 
+pub mod analysis;
 pub mod archive;
 pub mod callisto;
 pub mod colormap;
@@ -15,3 +16,4 @@ pub mod plot;
 pub mod radio;
 pub mod render;
 pub mod util;
+pub mod xlsx;

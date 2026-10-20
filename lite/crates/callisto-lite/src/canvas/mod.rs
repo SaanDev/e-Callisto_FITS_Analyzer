@@ -7,6 +7,8 @@
 //! colouring live in `callisto_core::plot`; this module lays them out and
 //! draws them, snapping lines to physical pixels as Qt's raster engine does.
 
+mod overlays;
+
 use std::time::{Duration, Instant};
 
 use callisto_core::image::RgbaImage;
@@ -25,6 +27,8 @@ use egui::{
 use std::sync::Arc;
 
 use crate::fonts::{graph_font, plot_font};
+use callisto_core::analysis::annotations::AnnotationKind;
+pub use overlays::Mode;
 
 /// `GraphicsLayout` contents margins and the `PlotItem`'s own.
 const LAYOUT_MARGIN: f64 = 9.0;
@@ -143,6 +147,21 @@ pub enum CanvasEvent {
     ViewInteractionFinished { start: View, end: View },
     /// `rectZoomFinished`.
     RectZoomFinished { start: View, end: View },
+    /// `plotClicked`: a left click with no capture running.
+    PlotClicked { x: f64, y: f64 },
+    /// `lassoFinished`: the lasso's vertices (at least three).
+    LassoFinished(Vec<(f64, f64)>),
+    /// `driftPointAdded`.
+    DriftPointAdded { x: f64, y: f64 },
+    /// `driftCaptureFinished`: every point clicked.
+    DriftCaptureFinished(Vec<(f64, f64)>),
+    /// `measurementCaptureFinished`: the two points.
+    MeasurementCaptureFinished(Vec<(f64, f64)>),
+    /// `annotationCaptureFinished`: the polygon's vertices, the line's ends
+    /// or the text's position.
+    AnnotationCaptureFinished { kind: AnnotationKind, points: Vec<(f64, f64)> },
+    /// `annotationCaptureCancelled`.
+    AnnotationCaptureCancelled(AnnotationKind),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -184,6 +203,8 @@ impl R {
 /// The `PlotItem` grid, as Qt's layout resolves it.
 #[derive(Clone, Copy, Debug, Default)]
 struct Geometry {
+    /// The whole canvas (the graphics view), logical pixels.
+    size: (f64, f64),
     plot: R,
     title: R,
     left: R,
@@ -207,6 +228,7 @@ fn layout(w: f64, h: f64, left_w: f64, bottom_h: f64) -> Geometry {
     let colorbar = R::new(view.x + view_w + COLORBAR_GAP, main_y, COLORBAR_W, main_h);
     let bar_h = (main_h - 2.0).max(0.0);
     Geometry {
+        size: (w, h),
         plot,
         title: R::new(view.x, inner_y, view_w, TITLE_H),
         left: R::new(inner_x, main_y, left_w, main_h),
@@ -250,6 +272,11 @@ pub struct PlotCanvas {
     events: Vec<CanvasEvent>,
     image_layer: Option<Layer>,
     bar_layer: Option<Layer>,
+    overlays: overlays::Overlays,
+    capture: overlays::Capture,
+    overlay_cache: overlays::LayerCache,
+    /// How the canvas was last laid out on screen.
+    last_layout: Option<(Pixels, Geometry)>,
 }
 
 impl Default for PlotCanvas {
@@ -293,6 +320,10 @@ impl PlotCanvas {
             events: Vec::new(),
             image_layer: None,
             bar_layer: None,
+            overlays: Default::default(),
+            capture: Default::default(),
+            overlay_cache: Default::default(),
+            last_layout: None,
         };
         canvas.apply_labels();
         canvas
@@ -362,6 +393,16 @@ impl PlotCanvas {
         } else {
             f64::NAN
         }
+    }
+
+    /// Where plot coordinates (seconds, MHz) were on screen when last drawn.
+    pub fn screen_pos(&self, x: f64, y: f64) -> Option<Pos2> {
+        let (px, geo) = self.last_layout?;
+        let v = geo.view;
+        let [x0, x1, y0, y1] = self.range;
+        let cx = v.x + (x - x0) / (x1 - x0) * v.w;
+        let cy = v.y + (y1 - self.axis_y(y)) / (y1 - y0) * v.h;
+        Some(px.point(cx, cy))
     }
 
     /// `get_view`.
@@ -500,6 +541,7 @@ impl PlotCanvas {
         self.drag = None;
         self.interaction_start = None;
         self.last_range_change = None;
+        self.reset_overlays();
         self.apply_labels();
     }
 
@@ -520,7 +562,7 @@ impl PlotCanvas {
     }
 
     fn mouse_enabled(&self) -> bool {
-        !self.navigation_locked || self.rect_zoom_once
+        !self.capture.mouse_suspended && (!self.navigation_locked || self.rect_zoom_once)
     }
 
     /// `start_rect_zoom_once`: the next left drag zooms to a rectangle.
@@ -607,6 +649,7 @@ impl PlotCanvas {
             }
         }
         let bar_draw = self.bar_axis.generate(geo.bar_axis.w, geo.bar_axis.h, &measure_tick);
+        self.last_layout = Some((px, geo));
 
         self.handle_mouse(ui, rect, &px, &geo);
         self.poll_interaction_timer(ui);
@@ -615,6 +658,7 @@ impl PlotCanvas {
         if self.image.is_some() {
             self.draw_image(ui, &painter, &px, &geo);
         }
+        self.draw_overlays(ui, &painter, &px, &geo);
 
         draw_axis(ui, &painter, &px, geo.left, &left_draw, &tick_font, fg, fg);
         draw_axis(ui, &painter, &px, geo.bottom, &bottom_draw, &tick_font, fg, fg);
@@ -750,9 +794,11 @@ impl PlotCanvas {
         let resp = ui.interact(rect, Id::new("plot_canvas"), Sense::click_and_drag());
         let pointer = ui.input(|i| i.pointer.latest_pos());
         let to_canvas = |p: Pos2| px.canvas(p);
+        let move_consumed = self.handle_capture_input(ui, &resp, px, geo);
 
         // Cursor readout: anywhere over the PlotItem, extrapolating outside the view box.
         if resp.hovered()
+            && !move_consumed
             && let Some(p) = pointer
             && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO || i.pointer.is_moving())
         {
@@ -985,6 +1031,7 @@ fn cached_layer(
 
 /// Maps canvas coordinates to device pixels, with the canvas origin snapped
 /// to a whole pixel as Qt places a widget.
+#[derive(Clone, Copy, Debug)]
 struct Pixels {
     origin: (f64, f64),
     ppp: f64,

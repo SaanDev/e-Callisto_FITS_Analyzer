@@ -547,6 +547,7 @@ dependencies = [
  "flate2",
  "image",
  "serde_json",
+ "tiny-skia",
  "ureq",
  "url",
 ]
@@ -1800,6 +1801,8 @@ dependencies = [
  "num-traits",
  "png 0.18.1",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

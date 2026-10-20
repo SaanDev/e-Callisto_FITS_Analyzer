@@ -2,12 +2,14 @@
 //! menu bar, toolbar, then an 8 px-margin central area holding the sidebar,
 //! a splitter handle, the sidebar toggle and the plot; the status bar below.
 
+pub mod color_dialog;
 pub mod combine_dialog;
 pub mod dialogs;
 pub mod itemview;
 pub mod menubar;
 pub mod sidebar;
 pub mod statusbar;
+pub mod tool_dialogs;
 pub mod toolbar;
 pub mod qlayout;
 pub mod qt;

@@ -19,6 +19,55 @@ use crate::fonts::{Weight, ui_font};
 use crate::theme::Palette;
 
 pub const FONT_PX: f32 = 12.0;
+
+thread_local! {
+    /// Whether controls follow the app-wide stylesheet (see [`with_app_style`]).
+    static APP_STYLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Draws `f`'s controls as the app-wide stylesheet styles them, for dialogs
+/// that belong to the main window: drop-downs and spin buttons show the
+/// arrow images (`chevron_down_small.svg`, `chevron_up_small.svg`, 12 × 12)
+/// and editable text sits 10 px + border + Qt's 2 px margin in. The
+/// downloader's windows replace the app's stylesheet with their own: empty
+/// drop-downs, text 2 px further left.
+pub fn with_app_style<R>(f: impl FnOnce() -> R) -> R {
+    let before = APP_STYLE.with(|a| a.replace(true));
+    let out = f();
+    APP_STYLE.with(|a| a.set(before));
+    out
+}
+
+fn app_style() -> bool {
+    APP_STYLE.with(|a| a.get())
+}
+
+/// `QCheckBox` with the app-wide indicator: 15 px plus a 1 px border,
+/// radius 4, the accent when checked, the text 7 px after it. Returns
+/// true when toggled.
+pub fn check_box(ui: &Ui, rect: Rect, id: Id, label: &str, checked: &mut bool, enabled: bool, p: &Palette) -> bool {
+    let resp = ui.interact(rect, id, if enabled { Sense::click() } else { Sense::hover() });
+    let ind = Rect::from_min_size(pos2(rect.left(), rect.center().y - 8.5), vec2(17.0, 17.0));
+    if *checked {
+        qt_box(ui, ind, 4.0, p.accent, p.accent);
+    } else {
+        qt_box(ui, ind, 4.0, p.input_bg, p.border);
+    }
+    text_left(ui, rect.left() + 24.0, rect.center().y, label, FONT_PX, Weight::Regular, text_color(enabled, p));
+    if resp.clicked() {
+        *checked = !*checked;
+        return true;
+    }
+    false
+}
+
+fn arrow_icon(ui: &Ui, button: Rect, icon: crate::icons::Icon, p: &Palette) {
+    if app_style() {
+        // The arrow sits in the subcontrol's contents, right of its 1 px left border.
+        let c = pos2(button.left() + 1.0 + (button.width() - 1.0) / 2.0, button.center().y);
+        super::widgets::icon(ui, Rect::from_center_size(c, vec2(12.0, 12.0)), icon, p.dark, 1.0);
+    }
+}
 /// `QFontMetrics::lineSpacing` / `height` of the 9 pt UI font.
 pub const LINE: f32 = 16.0;
 /// `fm.horizontalAdvance('x')`.
@@ -296,6 +345,7 @@ fn drop_down(ui: &Ui, rect: Rect, hovered: bool, p: &Palette) -> Rect {
     // would be drawn as an antialiased line, two device pixels wide.
     fill_exact(&painter, Rect::from_min_max(strip.min, pos2(strip.left() + 2.0, strip.bottom())), CornerRadius::ZERO, p.border);
     fill_exact(&painter, Rect::from_min_max(pos2(strip.left() + 1.0, strip.top()), strip.max), CornerRadius { nw: 0, sw: 0, ne: 10, se: 10 }, fill);
+    arrow_icon(ui, strip, crate::icons::Icon::ChevronDownSmall, p);
     strip
 }
 
@@ -335,12 +385,19 @@ fn step_buttons(ui: &Ui, rect: Rect, over_frame: bool, hovered: [bool; 2], p: &P
             let body = Rect::from_min_max(pos2(snap(b.left() + 1.0), snap(b.top())), pos2(snap(b.right()), snap(b.bottom())));
             fill_exact(&painter, body, CornerRadius::ZERO, fill);
         }
+        let mut contents = b;
+        if over_frame && i == 0 {
+            contents.max.y -= 1.0;
+        }
+        let icon = if i == 0 { crate::icons::Icon::ChevronUpSmall } else { crate::icons::Icon::ChevronDownSmall };
+        arrow_icon(ui, contents, icon, p);
     }
 }
 
 /// An editable text field; `text_x` is the text's inset. Returns the response.
 fn text_field(ui: &mut Ui, rect: Rect, id: Id, text: &mut String, right_inset: f32, enabled: bool, color: Color32) -> Response {
-    let field = Rect::from_min_max(pos2(rect.left() + 11.0, rect.top() + 1.0), pos2(rect.right() - right_inset, rect.bottom() - 1.0));
+    let inset = if app_style() { 13.0 } else { 11.0 };
+    let field = Rect::from_min_max(pos2(rect.left() + inset, rect.top() + 1.0), pos2(rect.right() - right_inset, rect.bottom() - 1.0));
     ui.add_enabled_ui(enabled, |ui| {
         let mut style = (**ui.style()).clone();
         style.spacing.item_spacing = vec2(0.0, 0.0);
@@ -488,7 +545,8 @@ pub fn combo(ui: &Ui, rect: Rect, id: Id, items: &[String], current: Option<usiz
     let resp = ui.interact(rect, id, if enabled { Sense::click() } else { Sense::hover() });
     let popup = id.with("popup");
     let mut open = ui.data(|d| d.get_temp::<bool>(popup)).unwrap_or(false);
-    field_box(ui, rect, open, enabled, p);
+    let focused = ui.memory(|m| m.has_focus(id));
+    field_box(ui, rect, open || focused, enabled, p);
     drop_down(ui, rect, resp.hovered() && enabled, p);
     let text = current.and_then(|i| items.get(i));
     let color = if !enabled { p.disabled } else { p.text };
@@ -886,6 +944,88 @@ pub fn spin_box(ui: &mut Ui, rect: Rect, id: Id, value: &mut i32, range: (i32, i
         }
     }
     *value = (*value).clamp(range.0, range.1);
+    *value != before
+}
+
+/// `QDoubleSpinBox`: `decimals` places, `step` per arrow or wheel notch,
+/// an optional suffix. With `select_all`, the text is selected and focused
+/// (`selectAll()` before the dialog shows). Returns true when the value changed.
+#[allow(clippy::too_many_arguments)]
+pub fn double_spin_box(
+    ui: &mut Ui,
+    rect: Rect,
+    id: Id,
+    value: &mut f64,
+    range: (f64, f64),
+    step: f64,
+    decimals: usize,
+    suffix: &str,
+    select_all: bool,
+    enabled: bool,
+    p: &Palette,
+) -> bool {
+    let before = *value;
+    let edit_id = id.with("edit");
+    let focused = ui.memory(|m| m.has_focus(edit_id));
+    field_box(ui, rect, focused, enabled, p);
+    let [up, down] = step_rects(rect, true);
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let buttons = [(ui.interact(up, id.with("up"), sense), 1.0), (ui.interact(down, id.with("down"), sense), -1.0)];
+    step_buttons(ui, rect, true, [0, 1].map(|i| buttons[i].0.hovered() && enabled), p);
+    // QAbstractSpinBox rounds the stepped value to the decimals shown.
+    let round = |v: f64| {
+        let f = 10f64.powi(decimals as i32);
+        (v * f).round() / f
+    };
+    for (b, sign) in &buttons {
+        if b.clicked() {
+            *value = round(*value + sign * step);
+        }
+    }
+    let display = |v: f64| format!("{v:.decimals$}{suffix}");
+    let text_id = id.with("text");
+    let mut text: String = ui.data(|d| d.get_temp::<String>(text_id)).unwrap_or_else(|| display(*value));
+    let color = if enabled { p.text } else { p.disabled };
+    if select_all {
+        ui.memory_mut(|m| m.request_focus(edit_id));
+        let number_len = display(*value).chars().count() - suffix.chars().count();
+        let mut state = egui::text_edit::TextEditState::load(ui.ctx(), edit_id).unwrap_or_default();
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+            egui::text::CCursor::new(0),
+            egui::text::CCursor::new(number_len),
+        )));
+        state.store(ui.ctx(), edit_id);
+    }
+    let resp = text_field(ui, rect, edit_id, &mut text, 33.0, enabled, color);
+    if resp.has_focus() {
+        let t = text.trim().trim_end_matches(suffix.trim()).trim();
+        if let Ok(v) = t.parse::<f64>() {
+            *value = v;
+        }
+        let (up, down) = ui.input(|i| (i.key_pressed(egui::Key::ArrowUp), i.key_pressed(egui::Key::ArrowDown)));
+        if up || down {
+            *value = round(*value + if up { step } else { -step }).clamp(range.0, range.1);
+            text = display(*value);
+        }
+        ui.data_mut(|d| d.insert_temp(text_id, text.clone()));
+    } else {
+        ui.data_mut(|d| d.remove::<String>(text_id));
+    }
+    if resp.hovered() && enabled {
+        let wheel: f32 = ui.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::MouseWheel { delta, .. } => Some(delta.y),
+                    _ => None,
+                })
+                .sum()
+        });
+        if wheel != 0.0 {
+            *value = round(*value + wheel.signum() as f64 * step);
+        }
+    }
+    *value = value.clamp(range.0, range.1);
     *value != before
 }
 

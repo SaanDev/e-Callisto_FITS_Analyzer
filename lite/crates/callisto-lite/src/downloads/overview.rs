@@ -95,6 +95,12 @@ fn placeholder() -> Preview {
         }],
         spine_color: WHITE,
         spine_width_pt: 0.0,
+        title: None,
+        title_pad_pt: 6.0,
+        scatters: Vec::new(),
+        lines: Vec::new(),
+        legend: None,
+        axis_zorder: 1.5,
     };
     let fig = Figure { width: 1200.0, height: 800.0, dpi: 100.0, facecolor: WHITE, axes: vec![ax], texts: Vec::new() };
     Preview { title: "Preview".into(), result: None, view: FigureView::new(fig), scroll: 0.0 }
