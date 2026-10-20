@@ -5,6 +5,7 @@
 pub mod axis;
 pub mod colormap;
 pub mod image;
+pub mod qt_raster;
 
 pub use axis::*;
 pub use colormap::Colormap;

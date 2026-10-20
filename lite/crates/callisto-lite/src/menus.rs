@@ -91,6 +91,20 @@ pub enum Command {
     ClearRecentFiles,
     TrimTimelineStart,
     TrimTimelineEnd,
+    /// A menu action in one of the analysis windows' own menu bars.
+    Window(WindowAction),
+}
+
+/// The analysis windows' menu actions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum WindowAction {
+    SaveAs,
+    ExportAs,
+    ResetAll,
+    RestoreMaxima,
+    OpenAnalyzer,
+    RidgeSettings,
+    About,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -111,7 +125,7 @@ pub enum Item {
 }
 
 impl Item {
-    fn action(label: impl Into<Cow<'static, str>>, command: Command) -> Self {
+    pub(crate) fn action(label: impl Into<Cow<'static, str>>, command: Command) -> Self {
         Item::Action { label: label.into(), shortcut: None, enabled: true, checked: None, command }
     }
 
@@ -122,7 +136,7 @@ impl Item {
         self
     }
 
-    fn enabled(mut self, on: bool) -> Self {
+    pub(crate) fn enabled(mut self, on: bool) -> Self {
         if let Item::Action { enabled, .. } = &mut self {
             *enabled = on;
         }
@@ -166,6 +180,10 @@ pub struct MenuState {
     pub prefetch_adjacent: bool,
     pub auto_clean_max_outliers: bool,
     pub click_light_curve: bool,
+    /// Processed data (background subtracted): the analysis windows need it.
+    pub has_noise: bool,
+    pub has_light_curves: bool,
+    pub has_ruler_measurement: bool,
 }
 
 /// `_rebuild_recent_menu`: the selections, then Clear; or a disabled placeholder.
@@ -263,11 +281,11 @@ pub fn menu_bar(s: &MenuState) -> Vec<Menu> {
             items: vec![
                 Item::submenu(
                     "Maximum Intensities",
-                    vec![a("Open Maximum Intensities", C::OpenMaximumIntensities).enabled(data)],
+                    vec![a("Open Maximum Intensities", C::OpenMaximumIntensities).enabled(s.has_noise)],
                 ),
                 Item::submenu(
                     "Type II Band-splitting",
-                    vec![a("Open Type II Band-splitting", C::OpenTypeIIBandSplitting).enabled(data)],
+                    vec![a("Open Type II Band-splitting", C::OpenTypeIIBandSplitting).enabled(s.has_noise)],
                 ),
                 Item::submenu(
                     "Plot Light Curves",
@@ -278,12 +296,12 @@ pub fn menu_bar(s: &MenuState) -> Vec<Menu> {
                             .enabled(data),
                         a("Settings...", C::LightCurveSettings),
                         Item::Separator,
-                        a("Clear light curve(s)", C::ClearLightCurves).enabled(data),
+                        a("Clear light curve(s)", C::ClearLightCurves).enabled(data && s.has_light_curves),
                     ],
                 ),
                 Item::Separator,
                 a("Ruler Measurement", C::RulerMeasurement).enabled(data),
-                a("Clear Ruler Measurement", C::ClearRulerMeasurement).enabled(data),
+                a("Clear Ruler Measurement", C::ClearRulerMeasurement).enabled(s.has_ruler_measurement),
             ],
         },
         Menu {

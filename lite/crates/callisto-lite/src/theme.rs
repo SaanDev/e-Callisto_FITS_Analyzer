@@ -99,18 +99,22 @@ pub struct QtPalette {
     pub mid: Color32,
     pub text: Color32,
     pub highlight: Color32,
+    /// `QPalette::Dark` and `Light`: the shades of `qDrawShadePanel` frames
+    /// (measured from the full app's colour dialog).
+    pub dark: Color32,
+    pub light: Color32,
 }
 
 impl QtPalette {
     pub fn new(dark: bool, os_dark: bool) -> Self {
         if dark {
             // AppTheme._dark_palette.
-            QtPalette { window: hex(0x2b2b2b), window_text: hex(0xf0f0f0), base: hex(0x1f1f1f), button: hex(0x353535), mid: hex(0x5a5a5a), text: hex(0xf0f0f0), highlight: hex(0x0a84ff) }
+            QtPalette { window: hex(0x2b2b2b), window_text: hex(0xf0f0f0), base: hex(0x1f1f1f), button: hex(0x353535), mid: hex(0x5a5a5a), text: hex(0xf0f0f0), highlight: hex(0x0a84ff), dark: hex(0x1e1e1e), light: hex(0x787878) }
         } else if os_dark {
             // Fusion's standard palette, dark scheme.
-            QtPalette { window: hex(0x323232), window_text: hex(0xf0f0f0), base: hex(0x242424), button: hex(0x323232), mid: hex(0x262626), text: hex(0xf0f0f0), highlight: hex(0x308cc6) }
+            QtPalette { window: hex(0x323232), window_text: hex(0xf0f0f0), base: hex(0x242424), button: hex(0x323232), mid: hex(0x262626), text: hex(0xf0f0f0), highlight: hex(0x308cc6), dark: hex(0x212121), light: hex(0x4b4b4b) }
         } else {
-            QtPalette { window: hex(0xefefef), window_text: hex(0x000000), base: hex(0xffffff), button: hex(0xefefef), mid: hex(0xb8b8b8), text: hex(0x000000), highlight: hex(0x308cc6) }
+            QtPalette { window: hex(0xefefef), window_text: hex(0x000000), base: hex(0xffffff), button: hex(0xefefef), mid: hex(0xb8b8b8), text: hex(0x000000), highlight: hex(0x308cc6), dark: hex(0x9f9f9f), light: hex(0xffffff) }
         }
     }
 

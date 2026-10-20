@@ -9,6 +9,8 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
 
+use callisto_core::mpl::Face;
+use callisto_core::mpl::mathtext::GlyphMetrics;
 use egui::{FontData, FontDefinitions, FontFamily, FontId};
 
 /// Font weights the full app's stylesheets use. 500 renders as regular in
@@ -61,6 +63,24 @@ pub fn graph_font(px: f32, bold: bool, italic: bool) -> FontId {
     FontId::new(px, FontFamily::Name(name.into()))
 }
 
+/// A text annotation's font in `family` (`QFontComboBox`), once
+/// [`SystemFonts::install_with`] has installed that family; the app font
+/// otherwise, as Qt falls back.
+pub fn annotation_font(family: &str, px: f32, bold: bool, italic: bool) -> FontId {
+    let installed = EXTRA_FAMILIES.read().ok().is_some_and(|g| g.iter().any(|f| f.eq_ignore_ascii_case(family)));
+    if !installed {
+        return plot_font(px, bold, italic);
+    }
+    FontId::new(px, FontFamily::Name(extra_family_name(family, bold, italic).into()))
+}
+
+fn extra_family_name(family: &str, bold: bool, italic: bool) -> String {
+    format!("extra:{}:{}{}", family.to_lowercase(), if bold { "b" } else { "" }, if italic { "i" } else { "" })
+}
+
+/// Families installed for annotations.
+static EXTRA_FAMILIES: RwLock<Vec<String>> = RwLock::new(Vec::new());
+
 /// egui family names for the Graph Properties family: regular, bold, italic, bold italic.
 const GRAPH: [&str; 4] = ["graph-regular", "graph-bold", "graph-italic", "graph-bold-italic"];
 
@@ -88,28 +108,117 @@ static METRICS: RwLock<Option<HashMap<FontFamily, (f32, f32)>>> = RwLock::new(No
 /// The regular UI face's file, for glyph ink boxes ([`MplMeasure`]).
 static UI_FACE: RwLock<Option<(std::sync::Arc<Vec<u8>>, u32)>> = RwLock::new(None);
 
+/// The UI family's semibold and bold faces, for Qt's design-metric widths.
+static UI_SEMIBOLD_FACE: RwLock<Option<(std::sync::Arc<Vec<u8>>, u32)>> = RwLock::new(None);
+static UI_BOLD_FACE: RwLock<Option<(std::sync::Arc<Vec<u8>>, u32)>> = RwLock::new(None);
+
+/// `QFontMetricsF::horizontalAdvance` as Qt measures for elision: the
+/// face's design advances at `px` (unrounded), in the UI family's weight.
+pub fn design_width(text: &str, px: f32, weight: Weight) -> Option<f32> {
+    let slot = match weight {
+        Weight::Regular => &UI_FACE,
+        Weight::Semibold => &UI_SEMIBOLD_FACE,
+        Weight::Bold => &UI_BOLD_FACE,
+    };
+    let (data, index) = slot.read().ok()?.clone().or_else(|| UI_FACE.read().ok()?.clone())?;
+    let face = ttf_parser::Face::parse(&data, index).ok()?;
+    let scale = px / face.units_per_em() as f32;
+    Some(text.chars().map(|c| face.glyph_index(c).and_then(|g| face.glyph_hor_advance(g)).unwrap_or(0) as f32 * scale).sum())
+}
+
+/// The Origin graphs' face (Arial or a metric-compatible stand-in), for
+/// glyph metrics and outlines.
+static ORIGIN_FACE: RwLock<Option<(std::sync::Arc<Vec<u8>>, u32)>> = RwLock::new(None);
+
+/// egui's family for matplotlib text in the Origin graphs' face.
+const ORIGIN: &str = "mpl-origin";
+
+/// Origin's Arial and the stand-ins `origin_font_families` accepts.
+const ORIGIN_CANDIDATES: [&str; 3] = ["Arial", "Liberation Sans", "Arimo"];
+
 /// Runs `f` with the regular UI face (for glyph outlines), once installed.
 pub fn with_ui_face<R>(f: impl FnOnce(&ttf_parser::Face) -> R) -> Option<R> {
-    let guard = UI_FACE.read().ok()?;
-    let (data, index) = guard.as_ref()?;
-    let face = ttf_parser::Face::parse(data, *index).ok()?;
-    Some(f(&face))
+    with_mpl_face(Face::Ui, f)
+}
+
+/// Runs `f` with the face matplotlib text in `face` is drawn in: the
+/// Origin face when installed, the UI face otherwise.
+pub fn with_mpl_face<R>(face: Face, f: impl FnOnce(&ttf_parser::Face) -> R) -> Option<R> {
+    let origin = if face == Face::Origin { ORIGIN_FACE.read().ok().and_then(|g| g.clone()) } else { None };
+    let (data, index) = match origin {
+        Some(o) => o,
+        None => UI_FACE.read().ok()?.clone()?,
+    };
+    let parsed = ttf_parser::Face::parse(&data, index).ok()?;
+    Some(f(&parsed))
+}
+
+/// The egui font matplotlib text in `face` is laid out with.
+pub fn mpl_font(face: Face, px: f32) -> FontId {
+    let origin = face == Face::Origin && ORIGIN_FACE.read().ok().is_some_and(|g| g.is_some());
+    if origin { FontId::new(px, FontFamily::Name(ORIGIN.into())) } else { FontId::proportional(px) }
 }
 
 /// matplotlib's text extents (`RendererAgg.get_text_width_height_descent`)
-/// for text drawn in the regular UI face: the advance egui lays the text
-/// out with, and the inked glyphs' height and descent.
+/// for text in the interface or the Origin face: the advance egui lays the
+/// text out with, and the inked glyphs' height and descent; and the glyph
+/// metrics mathtext lays math labels out with.
 pub struct MplMeasure<'a> {
     pub ctx: &'a egui::Context,
 }
 
+/// `FT_Get_Kerning(KERNING_DEFAULT)` at matplotlib's 8× horizontal
+/// hinting factor: the `kern` table's value rounded to an eighth of a pixel.
+fn kern_px(face: &ttf_parser::Face, a: char, b: char, size_px: f64) -> f64 {
+    let (Some(l), Some(r)) = (face.glyph_index(a), face.glyph_index(b)) else { return 0.0 };
+    let Some(kern) = face.tables().kern else { return 0.0 };
+    let v = kern.subtables.into_iter().filter(|t| t.horizontal && !t.variable).find_map(|t| t.glyphs_kerning(l, r));
+    let scale = size_px / face.units_per_em() as f64;
+    v.map(|v| (v as f64 * scale * 8.0).round() / 8.0).unwrap_or(0.0)
+}
+
 impl callisto_core::mpl::TextMeasure for MplMeasure<'_> {
-    fn measure(&self, text: &str, size_px: f64) -> callisto_core::mpl::TextExtent {
+    fn glyph(&self, c: char, size_px: f64, face: Face) -> Option<GlyphMetrics> {
+        with_mpl_face(face, |f| {
+            let id = f.glyph_index(c)?;
+            let scale = size_px / f.units_per_em() as f64;
+            let advance = f.glyph_hor_advance(id)? as f64 * scale;
+            let Some(bb) = f.glyph_bounding_box(id) else {
+                return Some(GlyphMetrics { advance, ..Default::default() });
+            };
+            let (xmin, xmax) = (bb.x_min as f64 * scale, bb.x_max as f64 * scale);
+            let (ymin, ymax) = (bb.y_min as f64 * scale, bb.y_max as f64 * scale);
+            // FreeType's hinted metrics: the vertical extent grid-fitted.
+            let (top, bottom) = (ymax.ceil(), ymin.floor());
+            Some(GlyphMetrics { advance, width: xmax - xmin, height: top - bottom, xmin, xmax, ymin, ymax, iceberg: top })
+        })
+        .flatten()
+    }
+
+    fn kerning(&self, a: char, b: char, size_px: f64, face: Face) -> f64 {
+        with_mpl_face(face, |f| kern_px(f, a, b, size_px)).unwrap_or(0.0)
+    }
+
+    fn x_height(&self, size_px: f64, face: Face) -> f64 {
+        // `get_xheight`: PCLT's xHeight / 64 × (size / 12 pt) × (dpi / 100).
+        let pclt = with_mpl_face(face, |f| {
+            let t = f.raw_face().table(ttf_parser::Tag::from_bytes(b"PCLT"))?;
+            Some(u16::from_be_bytes([*t.get(10)?, *t.get(11)?]) as f64)
+        })
+        .flatten();
+        match pclt {
+            Some(x) => x / 64.0 * size_px * 0.06,
+            None => self.glyph('x', size_px, face).map(|g| g.iceberg).unwrap_or(0.5 * size_px),
+        }
+    }
+
+    fn measure(&self, text: &str, size_px: f64, mpl_face: Face) -> callisto_core::mpl::TextExtent {
         let galley = self.ctx.fonts_mut(|f| {
-            f.layout_no_wrap(text.to_owned(), FontId::proportional(size_px as f32), egui::Color32::WHITE)
+            f.layout_no_wrap(text.to_owned(), mpl_font(mpl_face, size_px as f32), egui::Color32::WHITE)
         });
-        let guard = UI_FACE.read().ok();
-        let face = guard.as_ref().and_then(|g| g.as_ref()).and_then(|(d, i)| ttf_parser::Face::parse(d, *i).ok());
+        let origin = if mpl_face == Face::Origin { ORIGIN_FACE.read().ok().and_then(|g| g.clone()) } else { None };
+        let data = origin.or_else(|| UI_FACE.read().ok().and_then(|g| g.clone()));
+        let face = data.as_ref().and_then(|(d, i)| ttf_parser::Face::parse(d, *i).ok());
         let Some(face) = face else {
             let w = galley.size().x as f64;
             return callisto_core::mpl::TextExtent { width: w, height: size_px, descent: size_px * 0.22 };
@@ -246,11 +355,12 @@ impl SystemFonts {
 
     /// Install the UI faces into egui. Returns the family used, if any.
     pub fn install(&self, ctx: &egui::Context) -> Option<String> {
-        self.install_with(ctx, None)
+        self.install_with(ctx, None, &[])
     }
 
-    /// [`Self::install`], plus `graph_family`'s faces for the plot text.
-    pub fn install_with(&self, ctx: &egui::Context, graph_family: Option<&str>) -> Option<String> {
+    /// [`Self::install`], plus `graph_family`'s faces for the plot text and
+    /// the `extra` families text annotations use.
+    pub fn install_with(&self, ctx: &egui::Context, graph_family: Option<&str>, extra: &[String]) -> Option<String> {
         let mut defs = FontDefinitions::default();
         let egui_fallbacks = defs.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
 
@@ -275,8 +385,14 @@ impl SystemFonts {
                     _ => &[400],
                 };
                 if let Some(font) = fallbacks.iter().find_map(|w| self.face(name, *w)) {
-                    if value == 400
-                        && let Ok(mut g) = UI_FACE.write()
+                    let slot = match value {
+                        400 => Some(&UI_FACE),
+                        600 => Some(&UI_SEMIBOLD_FACE),
+                        700 => Some(&UI_BOLD_FACE),
+                        _ => None,
+                    };
+                    if let Some(slot) = slot
+                        && let Ok(mut g) = slot.write()
                     {
                         *g = Some((std::sync::Arc::new(font.font.to_vec()), font.index));
                     }
@@ -342,7 +458,55 @@ impl SystemFonts {
             chain.extend(ui_chain);
             defs.families.insert(FontFamily::Name(GRAPH[i].into()), chain);
         }
+        // matplotlib text in the Origin graphs' face, falling back to the UI chain.
+        let origin = ORIGIN_CANDIDATES.iter().find_map(|name| self.face(name, 400));
+        let mut chain = Vec::new();
+        if let Some(font) = origin {
+            if let Ok(mut g) = ORIGIN_FACE.write() {
+                *g = Some((std::sync::Arc::new(font.font.to_vec()), font.index));
+            }
+            defs.font_data.insert("mpl-origin-face".into(), font.into());
+            chain.push("mpl-origin-face".to_owned());
+        }
+        chain.extend(defs.families.get(&FontFamily::Proportional).cloned().unwrap_or_default());
+        defs.families.insert(FontFamily::Name(ORIGIN.into()), chain);
+        // Annotation families, each falling back to the UI family's faces.
+        let mut installed_extra = Vec::new();
+        for name in extra {
+            if self.face(name, 400).is_none() && self.styled_face(name, 400, true).is_none() {
+                continue;
+            }
+            for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+                let weight = if bold { 700 } else { 400 };
+                let ui_chain = defs
+                    .families
+                    .get(&plot_font(1.0, bold, italic).family)
+                    .cloned()
+                    .unwrap_or_default();
+                let mut chain = Vec::new();
+                let face = self
+                    .styled_face(name, weight, italic)
+                    .or_else(|| self.styled_face(name, 400, italic))
+                    .or_else(|| self.face(name, weight))
+                    .or_else(|| self.face(name, 400));
+                let family_name = extra_family_name(name, bold, italic);
+                if let Some(font) = face {
+                    let key = format!("{family_name}-face");
+                    defs.font_data.insert(key.clone(), font.into());
+                    chain.push(key);
+                    if let Some(m) = self.metrics_of(name, weight, italic).or_else(|| self.metrics_of(name, 400, false)) {
+                        graph_metrics.push((FontFamily::Name(family_name.clone().into()), m));
+                    }
+                }
+                chain.extend(ui_chain);
+                defs.families.insert(FontFamily::Name(family_name.into()), chain);
+            }
+            installed_extra.push(name.clone());
+        }
         ctx.set_fonts(defs);
+        if let Ok(mut g) = EXTRA_FAMILIES.write() {
+            *g = installed_extra;
+        }
         if let Some(name) = family {
             let mut map = HashMap::new();
             map.extend(graph_metrics);

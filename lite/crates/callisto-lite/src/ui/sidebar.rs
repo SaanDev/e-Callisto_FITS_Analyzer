@@ -39,7 +39,6 @@ pub struct SidebarState {
     pub font_families: Vec<String>,
     pub graph_title: String,
     pub analysis_summary: String,
-    pub ruler_text: String,
     /// `timeline_step_combo`: observations added per click.
     pub timeline_step: usize,
     scroll_to: Option<f32>,
@@ -52,7 +51,6 @@ impl Default for SidebarState {
             font_families: vec!["Default".into()],
             graph_title: String::new(),
             analysis_summary: "No analysis session loaded.".into(),
-            ruler_text: "No measurement.".into(),
             timeline_step: 1,
             scroll_to: None,
         }
@@ -211,6 +209,16 @@ fn card(
 fn label(ui: &Ui, col: &mut Column, text: &str, p: &Palette) {
     let r = col.next(16.0);
     widgets::text_left(ui, r.left(), r.center().y, text, 12.0, Weight::Regular, p.card_text);
+}
+
+/// A word-wrapping `QLabel`: 16 px per line.
+fn wrapped_label(ui: &Ui, col: &mut Column, text: &str, p: &Palette) {
+    let lines = super::qt::wrap_lines(ui.ctx(), text, col.w, Weight::Regular);
+    let r = col.next(16.0 * lines.len().max(1) as f32);
+    for (i, line) in lines.iter().enumerate() {
+        let y = r.top() + 8.0 + 16.0 * i as f32;
+        widgets::text_left(ui, r.left(), y, line, 12.0, Weight::Regular, p.card_text);
+    }
 }
 
 /// `QLabel#SectionLabel` / `[section="true"]`: margin-top 10, margin-bottom 2.
@@ -506,17 +514,22 @@ fn graph_properties(ui: &mut Ui, col: &mut Column, st: &mut SidebarState, cx: &m
 }
 
 fn analysis_summary(ui: &mut Ui, col: &mut Column, st: &mut SidebarState, _cx: &mut SidebarContext<'_>, p: &Palette) {
-    label(ui, col, &st.analysis_summary.clone(), p);
+    wrapped_label(ui, col, &st.analysis_summary.clone(), p);
 }
 
-fn ruler(ui: &mut Ui, col: &mut Column, st: &mut SidebarState, cx: &mut SidebarContext<'_>, p: &Palette) {
-    label(ui, col, &st.ruler_text.clone(), p);
+/// `MeasurementReadout`: the readout, then Copy and Clear.
+fn ruler(ui: &mut Ui, col: &mut Column, _st: &mut SidebarState, cx: &mut SidebarContext<'_>, p: &Palette) {
+    let readout = cx.session.tools.ruler.clone();
+    wrapped_label(ui, col, &readout.text, p);
     let r = col.next(32.0);
     let copy = Rect::from_min_size(r.min, vec2(117.0, 32.0));
     let clear = Rect::from_min_max(pos2(r.left() + 123.0, r.top()), r.max);
-    let measured = cx.has_data() && st.ruler_text != "No measurement.";
-    widgets::push_button(ui, copy, Id::new("ruler_copy"), "Copy", ButtonKind::Normal, measured, p);
-    if widgets::push_button(ui, clear, Id::new("ruler_clear"), "Clear", ButtonKind::Normal, measured, p).clicked() {
+    if widgets::push_button(ui, copy, Id::new("ruler_copy"), "Copy", ButtonKind::Normal, readout.copy_enabled, p).clicked() {
+        ui.ctx().copy_text(readout.text.clone());
+    }
+    if widgets::push_button(ui, clear, Id::new("ruler_clear"), "Clear", ButtonKind::Normal, readout.clear_enabled, p)
+        .clicked()
+    {
         cx.commands.push(Command::ClearRulerMeasurement);
     }
 }

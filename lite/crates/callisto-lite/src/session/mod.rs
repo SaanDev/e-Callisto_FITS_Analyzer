@@ -7,9 +7,11 @@
 //! can be read side by side. Drawing is left to `crate::canvas`, which this
 //! drives as the full app drives its `AcceleratedPlotWidget`.
 
+mod analysis;
 mod display_range;
 mod rfi;
 mod timeline;
+mod tools;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,6 +35,7 @@ use crate::canvas::{CanvasEvent, ImageUpdate, PlotCanvas, TextStyle, View};
 pub use display_range::{DisplayRange, DisplayRangePreset, DisplayRangeRequest, delete_preset, upsert_preset};
 pub use rfi::RfiConfig;
 pub use timeline::ProbeResult;
+pub use tools::{AnnotationMode, LightCurveRecord, RulerReadout, ToolState};
 use timeline::{DatasetExtras, TimelineMsg};
 
 /// `MainWindow.DB_SCALE`: digits to dB for CALLISTO receivers.
@@ -194,6 +197,14 @@ pub struct Session {
     pub current_plot_type: String,
     /// What the plot shows, in display units (for the cursor readout).
     current_display_data: Option<Arc<Array2>>,
+    /// What the plot was made from, before units (`_current_plot_source_data`).
+    current_plot_source: Option<Arc<Array2>>,
+    /// The ruler, drift, lasso, light curves and annotations.
+    pub tools: ToolState,
+    /// `_analysis_session`: what the analysis windows share.
+    pub analysis: Option<callisto_core::analysis::session::AnalysisSession>,
+    /// New data cleared the analysis: its windows close.
+    pub analysis_windows_close_due: bool,
 
     pub noise_clip_low: f64,
     pub noise_clip_high: f64,
@@ -264,6 +275,10 @@ impl Session {
             noise_reduced_original_plot_type: "Background Subtracted".into(),
             current_plot_type: "Raw".into(),
             current_display_data: None,
+            current_plot_source: None,
+            analysis: None,
+            analysis_windows_close_due: false,
+            tools: ToolState::new(),
             noise_clip_low: 0.0,
             noise_clip_high: 0.0,
             noise_clip_scale: ClipScale::Linear,
@@ -531,6 +546,7 @@ impl Session {
             title = self.current_plot_type.clone();
         }
         self.plot_data(&title, PlotView::Full);
+        self.drop_interaction_overlays();
         self.refresh_timeline_panel();
         if !log_message.is_empty() {
             self.log_operation(log_message);
@@ -557,8 +573,10 @@ impl Session {
         self.noise_reduced_original_plot_type = "Background Subtracted".into();
         self.background_applied = None;
         self.current_display_data = None;
+        self.current_plot_source = None;
         self.undo_stack.clear();
         self.redo_stack.clear();
+        self.reset_feature_state_for_new_data();
         self.rfi = RfiConfig::default();
         self.rfi_preview = None;
     }
@@ -603,9 +621,12 @@ impl Session {
         self.cancel_rect_zoom();
         let display = self.intensity_for_display(&source);
         self.current_display_data = Some(display.clone());
+        self.current_plot_source = Some(source);
         let plot_type = normalize_plot_type(title);
         self.current_plot_type = plot_type.clone();
         self.refresh_canvas(&display, &plot_type, view);
+        // _refresh_accel_plot ends with _render_light_curve_accel_overlay.
+        self.render_light_curve_overlay();
         self.home_view = self.mpl_home_view();
         self.loaded_message_due = true;
     }
@@ -613,6 +634,9 @@ impl Session {
     /// Work the full app defers to the next event-loop turn; call once per
     /// frame. Returns whether anything changed (and needs drawing).
     pub fn flush_deferred(&mut self) -> bool {
+        if self.flush_pending_isolation() {
+            return true;
+        }
         if std::mem::take(&mut self.loaded_message_due) && self.has_data() {
             let text = format!("Loaded: {}", self.filename());
             self.show_message(text, 5000);
@@ -1289,6 +1313,9 @@ impl Session {
                     self.canvas.set_navigation_locked(self.nav_locked);
                     self.show_message("Zoomed to selected region (still locked).", 2500);
                 }
+                other => {
+                    self.handle_tool_event(&other);
+                }
             }
         }
     }
@@ -1498,6 +1525,8 @@ impl Session {
         }
         let had_processed = self.noise_reduced.is_some()
             || self.noise_reduced_original.is_some()
+            || self.tools.lasso_mask.is_some()
+            || self.tools.lasso_active
             || self.noise_clip_thresholds_active()
             || self.background_applied.is_some();
         if had_processed {
@@ -1506,9 +1535,11 @@ impl Session {
         self.noise_update_due = None;
         self.noise_undo_pending = false;
         self.noise_slider_drag_active = false;
+        self.drop_interaction_overlays();
         self.noise_reduced = None;
         self.noise_reduced_original = None;
         self.noise_reduced_original_plot_type = "Background Subtracted".into();
+        self.tools.lasso_mask = None;
         self.rfi_preview = None;
         self.rfi.applied = false;
         self.background_applied = None;
@@ -1520,8 +1551,10 @@ impl Session {
         self.show_message("Reset to raw", 3000);
     }
 
-    /// `reset_selection`: back to the processed original, or to the home view.
+    /// `reset_selection`: back to the processed original, or to the home
+    /// view; either way the drift markers go.
     pub fn reset_selection(&mut self) {
+        let had_drift_points = self.clear_drift_overlays();
         if let Some(original) = self.noise_reduced_original.clone() {
             self.push_undo_state();
             self.noise_reduced = Some(original);
@@ -1536,7 +1569,12 @@ impl Session {
                 self.rfi_preview = None;
             }
             self.plot_data(&title, PlotView::Full);
-            self.show_message("Selection Reset", 4000);
+            self.tools.lasso_mask = None;
+            if had_drift_points {
+                self.show_message("Selection reset (drift markers cleared)", 4000);
+            } else {
+                self.show_message("Selection Reset", 4000);
+            }
             return;
         }
         if let (Some(cur), Some(home)) = (self.canvas.view(), self.home_view)
@@ -1544,7 +1582,13 @@ impl Session {
         {
             self.push_undo_view(cur);
             self.canvas.set_view(home);
-            self.show_message("View reset", 2500);
+            if had_drift_points {
+                self.show_message("View reset (drift markers cleared)", 2500);
+            } else {
+                self.show_message("View reset", 2500);
+            }
+        } else if had_drift_points {
+            self.show_message("Drift markers reset", 2500);
         }
     }
 
