@@ -32,9 +32,10 @@ from src.ui.widgets.accelerated_plot_widget import _mpl_cmap_to_lookup, _rgba_lu
 NAMES = ["Custom", "viridis", "plasma", "inferno", "magma", "cividis", "turbo", "RdYlBu", "jet", "cubehelix", "bone_r"]
 
 
-# Not in the list: the Combine FITS Files preview's colormap
-# (CombineFitsDialog._render_preview).
-EXTRA = ["combined_preview"]
+# Not in the list: the Combine FITS Files preview's colormap, and the
+# multi-station comparison's extra "gray" (`_COLORMAP_NAMES`).
+# (CombineFitsDialog._render_preview, comparison_cmap).
+EXTRA = ["combined_preview", "gray"]
 
 
 def build(name: str):

@@ -546,7 +546,9 @@ dependencies = [
  "colorous",
  "flate2",
  "image",
+ "serde",
  "serde_json",
+ "tiny-skia",
  "ureq",
  "url",
 ]
@@ -568,6 +570,7 @@ dependencies = [
  "open",
  "rfd",
  "serde",
+ "serde_json",
  "tiny-skia",
  "ttf-parser",
 ]
@@ -1800,6 +1803,8 @@ dependencies = [
  "num-traits",
  "png 0.18.1",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

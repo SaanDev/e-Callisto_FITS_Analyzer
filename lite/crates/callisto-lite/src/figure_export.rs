@@ -9,10 +9,15 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use callisto_core::mpl::{Figure, Prim, PxRect, rasterize_image};
+use callisto_core::mpl::{Face, Figure, GlyphRun, MarkerKind, Prim, PxRect, rasterize_image, render};
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
-use crate::fonts::{MplMeasure, with_ui_face};
+use crate::fonts::{MplMeasure, mpl_font, with_mpl_face};
+
+thread_local! {
+    /// `pad_inches` of the export in progress.
+    static PAD_INCHES: std::cell::Cell<f64> = const { std::cell::Cell::new(0.1) };
+}
 
 /// The union of everything drawn, plus `pad` (`bbox_inches='tight'`).
 fn tight_bbox(fig: &Figure, list: &callisto_core::mpl::DrawList) -> PxRect {
@@ -34,7 +39,7 @@ fn tight_bbox(fig: &Figure, list: &callisto_core::mpl::DrawList) -> PxRect {
     if !b.x0.is_finite() {
         return PxRect { x0: 0.0, y0: 0.0, x1: fig.width, y1: fig.height };
     }
-    let pad = 0.1 * fig.dpi;
+    let pad = PAD_INCHES.with(|p| p.get()) * fig.dpi;
     PxRect { x0: b.x0 - pad, y0: b.y0 - pad, x1: b.x1 + pad, y1: b.y1 + pad }
 }
 
@@ -45,17 +50,23 @@ fn paint(c: [u8; 4]) -> Paint<'static> {
     p
 }
 
-/// Glyph outlines of `text` at `size_px`, pen at the origin, y down.
-fn text_path(ctx: &egui::Context, text: &str, size_px: f64) -> Option<tiny_skia::Path> {
-    let galley = ctx.fonts_mut(|f| f.layout_no_wrap(text.to_owned(), egui::FontId::proportional(size_px as f32), egui::Color32::WHITE));
-    let glyphs: Vec<(char, f32)> = galley.rows.first().map(|r| r.row.glyphs.iter().map(|g| (g.chr, g.pos.x)).collect()).unwrap_or_default();
-    with_ui_face(|face| {
-        let scale = (size_px / face.units_per_em() as f64) as f32;
+/// Glyph outlines of `text` at `size_px` in `face`, pen at the origin, y
+/// down; a math label's glyphs where mathtext placed them.
+fn text_path(ctx: &egui::Context, text: &str, size_px: f64, face: Face, runs: &[GlyphRun]) -> Option<tiny_skia::Path> {
+    // (character, x, y, size)
+    let glyphs: Vec<(char, f32, f32, f64)> = if runs.is_empty() {
+        let galley = ctx.fonts_mut(|f| f.layout_no_wrap(text.to_owned(), mpl_font(face, size_px as f32), egui::Color32::WHITE));
+        galley.rows.first().map(|r| r.row.glyphs.iter().map(|g| (g.chr, g.pos.x, 0.0, size_px)).collect()).unwrap_or_default()
+    } else {
+        runs.iter().map(|g| (g.c, g.dx as f32, g.dy as f32, g.size_px)).collect()
+    };
+    with_mpl_face(face, |f| {
         let mut pb = PathBuilder::new();
-        for (ch, x) in &glyphs {
-            let Some(id) = face.glyph_index(*ch) else { continue };
-            let mut sink = Outline { pb: &mut pb, scale, dx: *x };
-            face.outline_glyph(id, &mut sink);
+        for (ch, x, y, size) in &glyphs {
+            let Some(id) = f.glyph_index(*ch) else { continue };
+            let scale = (size / f.units_per_em() as f64) as f32;
+            let mut sink = Outline { pb: &mut pb, scale, dx: *x, dy: *y };
+            f.outline_glyph(id, &mut sink);
         }
         pb.finish()
     })
@@ -66,21 +77,23 @@ struct Outline<'a> {
     pb: &'a mut PathBuilder,
     scale: f32,
     dx: f32,
+    dy: f32,
 }
 
 impl ttf_parser::OutlineBuilder for Outline<'_> {
     fn move_to(&mut self, x: f32, y: f32) {
-        self.pb.move_to(self.dx + x * self.scale, -y * self.scale);
+        self.pb.move_to(self.dx + x * self.scale, self.dy - y * self.scale);
     }
     fn line_to(&mut self, x: f32, y: f32) {
-        self.pb.line_to(self.dx + x * self.scale, -y * self.scale);
+        self.pb.line_to(self.dx + x * self.scale, self.dy - y * self.scale);
     }
     fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
-        self.pb.quad_to(self.dx + x1 * self.scale, -y1 * self.scale, self.dx + x * self.scale, -y * self.scale);
+        let (s, dx, dy) = (self.scale, self.dx, self.dy);
+        self.pb.quad_to(dx + x1 * s, dy - y1 * s, dx + x * s, dy - y * s);
     }
     fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
-        let s = self.scale;
-        self.pb.cubic_to(self.dx + x1 * s, -y1 * s, self.dx + x2 * s, -y2 * s, self.dx + x * s, -y * s);
+        let (s, dx, dy) = (self.scale, self.dx, self.dy);
+        self.pb.cubic_to(dx + x1 * s, dy - y1 * s, dx + x2 * s, dy - y2 * s, dx + x * s, dy - y * s);
     }
     fn close(&mut self) {
         self.pb.close();
@@ -88,16 +101,24 @@ impl ttf_parser::OutlineBuilder for Outline<'_> {
 }
 
 /// The figure as pixels at `scale` device pixels per logical pixel,
-/// cropped to `bbox` (logical pixels).
+/// cropped to its tight bounding box. Like `savefig(dpi=…)`, the figure is
+/// laid out again at that dpi (text is hinted at its own size), and Agg's
+/// canvas is the box truncated to whole pixels, anchored at its
+/// bottom-left corner.
 pub fn rasterize(ctx: &egui::Context, fig: &Figure, scale: f64) -> Result<Pixmap> {
-    let list = fig.layout(&MplMeasure { ctx });
+    let mut at_dpi = fig.clone();
+    at_dpi.width *= scale;
+    at_dpi.height *= scale;
+    at_dpi.dpi *= scale;
+    let fig = &at_dpi;
+    let mut list = fig.layout(&MplMeasure { ctx });
     let bbox = tight_bbox(fig, &list);
-    let w = ((bbox.x1 - bbox.x0) * scale).ceil().max(1.0) as u32;
-    let h = ((bbox.y1 - bbox.y0) * scale).ceil().max(1.0) as u32;
+    let w = (bbox.x1 - bbox.x0).floor().max(1.0) as u32;
+    let h = (bbox.y1 - bbox.y0).floor().max(1.0) as u32;
+    list.translate(-bbox.x0, h as f64 - bbox.y1);
     let mut pix = Pixmap::new(w, h).context("figure too large to export")?;
     pix.fill(tiny_skia::Color::WHITE);
-    let s = scale as f32;
-    let to = Transform::from_translate(-bbox.x0 as f32, -bbox.y0 as f32).post_scale(s, s);
+    let to = Transform::identity();
     for p in &list.prims {
         match p {
             Prim::Fill { rect, color } => {
@@ -122,7 +143,7 @@ pub fn rasterize(ctx: &egui::Context, fig: &Figure, scale: f64) -> Result<Pixmap
             }
             Prim::Image { axes, image, dest, clip } => {
                 let Some(im) = fig.axes.get(*axes).and_then(|a| a.images.get(*image)) else { continue };
-                let map = |x: f64, y: f64| ((x - bbox.x0) * scale, (y - bbox.y0) * scale);
+                let map = |x: f64, y: f64| (x, y);
                 let (dx0, dy0) = map(dest.x0.min(dest.x1), dest.y0.min(dest.y1));
                 let (dx1, dy1) = map(dest.x0.max(dest.x1), dest.y0.max(dest.y1));
                 let (cx0, cy0) = map(clip.x0, clip.y0);
@@ -140,8 +161,11 @@ pub fn rasterize(ctx: &egui::Context, fig: &Figure, scale: f64) -> Result<Pixmap
                 }
                 pix.draw_pixmap(out[0] as i32, out[1] as i32, sub.as_ref(), &tiny_skia::PixmapPaint::default(), Transform::identity(), None);
             }
-            Prim::Text { pos, text, size_px, color, rotation, .. } => {
-                if let Some(path) = text_path(ctx, text, *size_px) {
+            Prim::Markers { .. } | Prim::Path { .. } | Prim::Frame { .. } => {
+                render::draw(p, &mut pix.as_mut(), 1.0, (0.0, 0.0));
+            }
+            Prim::Text { pos, text, size_px, color, rotation, face, glyphs, .. } => {
+                if let Some(path) = text_path(ctx, text, *size_px, *face, glyphs) {
                     let (dx, dy) = callisto_core::mpl::agg_rotated_text_offset(*rotation);
                     let t = Transform::from_rotate(-*rotation as f32).post_translate(pos.0 as f32, pos.1 as f32).post_concat(to).post_translate(dx as f32, dy as f32);
                     pix.fill_path(&path, &paint(*color), FillRule::Winding, t, None);
@@ -155,6 +179,13 @@ pub fn rasterize(ctx: &egui::Context, fig: &Figure, scale: f64) -> Result<Pixmap
 /// `savefig(path, dpi=dpi, bbox_inches="tight", facecolor="white")`, the
 /// format from the extension.
 pub fn save_figure(ctx: &egui::Context, fig: &Figure, path: &Path, dpi: f64) -> Result<()> {
+    save_figure_padded(ctx, fig, path, dpi, 0.1)
+}
+
+/// [`save_figure`] with `pad_inches` around the drawing (the full app's
+/// `save_figure(tight=True)` pads 0.08 inch); JPEG at quality 95.
+pub fn save_figure_padded(ctx: &egui::Context, fig: &Figure, path: &Path, dpi: f64, pad_inches: f64) -> Result<()> {
+    PAD_INCHES.with(|p| p.set(pad_inches));
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_else(|| "png".into());
     let scale = dpi / fig.dpi;
     if ext == "svg" {
@@ -168,6 +199,11 @@ pub fn save_figure(ctx: &egui::Context, fig: &Figure, path: &Path, dpi: f64) -> 
     match ext.as_str() {
         "png" => image::save_buffer_with_format(path, &rgba, w, h, image::ExtendedColorType::Rgba8, image::ImageFormat::Png)?,
         "tif" | "tiff" => image::save_buffer_with_format(path, &rgba, w, h, image::ExtendedColorType::Rgba8, image::ImageFormat::Tiff)?,
+        "jpg" | "jpeg" => {
+            let file = std::fs::File::create(path)?;
+            let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::BufWriter::new(file), 95);
+            enc.encode(&rgb, w, h, image::ExtendedColorType::Rgb8)?;
+        }
         "pdf" => std::fs::write(path, pdf(&rgb, w, h, dpi)?)?,
         "eps" | "ps" => std::fs::write(path, eps(&rgb, w, h, dpi))?,
         other => bail!("Format '{other}' is not supported."),
@@ -175,13 +211,57 @@ pub fn save_figure(ctx: &egui::Context, fig: &Figure, path: &Path, dpi: f64) -> 
     Ok(())
 }
 
+/// The comparison's visible export (`_export_visible_plot`): raster
+/// formats as captured, PDF on an A4 page with the image scaled to fit and
+/// centred (`QPdfWriter` at 300 dpi), EPS at 300 dpi, SVG with the PNG embedded.
+pub fn save_raster(path: &Path, ext: &str, rgba: &[u8], w: u32, h: u32) -> Result<()> {
+    let rgb: Vec<u8> = rgba.as_chunks::<4>().0.iter().flat_map(|c| [c[0], c[1], c[2]]).collect();
+    match ext {
+        "png" => image::save_buffer_with_format(path, rgba, w, h, image::ExtendedColorType::Rgba8, image::ImageFormat::Png)?,
+        "tif" | "tiff" => image::save_buffer_with_format(path, rgba, w, h, image::ExtendedColorType::Rgba8, image::ImageFormat::Tiff)?,
+        "jpg" | "jpeg" => {
+            let file = std::fs::File::create(path)?;
+            let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::BufWriter::new(file), 95);
+            enc.encode(&rgb, w, h, image::ExtendedColorType::Rgb8)?;
+        }
+        "pdf" => {
+            let (pw, ph) = (595.276, 841.89);
+            let k = (pw / w as f64).min(ph / h as f64);
+            let (dw, dh) = (w as f64 * k, h as f64 * k);
+            std::fs::write(path, pdf_on_page(&rgb, w, h, (pw, ph), [(pw - dw) / 2.0, (ph - dh) / 2.0, dw, dh])?)?;
+        }
+        "eps" => std::fs::write(path, eps(&rgb, w, h, 300.0))?,
+        "svg" => {
+            let mut png = Vec::new();
+            image::write_buffer_with_format(&mut std::io::Cursor::new(&mut png), rgba, w, h, image::ExtendedColorType::Rgba8, image::ImageFormat::Png)?;
+            let svg = format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\">
+<image width=\"{w}\" height=\"{h}\" href=\"data:image/png;base64,{}\"/>
+</svg>
+",
+                base64(&png)
+            );
+            std::fs::write(path, svg)?;
+        }
+        other => bail!("Unsupported export format: {other}."),
+    }
+    Ok(())
+}
+
 /// A one-page PDF holding the image at its physical size.
 fn pdf(rgb: &[u8], w: u32, h: u32, dpi: f64) -> Result<Vec<u8>> {
+    let (pw, ph) = (w as f64 * 72.0 / dpi, h as f64 * 72.0 / dpi);
+    pdf_on_page(rgb, w, h, (pw, ph), [0.0, 0.0, pw, ph])
+}
+
+/// A one-page PDF of `page` points with the image in `[x, y, width, height]`.
+fn pdf_on_page(rgb: &[u8], w: u32, h: u32, page: (f64, f64), place: [f64; 4]) -> Result<Vec<u8>> {
     let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
     z.write_all(rgb)?;
     let data = z.finish()?;
-    let (pw, ph) = (w as f64 * 72.0 / dpi, h as f64 * 72.0 / dpi);
-    let content = format!("q {pw:.3} 0 0 {ph:.3} 0 0 cm /Im0 Do Q");
+    let (pw, ph) = page;
+    let [px, py, dw, dh] = place;
+    let content = format!("q {dw:.3} 0 0 {dh:.3} {px:.3} {py:.3} cm /Im0 Do Q");
     let mut out: Vec<u8> = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n".to_vec();
     let mut offsets = Vec::new();
     let mut obj = |out: &mut Vec<u8>, body: Vec<u8>| {
@@ -250,6 +330,56 @@ fn svg_color(c: [u8; 4]) -> String {
     format!("#{:02x}{:02x}{:02x}\" fill-opacity=\"{:.3}", c[0], c[1], c[2], c[3] as f64 / 255.0)
 }
 
+fn svg_stroke(c: [u8; 4]) -> String {
+    format!("#{:02x}{:02x}{:02x}\" stroke-opacity=\"{:.3}", c[0], c[1], c[2], c[3] as f64 / 255.0)
+}
+
+/// A marker, curve or frame primitive as SVG elements.
+fn svg_shape(p: &Prim) -> String {
+    let mut s = String::new();
+    match p {
+        Prim::Markers { kind, centers, size, face, edge, edge_width, .. } => {
+            let h = size / 2.0;
+            let style = format!("fill=\"{}\" stroke=\"{}\" stroke-width=\"{edge_width:.3}\"", svg_color(*face), svg_stroke(*edge));
+            for &(x, y) in centers.iter() {
+                s.push_str(&match kind {
+                    MarkerKind::Square => format!("<rect x=\"{:.3}\" y=\"{:.3}\" width=\"{size:.3}\" height=\"{size:.3}\" {style}/>\n", x - h, y - h),
+                    MarkerKind::Circle => format!("<circle cx=\"{x:.3}\" cy=\"{y:.3}\" r=\"{h:.3}\" {style}/>\n"),
+                    MarkerKind::Star => {
+                        let pts: Vec<String> = (0..10)
+                            .map(|k| {
+                                let t = std::f64::consts::PI / 5.0 * k as f64 + std::f64::consts::FRAC_PI_2;
+                                let r = if k % 2 == 1 { 0.381966 } else { 1.0 } * h;
+                                format!("{:.3},{:.3}", x + r * t.cos(), y - r * t.sin())
+                            })
+                            .collect();
+                        format!("<polygon points=\"{}\" {style} stroke-linejoin=\"bevel\"/>\n", pts.join(" "))
+                    }
+                });
+            }
+        }
+        Prim::Path { points, color, width, .. } => {
+            let pts: Vec<String> = points.iter().map(|(x, y)| format!("{x:.3},{y:.3}")).collect();
+            s.push_str(&format!(
+                "<polyline points=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{width:.3}\" stroke-linecap=\"square\" stroke-linejoin=\"round\"/>\n",
+                pts.join(" "),
+                svg_stroke(*color)
+            ));
+        }
+        Prim::Frame { rect, face, edge, width } => s.push_str(&format!(
+            "<rect x=\"{:.3}\" y=\"{:.3}\" width=\"{:.3}\" height=\"{:.3}\" fill=\"{}\" stroke=\"{}\" stroke-width=\"{width:.3}\"/>\n",
+            rect.x0,
+            rect.y0,
+            rect.x1 - rect.x0,
+            rect.y1 - rect.y0,
+            svg_color(*face),
+            svg_stroke(*edge)
+        )),
+        _ => {}
+    }
+    s
+}
+
 /// The figure as SVG: vector shapes, images as embedded PNG, text as paths.
 fn svg(ctx: &egui::Context, fig: &Figure) -> Result<String> {
     let list = fig.layout(&MplMeasure { ctx });
@@ -295,8 +425,9 @@ fn svg(ctx: &egui::Context, fig: &Figure) -> Result<String> {
                     out[0] as f64 / sc, out[1] as f64 / sc, iw as f64 / sc, ih as f64 / sc, base64(&png)
                 ));
             }
-            Prim::Text { pos, text, size_px, color, rotation, .. } => {
-                let Some(path) = text_path(ctx, text, *size_px) else { continue };
+            Prim::Markers { .. } | Prim::Path { .. } | Prim::Frame { .. } => s.push_str(&svg_shape(p)),
+            Prim::Text { pos, text, size_px, color, rotation, face, glyphs, .. } => {
+                let Some(path) = text_path(ctx, text, *size_px, *face, glyphs) else { continue };
                 let mut d = String::new();
                 for seg in path.segments() {
                     use tiny_skia::PathSegment as P;

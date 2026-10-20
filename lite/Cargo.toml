@@ -13,7 +13,7 @@ anyhow = "1.0.104"
 chrono = "0.4.45"
 colorous = "1.0.16"
 flate2 = "1.1.10"
-image = { version = "0.25.10", default-features = false, features = ["png", "tiff"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "tiff", "jpeg"] }
 ureq = "3.4.2"
 url = "2.5.8"
 serde = { version = "1.0.229", features = ["derive"] }

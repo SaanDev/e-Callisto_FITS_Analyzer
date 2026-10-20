@@ -1,16 +1,21 @@
 //! The full app's downloader figures: the FITS preview
 //! (`callisto_downloader._build_plotutil_preview_figure` +
 //! `AppTheme.apply_mpl`) and the full-day spectral overview
-//! (`spectral_overview.render_spectral_overview_figure`).
+//! (`spectral_overview.render_spectral_overview_figure`); and the PNGs
+//! batch processing writes (`batch_processing.save_background_subtracted_png`),
+//! and the multi-station comparison's grid export
+//! (`multi_station_comparison.render_comparison_grid_figure`).
 
 use std::sync::Arc;
 
 use super::{
     AxesText, Axes, AxisSpec, FigText, Figure, Formatter, Grid, HAlign, Image, Interpolation, Label, Rgba, Side,
-    Ticks, VAlign, colorbar_image, hex, subplot_with_colorbar, BLACK, WHITE,
+    Ticks, VAlign, colorbar_beside, colorbar_image, grid_positions, hex, subplot_with_colorbar, BLACK, WHITE, Face,
 };
+use crate::radio::comparison::{Alignment, PanelPayload, comparison_colormap, dataset_extent, grid_dimensions, ut_tick};
 use crate::plot::Colormap;
 use crate::radio::array::Array2;
+use crate::radio::batch::{BatchFigureSpec, format_ut_tick};
 use crate::radio::frequency_axis::frequency_edges;
 use crate::radio::processing::{BackgroundMethod, PLOTUTIL_DB_SCALE, subtract_background};
 use crate::radio::spectral_overview::{DISPLAY_LIMITS, OverviewResult, SECONDS_PER_PANEL};
@@ -56,6 +61,12 @@ fn colorbar_axes(position: [f64; 4], box_aspect: Option<(f64, (f64, f64))>, imag
         texts: Vec::new(),
         spine_color: fg,
         spine_width_pt: 1.5,
+        title: None,
+        title_pad_pt: 6.0,
+        scatters: Vec::new(),
+        lines: Vec::new(),
+        legend: None,
+        axis_zorder: 1.5,
     }
 }
 
@@ -107,6 +118,12 @@ pub fn preview_figure(data: &Array2, freqs: &[f64], times: &[f64], width: f64, h
         texts: Vec::new(),
         spine_color: c.text,
         spine_width_pt: 1.5,
+        title: None,
+        title_pad_pt: 6.0,
+        scatters: Vec::new(),
+        lines: Vec::new(),
+        legend: None,
+        axis_zorder: 1.5,
     };
     let bar = colorbar_axes(
         cbar,
@@ -117,6 +134,142 @@ pub fn preview_figure(data: &Array2, freqs: &[f64], times: &[f64], width: f64, h
         12.0,
     );
     Figure { width, height, dpi: 100.0, facecolor: c.window, axes: vec![ax, bar], texts: Vec::new() }
+}
+
+/// `_resolve_cmap`: a known colormap, else viridis.
+fn batch_cmap(name: &str) -> Colormap {
+    let c = Colormap::by_name(name.trim());
+    if c.name == name.trim() || name.trim().eq_ignore_ascii_case("custom") { c } else { Colormap::by_name("viridis") }
+}
+
+/// `save_background_subtracted_png`'s figure: `Figure(figsize=(10, 6))`,
+/// the image with its colour bar, title and labels, UT ticks when asked,
+/// the locked display range when given.
+pub fn batch_figure(spec: &BatchFigureSpec) -> Figure {
+    let cmap = batch_cmap(&spec.cmap_name);
+    let (vmin, vmax) = spec.levels.unwrap_or((0.0, 1.0));
+    let mut x = AxisSpec::origin(BLACK);
+    let mut y = AxisSpec::origin(BLACK);
+    x.label = spec.x_label.as_ref().map(|t| Label::new(t.clone(), 12.0, BLACK));
+    y.label = spec.y_label.as_ref().map(|t| Label::new(t.clone(), 12.0, BLACK));
+    if let Some((start, seconds)) = spec.ut_ticks {
+        x.formatter = Formatter::Func(Arc::new(move |v: f64| format_ut_tick(v, start, seconds)));
+    }
+    let [x0, x1, bottom, top] = spec.extent;
+    let image = Image {
+        data: Arc::new(spec.display.clone()),
+        extent: spec.extent,
+        origin_upper: true,
+        cmap,
+        vmin,
+        vmax,
+        interpolation: Interpolation::Auto,
+    };
+    let (main, cbar, aspect) = subplot_with_colorbar();
+    let mut ax = Axes::new(main, x, y);
+    ax.xlim = spec.xlim.unwrap_or((x0, x1));
+    ax.ylim = spec.ylim.unwrap_or((bottom, top));
+    ax.facecolor = Some(WHITE);
+    ax.images = vec![image];
+    ax.title = spec.title.as_ref().map(|t| Label::new(t.clone(), 14.4, BLACK));
+    let bar = colorbar_axes(cbar, Some(aspect), colorbar_image(&cmap, vmin, vmax), BLACK, Label::new(spec.colorbar_label.clone(), 12.0, BLACK), 12.0);
+    Figure { width: 1000.0, height: 600.0, dpi: 100.0, facecolor: WHITE, axes: vec![ax, bar], texts: Vec::new() }
+}
+
+/// What the grid export draws the panels with.
+#[derive(Clone, Debug)]
+pub struct GridOptions {
+    /// The panels' time alignment, as the window last rendered them.
+    pub alignment: Alignment,
+    /// The locked display range's times, when one is locked.
+    pub time_range: Option<(f64, f64)>,
+    pub use_db: bool,
+    pub cmap: String,
+    /// `COLOR_SCALE_PER_STATION`: a colour bar beside every panel.
+    pub per_station: bool,
+    pub columns: Option<usize>,
+    pub title: String,
+}
+
+/// `render_comparison_grid_figure`: the panels in a grid on a shared time
+/// axis, each in its own frequency range, titled, with one colour bar on
+/// the right or one per panel.
+pub fn comparison_grid_figure(payloads: &[PanelPayload], o: &GridOptions) -> Figure {
+    let n = payloads.len().max(1);
+    let (rows, cols) = grid_dimensions(n, o.columns);
+    let (width, height) = ((5.0 * cols as f64 + 1.2) * 100.0, (3.6 * rows as f64 + 1.4) * 100.0);
+    let extents: Vec<[f64; 4]> = payloads.iter().map(|p| dataset_extent(&p.dataset, &p.time_axis)).collect();
+    let xlim = o.time_range.unwrap_or_else(|| {
+        (extents.iter().map(|e| e[0]).fold(f64::INFINITY, f64::min), extents.iter().map(|e| e[1]).fold(f64::NEG_INFINITY, f64::max))
+    });
+    let show_seconds = (xlim.1 - xlim.0).abs() <= 300.0;
+    let ut = o.alignment == Alignment::Ut;
+    let right = if o.per_station { 0.89 } else { 0.865 };
+    let (bottoms, tops, lefts, rights) = grid_positions([0.075, 0.08, right, 0.84], rows, cols, 0.28, 0.48, &[], &[]);
+    let cmap = comparison_colormap(&o.cmap);
+    let unit = if o.use_db { "Intensity [dB]" } else { "Intensity [Digits]" };
+    let mut axes = Vec::new();
+    let mut bars = Vec::new();
+    for (i, (p, ext)) in payloads.iter().zip(&extents).enumerate() {
+        let (r, c) = (i / cols, i % cols);
+        let cell = [lefts[c], bottoms[r], rights[c], tops[r]];
+        let (position, bar) = if o.per_station {
+            let (main, bar, aspect) = colorbar_beside(cell, 0.038, 0.018);
+            (main, Some((bar, aspect)))
+        } else {
+            ([cell[0], cell[1], cell[2] - cell[0], cell[3] - cell[1]], None)
+        };
+        let mut x = AxisSpec::origin(BLACK);
+        let mut y = AxisSpec::origin(BLACK);
+        x.tick_label_pt = 8.0;
+        y.tick_label_pt = 8.0;
+        if c == 0 {
+            y.label = Some(Label::new("Frequency [MHz]", 9.0, BLACK));
+        }
+        if i + cols >= payloads.len() {
+            x.label = Some(Label::new(if ut { "Observation time [UTC]" } else { "Time [s]" }, 9.0, BLACK));
+        }
+        // `subplots(sharex=True)` keeps x tick labels on the last row only.
+        x.labels_low = r == rows - 1;
+        if ut {
+            x.formatter = Formatter::Func(Arc::new(move |v: f64| ut_tick(v, show_seconds)));
+        }
+        let mut ax = Axes::new(position, x, y);
+        ax.xlim = xlim;
+        ax.ylim = (ext[2], ext[3]);
+        ax.facecolor = Some(WHITE);
+        ax.images = vec![Image {
+            data: p.display.clone(),
+            extent: p.mpl_extent,
+            origin_upper: true,
+            cmap,
+            vmin: p.levels.0,
+            vmax: p.levels.1,
+            interpolation: Interpolation::Auto,
+        }];
+        ax.title = Some(Label::new(p.dataset.label.clone(), 10.0, hex(0x111827, 1.0)).with_face(Face::UiSemibold));
+        ax.title_pad_pt = 9.0;
+        axes.push(ax);
+        if let Some((bar, aspect)) = bar {
+            bars.push(colorbar_axes(bar, Some(aspect), colorbar_image(&cmap, p.levels.0, p.levels.1), BLACK, Label::new(unit, 8.0, BLACK), 7.0));
+        }
+    }
+    if !o.per_station
+        && let Some(first) = payloads.first()
+    {
+        let image = colorbar_image(&cmap, first.levels.0, first.levels.1);
+        bars.push(colorbar_axes([0.905, 0.16, 0.018, 0.66], None, image, BLACK, Label::new(unit, 9.0, BLACK), 8.0));
+    }
+    axes.extend(bars);
+    let suptitle = FigText {
+        x: 0.5,
+        y: 0.975,
+        label: Label::new(o.title.clone(), 15.0, hex(0x11113f, 1.0)).with_face(Face::UiBold),
+        ha: HAlign::Center,
+        va: VAlign::Top,
+        rotation: 0.0,
+    };
+    Figure { width, height, dpi: 100.0, facecolor: WHITE, axes, texts: vec![suptitle] }
 }
 
 /// `render_spectral_overview_figure` for a canvas of `width` × `height`.
@@ -208,6 +361,12 @@ pub fn overview_figure(result: &OverviewResult, width: f64, height: f64) -> Figu
             texts,
             spine_color: BLACK,
             spine_width_pt: 1.5,
+            title: None,
+            title_pad_pt: 6.0,
+            scatters: Vec::new(),
+            lines: Vec::new(),
+            legend: None,
+            axis_zorder: 1.5,
         });
     }
     axes.push(colorbar_axes(

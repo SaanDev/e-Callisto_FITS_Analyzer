@@ -12,8 +12,10 @@ chrono.workspace = true
 colorous.workspace = true
 flate2.workspace = true
 image.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tiny-skia.workspace = true
 ureq.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true

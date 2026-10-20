@@ -79,6 +79,29 @@ pub fn text_left_clipped(ui: &Ui, clip: Rect, x: f32, center_y: f32, text: &str,
 }
 
 /// Text with its left edge at `x`, centred vertically on `center_y`.
+/// Text with a Qt mnemonic (`&File`): the `&` dropped and the letter after
+/// it underlined, one device pixel below the baseline. 12 px regular.
+pub fn mnemonic_text(ui: &Ui, x: f32, center_y: f32, align: egui::Align, text: &str, color: Color32) -> Rect {
+    let (plain, at) = match text.find('&') {
+        Some(i) if i + 1 < text.len() => (format!("{}{}", &text[..i], &text[i + 1..]), Some(i)),
+        _ => (text.to_owned(), None),
+    };
+    let rect = qt_text(ui, x, center_y, align, &plain, 12.0, Weight::Regular, color);
+    if let Some(i) = at {
+        let font = ui_font(12.0, Weight::Regular);
+        let width = |t: &str| ui.ctx().fonts_mut(|f| f.layout_no_wrap(t.to_owned(), font.clone(), color)).size().x;
+        let ch_len = plain[i..].chars().next().map_or(1, char::len_utf8);
+        let (x0, x1) = (rect.left() + width(&plain[..i]), rect.left() + width(&plain[..i + ch_len]));
+        let ppp = ui.ctx().pixels_per_point();
+        let (height, ascent) = crate::fonts::qt_metrics(&font).map_or((16.0, 13.0), |m| (m.height(), m.ascent));
+        let baseline = ((center_y - height / 2.0 + ascent) * ppp).round();
+        let snap = |v: f32| (v * ppp).round() / ppp;
+        let line = Rect::from_min_max(pos2(snap(x0), (baseline + 1.0) / ppp), pos2(snap(x1), (baseline + 2.0) / ppp));
+        ui.painter().add(egui::Shape::Rect(egui::epaint::RectShape::filled(line, 0.0, color).with_round_to_pixels(false)));
+    }
+    rect
+}
+
 pub fn text_left(ui: &Ui, x: f32, center_y: f32, text: &str, px: f32, weight: Weight, color: Color32) -> Rect {
     qt_text(ui, x, center_y, egui::Align::Min, text, px, weight, color)
 }

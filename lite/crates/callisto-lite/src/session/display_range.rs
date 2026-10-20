@@ -5,36 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::*;
 
-/// `VIEW_CONFIG_SCHEMA_VERSION`.
-pub const VIEW_CONFIG_SCHEMA_VERSION: i64 = 1;
-
-/// `normalize_display_range`'s output.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct DisplayRange {
-    pub time_start_s: f64,
-    pub time_stop_s: f64,
-    pub freq_min_mhz: f64,
-    pub freq_max_mhz: f64,
-}
-
-impl DisplayRange {
-    /// `normalize_display_range`: stop after start, distinct frequencies, sorted.
-    pub fn normalized(time_start: f64, time_stop: f64, freq_a: f64, freq_b: f64) -> Result<Self, String> {
-        for v in [time_start, time_stop, freq_a, freq_b] {
-            if !v.is_finite() {
-                return Err(format!("Invalid finite numeric value: {}", py_float(v)));
-            }
-        }
-        if time_stop <= time_start {
-            return Err("Display range stop time must be later than start time.".into());
-        }
-        if (freq_b - freq_a).abs() <= 1e-9 {
-            return Err("Display range frequency bounds must be different.".into());
-        }
-        let (freq_min_mhz, freq_max_mhz) = sorted(freq_a, freq_b);
-        Ok(Self { time_start_s: time_start, time_stop_s: time_stop, freq_min_mhz, freq_max_mhz })
-    }
-}
+pub use callisto_core::view_config::{DisplayRange, VIEW_CONFIG_SCHEMA_VERSION};
 
 /// A saved display range (`build_display_range_preset`), stored as the full
 /// app stores it.
@@ -239,6 +210,48 @@ impl Session {
         self.canvas.set_view(new_view);
         self.show_message("Display range applied.", 2500);
         true
+    }
+
+    /// What batch processing borrows from the main window: the colormap,
+    /// the cold digits and a view config's range and visual settings
+    /// (`_current_display_range_payload`, `_view_config_visual_payload`).
+    pub fn batch_env(&self) -> crate::tools::batch::BatchEnv {
+        use serde_json::{Value, json};
+        let g = &self.graph;
+        let graph = json!({
+            "remove_titles": g.remove_titles,
+            "title_bold": g.title_bold,
+            "title_italic": g.title_italic,
+            "axis_bold": g.axis_bold,
+            "axis_italic": g.axis_italic,
+            "ticks_bold": g.ticks_bold,
+            "ticks_italic": g.ticks_italic,
+            "title_override": g.title_override,
+            "font_family": g.font_family,
+            "tick_font_px": g.tick_px,
+            "axis_label_font_px": g.axis_px,
+            "title_font_px": g.title_px,
+        });
+        let (cold, _) = sorted(self.noise_clip_low, self.noise_clip_high);
+        let visual = callisto_core::view_config::VisualConfig {
+            use_db: self.use_db,
+            use_utc: self.use_utc,
+            noise_clip_low: self.noise_clip_low,
+            noise_clip_high: self.noise_clip_high,
+            noise_clip_scale: if self.noise_clip_scale == super::ClipScale::SignedLog { "signed_log" } else { "linear" }.into(),
+            cmap: if g.cmap.is_empty() { "Custom".into() } else { g.cmap.clone() },
+            graph: match graph {
+                Value::Object(m) => m,
+                _ => Default::default(),
+            },
+        };
+        crate::tools::batch::BatchEnv {
+            cmap: if g.cmap.trim().is_empty() { "Custom".into() } else { g.cmap.clone() },
+            cold_digits: cold,
+            display_range: self.display_range_defaults().and_then(|[t0, t1, f0, f1]| DisplayRange::normalized(t0, t1, f0, f1).ok()),
+            visual,
+            use_utc: self.use_utc,
+        }
     }
 
     /// `_current_display_range_payload`.

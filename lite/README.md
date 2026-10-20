@@ -111,6 +111,35 @@ python lite/parity/make_figure_reference.py
 cargo test -p callisto-core --test downloads_parity --test figures_parity
 ```
 
+**Analysis.** `tools/capture_analysis.py` loads a fixture into the full app's
+main window and saves its tool states (ruler, drift rate, light curves,
+annotations, isolated burst), the Maximum Intensities and Analyzer windows and
+the analysis settings dialogs:
+
+```powershell
+python lite/tools/capture_analysis.py lite/reference/windows/analysis light
+python lite/tools/capture_analysis.py lite/reference/windows/analysis dark
+cargo test -p callisto-lite --test analysis_screenshots --test analysis_windows --test analysis_dialogs -- --ignored --nocapture --test-threads 1
+```
+
+**Data tools.** `tools/capture_tools.py` opens the full app's Batch FIT
+Processing dialog and Multi-Station Comparison window from a main window with
+a fixture loaded, with throwaway settings and a scratch folder. It runs a real
+batch over three fixtures and saves the dialog states and output PNGs, the
+comparison in six states (one file, four stations, two more that combine,
+noise clipping, per-station dB scales, a ruler measurement) with each panel's
+extent and levels, the Export Comparison dialog and both exports:
+
+```powershell
+python lite/tools/capture_tools.py lite/reference/windows/tools light
+python lite/tools/capture_tools.py lite/reference/windows/tools dark
+cargo test -p callisto-lite --test tools_windows --test comparison_windows -- --ignored --nocapture --test-threads 1
+cargo test -p callisto-core --test comparison_parity
+```
+
+The batch and comparison grid figures are also in `make_figure_reference.py`'s
+cases, checked by `figures_parity`.
+
 **Speed.** The plan's speed targets, timed on a folder of e-CALLISTO files
 (INDIA-GAURI focus code 02, a full day):
 

@@ -230,6 +230,28 @@ colours shift. Lite reproduces it for now; fixing it in both is a decision for y
 - Type II band-splitting and its graph settings; Analysis Summary section.
 - **Exit:** parity tests pass for every analysis result; every analysis dialog matches.
 
+**Status (2026-10-20), on branch `analyzer-lite`:**
+
+| Item | State |
+|---|---|
+| Light curves, ruler, drift rate, isolate burst, annotations | Done. Main window in 13 tool states, light and dark: 1.0–1.4 % of pixels differ |
+| Maximum Intensities with ridge tracking, auto-clean and export | Done. Window 0.8–1.1 % |
+| Analyze Burst: fits, t₀, density models, shock parameters, Excel export | Done. Light theme 0.7–1.5 %, dark 1.5–2.6 % (light ClearType text on the dark panels) |
+| Analysis figures (scatter, best fit, power-law labels in mathtext, legends) | Every axes, text extent and tick identical to matplotlib's (`figures_parity`) |
+| Settings dialogs: ridge tracking, light-curve frequency and settings, text annotation, colour, choose label | 1.2–6.0 % (small, text-heavy windows) |
+| Analysis Summary section | Done |
+| Type II band-splitting window and its graph settings dialog | **Open.** Not ported yet; it stays in this phase |
+
+Found in the full app while porting (Lite reproduces them; fixing them in
+both apps is a decision for you):
+
+- With the light theme on a dark operating system, the Analyzer's and Type II's
+  scrolled panels are dark: `QScrollArea` fills its viewport with the system
+  palette's window colour.
+- The Analyzer's comparison table clips its header texts.
+- The Type II title keeps ".fit" from a `.fit.gz` name (`os.path.splitext`
+  removes only ".gz").
+
 ### Phase 3: data tools
 - e-CALLISTO downloader with station lookup, focus-code grouping, previews and download queue.
 - Learmonth downloader; burst list and previews.
@@ -245,13 +267,49 @@ part was brought forward, ahead of Phase 2:
 | Previews (single and combined panels), spectral overview, burst FITS search | Done; figures are matplotlib's own layout ported to Rust |
 | Learmonth downloader (daily `.srs`, 15-minute chunks, Convert to FIT, Convert and Import) | Done; tested on a synthetic day until real samples arrive |
 | Import into the main window ("Importing FITS Files" progress, single file, combined, frequency options) | Done |
-| Compare (multi-station comparison) | Files are prepared, then a notice says comparison is not in this build yet; the window comes with the rest of Phase 3 |
+| Compare (multi-station comparison) | Done (see below): the prepared files open in the comparison window |
 | Figure export from the overview | PNG, TIFF and SVG as matplotlib writes them; PDF and EPS embed a raster image for now |
 | Results against the full app | `downloads_parity` (listings, candidate filters, burst catalog, Learmonth chunks and FIT bytes) and `figures_parity` (every axes, text extent and tick of the preview and overview figures) pass |
 | Looks against the full app, light and dark | Downloader tabs 0.4–1.7 % of pixels differ, previews 0.6–1.0 %, Learmonth 0.7–2.3 %, calendar and station popups 3–6 %, import progress 5 % (a 200 × 70 window, so its text weighs more). What remains is ClearType text against Lite's grey anti-aliasing; field edges, tables, tab bars and figure text sit on the same pixels |
 | macOS and Linux | Not yet built or compared |
 
-Found in the full app while porting:
+**Status (2026-10-20): batch processing and the multi-station comparison.**
+
+| Item | State |
+|---|---|
+| Batch FIT Processing (Processing → Batch Processing) | Done. The same messages, summary and output files; a real run over three fixtures writes the full app's file names. Dialog in four states, light and dark: 1.4–2.1 % of pixels differ |
+| Batch output PNGs | Same view, levels, colour bar and layout as matplotlib's (`figures_parity`, four modes). Pixels 1.6–4.5 % apart: at 300 dpi matplotlib's text boxes come from FreeType's autohinter (whole pixels, advances moved by stem snapping), which Lite approximates to a pixel or two, and the noisy spectra shift with them. Matching exactly would need FreeType itself |
+| Figure export (all windows) | Now laid out again at the output dpi and cropped like Agg (canvas truncated to whole pixels, anchored bottom-left), as `savefig` does |
+| Multi-Station Comparison (Processing menu, the downloader's Compare) | Done, in the Modern view's hardware panels: files, the largest valid combinations, UT or seconds alignment, units, colormaps (with *gray*), shared, per-station and manual scales, noise reduction for all panels or one, the ruler, a locked range (UT or seconds), view configs |
+| Comparison results against the full app | Combinations, labels, aligned extents and colour levels identical in five captured states (`comparison_parity`) |
+| Comparison looks, light and dark | Window in six states 0.7–2.1 %; status line, readout and panel list identical |
+| Export Comparison dialog | 2.3–3.5 % |
+| Grid export | Figure layout identical to matplotlib's in three layouts (`figures_parity`); the PNG 1.9 % apart |
+| Visible-view export | 4.2 % apart: Lite captures each panel from the screen and resamples it to the exporter's width, where pyqtgraph draws it again at that width |
+| macOS and Linux | Not yet built or compared |
+
+Found in the full app while porting (Lite reproduces them; fixing them in
+both apps is a decision for you):
+
+- The app stylesheet sets `color` on labels, fields, check boxes and radio
+  buttons without a `:disabled` rule, so disabled controls look enabled; only
+  push buttons grey out. Examples: *Background Method* in batch Raw mode, the
+  grid options of Export Comparison while *Visible View* is chosen.
+- The batch dialog's Cancel button never reads "Cancel Run":
+  `_set_controls_enabled(False)` runs before the worker thread exists.
+- The comparison's Low/High spin boxes make its controls 508 px wide in a
+  352 px view, so the controls scroll sideways and are cut off at the default
+  splitter position.
+- The comparison's scrolled controls and the gaps between its panels are dark
+  in the light theme on a dark operating system (the scroll-area palette, as in
+  the Analyzer).
+- Editing one panel's noise reduction recomputes that panel's colour levels
+  from its own data, also under *Shared scale*, until the next full redraw.
+- In dB units the comparison uses each panel's lower clipping threshold as the
+  cold digits, even when noise clipping is not the method: after trying
+  clipping at −10, dB values stay offset by 10 digits.
+
+Found earlier in the full app while porting:
 
 - The event window's *Start (UTC)* and *Stop (UTC)* edits are local-time
   `QDateTimeEdit`s. They start at local time and are then searched as UTC, which

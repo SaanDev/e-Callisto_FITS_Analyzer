@@ -270,6 +270,10 @@ pub struct Axis {
     pub auto_si_prefix: bool,
     pub range: (f64, f64),
     si_prefix_scale: f64,
+    /// `setGrid(alpha)`: ticks become grid lines across the linked view,
+    /// `grid_extent` (the view's size across the axis) away.
+    pub grid: Option<u8>,
+    pub grid_extent: f64,
 }
 
 impl Axis {
@@ -290,6 +294,8 @@ impl Axis {
             auto_si_prefix: true,
             range: (0.0, 1.0),
             si_prefix_scale: 1.0,
+            grid: None,
+            grid_extent: 0.0,
         }
     }
 
@@ -406,12 +412,21 @@ impl Axis {
     pub fn generate(&mut self, w: f64, h: f64, measure: &dyn Fn(&str) -> (f64, f64)) -> AxisDraw {
         let mut out = AxisDraw::default();
         let vertical = self.orientation.vertical();
-        let (span0, span1, tick_start, tick_stop, tick_dir) = match self.orientation {
+        let (span0, span1, mut tick_start, tick_stop, tick_dir) = match self.orientation {
             Orientation::Left => ((w - 1.0, -1.0), (w - 1.0, h + 1.0), w, w, -1.0),
             Orientation::Right => ((1.0, -1.0), (1.0, h + 1.0), 0.0, 0.0, 1.0),
             Orientation::Top => ((-1.0, h - 1.0), (w + 1.0, h - 1.0), h, h, -1.0),
             Orientation::Bottom => ((-1.0, 1.0), (w + 1.0, 1.0), 0.0, 0.0, 1.0),
         };
+        // With a grid the ticks start at the far side of the linked view.
+        if self.grid.is_some() {
+            tick_start = match self.orientation {
+                Orientation::Left => w + self.grid_extent,
+                Orientation::Right => -self.grid_extent,
+                Orientation::Top => h + self.grid_extent,
+                Orientation::Bottom => -self.grid_extent,
+            };
+        }
         let length = (span1.0 - span0.0).hypot(span1.1 - span0.1);
         if length == 0.0 {
             return out;
@@ -442,7 +457,11 @@ impl Axis {
         let mut positions: Vec<Vec<Option<f64>>> = Vec::new();
         for (i, (_, values)) in levels.iter().enumerate() {
             let tick_length = self.tick_length / (i as f64 * 0.5 + 1.0);
-            let alpha = (255.0 / (i as f64 + 1.0)) as u8;
+            let mut line_alpha = 255.0 / (i as f64 + 1.0);
+            if let Some(g) = self.grid {
+                line_alpha *= g as f64 / 255.0 * (0.05 * length / (values.len() as f64 + 1.0)).clamp(0.0, 1.0);
+            }
+            let alpha = line_alpha as u8;
             let mut row = Vec::with_capacity(values.len());
             for v in values {
                 let x = v * x_scale - offset;
@@ -451,7 +470,7 @@ impl Axis {
                     continue;
                 }
                 row.push(Some(x));
-                let end = tick_stop + tick_length * tick_dir;
+                let end = if self.grid.is_some() { tick_stop } else { tick_stop + tick_length * tick_dir };
                 out.ticks.push(if vertical {
                     Line { x1: tick_start, y1: x, x2: end, y2: x, alpha }
                 } else {

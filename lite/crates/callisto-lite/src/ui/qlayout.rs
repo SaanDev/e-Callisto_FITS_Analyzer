@@ -237,6 +237,150 @@ pub struct Splitter {
 pub enum Layout {
     Box(BoxLayout),
     Grid(GridLayout),
+    Form(FormLayout),
+}
+
+/// `QFormLayout` as Fusion configures it: rows never wrap, fields that are
+/// not fixed grow, labels left-aligned, the form at the top left.
+#[derive(Clone)]
+pub struct FormLayout {
+    pub margins: [i32; 4],
+    pub hspacing: i32,
+    pub vspacing: i32,
+    /// `(label, field)` per row; no label is a spanning row (`addRow(widget)`).
+    pub rows: Vec<(Option<Item>, Item)>,
+}
+
+impl FormLayout {
+    pub fn new(margins: [i32; 4], hspacing: i32, vspacing: i32) -> Self {
+        FormLayout { margins, hspacing, vspacing, rows: Vec::new() }
+    }
+
+    /// `addRow(label, field)`.
+    pub fn row(mut self, label: WidgetSpec, field: Item) -> Self {
+        self.rows.push((Some(Item::Widget(label)), field));
+        self
+    }
+
+    /// `addRow(widget)`: the item spans both columns.
+    pub fn span(mut self, field: Item) -> Self {
+        self.rows.push((None, field));
+        self
+    }
+
+    pub fn into_item(self) -> Item {
+        Item::Layout(Box::new(Layout::Form(self)))
+    }
+
+    /// The rows' sizes (`updateSizes`): label and field min, hint and max.
+    fn items(&self) -> Vec<(Option<ItemInfo>, ItemInfo)> {
+        self.rows.iter().map(|(l, f)| (l.as_ref().map(|l| l.info(Align::NONE)), f.info(Align::NONE))).collect()
+    }
+
+    /// `setupVerticalLayoutData`: one chain entry per row after a top
+    /// entry, a bottom stretch, and the widest label that fits `width`.
+    fn vertical(&self, width: i32) -> (Vec<LayoutStruct>, i32) {
+        let items = self.items();
+        let mut max_label = 0;
+        for (l, f) in &items {
+            if let Some(l) = l
+                && l.hint.w + f.min.w <= width
+            {
+                max_label = max_label.max(l.hint.w);
+            }
+        }
+        let mut chain = vec![LayoutStruct::init(0, 0)];
+        let mut add_stretch = true;
+        for (l, f) in &items {
+            let (min1, sh1, max1, s1, e1) =
+                l.as_ref().map_or((0, 0, WIDGET_MAX, 0, false), |l| (l.min.h, l.hint.h, l.max.h, l.vstretch, l.exp_v));
+            let mut row = LayoutStruct::init(s1.max(f.vstretch), min1.max(f.min.h));
+            row.size_hint = sh1.max(f.hint.h);
+            row.maximum_size = max1.min(f.max.h);
+            row.expansive = e1 || f.exp_v || row.stretch > 0;
+            row.empty = false;
+            if row.expansive {
+                add_stretch = false;
+            }
+            if chain.len() > 1 {
+                let last = chain.len() - 1;
+                chain[last].spacing = self.vspacing;
+            }
+            chain.push(row);
+        }
+        if add_stretch {
+            let mut bottom = LayoutStruct::init(1, 0);
+            bottom.expansive = true;
+            chain.push(bottom);
+        }
+        (chain, max_label)
+    }
+
+    fn margin_size(&self) -> Size {
+        let [l, t, r, b] = self.margins;
+        Size::new(l + r, t + b)
+    }
+
+    /// `calcSizeHints` with `updateSizes`.
+    fn summary(&self) -> Summary {
+        let items = self.items();
+        let (mut sh_l, mut sh_f, mut min_l, mut min_f) = (0, 0, 0, 0);
+        let (mut sh_span, mut min_span) = (0, 0);
+        let (mut exp_h, mut exp_v) = (false, false);
+        for (l, f) in &items {
+            if let Some(l) = l {
+                sh_l = sh_l.max(l.hint.w);
+                min_l = min_l.max(l.min.w);
+                exp_h |= l.exp_h;
+                exp_v |= l.exp_v;
+                sh_f = sh_f.max(f.hint.w + self.hspacing);
+                min_f = min_f.max(f.min.w + self.hspacing);
+            } else {
+                sh_span = sh_span.max(f.hint.w);
+                min_span = min_span.max(f.min.w);
+            }
+            exp_h |= f.exp_h;
+            exp_v |= f.exp_v;
+        }
+        let (chain, _) = self.vertical(LAYOUT_MAX);
+        let m = self.margin_size();
+        let h: i32 = chain.iter().map(|c| c.size_hint + c.spacing).sum();
+        let mh: i32 = chain.iter().map(|c| c.minimum_size + c.spacing).sum();
+        Summary {
+            hint: Size::new((sh_l + sh_f).max(sh_span), h) + m,
+            min: Size::new((min_l + min_f).max(min_span), mh) + m,
+            max: Size::new(LAYOUT_MAX, LAYOUT_MAX),
+            exp_h,
+            exp_v,
+            has_hfw: false,
+            empty: self.rows.is_empty(),
+        }
+    }
+
+    /// `QFormLayout::setGeometry` and `arrangeWidgets`.
+    fn set_geometry(&self, r: IRect, out: &mut Geometry) {
+        let [l, t, rr, b] = self.margins;
+        let cr = r.shrink(l, t, rr, b);
+        let (mut chain, max_label) = self.vertical(cr.w);
+        let n = chain.len();
+        geom_calc(&mut chain, 0, n, cr.y, cr.h, -1);
+        let items = self.items();
+        for (i, ((label, field), (li, fi))) in self.rows.iter().zip(&items).enumerate() {
+            let row = chain[i + 1];
+            if let (Some(label), Some(li)) = (label, li) {
+                let mut h = row.size;
+                if !li.exp_v {
+                    // A tall field gets a top-aligned label, "but not too much".
+                    h = h.min((li.hint.h * 7 / 4).min(li.max.h));
+                }
+                let w = max_label.min(li.hint.w);
+                label.set_geometry(IRect::new(cr.x, row.pos, w, h), Align::NONE, out);
+            }
+            let fw = if label.is_some() { cr.w - max_label - self.hspacing } else { cr.w };
+            let size = Size::new(fw, row.size).bounded_to(fi.max);
+            field.set_geometry(IRect::new(cr.x + cr.w - fw, row.pos, size.w, size.h), Align::NONE, out);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1041,9 +1185,10 @@ impl BoxLayout {
         }
         maxw = maxw.min(LAYOUT_MAX);
         maxh = maxh.min(LAYOUT_MAX);
-        let hint = Size::new(hintw, hinth).expanded_to(Size::new(minw, minh)).bounded_to(Size::new(maxw, maxh));
+        // `setupGeom`: the maximum grows to the minimum before it bounds the hint.
         let min = Size::new(minw, minh);
         let max = Size::new(maxw, maxh).expanded_to(min);
+        let hint = Size::new(hintw, hinth).expanded_to(min).bounded_to(max);
         BoxGeom { a, hint, min, max, exp_h: horexp, exp_v: verexp, has_hfw, empty }
     }
 
@@ -1433,6 +1578,7 @@ impl Layout {
                     empty: d.empty,
                 }
             }
+            Layout::Form(f) => f.summary(),
         }
     }
 
@@ -1448,6 +1594,7 @@ impl Layout {
         match self {
             Layout::Box(b) => b.items.iter().any(|(i, ..)| i.has_hfw()),
             Layout::Grid(g) => g.items.iter().any(|(i, ..)| i.has_hfw()),
+            Layout::Form(_) => false,
         }
     }
 
@@ -1455,6 +1602,7 @@ impl Layout {
         match self {
             Layout::Box(b) => b.height_for_width(w),
             Layout::Grid(g) => g.height_for_width(w),
+            Layout::Form(f) => f.summary().hint.h,
         }
     }
 
@@ -1463,6 +1611,7 @@ impl Layout {
         match self {
             Layout::Box(b) => b.set_geometry(r, out),
             Layout::Grid(g) => g.set_geometry(r, out),
+            Layout::Form(f) => f.set_geometry(r, out),
         }
     }
 
@@ -1477,6 +1626,12 @@ impl Layout {
 impl From<BoxLayout> for Layout {
     fn from(b: BoxLayout) -> Self {
         Layout::Box(b)
+    }
+}
+
+impl From<FormLayout> for Layout {
+    fn from(f: FormLayout) -> Self {
+        Layout::Form(f)
     }
 }
 

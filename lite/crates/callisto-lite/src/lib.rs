@@ -3,6 +3,7 @@
 //!
 //! See `lite/PLAN.md` for scope and phases.
 
+pub mod analysis;
 pub mod app;
 pub mod canvas;
 pub mod downloads;
@@ -14,6 +15,7 @@ pub mod icons;
 pub mod menus;
 pub mod session;
 pub mod theme;
+pub mod tools;
 pub mod ui;
 
 pub const APP_NAME: &str = "e-CALLISTO FITS Analyzer Lite";

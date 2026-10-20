@@ -2,13 +2,20 @@
 //! lays them out: subplot and gridspec geometry, colour bars made with
 //! `make_axes_gridspec`, tick locators and formatters, text alignment with
 //! matplotlib's "lp" line metrics, and image resampling (nearest, and the
-//! Agg Hanning filter `interpolation='auto'` picks when downsampling).
+//! Agg Hanning filter `interpolation='auto'` picks when downsampling); and
+//! for the analysis graphs, titles, scatter plots and lines with markers
+//! autoscaled with matplotlib's margins, legends ([`legend`]) and labels
+//! with superscripts ([`mathtext`]), drawn in matplotlib's z-order.
 //!
 //! A [`Figure`] is laid out into a [`DrawList`] in logical pixels (y down);
 //! the GUI paints it, and exports rasterise it. Text extents come from the
 //! caller ([`TextMeasure`]), because only the GUI knows the fonts.
 
+pub mod analysis_figures;
 pub mod figures;
+pub mod legend;
+pub mod mathtext;
+pub mod render;
 pub mod ticker;
 
 use std::sync::Arc;
@@ -36,8 +43,44 @@ pub struct TextExtent {
     pub descent: f64,
 }
 
+/// The family a text is drawn in: the interface family (the full app's
+/// `apply_origin_style` font) in its regular, semibold (`fontweight=600`)
+/// or bold face, or the Origin graphs' family (Arial).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Face {
+    #[default]
+    Ui,
+    UiSemibold,
+    UiBold,
+    Origin,
+}
+
 pub trait TextMeasure {
-    fn measure(&self, text: &str, size_px: f64) -> TextExtent;
+    fn measure(&self, text: &str, size_px: f64, face: Face) -> TextExtent;
+    /// A glyph's metrics, for [`mathtext`].
+    fn glyph(&self, _c: char, _size_px: f64, _face: Face) -> Option<mathtext::GlyphMetrics> {
+        None
+    }
+    /// Pair kerning in pixels, as FreeType's `KERNING_DEFAULT` gives it.
+    fn kerning(&self, _a: char, _b: char, _size_px: f64, _face: Face) -> f64 {
+        0.0
+    }
+    /// mathtext's x-height (`TruetypeFonts.get_xheight`, from the font's
+    /// PCLT table).
+    fn x_height(&self, size_px: f64, _face: Face) -> f64 {
+        0.5 * size_px
+    }
+}
+
+/// A text's extent as `Text._get_layout` measures it: mathtext's for math
+/// strings, with their layout.
+fn text_extent(m: &dyn TextMeasure, text: &str, size_px: f64, face: Face) -> (TextExtent, Option<mathtext::MathLayout>) {
+    if mathtext::is_math_text(text) {
+        let l = mathtext::layout(text, size_px, face, m);
+        (TextExtent { width: l.width, height: l.height, descent: l.descent }, Some(l))
+    } else {
+        (m.measure(text, size_px, face), None)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,11 +105,17 @@ pub struct Label {
     pub text: String,
     pub size_pt: f64,
     pub color: Rgba,
+    pub face: Face,
 }
 
 impl Label {
     pub fn new(text: impl Into<String>, size_pt: f64, color: Rgba) -> Self {
-        Label { text: text.into(), size_pt, color }
+        Label { text: text.into(), size_pt, color, face: Face::Ui }
+    }
+
+    pub fn with_face(mut self, face: Face) -> Self {
+        self.face = face;
+        self
     }
 }
 
@@ -137,6 +186,8 @@ pub struct AxisSpec {
     pub minor_width_pt: f64,
     pub pad_pt: f64,
     pub labelpad_pt: f64,
+    /// The tick labels' family.
+    pub face: Face,
 }
 
 impl AxisSpec {
@@ -163,6 +214,7 @@ impl AxisSpec {
             minor_width_pt: 0.6,
             pad_pt: 3.5,
             labelpad_pt: 4.0,
+            face: Face::Ui,
         }
     }
 }
@@ -184,6 +236,59 @@ pub struct AxesText {
     pub va: VAlign,
 }
 
+/// A marker's shape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkerKind {
+    /// `'s'`.
+    Square,
+    /// `'o'`.
+    Circle,
+    /// `'*'`: a five-pointed star.
+    Star,
+}
+
+/// A line's markers: shape, size in points, colours and edge width.
+#[derive(Clone, Debug)]
+pub struct Marker {
+    pub kind: MarkerKind,
+    pub size_pt: f64,
+    pub face: Rgba,
+    pub edge: Rgba,
+    pub edge_width_pt: f64,
+}
+
+/// `ax.scatter` with one size and colour: circles `sqrt(s)` points across,
+/// edged in the face colour.
+#[derive(Clone, Debug)]
+pub struct Scatter {
+    pub x: Arc<Vec<f64>>,
+    pub y: Arc<Vec<f64>>,
+    /// `s`, in points².
+    pub size_pt2: f64,
+    pub color: Rgba,
+    pub edge_width_pt: f64,
+    pub zorder: f64,
+}
+
+impl Scatter {
+    pub fn new(x: Vec<f64>, y: Vec<f64>, size_pt2: f64, color: Rgba) -> Self {
+        Scatter { x: Arc::new(x), y: Arc::new(y), size_pt2, color, edge_width_pt: 1.0, zorder: 1.0 }
+    }
+}
+
+/// `ax.plot`: a solid line (or none) with optional markers.
+#[derive(Clone, Debug)]
+pub struct Line2D {
+    pub x: Arc<Vec<f64>>,
+    pub y: Arc<Vec<f64>>,
+    pub color: Rgba,
+    /// A solid line of this width in points; `None` for `linestyle='none'`.
+    pub width_pt: Option<f64>,
+    pub marker: Option<Marker>,
+    pub label: Option<String>,
+    pub zorder: f64,
+}
+
 #[derive(Clone)]
 pub struct Axes {
     /// `[left, bottom, width, height]` in figure fractions.
@@ -200,6 +305,74 @@ pub struct Axes {
     pub texts: Vec<AxesText>,
     pub spine_color: Rgba,
     pub spine_width_pt: f64,
+    /// `ax.set_title` (centred, `axes.titlepad` above the axes).
+    pub title: Option<Label>,
+    pub title_pad_pt: f64,
+    pub scatters: Vec<Scatter>,
+    pub lines: Vec<Line2D>,
+    pub legend: Option<legend::Legend>,
+    /// The axis artists' z-order (grid, ticks and labels): 1.5 for
+    /// `axes.axisbelow = 'line'`.
+    pub axis_zorder: f64,
+}
+
+impl Axes {
+    /// An empty axes at `position` with the given axis styles.
+    pub fn new(position: [f64; 4], x: AxisSpec, y: AxisSpec) -> Self {
+        Axes {
+            position,
+            box_aspect: None,
+            xlim: (0.0, 1.0),
+            ylim: (0.0, 1.0),
+            facecolor: None,
+            images: Vec::new(),
+            x,
+            y,
+            grids: Vec::new(),
+            texts: Vec::new(),
+            spine_color: BLACK,
+            spine_width_pt: 1.5,
+            title: None,
+            title_pad_pt: 6.0,
+            scatters: Vec::new(),
+            lines: Vec::new(),
+            legend: None,
+            axis_zorder: 1.5,
+        }
+    }
+
+    /// `autoscale_view` after plotting: the data's extent (scatter offsets
+    /// and line vertices) with `axes.xmargin`/`ymargin` (0.05) on each side.
+    pub fn autoscale(&mut self) {
+        let (mut x0, mut x1, mut y0, mut y1) = (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+        let pairs = self
+            .scatters
+            .iter()
+            .map(|s| (s.x.clone(), s.y.clone()))
+            .chain(self.lines.iter().map(|l| (l.x.clone(), l.y.clone())));
+        for (xs, ys) in pairs {
+            for (&x, &y) in xs.iter().zip(ys.iter()) {
+                if x.is_finite() && y.is_finite() {
+                    x0 = x0.min(x);
+                    x1 = x1.max(x);
+                    y0 = y0.min(y);
+                    y1 = y1.max(y);
+                }
+            }
+        }
+        if x0.is_finite() {
+            self.xlim = auto_limits(x0, x1);
+            self.ylim = auto_limits(y0, y1);
+        }
+    }
+}
+
+/// One axis of `autoscale_view`: the locator's `nonsingular`, the margin,
+/// then `view_limits` (`axes.autolimit_mode = 'data'`).
+fn auto_limits(lo: f64, hi: f64) -> (f64, f64) {
+    let (lo, hi) = ticker::nonsingular(lo, hi, 0.05, 1e-15);
+    let delta = (hi - lo) * 0.05;
+    ticker::nonsingular(lo - delta, hi + delta, 0.05, 1e-15)
 }
 
 /// `fig.text`.
@@ -234,6 +407,16 @@ pub struct PxRect {
     pub y1: f64,
 }
 
+/// One glyph of a math label: its offset from the label's pen (y down,
+/// from the baseline) and size.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GlyphRun {
+    pub c: char,
+    pub dx: f64,
+    pub dy: f64,
+    pub size_px: f64,
+}
+
 #[derive(Clone)]
 pub enum Prim {
     Fill { rect: PxRect, color: Rgba },
@@ -242,8 +425,18 @@ pub enum Prim {
     Image { axes: usize, image: usize, dest: PxRect, clip: PxRect },
     /// Text with its pen origin on the baseline at `pos`, rotated
     /// counter-clockwise by `rotation` degrees about that point; `bbox` is
-    /// its window extent as matplotlib computes it.
-    Text { pos: (f64, f64), text: String, size_px: f64, color: Rgba, rotation: f64, bbox: PxRect },
+    /// its window extent as matplotlib computes it. A math label carries
+    /// its glyphs as mathtext placed them (plain text has none).
+    Text { pos: (f64, f64), text: String, size_px: f64, color: Rgba, rotation: f64, bbox: PxRect, face: Face, glyphs: Vec<GlyphRun> },
+    /// Markers centred at `centers`, `size` across (a square's side, a
+    /// circle's diameter), as Agg draws them: `draw_markers` (`snapped`:
+    /// each marker stamped at a whole device pixel, its path snapped when
+    /// it can be) or a path collection (exact positions).
+    Markers { kind: MarkerKind, centers: Arc<Vec<(f64, f64)>>, size: f64, face: Rgba, edge: Rgba, edge_width: f64, snapped: bool, clip: Option<PxRect> },
+    /// A solid polyline: projecting caps, round joins.
+    Path { points: Arc<Vec<(f64, f64)>>, color: Rgba, width: f64, clip: Option<PxRect> },
+    /// A rectangle patch, filled and edged, snapped as Agg snaps it.
+    Frame { rect: PxRect, face: Rgba, edge: Rgba, width: f64 },
 }
 
 pub struct DrawList {
@@ -254,16 +447,58 @@ pub struct DrawList {
     pub axes_rects: Vec<PxRect>,
 }
 
+impl PxRect {
+    fn shifted(&self, dx: f64, dy: f64) -> PxRect {
+        PxRect { x0: self.x0 + dx, y0: self.y0 + dy, x1: self.x1 + dx, y1: self.y1 + dy }
+    }
+}
+
+impl DrawList {
+    /// Moves everything by (`dx`, `dy`): the figure transform a tight
+    /// bounding box sets before drawing, so snapping happens in its frame.
+    pub fn translate(&mut self, dx: f64, dy: f64) {
+        let pts = |v: &Arc<Vec<(f64, f64)>>| Arc::new(v.iter().map(|&(x, y)| (x + dx, y + dy)).collect::<Vec<_>>());
+        for r in &mut self.axes_rects {
+            *r = r.shifted(dx, dy);
+        }
+        for p in &mut self.prims {
+            match p {
+                Prim::Fill { rect, .. } | Prim::Frame { rect, .. } => *rect = rect.shifted(dx, dy),
+                Prim::Line { a, b, .. } => {
+                    *a = (a.0 + dx, a.1 + dy);
+                    *b = (b.0 + dx, b.1 + dy);
+                }
+                Prim::Image { dest, clip, .. } => {
+                    *dest = dest.shifted(dx, dy);
+                    *clip = clip.shifted(dx, dy);
+                }
+                Prim::Text { pos, bbox, .. } => {
+                    *pos = (pos.0 + dx, pos.1 + dy);
+                    *bbox = bbox.shifted(dx, dy);
+                }
+                Prim::Markers { centers, clip, .. } => {
+                    *centers = pts(centers);
+                    *clip = clip.as_ref().map(|c| c.shifted(dx, dy));
+                }
+                Prim::Path { points, clip, .. } => {
+                    *points = pts(points);
+                    *clip = clip.as_ref().map(|c| c.shifted(dx, dy));
+                }
+            }
+        }
+    }
+}
+
 fn pt(f: &Figure, points: f64) -> f64 {
     points * f.dpi / 72.0
 }
 
 /// The line metrics matplotlib aligns text with: the larger of the text's
 /// ink and that of "lp".
-fn line_metrics(m: &dyn TextMeasure, text: &str, size_px: f64) -> (TextExtent, f64, f64) {
-    let lp = m.measure("lp", size_px);
-    let e = if text.is_empty() { TextExtent::default() } else { m.measure(text, size_px) };
-    (e, e.height.max(lp.height), e.descent.max(lp.descent))
+fn line_metrics(m: &dyn TextMeasure, text: &str, size_px: f64, face: Face) -> (TextExtent, f64, f64, Option<mathtext::MathLayout>) {
+    let lp = m.measure("lp", size_px, face);
+    let (e, math) = if text.is_empty() { (TextExtent::default(), None) } else { text_extent(m, text, size_px, face) };
+    (e, e.height.max(lp.height), e.descent.max(lp.descent), math)
 }
 
 /// Where Agg's `draw_text_image` puts rotated text relative to the exact
@@ -292,7 +527,7 @@ fn place_text(
     rotation: f64,
     rotation_anchor: bool,
 ) -> (Prim, PxRect) {
-    let (e, h, d) = line_metrics(m, &label.text, size_px);
+    let (e, h, d, math) = line_metrics(m, &label.text, size_px, label.face);
     let w = e.width;
     // The layout box in text coordinates (y up), baseline of the line at
     // y = -(h - d) from the box top at 0.
@@ -349,7 +584,16 @@ fn place_text(
         x1: pts.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max),
         y1: pts.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max),
     };
-    let prim = Prim::Text { pos, text: label.text.clone(), size_px, color: label.color, rotation, bbox: bbox.clone() };
+    let glyphs = math
+        .map(|l| {
+            l.glyphs
+                .iter()
+                .filter(|g| g.c != ' ')
+                .map(|g| GlyphRun { c: g.c, dx: g.x, dy: g.y - l.box_height, size_px: g.size_px })
+                .collect()
+        })
+        .unwrap_or_default();
+    let prim = Prim::Text { pos, text: label.text.clone(), size_px, color: label.color, rotation, bbox: bbox.clone(), face: label.face, glyphs };
     (prim, bbox)
 }
 
@@ -411,8 +655,15 @@ pub fn grid_positions(
 pub type BarAspect = (f64, (f64, f64));
 
 pub fn subplot_with_colorbar() -> ([f64; 4], [f64; 4], BarAspect) {
-    let (left, bottom, right, top) = (0.125, 0.11, 0.9, 0.88);
-    let (fraction, pad, shrink, aspect) = (0.15, 0.05, 1.0, 20.0);
+    colorbar_beside([0.125, 0.11, 0.9, 0.88], 0.15, 0.05)
+}
+
+/// `fig.colorbar(im, ax=ax, fraction=…, pad=…)` for a subplot whose cell is
+/// `[left, bottom, right, top]` (`make_axes_gridspec`, location right):
+/// the axes and the colour bar's axes, with its box aspect.
+pub fn colorbar_beside(cell: [f64; 4], fraction: f64, pad: f64) -> ([f64; 4], [f64; 4], BarAspect) {
+    let [left, bottom, right, top] = cell;
+    let (shrink, aspect) = (1.0, 20.0);
     let wh_space = 2.0 * pad / (1.0 - pad);
     let (_, _, lefts, rights) =
         grid_positions([left, bottom, right, top], 1, 2, wh_space, 0.0, &[1.0 - fraction - pad, fraction], &[]);
@@ -490,17 +741,125 @@ impl Figure {
         DrawList { width: self.width, height: self.height, prims, axes_rects }
     }
 
-    fn layout_axes(&self, ai: usize, ax: &Axes, r: &PxRect, m: &dyn TextMeasure, prims: &mut Vec<Prim>) {
+    /// Lays out one axes: its patch, then its artists in z-order as
+    /// `Axes.draw` sorts them (stable, children before spines, axes,
+    /// title and legend at equal z-order).
+    fn layout_axes(&self, ai: usize, ax: &Axes, r: &PxRect, m: &dyn TextMeasure, out: &mut Vec<Prim>) {
         let to_x = |v: f64| r.x0 + (v - ax.xlim.0) / (ax.xlim.1 - ax.xlim.0) * (r.x1 - r.x0);
         let to_y = |v: f64| r.y1 - (v - ax.ylim.0) / (ax.ylim.1 - ax.ylim.0) * (r.y1 - r.y0);
         if let Some(face) = ax.facecolor {
-            prims.push(Prim::Fill { rect: r.clone(), color: face });
+            out.push(Prim::Fill { rect: r.clone(), color: face });
         }
+        let mut groups: Vec<(f64, Vec<Prim>)> = Vec::new();
         for (ii, im) in ax.images.iter().enumerate() {
             let [l, rt, b, t] = im.extent;
             let dest = PxRect { x0: to_x(l), x1: to_x(rt), y0: to_y(t), y1: to_y(b) };
-            prims.push(Prim::Image { axes: ai, image: ii, dest, clip: r.clone() });
+            groups.push((0.0, vec![Prim::Image { axes: ai, image: ii, dest, clip: r.clone() }]));
         }
+        // What a "best" legend avoids: line vertices and scatter offsets.
+        let mut avoid = legend::Avoid::default();
+        for s in &ax.scatters {
+            let centers: Vec<(f64, f64)> = s
+                .x
+                .iter()
+                .zip(s.y.iter())
+                .filter(|(x, y)| x.is_finite() && y.is_finite())
+                .map(|(&x, &y)| (to_x(x), to_y(y)))
+                .collect();
+            avoid.offsets.extend(centers.iter().copied());
+            let prim = Prim::Markers {
+                kind: MarkerKind::Circle,
+                centers: Arc::new(centers),
+                size: pt(self, s.size_pt2.sqrt()),
+                face: s.color,
+                edge: s.color,
+                edge_width: pt(self, s.edge_width_pt),
+                // One path in one colour: `Collection.draw` hands it to
+                // `draw_markers` (`do_single_path_optimization`).
+                snapped: true,
+                clip: Some(r.clone()),
+            };
+            groups.push((s.zorder, vec![prim]));
+        }
+        for l in &ax.lines {
+            let points: Vec<(f64, f64)> = l
+                .x
+                .iter()
+                .zip(l.y.iter())
+                .filter(|(x, y)| x.is_finite() && y.is_finite())
+                .map(|(&x, &y)| (to_x(x), to_y(y)))
+                .collect();
+            let points = Arc::new(points);
+            avoid.lines.push(points.clone());
+            let mut g = Vec::new();
+            if let Some(w) = l.width_pt {
+                g.push(Prim::Path { points: points.clone(), color: l.color, width: pt(self, w), clip: Some(r.clone()) });
+            }
+            if let Some(mk) = &l.marker {
+                g.push(self.markers(mk, points, Some(r.clone())));
+            }
+            groups.push((l.zorder, g));
+        }
+        let mut texts = Vec::new();
+        for t in &ax.texts {
+            let anchor = (r.x0 + t.x * (r.x1 - r.x0), r.y1 - t.y * (r.y1 - r.y0));
+            let (p, bb) = place_text(m, anchor, &t.label, pt(self, t.label.size_pt), t.ha, t.va, 0.0, false);
+            avoid.bboxes.push(bb);
+            texts.push(p);
+        }
+        groups.push((3.0, texts));
+        let mut axis = Vec::new();
+        let mut spines = Vec::new();
+        let x_high = self.layout_axis(ax, r, m, &mut axis, &mut spines);
+        groups.push((2.5, spines));
+        groups.push((ax.axis_zorder, axis));
+        if let Some(title) = &ax.title {
+            groups.push((3.0, vec![self.title(ax, title, r, x_high, m)]));
+        }
+        if let Some(leg) = &ax.legend {
+            groups.push((5.0, legend::layout(self, ax, r, leg, m, &avoid)));
+        }
+        groups.sort_by(|a, b| a.0.total_cmp(&b.0));
+        out.extend(groups.into_iter().flat_map(|g| g.1));
+    }
+
+    /// A line's markers as `draw_markers` draws them.
+    fn markers(&self, mk: &Marker, centers: Arc<Vec<(f64, f64)>>, clip: Option<PxRect>) -> Prim {
+        Prim::Markers {
+            kind: mk.kind,
+            centers,
+            size: pt(self, mk.size_pt),
+            face: mk.face,
+            edge: mk.edge,
+            edge_width: pt(self, mk.edge_width_pt),
+            snapped: true,
+            clip,
+        }
+    }
+
+    /// The title, `_update_title_position`: `title_pad` above the axes, or
+    /// above what sits on top of it (top tick labels), raised further when
+    /// its descent would still reach below that.
+    fn title(&self, ax: &Axes, title: &Label, r: &PxRect, top: f64, m: &dyn TextMeasure) -> Prim {
+        let size = pt(self, title.size_pt);
+        let pad = pt(self, ax.title_pad_pt);
+        let place = |y: f64| place_text(m, ((r.x0 + r.x1) / 2.0, y), title, size, HAlign::Center, VAlign::Baseline, 0.0, false);
+        let (mut p, bb) = place(r.y0 - pad);
+        if bb.y1 > top {
+            let (p2, bb2) = place(top - pad);
+            p = p2;
+            if bb2.y1 > top {
+                p = place(top - pad - (bb2.y1 - top)).0;
+            }
+        }
+        p
+    }
+
+    /// The axis artists (grid, ticks, tick and axis labels) and spines.
+    /// Returns the top of what sits above the axes, for the title.
+    fn layout_axis(&self, ax: &Axes, r: &PxRect, m: &dyn TextMeasure, prims: &mut Vec<Prim>, spines: &mut Vec<Prim>) -> f64 {
+        let to_x = |v: f64| r.x0 + (v - ax.xlim.0) / (ax.xlim.1 - ax.xlim.0) * (r.x1 - r.x0);
+        let to_y = |v: f64| r.y1 - (v - ax.ylim.0) / (ax.ylim.1 - ax.ylim.0) * (r.y1 - r.y0);
         let (wpx, hpx) = (r.x1 - r.x0, r.y1 - r.y0);
         let xt = axis_ticks(&ax.x, ax.xlim, wpx * 72.0 / self.dpi, true);
         let yt = axis_ticks(&ax.y, ax.ylim, hpx * 72.0 / self.dpi, false);
@@ -558,7 +917,7 @@ impl Figure {
         // Spines (square caps, centred on the axes edges).
         let sw = pt(self, ax.spine_width_pt);
         for (a, b) in [((r.x0, r.y1), (r.x1, r.y1)), ((r.x0, r.y0), (r.x1, r.y0)), ((r.x0, r.y0), (r.x0, r.y1)), ((r.x1, r.y0), (r.x1, r.y1))] {
-            prims.push(Prim::Line { a, b, color: ax.spine_color, width: sw, square_caps: true });
+            spines.push(Prim::Line { a, b, color: ax.spine_color, width: sw, square_caps: true });
         }
 
         // Tick labels, and the extents the axis labels are placed beyond.
@@ -566,7 +925,7 @@ impl Figure {
         let (mut x_low, mut x_high) = (r.y1, r.y0);
         if ax.x.labels_low || ax.x.labels_high {
             for (v, text) in &xt.major {
-                let label = Label::new(text.clone(), ax.x.tick_label_pt, ax.x.label_color);
+                let label = Label::new(text.clone(), ax.x.tick_label_pt, ax.x.label_color).with_face(ax.x.face);
                 let size = pt(self, label.size_pt);
                 if ax.x.labels_low {
                     let (p, bb) = place_text(m, (to_x(*v), r.y1 + pad(&ax.x)), &label, size, HAlign::Center, VAlign::Top, 0.0, false);
@@ -583,7 +942,7 @@ impl Figure {
         let (mut y_low, mut y_high) = (r.x0, r.x1);
         if ax.y.labels_low || ax.y.labels_high {
             for (v, text) in &yt.major {
-                let label = Label::new(text.clone(), ax.y.tick_label_pt, ax.y.label_color);
+                let label = Label::new(text.clone(), ax.y.tick_label_pt, ax.y.label_color).with_face(ax.y.face);
                 let size = pt(self, label.size_pt);
                 if ax.y.labels_low {
                     let (p, bb) = place_text(m, (r.x0 - pad(&ax.y), to_y(*v)), &label, size, HAlign::Right, VAlign::CenterBaseline, 0.0, false);
@@ -597,13 +956,17 @@ impl Figure {
                 }
             }
         }
+        let mut x_top = if ax.x.labels_high { x_high } else { r.y0 };
         if let Some(label) = &ax.x.label {
             let size = pt(self, label.size_pt);
             let labelpad = pt(self, ax.x.labelpad_pt);
-            let (p, _) = match ax.x.label_side {
+            let (p, bb) = match ax.x.label_side {
                 Side::Low => place_text(m, ((r.x0 + r.x1) / 2.0, x_low + labelpad), label, size, HAlign::Center, VAlign::Top, 0.0, false),
                 Side::High => place_text(m, ((r.x0 + r.x1) / 2.0, x_high - labelpad), label, size, HAlign::Center, VAlign::Bottom, 0.0, false),
             };
+            if ax.x.label_side == Side::High {
+                x_top = x_top.min(bb.y0);
+            }
             prims.push(p);
         }
         if let Some(label) = &ax.y.label {
@@ -616,11 +979,7 @@ impl Figure {
             };
             prims.push(p);
         }
-        for t in &ax.texts {
-            let anchor = (r.x0 + t.x * (r.x1 - r.x0), r.y1 - t.y * (r.y1 - r.y0));
-            let (p, _) = place_text(m, anchor, &t.label, pt(self, t.label.size_pt), t.ha, t.va, 0.0, false);
-            prims.push(p);
-        }
+        x_top
     }
 }
 
@@ -793,7 +1152,7 @@ mod tests {
 
     struct Fixed;
     impl TextMeasure for Fixed {
-        fn measure(&self, text: &str, size: f64) -> TextExtent {
+        fn measure(&self, text: &str, size: f64, _face: Face) -> TextExtent {
             TextExtent { width: text.chars().count() as f64 * size * 0.5, height: size, descent: size * 0.2 }
         }
     }
@@ -824,20 +1183,7 @@ mod tests {
     #[test]
     fn ylabel_sits_left_of_tick_labels() {
         let (main, _, _) = subplot_with_colorbar();
-        let mut ax = Axes {
-            position: main,
-            box_aspect: None,
-            xlim: (0.0, 1797.0),
-            ylim: (10.0, 110.0),
-            facecolor: None,
-            images: Vec::new(),
-            x: AxisSpec::origin(BLACK),
-            y: AxisSpec::origin(BLACK),
-            grids: Vec::new(),
-            texts: Vec::new(),
-            spine_color: BLACK,
-            spine_width_pt: 1.5,
-        };
+        let mut ax = Axes { xlim: (0.0, 1797.0), ylim: (10.0, 110.0), ..Axes::new(main, AxisSpec::origin(BLACK), AxisSpec::origin(BLACK)) };
         ax.y.label = Some(Label::new("Frequency [MHz]", 12.0, BLACK));
         let fig = Figure { width: 874.0, height: 480.0, dpi: 100.0, facecolor: WHITE, axes: vec![ax], texts: Vec::new() };
         let list = fig.layout(&Fixed);

@@ -4,10 +4,12 @@
 pub mod archive;
 pub mod array;
 pub mod artemis;
+pub mod batch;
 pub mod burst_list;
 pub mod cache;
 pub mod colormap_tables;
 pub mod combine;
+pub mod comparison;
 pub mod downloader;
 pub mod fits_io;
 pub mod frequency_axis;

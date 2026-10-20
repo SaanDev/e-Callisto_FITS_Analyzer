@@ -3,6 +3,8 @@
 use crate::radio::colormap_tables::COLORMAPS;
 
 const PREVIEW: &str = "combined_preview";
+/// Only the multi-station comparison lists it (`_COLORMAP_NAMES`).
+const COMPARISON_ONLY: &str = "gray";
 
 /// One colormap from `MainWindow.cmap_combo`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,7 +26,7 @@ impl Colormap {
 
     /// The names, in the order of the Graph Properties list.
     pub fn names() -> impl Iterator<Item = &'static str> {
-        COLORMAPS.iter().map(|c| c.0).filter(|n| *n != PREVIEW)
+        COLORMAPS.iter().map(|c| c.0).filter(|n| *n != PREVIEW && *n != COMPARISON_ONLY)
     }
 
     /// The Combine FITS Files preview's colormap (not in the list).
