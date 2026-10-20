@@ -24,7 +24,7 @@ env/
 # Build artifacts (repository root only, so docs/build/ stays tracked)
 /build/
 /dist/
-lite/
+/lite/target/
 /dmg_tmp/
 *.dmg
 *.spec.bak
