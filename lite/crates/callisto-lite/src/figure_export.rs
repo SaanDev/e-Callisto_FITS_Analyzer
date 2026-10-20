@@ -60,17 +60,29 @@ fn text_path(ctx: &egui::Context, text: &str, size_px: f64, face: Face, runs: &[
     } else {
         runs.iter().map(|g| (g.c, g.dx as f32, g.dy as f32, g.size_px)).collect()
     };
+    let mut pb = PathBuilder::new();
+    let mut missing = Vec::new();
     with_mpl_face(face, |f| {
-        let mut pb = PathBuilder::new();
-        for (ch, x, y, size) in &glyphs {
-            let Some(id) = f.glyph_index(*ch) else { continue };
+        for g @ (ch, x, y, size) in &glyphs {
+            let Some(id) = f.glyph_index(*ch) else {
+                missing.push(*g);
+                continue;
+            };
             let scale = (size / f.units_per_em() as f64) as f32;
-            let mut sink = Outline { pb: &mut pb, scale, dx: *x, dy: *y };
-            f.outline_glyph(id, &mut sink);
+            f.outline_glyph(id, &mut Outline { pb: &mut pb, scale, dx: *x, dy: *y });
         }
-        pb.finish()
-    })
-    .flatten()
+    });
+    // matplotlib falls back glyph by glyph (the Origin face's "ₛ", "☉").
+    if !missing.is_empty() && face != Face::Ui {
+        with_mpl_face(Face::Ui, |f| {
+            for (ch, x, y, size) in &missing {
+                let Some(id) = f.glyph_index(*ch) else { continue };
+                let scale = (size / f.units_per_em() as f64) as f32;
+                f.outline_glyph(id, &mut Outline { pb: &mut pb, scale, dx: *x, dy: *y });
+            }
+        });
+    }
+    pb.finish()
 }
 
 struct Outline<'a> {

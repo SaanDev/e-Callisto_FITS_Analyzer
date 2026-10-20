@@ -8,6 +8,7 @@
 //! draws them, snapping lines to physical pixels as Qt's raster engine does.
 
 mod overlays;
+mod series;
 
 use std::time::{Duration, Instant};
 
@@ -29,6 +30,7 @@ use std::sync::Arc;
 use crate::fonts::{graph_font, plot_font};
 use callisto_core::analysis::annotations::AnnotationKind;
 pub use overlays::Mode;
+pub use series::Series;
 
 /// `GraphicsLayout` contents margins and the `PlotItem`'s own.
 const LAYOUT_MARGIN: f64 = 9.0;
@@ -73,6 +75,8 @@ impl View {
 pub struct TextStyle {
     /// Graph Properties → Font family; `None` is the app font.
     pub family: Option<String>,
+    /// Another installed family (the Type II graph settings' font), over `family`.
+    pub extra_family: Option<String>,
     pub tick_px: u32,
     pub axis_px: u32,
     pub title_px: u32,
@@ -89,6 +93,7 @@ impl Default for TextStyle {
     fn default() -> Self {
         Self {
             family: None,
+            extra_family: None,
             tick_px: 11,
             axis_px: 12,
             title_px: 14,
@@ -105,6 +110,9 @@ impl Default for TextStyle {
 impl TextStyle {
     fn font(&self, px: u32, bold: bool, italic: bool) -> FontId {
         let px = px.max(1) as f32;
+        if let Some(f) = &self.extra_family {
+            return crate::fonts::annotation_font(f, px, bold, italic);
+        }
         if self.family.is_some() { graph_font(px, bold, italic) } else { plot_font(px, bold, italic) }
     }
 
@@ -214,7 +222,9 @@ struct Geometry {
     bar_axis: R,
 }
 
-fn layout(w: f64, h: f64, left_w: f64, bottom_h: f64) -> Geometry {
+fn layout(w: f64, h: f64, left_w: f64, bottom_h: f64, colorbar: bool) -> Geometry {
+    // A hidden colour bar keeps the 5 px column before it.
+    let colorbar_w = if colorbar { COLORBAR_W } else { 0.0 };
     let plot =
         R::new(LAYOUT_MARGIN, LAYOUT_MARGIN, (w - 2.0 * LAYOUT_MARGIN).max(0.0), (h - 2.0 * LAYOUT_MARGIN).max(0.0));
     let inner_x = plot.x + PLOT_MARGIN;
@@ -222,10 +232,10 @@ fn layout(w: f64, h: f64, left_w: f64, bottom_h: f64) -> Geometry {
     let inner_w = (plot.w - 2.0 * PLOT_MARGIN).max(0.0);
     let inner_h = (plot.h - 2.0 * PLOT_MARGIN).max(0.0);
     let main_h = (inner_h - TITLE_H - bottom_h).max(0.0);
-    let view_w = (inner_w - left_w - COLORBAR_GAP - COLORBAR_W).max(0.0);
+    let view_w = (inner_w - left_w - COLORBAR_GAP - colorbar_w).max(0.0);
     let main_y = inner_y + TITLE_H;
     let view = R::new(inner_x + left_w, main_y, view_w, main_h);
-    let colorbar = R::new(view.x + view_w + COLORBAR_GAP, main_y, COLORBAR_W, main_h);
+    let colorbar = R::new(view.x + view_w + COLORBAR_GAP, main_y, colorbar_w, main_h);
     let bar_h = (main_h - 2.0).max(0.0);
     Geometry {
         size: (w, h),
@@ -277,6 +287,12 @@ pub struct PlotCanvas {
     overlay_cache: overlays::LayerCache,
     /// How the canvas was last laid out on screen.
     last_layout: Option<(Pixels, Geometry)>,
+    /// The point and curve items (`set_series`), for the auto range.
+    series: Vec<Series>,
+    colorbar_visible: bool,
+    image_visible: bool,
+    /// `enableAutoRange`: the view follows the visible items.
+    auto_range: bool,
     /// The widget id for the mouse (several canvases can share a window).
     id: Id,
 }
@@ -326,6 +342,10 @@ impl PlotCanvas {
             capture: Default::default(),
             overlay_cache: Default::default(),
             last_layout: None,
+            series: Vec::new(),
+            colorbar_visible: true,
+            image_visible: true,
+            auto_range: false,
             id: Id::new("plot_canvas"),
         };
         canvas.apply_labels();
@@ -438,6 +458,8 @@ impl PlotCanvas {
         let x = set_range_axis(view.xlim, 0.0, self.range[1] - self.range[0]);
         let y = set_range_axis((lo, hi), 0.0, self.range[3] - self.range[2]);
         self.range = [x.0, x.1, y.0, y.1];
+        // `setRange(disableAutoRange=True)`.
+        self.auto_range = false;
         self.sync_axis_ranges();
     }
 
@@ -446,6 +468,8 @@ impl PlotCanvas {
         if self.interaction_start.is_none() {
             self.interaction_start = self.view();
         }
+        // The mouse takes the view over from the auto range.
+        self.auto_range = false;
         self.range = range;
         self.sync_axis_ranges();
         self.last_range_change = Some(Instant::now());
@@ -636,8 +660,8 @@ impl PlotCanvas {
             if !axis.label_visible() {
                 return (8.0, 24.0);
             }
-            let m = metrics(&galley(ui, &axis.label_string(), &axis_font, fg), &axis_font);
-            (m.width + 2.0 * DOC_MARGIN, document_height(m.line_height))
+            let (width, line_height) = rich_extent(ui, &axis.label_string(), &axis_font, fg);
+            (width + 2.0 * DOC_MARGIN, document_height(line_height))
         };
 
         // Lay out, draw the axes' specs, and lay out again while the text
@@ -648,7 +672,13 @@ impl PlotCanvas {
         for _ in 0..4 {
             let left_w = self.left.width(label_box(&self.left).1);
             let bottom_h = self.bottom.height(label_box(&self.bottom).1);
-            geo = layout(w, h, left_w, bottom_h);
+            geo = layout(w, h, left_w, bottom_h, self.colorbar_visible);
+            if self.auto_range {
+                self.apply_auto_range(geo.view.w, geo.view.h);
+            }
+            // Grid lines run across the linked view.
+            self.left.grid_extent = geo.view.w;
+            self.bottom.grid_extent = geo.view.h;
             left_draw = self.left.generate(geo.left.w, geo.left.h, &measure_tick);
             bottom_draw = self.bottom.generate(geo.bottom.w, geo.bottom.h, &measure_tick);
             let stable = self.left.width(label_box(&self.left).1) == left_w
@@ -664,7 +694,7 @@ impl PlotCanvas {
         self.poll_interaction_timer(ui);
 
         // The spectrogram, clipped to the view box.
-        if self.image.is_some() {
+        if self.image.is_some() && self.image_visible {
             self.draw_image(ui, &painter, &px, &geo);
         }
         self.draw_overlays(ui, &painter, &px, &geo);
@@ -675,15 +705,17 @@ impl PlotCanvas {
         self.draw_axis_label(ui, &painter, &px, &self.bottom, geo.bottom, &axis_font, fg);
         self.draw_title(ui, &painter, &px, geo.title, fg);
 
-        self.draw_colorbar(ui, &painter, &px, &geo);
-        // The colour bar's frame: its left, top and bottom axes, lines only.
-        let bar = geo.bar;
-        let frame = |line: Line| draw_line(&painter, &px, bar.x, bar.y, line, FRAME_GREY);
-        frame(Line { x1: -1.0, y1: -1.0, x2: -1.0, y2: bar.h + 1.0, alpha: 255 });
-        frame(Line { x1: -1.0, y1: -1.0, x2: bar.w + 1.0, y2: -1.0, alpha: 255 });
-        frame(Line { x1: -1.0, y1: bar.h + 1.0, x2: bar.w + 1.0, y2: bar.h + 1.0, alpha: 255 });
-        draw_axis(ui, &painter, &px, geo.bar_axis, &bar_draw, &tick_font, fg, fg);
-        self.draw_axis_label(ui, &painter, &px, &self.bar_axis, geo.bar_axis, &axis_font, fg);
+        if self.colorbar_visible {
+            self.draw_colorbar(ui, &painter, &px, &geo);
+            // The colour bar's frame: its left, top and bottom axes, lines only.
+            let bar = geo.bar;
+            let frame = |line: Line| draw_line(&painter, &px, bar.x, bar.y, line, FRAME_GREY);
+            frame(Line { x1: -1.0, y1: -1.0, x2: -1.0, y2: bar.h + 1.0, alpha: 255 });
+            frame(Line { x1: -1.0, y1: -1.0, x2: bar.w + 1.0, y2: -1.0, alpha: 255 });
+            frame(Line { x1: -1.0, y1: bar.h + 1.0, x2: bar.w + 1.0, y2: bar.h + 1.0, alpha: 255 });
+            draw_axis(ui, &painter, &px, geo.bar_axis, &bar_draw, &tick_font, fg, fg);
+            self.draw_axis_label(ui, &painter, &px, &self.bar_axis, geo.bar_axis, &axis_font, fg);
+        }
 
         // The rectangle-zoom rubber band (`ViewBox.rbScaleBox`).
         if let Some(d) = self.drag
@@ -766,7 +798,17 @@ impl PlotCanvas {
         if !axis.label_visible() || !axis.visible {
             return;
         }
-        let g = galley(ui, &axis.label_string(), font, color);
+        let text = axis.label_string();
+        let runs = rich_runs(&text);
+        if runs.iter().any(|(_, v)| *v != 0) && !matches!(axis.orientation, Orientation::Left | Orientation::Right) {
+            let (width, line_height) = rich_extent(ui, &text, font, color);
+            let (lw, lh) = (width + 2.0 * DOC_MARGIN, document_height(line_height));
+            let (lx, ly) = axis.label_pos(r.w, r.h, lw, lh);
+            draw_rich(ui, painter, px, (r.x + lx + DOC_MARGIN, r.y + ly + DOC_MARGIN), &runs, font, color);
+            return;
+        }
+        let plain: String = runs.iter().map(|(t, _)| t.as_str()).collect();
+        let g = galley(ui, &plain, font, color);
         let m = metrics(&g, font);
         let (lw, lh) = (m.width + 2.0 * DOC_MARGIN, document_height(m.line_height));
         let (lx, ly) = axis.label_pos(r.w, r.h, lw, lh);
@@ -1003,6 +1045,76 @@ fn axis_mask(axis: Option<usize>) -> [bool; 2] {
     }
 }
 
+/// The runs of a label's HTML: text, and 0 for normal, -1 for `<sub>`, 1 for `<sup>`.
+fn rich_runs(html: &str) -> Vec<(String, i32)> {
+    let mut runs: Vec<(String, i32)> = Vec::new();
+    let mut level = 0;
+    let mut rest = html;
+    let mut push = |t: &str, level: i32| {
+        if t.is_empty() {
+            return;
+        }
+        let t = t.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&");
+        match runs.last_mut() {
+            Some((s, l)) if *l == level => s.push_str(&t),
+            _ => runs.push((t, level)),
+        }
+    };
+    while let Some(i) = rest.find('<') {
+        push(&rest[..i], level);
+        let Some(j) = rest[i..].find('>') else { break };
+        match rest[i + 1..i + j].trim().to_lowercase().as_str() {
+            "sub" => level = -1,
+            "sup" => level = 1,
+            "/sub" | "/sup" => level = 0,
+            _ => {}
+        }
+        rest = &rest[i + j + 1..];
+    }
+    push(rest, level);
+    runs
+}
+
+/// A sub- or superscript's font: `(pixelSize * 2) / 3`.
+fn script_font(font: &FontId) -> FontId {
+    FontId::new(((font.size as i32 * 2) / 3) as f32, font.family.clone())
+}
+
+/// A label's advance and line height, its scripts at two thirds of the size.
+fn rich_extent(ui: &Ui, html: &str, font: &FontId, color: Color32) -> (f64, f64) {
+    let main = metrics(&galley(ui, "x", font, color), font).line_height;
+    let width = rich_runs(html)
+        .iter()
+        .map(|(t, v)| {
+            let f = if *v == 0 { font.clone() } else { script_font(font) };
+            metrics(&galley(ui, t, &f, color), &f).width
+        })
+        .sum();
+    (width, main)
+}
+
+/// Draws the runs from the text box's top-left `at` (canvas coordinates):
+/// a subscript's baseline lowered by a sixth of its font's height, a
+/// superscript's raised by half (`QTextLine::draw`).
+fn draw_rich(ui: &Ui, painter: &egui::Painter, px: &Pixels, at: (f64, f64), runs: &[(String, i32)], font: &FontId, color: Color32) {
+    let main = metrics(&galley(ui, "x", font, color), font);
+    let baseline = at.1 + main.ascent;
+    let mut x = at.0;
+    for (text, v) in runs {
+        let f = if *v == 0 { font.clone() } else { script_font(font) };
+        let g = galley(ui, text, &f, color);
+        let m = metrics(&g, &f);
+        let shift = match v {
+            -1 => m.line_height / 6.0,
+            1 => -m.line_height / 2.0,
+            _ => 0.0,
+        };
+        let width = m.width;
+        painter.galley(px.text_origin(x, baseline + shift - m.ascent, &m), g, color);
+        x += width;
+    }
+}
+
 /// `QTextDocument` height for one line of text: the line height rounded up,
 /// plus the document margin on both sides.
 fn document_height(row_height: f64) -> f64 {
@@ -1177,7 +1289,7 @@ mod tests {
     #[test]
     fn layout_matches_pyqtgraph() {
         // The single-file reference: canvas 1270×863, left axis 44.09375, bottom 44.
-        let g = layout(1270.0, 863.0, 44.09375, 44.0);
+        let g = layout(1270.0, 863.0, 44.09375, 44.0, true);
         assert_eq!((g.view.x, g.view.y, g.view.w, g.view.h), (54.09375, 40.0, 1128.90625, 769.0));
         assert_eq!((g.bar.x, g.bar.y, g.bar.w, g.bar.h), (1189.0, 41.0, 25.0, 767.0));
         assert_eq!((g.bar_axis.x, g.bar_axis.w), (1214.0, 45.0));

@@ -5,12 +5,17 @@
 //! (`Session::analysis`, `_on_analysis_session_changed`).
 
 pub mod analyzer_window;
+pub mod band_icons;
 pub mod max_window;
 pub mod rich;
+pub mod richdoc;
 pub mod ridge_dialog;
+pub mod type_ii_settings;
+pub mod type_ii_window;
 
 use analyzer_window::AnalyzerWindow;
 use max_window::{MaxWindow, RidgeSource};
+use type_ii_window::TypeIIWindow;
 
 use std::time::{Duration, Instant};
 
@@ -55,6 +60,7 @@ impl Source {
 pub struct AnalysisWindows {
     pub max: Option<MaxWindow>,
     pub analyzer: Option<AnalyzerWindow>,
+    pub type_ii: Option<TypeIIWindow>,
     sync_guard: bool,
 }
 
@@ -63,6 +69,32 @@ impl AnalysisWindows {
     pub fn close_all(&mut self) {
         self.max = None;
         self.analyzer = None;
+        self.type_ii = None;
+    }
+
+    /// The Type II graph settings' font family, while the window is open.
+    pub fn type_ii_font_family(&self) -> Option<String> {
+        self.type_ii.as_ref().and_then(TypeIIWindow::font_family)
+    }
+
+    /// `_open_or_focus_type_ii_dialog`.
+    pub fn open_or_focus_type_ii(&mut self, s: &mut Session, session: Option<AnalysisSession>, ui_family: &str, families: Vec<String>) {
+        let Some(spectrum) = s.type_ii_spectrum() else {
+            return s.show_message("Type II band-splitting requires noise-reduced data.", 4000);
+        };
+        let candidate = s.with_analysis_context(session.as_ref()).or_else(|| s.with_analysis_context(s.analysis.as_ref()));
+        let normalized = candidate.is_some();
+        let candidate = candidate.unwrap_or_else(|| s.empty_type_ii_session());
+        match &mut self.type_ii {
+            None => self.type_ii = Some(TypeIIWindow::new(spectrum, s.filename(), &candidate, normalized, ui_family, families)),
+            Some(w) => {
+                w.set_spectrum(spectrum);
+                w.restore_session(&candidate);
+            }
+        }
+        if let Some(w) = &mut self.type_ii {
+            w.focus();
+        }
     }
 
     /// `_open_or_focus_analyzer_dialog`.
@@ -164,6 +196,11 @@ impl AnalysisWindows {
         {
             w.restore_session(&session);
         }
+        if source != Source::TypeII
+            && let Some(w) = &mut self.type_ii
+        {
+            w.restore_session(&session);
+        }
         self.sync_guard = false;
         if log {
             s.log_analysis(format!("Updated analysis session ({}).", source.tag()));
@@ -188,6 +225,13 @@ impl AnalysisWindows {
             events.extend(ev.into_iter().map(|e| (Source::Analyzer, e)));
             if closed {
                 self.analyzer = None;
+            }
+        }
+        if let Some(w) = &mut self.type_ii {
+            let (ev, closed) = w.show(ctx, p);
+            events.extend(ev.into_iter().map(|e| (Source::TypeII, e)));
+            if closed {
+                self.type_ii = None;
             }
         }
         for (source, e) in events {

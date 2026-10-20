@@ -568,6 +568,7 @@ dependencies = [
  "fontdb",
  "image",
  "open",
+ "resvg",
  "rfd",
  "serde",
  "serde_json",

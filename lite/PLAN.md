@@ -230,7 +230,7 @@ colours shift. Lite reproduces it for now; fixing it in both is a decision for y
 - Type II band-splitting and its graph settings; Analysis Summary section.
 - **Exit:** parity tests pass for every analysis result; every analysis dialog matches.
 
-**Status (2026-10-20), on branch `analyzer-lite`:**
+**Status (2026-10-20), on `master`: every item done.**
 
 | Item | State |
 |---|---|
@@ -240,7 +240,7 @@ colours shift. Lite reproduces it for now; fixing it in both is a decision for y
 | Analysis figures (scatter, best fit, power-law labels in mathtext, legends) | Every axes, text extent and tick identical to matplotlib's (`figures_parity`) |
 | Settings dialogs: ridge tracking, light-curve frequency and settings, text annotation, colour, choose label | 1.2–6.0 % (small, text-heavy windows) |
 | Analysis Summary section | Done |
-| Type II band-splitting window and its graph settings dialog | **Open.** Not ported yet; it stays in this phase |
+| Type II band-splitting window and its graph settings dialog | Done. Window in 5 states (empty, points, fits, results, B versus R), light and dark: 1.0–1.4 % of pixels differ; every detail label's rich text identical to the full app's; graph settings 1.8–1.9 %. Save Plot draws both figures with `add_subplot` placement, as the Analyzer's Save Graph does; matplotlib's constrained layout, the font family and bold/italic of the saved figures come with Phase 4's figure export |
 
 Found in the full app while porting (Lite reproduces them; fixing them in
 both apps is a decision for you):
@@ -251,6 +251,19 @@ both apps is a decision for you):
 - The Analyzer's comparison table clips its header texts.
 - The Type II title keeps ".fit" from a `.fit.gz` name (`os.path.splitext`
   removes only ".gz").
+- Type II: a band with no points comes back from the shared session as one
+  NaN point (the session stores the empty array as `None`, and
+  `np.asarray(None)` is a single NaN). So a fresh window shows "Selected
+  points 1" for each band, Undo and Clear are enabled with nothing to undo,
+  and Fit Both Bands is enabled after one click on each band.
+- Type II: before any calculation the averaging interval reads "[, ]". The
+  session keeps the empty results as a record of `None`s, which the window
+  takes for results. Changing the shock-speed source then says "Shock speed
+  source changed. Recalculate plasma parameters." although nothing was
+  calculated.
+- Type II: when Fit Both Bands fits the upper band and then fails on the
+  lower one (reachable through the NaN point above), the upper fit is kept
+  but no label or plot is updated until the next point or fit.
 
 ### Phase 3: data tools
 - e-CALLISTO downloader with station lookup, focus-code grouping, previews and download queue.

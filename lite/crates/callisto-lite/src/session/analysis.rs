@@ -87,6 +87,34 @@ impl Session {
         session.is_meaningful().then_some(session)
     }
 
+    /// What `_open_or_focus_type_ii_dialog` hands the Type II window: the
+    /// noise-reduced spectrum in display units, its colormap, frequency step
+    /// and noise clipping levels. None without noise-reduced data.
+    pub fn type_ii_spectrum(&self) -> Option<crate::analysis::type_ii_window::Spectrum> {
+        let d = self.data.as_ref()?;
+        let noise = self.noise_reduced.as_ref()?;
+        Some(crate::analysis::type_ii_window::Spectrum {
+            display: self.intensity_for_display(noise),
+            freqs: d.freqs.to_vec(),
+            time: d.time.to_vec(),
+            unit: self.intensity_unit_label().to_owned(),
+            cmap: callisto_core::plot::Colormap::by_name(&self.graph.cmap),
+            frequency_step_mhz: d.frequency_step_mhz,
+            display_levels: self.threshold_display_levels(),
+        })
+    }
+
+    /// The candidate `_open_or_focus_type_ii_dialog` makes without a session.
+    pub fn empty_type_ii_session(&self) -> AnalysisSession {
+        AnalysisSession {
+            source: self.analysis_source_context(),
+            max_intensity: None,
+            analyzer: AnalyzerBlock::default(),
+            type_ii: TypeIIBlock::default(),
+            ui: UiBlock { restore_type_ii_window: true, ..UiBlock::default() },
+        }
+    }
+
     /// `_analysis_session_with_context`: a session with this data's source.
     pub fn with_analysis_context(&self, session: Option<&AnalysisSession>) -> Option<AnalysisSession> {
         let mut s = session?.clone();

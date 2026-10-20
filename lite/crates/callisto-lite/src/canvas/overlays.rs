@@ -48,6 +48,8 @@ enum Role {
     LightCurve(usize),
     LightCurveLabel(usize),
     Annotation(usize),
+    /// `set_series`: the Type II plot's own items.
+    Series(usize),
 }
 
 impl Role {
@@ -83,7 +85,7 @@ impl TextFont {
 /// (anchor (0, 1)). `y` is in MHz, also on a log axis.
 #[derive(Clone, Debug, PartialEq)]
 enum Item {
-    Curve { x: Vec<f64>, y: Vec<f64>, pen: Pen },
+    Curve { x: Vec<f64>, y: Vec<f64>, pen: Pen, antialias: bool },
     Scatter { x: Vec<f64>, y: Vec<f64>, size: f64, pen: Pen, brush: [u8; 4] },
     Text { x: f64, y: f64, text: String, color: Color32, font: TextFont },
 }
@@ -189,6 +191,23 @@ fn split(points: &[(f64, f64)]) -> (Vec<f64>, Vec<f64>) {
 }
 
 impl PlotCanvas {
+    /// The series as overlay items, z 0, in the order given; items without
+    /// a finite point are hidden (`hide()`), so not drawn.
+    pub(super) fn overlays_set_series(&mut self, series: &[super::Series]) {
+        self.overlays.remove(|r| !matches!(r, Role::Series(_)));
+        for (i, s) in series.iter().enumerate() {
+            let (xs, ys) = s.xy();
+            if !xs.iter().zip(ys).any(|(a, b)| a.is_finite() && b.is_finite()) {
+                continue;
+            }
+            let item = match s {
+                super::Series::Scatter { x, y, size, pen, brush } => Item::Scatter { x: x.clone(), y: y.clone(), size: *size, pen: *pen, brush: *brush },
+                super::Series::Curve { x, y, pen, antialias } => Item::Curve { x: x.clone(), y: y.clone(), pen: *pen, antialias: *antialias },
+            };
+            self.overlays.set(Role::Series(i), 0.0, item);
+        }
+    }
+
     // ------------------------------------------------------- capture API
 
     /// The capture in progress.
@@ -300,9 +319,9 @@ impl PlotCanvas {
         );
         let line = Pen::new([40, 255, 120, 255], 2.0);
         if with_segments {
-            self.overlays.set(Role::DriftLine, 0.0, Item::Curve { x, y, pen: line });
+            self.overlays.set(Role::DriftLine, 0.0, Item::Curve { x, y, pen: line, antialias: false });
         } else if self.overlays.has(Role::DriftLine) {
-            self.overlays.set(Role::DriftLine, 0.0, Item::Curve { x: Vec::new(), y: Vec::new(), pen: line });
+            self.overlays.set(Role::DriftLine, 0.0, Item::Curve { x: Vec::new(), y: Vec::new(), pen: line, antialias: false });
         }
     }
 
@@ -328,9 +347,9 @@ impl PlotCanvas {
         );
         let line = Pen::new([24, 180, 255, 255], 2.0);
         if pts.len() >= 2 {
-            self.overlays.set(Role::MeasureLine, 34.0, Item::Curve { x: x[..2].to_vec(), y: y[..2].to_vec(), pen: line });
+            self.overlays.set(Role::MeasureLine, 34.0, Item::Curve { x: x[..2].to_vec(), y: y[..2].to_vec(), pen: line, antialias: false });
         } else if self.overlays.has(Role::MeasureLine) {
-            self.overlays.set(Role::MeasureLine, 34.0, Item::Curve { x: Vec::new(), y: Vec::new(), pen: line });
+            self.overlays.set(Role::MeasureLine, 34.0, Item::Curve { x: Vec::new(), y: Vec::new(), pen: line, antialias: false });
         }
         let text = label.trim();
         let last = *pts.last().unwrap();
@@ -369,7 +388,7 @@ impl PlotCanvas {
                 _ => PenStyle::Solid,
             };
             let pen = Pen::new(color, c.line_width.max(0.5)).styled(style);
-            self.overlays.set(Role::LightCurve(i), 19.0, Item::Curve { x: c.time.clone(), y: c.y.clone(), pen });
+            self.overlays.set(Role::LightCurve(i), 19.0, Item::Curve { x: c.time.clone(), y: c.y.clone(), pen, antialias: false });
             let label = c.label.trim();
             if c.show_label && !label.is_empty() {
                 let [r, g, b, _] = color_or(&c.color, [0x00, 0xe5, 0xff, 255]);
@@ -408,7 +427,7 @@ impl PlotCanvas {
                         y.push(y[0]);
                     }
                     let pen = Pen::new(color, ann.line_width.max(1.0));
-                    self.overlays.set(Role::Annotation(i), 20.0, Item::Curve { x, y, pen });
+                    self.overlays.set(Role::Annotation(i), 20.0, Item::Curve { x, y, pen, antialias: false });
                 }
                 AnnotationKind::Text => {
                     let Some(p) = ann.points.first() else { continue };
@@ -431,7 +450,7 @@ impl PlotCanvas {
 
     fn update_lasso_curve(&mut self) {
         let (x, y) = split(&self.capture.lasso);
-        self.overlays.set(Role::Lasso, 0.0, Item::Curve { x, y, pen: Pen::new([0, 212, 255, 255], 2.0) });
+        self.overlays.set(Role::Lasso, 0.0, Item::Curve { x, y, pen: Pen::new([0, 212, 255, 255], 2.0), antialias: false });
     }
 
     /// `_update_annotation_capture_overlay`.
@@ -461,7 +480,7 @@ impl PlotCanvas {
             AnnotationKind::Text => vertices = cursor.into_iter().collect(),
         }
         let (lx, ly) = split(&line);
-        self.overlays.set(Role::CaptureLine, 0.0, Item::Curve { x: lx, y: ly, pen: Pen::new([0, 212, 255, 220], 2.0) });
+        self.overlays.set(Role::CaptureLine, 0.0, Item::Curve { x: lx, y: ly, pen: Pen::new([0, 212, 255, 220], 2.0), antialias: false });
         let (vx, vy) = split(&vertices);
         self.overlays.set(
             Role::CaptureVertices,
@@ -832,12 +851,16 @@ impl PlotCanvas {
 /// One line or symbol item into `raster`.
 fn draw_item(raster: &mut Raster, item: &Item, to_device: &dyn Fn(f64, f64) -> (f64, f64), dpr: f64) {
     match item {
-        Item::Curve { x, y, pen } => {
+        Item::Curve { x, y, pen, antialias } => {
             if x.is_empty() {
                 return;
             }
             let pts: Vec<(f64, f64)> = x.iter().zip(y).map(|(&a, &b)| to_device(a, b)).collect();
-            raster.curve(&pts, pen);
+            if *antialias {
+                raster.curve_antialiased(&pts, pen);
+            } else {
+                raster.curve(&pts, pen);
+            }
         }
         Item::Scatter { x, y, size, pen, brush } => {
             let pts: Vec<(f64, f64)> = x.iter().zip(y).map(|(&a, &b)| to_device(a, b)).collect();

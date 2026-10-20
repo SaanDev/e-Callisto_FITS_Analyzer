@@ -674,6 +674,7 @@ impl Session {
         };
         self.canvas.set_text_style(TextStyle {
             family: (!g.font_family.is_empty()).then(|| g.font_family.clone()),
+            extra_family: None,
             tick_px,
             axis_px,
             title_px,

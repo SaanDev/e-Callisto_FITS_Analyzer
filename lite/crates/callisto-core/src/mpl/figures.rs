@@ -33,7 +33,7 @@ pub struct QtColors {
     pub mid: Rgba,
 }
 
-fn colorbar_axes(position: [f64; 4], box_aspect: Option<(f64, (f64, f64))>, image: Image, fg: Rgba, label: Label, tick_pt: f64) -> Axes {
+pub(super) fn colorbar_axes(position: [f64; 4], box_aspect: Option<(f64, (f64, f64))>, image: Image, fg: Rgba, label: Label, tick_pt: f64) -> Axes {
     let (vmin, vmax) = (image.vmin, image.vmax);
     let mut y = AxisSpec::origin(fg);
     y.ticks_low = false;

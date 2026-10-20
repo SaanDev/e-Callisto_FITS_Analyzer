@@ -542,6 +542,10 @@ impl LiteApp {
                 let auto_clean = self.settings.auto_clean_max_outliers;
                 self.analysis.open_or_focus_max(&mut self.session, None, false, true, auto_clean);
             }
+            Command::OpenTypeIIBandSplitting => {
+                let ui_family = self.fonts.ui_family().unwrap_or("Segoe UI");
+                self.analysis.open_or_focus_type_ii(&mut self.session, None, ui_family, self.fonts.families());
+            }
             Command::ToggleAutoCleanMaxOutliers => {
                 self.settings.auto_clean_max_outliers = !self.settings.auto_clean_max_outliers
             }
@@ -882,7 +886,13 @@ impl eframe::App for LiteApp {
             palette.apply(&ctx);
             self.applied_theme = Some(key);
         }
-        let families = self.session.annotation_font_families();
+        let mut families = self.session.annotation_font_families();
+        // The Type II graph settings' font family, while the window is open.
+        if let Some(f) = self.analysis.type_ii_font_family()
+            && !families.iter().any(|x| x.eq_ignore_ascii_case(&f))
+        {
+            families.push(f);
+        }
         if self.session.graph.font_family != self.installed_graph_family || families != self.installed_extra_families {
             let family = self.session.graph.font_family.clone();
             self.fonts.install_with(&ctx, (!family.is_empty()).then_some(family.as_str()), &families);

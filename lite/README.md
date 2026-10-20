@@ -113,8 +113,9 @@ cargo test -p callisto-core --test downloads_parity --test figures_parity
 
 **Analysis.** `tools/capture_analysis.py` loads a fixture into the full app's
 main window and saves its tool states (ruler, drift rate, light curves,
-annotations, isolated burst), the Maximum Intensities and Analyzer windows and
-the analysis settings dialogs:
+annotations, isolated burst), the Maximum Intensities and Analyzer windows, the
+Type II band-splitting window (picked points, fits, results, B versus R) with
+its graph settings, and the analysis settings dialogs:
 
 ```powershell
 python lite/tools/capture_analysis.py lite/reference/windows/analysis light

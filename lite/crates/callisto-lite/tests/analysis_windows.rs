@@ -9,9 +9,13 @@
 use std::path::{Path, PathBuf};
 
 use callisto_core::analysis::ridge::RidgeSettings;
+use callisto_core::analysis::session::TypeIIPlotStyle;
+use callisto_lite::analysis::Source;
 use callisto_lite::analysis::analyzer_window::AnalyzerWindow;
 use callisto_lite::analysis::max_window::MaxWindow;
 use callisto_lite::analysis::ridge_dialog::RidgeSettingsDialog;
+use callisto_lite::analysis::type_ii_settings::TypeIISettingsDialog;
+use callisto_lite::analysis::type_ii_window::TypeIIWindow;
 use callisto_lite::app::{LiteApp, Settings};
 use callisto_lite::fonts::SystemFonts;
 use callisto_lite::gpu::GpuPreference;
@@ -197,6 +201,128 @@ fn analysis_windows_match_full_app() {
     // grey anti-aliasing weighs more there (as in `analysis_dialogs`). The
     // dark Analyzer's light text on its dark panels shows the same effect at
     // about 2.5 %, so windows get 3 % as in `tools_windows`.
+    let limit = |name: &str| if name.starts_with("dialog_") { 6.0 } else { 3.0 };
+    let failing: Vec<_> = results.iter().filter(|(n, r)| r.is_some_and(|d| d >= limit(n))).collect();
+    assert!(failing.is_empty(), "windows no longer match the full app: {failing:?}");
+}
+
+/// The Type II panel's detail labels in the reference dump: the `QLabel`s
+/// at the sections' left edge, top to bottom.
+fn reference_detail_labels(name: &str) -> Vec<String> {
+    let path = lite_dir().join(format!("reference/windows/analysis/{name}.json"));
+    let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    fn walk(v: &serde_json::Value, out: &mut Vec<String>) {
+        match v {
+            serde_json::Value::Object(m) => {
+                if m.get("class").and_then(|c| c.as_str()) == Some("QLabel") && m.get("rect").and_then(|r| r[0].as_i64()) == Some(962) {
+                    out.push(m["text"].as_str().unwrap_or_default().to_owned());
+                }
+                m.values().for_each(|c| walk(c, out));
+            }
+            serde_json::Value::Array(a) => a.iter().for_each(|c| walk(c, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(&json, &mut out);
+    out
+}
+
+/// The capture's points on the Type II lanes (`capture_analysis.py`).
+const UPPER: [(f64, f64); 4] = [(300.0, 80.0), (340.0, 70.0), (380.0, 62.0), (420.0, 56.0)];
+const LOWER: [(f64, f64); 4] = [(300.0, 60.0), (340.0, 52.0), (380.0, 46.0), (420.0, 42.0)];
+
+/// Type II band-splitting as the capture drives it: opened from the main
+/// window once the Analyzer has fitted the maxima, the points on both
+/// lanes, the fits, the results, B versus R; then its graph settings.
+#[test]
+#[ignore = "renders with wgpu; run explicitly"]
+fn type_ii_window_matches_full_app() {
+    let mut results = Vec::new();
+    for (theme, name, dark) in [(ThemeMode::Light, "light", false), (ThemeMode::Dark, "dark", true)] {
+        let p = Palette::new(dark, true);
+        let mut h = isolated(theme);
+        let app = h.state_mut();
+        app.analysis.open_or_focus_max(&mut app.session, None, false, true, true);
+        let mut mx: MaxWindow = app.analysis.max.take().expect("the window opened");
+        assert!(mx.track_ridge(), "the ridge was tracked");
+        mx.restore_per_column_maxima();
+        let session = mx.session_state();
+        app.analysis.on_session_changed(&mut app.session, session.clone(), Source::Max, false);
+        // The Analyzer's plots each share the session (`sessionChanged`).
+        let ut = app.session.data.as_ref().and_then(|d| d.ut_start_sec);
+        let mut an = AnalyzerWindow::new(&session, "INDIA-GAURI_20261007_041500_02.fit.gz");
+        an.set_ut_start_sec(ut);
+        an.plot_max();
+        an.plot_fit(None);
+        an.plot_extra_choice(0);
+        app.analysis.on_session_changed(&mut app.session, an.session_state(), Source::Analyzer, false);
+        let fonts = SystemFonts::load();
+        let ui_family = fonts.ui_family().unwrap_or("Segoe UI");
+        app.analysis.open_or_focus_type_ii(&mut app.session, None, ui_family, fonts.families());
+        let t2: TypeIIWindow = app.analysis.type_ii.take().expect("the Type II window opened");
+        let t2 = std::rc::Rc::new(std::cell::RefCell::new(t2));
+        type Step = (&'static str, Box<dyn Fn(&mut TypeIIWindow)>);
+        let steps: Vec<Step> = vec![
+            ("window_type_ii", Box::new(|_| {})),
+            (
+                "window_type_ii_points",
+                Box::new(|w| {
+                    w.set_add_points(true);
+                    for (x, y) in UPPER {
+                        w.add_point(x, y);
+                    }
+                    w.set_band(1);
+                    for (x, y) in LOWER {
+                        w.add_point(x, y);
+                    }
+                }),
+            ),
+            ("window_type_ii_fits", Box::new(|w| w.fit_both())),
+            ("window_type_ii_results", Box::new(|w| w.calculate())),
+            ("window_type_ii_bvr", Box::new(|w| w.set_bvr(true))),
+        ];
+        // One harness for every state: the window keeps its textures.
+        let (w, pp) = (t2.clone(), p.clone());
+        let app = TestApp { draw: Box::new(move |ui| drop(w.borrow_mut().frame(ui, &pp))), p: p.clone(), frames: 0 };
+        let mut harness = Harness::builder()
+            .with_size([1280.0, 760.0])
+            .with_pixels_per_point(1.5)
+            .wgpu_setup(callisto_lite::gpu::wgpu_options(GpuPreference::from_env()).wgpu_setup)
+            .build_eframe(move |_| app);
+        for (state, step) in steps {
+            step(&mut t2.borrow_mut());
+            for _ in 0..6 {
+                harness.step();
+            }
+            let shot_name = format!("{state}_{name}");
+            // The labels below the fold, which the screenshot cannot see.
+            let expected = reference_detail_labels(&shot_name);
+            assert_eq!(t2.borrow().detail_html(), expected, "{shot_name}: detail labels");
+            let img = harness.render().expect("render");
+            results.push((shot_name.clone(), compare(&shot_name, &img)));
+        }
+        // Save Plot from either view, for a look (`reference/compare`).
+        let out = lite_dir().join("reference/compare");
+        for (view, bvr) in [("bvr", true), ("spectrum", false)] {
+            t2.borrow_mut().set_bvr(bvr);
+            let fig = t2.borrow().origin_figure().expect("the figure");
+            let path = out.join(format!("lite_type_ii_save_{view}_{name}.png"));
+            callisto_lite::figure_export::save_figure_padded(&harness.ctx, &fig, &path, 100.0, 0.08).expect("saved");
+        }
+        let style = TypeIIPlotStyle::default();
+        let mut d = TypeIISettingsDialog::new(&style, &style, ui_family, fonts.families());
+        let pp = p.clone();
+        results.push((format!("dialog_type_ii_settings_{name}"), shot(&format!("dialog_type_ii_settings_{name}"), [460.0, 822.0], p.clone(), move |ui| {
+            d.frame(ui, &pp);
+        })));
+    }
+    for (n, r) in &results {
+        match r {
+            Some(d) => println!("{n}: {d:.2}% differ"),
+            None => println!("{n}: no reference"),
+        }
+    }
     let limit = |name: &str| if name.starts_with("dialog_") { 6.0 } else { 3.0 };
     let failing: Vec<_> = results.iter().filter(|(n, r)| r.is_some_and(|d| d >= limit(n))).collect();
     assert!(failing.is_empty(), "windows no longer match the full app: {failing:?}");

@@ -13,7 +13,9 @@
 //!   `[4, 2]` or `[1, 2]` pen widths) and the outline filled at pixel centres.
 //!
 //! The first two are line-by-line ports. The third uses tiny-skia's stroker and
-//! scan converter, which sample the same pixel centres. Scatter symbols are
+//! scan converter, which sample the same pixel centres. A curve item with
+//! `antialias=True` (the Type II band-splitting fits) skips the segmenting
+//! and strokes the whole path with coverage antialiasing. Scatter symbols are
 //! antialiased images (`ScatterPlotItem.renderSymbol`) placed at rounded
 //! device positions, as `drawPixmapFragments` places them.
 //!
@@ -153,6 +155,27 @@ fn source_over(d: [u8; 4], color: [u8; 4]) -> [u8; 4] {
     ]
 }
 
+/// The runs of finite points (`connect='finite'`).
+fn finite_runs(points: &[(f64, f64)]) -> Vec<&[(f64, f64)]> {
+    let finite = |p: &(f64, f64)| p.0.is_finite() && p.1.is_finite();
+    let mut runs: Vec<&[(f64, f64)]> = Vec::new();
+    let mut start = None;
+    for (i, p) in points.iter().enumerate() {
+        match (finite(p), start) {
+            (true, None) => start = Some(i),
+            (false, Some(s)) => {
+                runs.push(&points[s..i]);
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(s) = start {
+        runs.push(&points[s..]);
+    }
+    runs
+}
+
 /// A window of device pixels to draw overlays into.
 pub struct Raster {
     pixmap: Pixmap,
@@ -216,22 +239,7 @@ impl Raster {
     /// `PlotCurveItem.paint` for device points, with non-finite points
     /// breaking the line (`connect='finite'`, as `PlotDataItem` picks).
     pub fn curve(&mut self, points: &[(f64, f64)], pen: &Pen) {
-        let finite = |p: &(f64, f64)| p.0.is_finite() && p.1.is_finite();
-        let mut runs: Vec<&[(f64, f64)]> = Vec::new();
-        let mut start = None;
-        for (i, p) in points.iter().enumerate() {
-            match (finite(p), start) {
-                (true, None) => start = Some(i),
-                (false, Some(s)) => {
-                    runs.push(&points[s..i]);
-                    start = None;
-                }
-                _ => {}
-            }
-        }
-        if let Some(s) = start {
-            runs.push(&points[s..]);
-        }
+        let runs = finite_runs(points);
         let segmented = pen.width > 1.0 && pen.style == PenStyle::Solid && pen.rgba[3] == 255;
         if segmented {
             // QPainter::drawLines: each segment its own square-capped line.
@@ -244,8 +252,15 @@ impl Raster {
         } else if pen.width <= 1.0 {
             CosmeticStroker::new(self, pen).draw_path(self, &runs);
         } else {
-            self.stroke_generic(&runs, pen);
+            self.stroke_generic(&runs, pen, false);
         }
+    }
+
+    /// `PlotCurveItem(antialias=True)`: `drawPath` with the Antialiasing
+    /// render hint, the cosmetic pen's square caps and bevel joins.
+    pub fn curve_antialiased(&mut self, points: &[(f64, f64)], pen: &Pen) {
+        let runs = finite_runs(points);
+        self.stroke_generic(&runs, pen, true);
     }
 
     /// `QRasterPaintEngine::stroke` for one line of a `LinesHint` path.
@@ -397,7 +412,7 @@ impl Raster {
 
     /// `QPaintEngineEx::stroke`: the outline (square caps, bevel joins,
     /// dashes in pen widths) filled at pixel centres.
-    fn stroke_generic(&mut self, runs: &[&[(f64, f64)]], pen: &Pen) {
+    fn stroke_generic(&mut self, runs: &[&[(f64, f64)]], pen: &Pen, antialias: bool) {
         let mut pb = PathBuilder::new();
         for run in runs {
             if run.len() < 2 {
@@ -427,7 +442,7 @@ impl Raster {
         let [r, g, b, a] = pen.rgba;
         let paint = Paint {
             shader: Shader::SolidColor(tiny_skia::Color::from_rgba8(r, g, b, a)),
-            anti_alias: false,
+            anti_alias: antialias,
             ..Default::default()
         };
         let t = Transform::from_translate(-self.ox as f32, -self.oy as f32);

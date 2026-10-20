@@ -144,6 +144,32 @@ pub fn with_ui_face<R>(f: impl FnOnce(&ttf_parser::Face) -> R) -> Option<R> {
     with_mpl_face(Face::Ui, f)
 }
 
+/// `normalize_font_family` without a family list: "" for an empty name,
+/// "Default" or a hidden family (a leading dot); a trailing point size
+/// (`Arial 12`) dropped.
+pub fn normalize_font_family(value: &str) -> String {
+    let text = value.trim();
+    if text.is_empty() || text.eq_ignore_ascii_case("default") || text.starts_with('.') {
+        return String::new();
+    }
+    // `^(?P<name>.+?)\s+\d+(?:\.\d+)?$`.
+    let bytes = text.as_bytes();
+    let mut i = bytes.len();
+    while i > 0 && (bytes[i - 1].is_ascii_digit() || bytes[i - 1] == b'.') {
+        i -= 1;
+    }
+    let number = &text[i..];
+    let valid_number = !number.is_empty()
+        && !number.starts_with('.')
+        && !number.ends_with('.')
+        && number.matches('.').count() <= 1;
+    let head = text[..i].trim_end();
+    if valid_number && head.len() < text[..i].len() && !head.is_empty() {
+        return head.to_owned();
+    }
+    text.to_owned()
+}
+
 /// The file of the face matplotlib text in `face` is drawn in: the Origin
 /// face or the UI family's weight when installed, the regular UI face otherwise.
 fn mpl_face_data(face: Face) -> Option<(std::sync::Arc<Vec<u8>>, u32)> {

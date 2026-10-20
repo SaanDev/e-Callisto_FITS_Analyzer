@@ -17,6 +17,7 @@ pub mod legend;
 pub mod mathtext;
 pub mod render;
 pub mod ticker;
+pub mod type_ii_figures;
 
 use std::sync::Arc;
 

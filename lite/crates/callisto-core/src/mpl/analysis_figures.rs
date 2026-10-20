@@ -186,8 +186,13 @@ pub fn fit_figure(g: &FitGraph, text: GraphText, width: f64, height: f64) -> Fig
 /// `power_law_label`: `prefix: f = a x⁻ᵇ`, the exponent a mathtext
 /// superscript in the text's font.
 pub fn power_law_label(a: f64, b: f64, prefix: &str, variable: &str) -> String {
+    power_law_label_for(a, b, prefix, "f", variable)
+}
+
+/// `power_law_label(…, symbol=…)`: `prefix: B = a R⁻ᵇ` and the like.
+pub fn power_law_label_for(a: f64, b: f64, prefix: &str, symbol: &str, variable: &str) -> String {
     let head = if prefix.is_empty() { String::new() } else { format!("{prefix}: ") };
-    format!("{head}f = {a:.2} {variable}$\\mathregular{{^{{{:.2}}}}}$", -b)
+    format!("{head}{symbol} = {a:.2} {variable}$\\mathregular{{^{{{:.2}}}}}$", -b)
 }
 
 #[cfg(test)]
