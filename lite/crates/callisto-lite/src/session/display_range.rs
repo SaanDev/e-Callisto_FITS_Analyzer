@@ -98,7 +98,7 @@ impl Session {
     }
 
     /// `_display_range_defaults`: the current view, or the full one.
-    fn display_range_defaults(&self) -> Option<[f64; 4]> {
+    pub(super) fn display_range_defaults(&self) -> Option<[f64; 4]> {
         let full = self.full_display_view()?;
         let view = self.canvas.view().unwrap_or(full);
         let mut v = [view.xlim.0, view.xlim.1, view.ylim.0, view.ylim.1];

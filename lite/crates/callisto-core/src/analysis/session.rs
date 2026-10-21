@@ -196,6 +196,33 @@ pub struct UiBlock {
     pub auto_removed_count: usize,
 }
 
+/// `version`, `analysis_run_id` and `updated_at`. Empty until the main
+/// window normalises the session: windows' payloads carry none, so each of
+/// their changes gets a new run id, as in the full app.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SessionIdentity {
+    pub version: i64,
+    pub run_id: String,
+    pub updated_at: String,
+}
+
+impl SessionIdentity {
+    /// `normalize_session`'s defaults: version 1, `str(uuid4())`, now.
+    pub fn ensured(mut self) -> Self {
+        if self.version == 0 {
+            self.version = 1;
+        }
+        if self.run_id.is_empty() {
+            let h = super::annotations::new_id();
+            self.run_id = format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..]);
+        }
+        if self.updated_at.is_empty() {
+            self.updated_at = super::annotations::now_iso();
+        }
+        self
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct AnalysisSession {
     pub source: SessionSource,
@@ -203,6 +230,7 @@ pub struct AnalysisSession {
     pub analyzer: AnalyzerBlock,
     pub type_ii: TypeIIBlock,
     pub ui: UiBlock,
+    pub identity: SessionIdentity,
 }
 
 impl AnalysisSession {
@@ -226,6 +254,7 @@ impl AnalysisSession {
             analyzer: if existing.analyzer.has_content() { existing.analyzer.clone() } else { seed.analyzer },
             type_ii: existing.type_ii.clone(),
             ui,
+            identity: SessionIdentity::default(),
         }
     }
 

@@ -11,6 +11,7 @@ pub mod colormap_tables;
 pub mod combine;
 pub mod comparison;
 pub mod downloader;
+pub mod fits_export;
 pub mod fits_io;
 pub mod frequency_axis;
 pub mod learmonth;

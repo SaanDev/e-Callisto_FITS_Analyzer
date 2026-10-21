@@ -139,7 +139,26 @@ cargo test -p callisto-core --test comparison_parity
 ```
 
 The batch and comparison grid figures are also in `make_figure_reference.py`'s
-cases, checked by `figures_parity`.
+cases, checked by `figures_parity`, as are the main window's Export Figure
+graphs and the analysis windows' saved figures.
+
+**Projects, exports and reports.** `parity/make_project_reference.py` drives
+the full app (throwaway settings and caches) into raw, processed, analysis and
+combined states, saves each as a project, reopens it and records what it writes
+back, then exports from it: Export to FIT, the analysis log, the provenance
+report and Export Figure (PNG, PDF, EPS, and on a log frequency axis).
+`parity/make_report_reference.py` then generates each project's report and
+records the report's input and where ReportLab put everything:
+
+```powershell
+python lite/parity/make_project_reference.py
+python lite/parity/make_report_reference.py
+cargo test -p callisto-lite --test project_parity --test export_figure --test project_report
+cargo test -p callisto-core --test report_parity
+```
+
+`CALLISTO_KEEP_FIGURES=1` keeps Lite's exported figures and reports and prints
+where they are.
 
 **Speed.** The plan's speed targets, timed on a folder of e-CALLISTO files
 (INDIA-GAURI focus code 02, a full day):

@@ -249,9 +249,9 @@ impl ViewConfig {
         })
     }
 
-    /// `dump_view_config_json`: sorted keys, two-space indents.
+    /// `dump_view_config_json`: as `json.dumps(indent=2, sort_keys=True)` writes it.
     pub fn dump(&self) -> String {
-        serde_json::to_string_pretty(&self.to_json()).unwrap_or_default()
+        crate::pyjson::dumps(&crate::pyjson::from_serde(&self.to_json()))
     }
 }
 

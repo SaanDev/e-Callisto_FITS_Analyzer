@@ -16,6 +16,7 @@ pub mod figures;
 pub mod legend;
 pub mod mathtext;
 pub mod render;
+pub mod spectrum_figures;
 pub mod ticker;
 pub mod type_ii_figures;
 
@@ -54,6 +55,43 @@ pub enum Face {
     UiSemibold,
     UiBold,
     Origin,
+    /// A graph's `font.family` list ([`family_chain`]; 0 is the Origin
+    /// families alone) in a weight and slant, as `GraphText` sets them.
+    Styled { family: u16, bold: bool, italic: bool },
+}
+
+impl Face {
+    /// The Origin graphs' text in the families `family` names, bold or
+    /// italic: [`Face::Origin`] when plain.
+    pub fn graph(family: u16, bold: bool, italic: bool) -> Face {
+        if family == 0 && !bold && !italic { Face::Origin } else { Face::Styled { family, bold, italic } }
+    }
+}
+
+/// The family lists [`Face::Styled`] refers to, by id (id 0 is empty).
+static FAMILY_CHAINS: std::sync::RwLock<Vec<Vec<String>>> = std::sync::RwLock::new(Vec::new());
+
+/// The id of a family list that leads the Origin families (`GraphText.families`
+/// minus the Origin part): 0 for an empty list.
+pub fn family_chain_id(chain: &[String]) -> u16 {
+    let chain: Vec<String> = chain.iter().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect();
+    if chain.is_empty() {
+        return 0;
+    }
+    let Ok(mut all) = FAMILY_CHAINS.write() else { return 0 };
+    if let Some(i) = all.iter().position(|c| *c == chain) {
+        return i as u16 + 1;
+    }
+    all.push(chain);
+    all.len() as u16
+}
+
+/// The family list behind an id from [`family_chain_id`].
+pub fn family_chain(id: u16) -> Vec<String> {
+    if id == 0 {
+        return Vec::new();
+    }
+    FAMILY_CHAINS.read().ok().and_then(|all| all.get(id as usize - 1).cloned()).unwrap_or_default()
 }
 
 pub trait TextMeasure {
@@ -288,6 +326,58 @@ pub struct Line2D {
     pub marker: Option<Marker>,
     pub label: Option<String>,
     pub zorder: f64,
+    /// Dashes on and off, in points (`lines.dashed_pattern` scaled by the
+    /// width); `None` for a solid line.
+    pub dash: Option<(f64, f64)>,
+}
+
+/// matplotlib's `linestyle` names as the main window's overlays use them:
+/// the dash pattern for a line `width_pt` wide (`lines.scale_dashes`).
+pub fn line_dash(style: &str, width_pt: f64) -> Option<(f64, f64)> {
+    match style.trim().to_lowercase().as_str() {
+        "dashed" | "--" => Some((3.7 * width_pt, 1.6 * width_pt)),
+        "dotted" | ":" => Some((1.0 * width_pt, 1.65 * width_pt)),
+        _ => None,
+    }
+}
+
+/// `ax.axhspan(y0, y1, …, hatch=…)`: a band across the axes in data `y`,
+/// filled, then hatched with north-east lines.
+#[derive(Clone, Debug)]
+pub struct HSpan {
+    pub y0: f64,
+    pub y1: f64,
+    pub face: Rgba,
+    /// The hatch's colour (the edge colour at the patch's alpha).
+    pub hatch: Rgba,
+    /// `'/'` repeated: the hatch has `6 × count` lines to the inch.
+    pub hatch_count: usize,
+    /// `hatch.linewidth`, in points.
+    pub hatch_width_pt: f64,
+    pub zorder: f64,
+}
+
+/// A text's box (`bbox=dict(boxstyle="square,pad=…")`).
+#[derive(Clone, Debug)]
+pub struct TextBox {
+    /// The pad as a fraction of the font size.
+    pub pad: f64,
+    pub face: Rgba,
+    pub edge: Rgba,
+    pub width_pt: f64,
+}
+
+/// `ax.text(x, y, …)` in data coordinates (unclipped, as `ax.text` draws),
+/// possibly several lines, with an optional box behind it.
+#[derive(Clone, Debug)]
+pub struct DataText {
+    pub x: f64,
+    pub y: f64,
+    pub label: Label,
+    pub ha: HAlign,
+    pub va: VAlign,
+    pub zorder: f64,
+    pub bbox: Option<TextBox>,
 }
 
 #[derive(Clone)]
@@ -315,9 +405,19 @@ pub struct Axes {
     /// The axis artists' z-order (grid, ticks and labels): 1.5 for
     /// `axes.axisbelow = 'line'`.
     pub axis_zorder: f64,
+    /// `set_yscale("log")`.
+    pub y_log: bool,
+    pub spans: Vec<HSpan>,
+    pub data_texts: Vec<DataText>,
 }
 
 impl Axes {
+    /// Where `v` sits up the axes, as a fraction of its height.
+    pub fn y_frac(&self, v: f64) -> f64 {
+        let t = |v: f64| if self.y_log { v.log10() } else { v };
+        (t(v) - t(self.ylim.0)) / (t(self.ylim.1) - t(self.ylim.0))
+    }
+
     /// An empty axes at `position` with the given axis styles.
     pub fn new(position: [f64; 4], x: AxisSpec, y: AxisSpec) -> Self {
         Axes {
@@ -339,6 +439,9 @@ impl Axes {
             lines: Vec::new(),
             legend: None,
             axis_zorder: 1.5,
+            y_log: false,
+            spans: Vec::new(),
+            data_texts: Vec::new(),
         }
     }
 
@@ -396,6 +499,8 @@ pub struct Figure {
     pub facecolor: Rgba,
     pub axes: Vec<Axes>,
     pub texts: Vec<FigText>,
+    /// `layout="constrained"`: positions solved at layout time.
+    pub constrained: Option<Constrained>,
 }
 
 // ------------------------------------------------------------------ draw list
@@ -422,8 +527,9 @@ pub struct GlyphRun {
 pub enum Prim {
     Fill { rect: PxRect, color: Rgba },
     Line { a: (f64, f64), b: (f64, f64), color: Rgba, width: f64, square_caps: bool },
-    /// An image in its extent's pixel rectangle, clipped to `clip`.
-    Image { axes: usize, image: usize, dest: PxRect, clip: PxRect },
+    /// An image in its extent's pixel rectangle, clipped to `clip`; on a
+    /// log axis, `log_y` is the extent's `(bottom, top)` to resample by.
+    Image { axes: usize, image: usize, dest: PxRect, clip: PxRect, log_y: Option<(f64, f64)> },
     /// Text with its pen origin on the baseline at `pos`, rotated
     /// counter-clockwise by `rotation` degrees about that point; `bbox` is
     /// its window extent as matplotlib computes it. A math label carries
@@ -434,10 +540,15 @@ pub enum Prim {
     /// each marker stamped at a whole device pixel, its path snapped when
     /// it can be) or a path collection (exact positions).
     Markers { kind: MarkerKind, centers: Arc<Vec<(f64, f64)>>, size: f64, face: Rgba, edge: Rgba, edge_width: f64, snapped: bool, clip: Option<PxRect> },
-    /// A solid polyline: projecting caps, round joins.
-    Path { points: Arc<Vec<(f64, f64)>>, color: Rgba, width: f64, clip: Option<PxRect> },
+    /// A polyline, round joins: solid with projecting caps, or dashed
+    /// (`dash` on and off, in pixels) with butt caps.
+    Path { points: Arc<Vec<(f64, f64)>>, color: Rgba, width: f64, clip: Option<PxRect>, dash: Option<(f64, f64)> },
     /// A rectangle patch, filled and edged, snapped as Agg snaps it.
     Frame { rect: PxRect, face: Rgba, edge: Rgba, width: f64 },
+    /// An edgeless rectangle patch, snapped, filled and hatched as Agg
+    /// hatches: lines `x + y = k · spacing` in device pixels from the
+    /// canvas's top-left corner (the hatch tile repeats from there).
+    Hatch { rect: PxRect, face: Rgba, hatch: Rgba, hatch_width: f64, spacing: f64, clip: Option<PxRect> },
 }
 
 pub struct DrawList {
@@ -483,6 +594,10 @@ impl DrawList {
                 }
                 Prim::Path { points, clip, .. } => {
                     *points = pts(points);
+                    *clip = clip.as_ref().map(|c| c.shifted(dx, dy));
+                }
+                Prim::Hatch { rect, clip, .. } => {
+                    *rect = rect.shifted(dx, dy);
                     *clip = clip.as_ref().map(|c| c.shifted(dx, dy));
                 }
             }
@@ -598,6 +713,72 @@ fn place_text(
     (prim, bbox)
 }
 
+/// `text.linespacing`.
+const LINESPACING: f64 = 1.2;
+
+/// Places an unrotated text of one or more lines like `Text._get_layout`:
+/// lines `linespacing` apart (never closer than "lp" allows), each aligned
+/// within the block as `ha` aligns the block. One primitive per line; the
+/// block's window extent.
+fn place_lines(m: &dyn TextMeasure, anchor: (f64, f64), label: &Label, size_px: f64, ha: HAlign, va: VAlign) -> (Vec<Prim>, PxRect) {
+    if !label.text.contains('\n') {
+        let (p, bb) = place_text(m, anchor, label, size_px, ha, va, 0.0, false);
+        return (vec![p], bb);
+    }
+    let lp = m.measure("lp", size_px, label.face);
+    let min_dy = (lp.height - lp.descent) * LINESPACING;
+    let lines: Vec<&str> = label.text.split('\n').collect();
+    // Text space, y up from the block's top: each line's width and baseline.
+    let (mut ws, mut ys) = (Vec::new(), Vec::new());
+    let (mut thisy, mut descent, mut baseline) = (0.0f64, 0.0, 0.0);
+    for (i, line) in lines.iter().enumerate() {
+        let (e, h, d, _) = line_metrics(m, line, size_px, label.face);
+        ws.push(if line.is_empty() { 0.0 } else { e.width });
+        baseline = (h - d) - thisy;
+        if i == 0 {
+            thisy = -(h - d);
+        } else {
+            thisy -= min_dy.max((h - d) * LINESPACING);
+        }
+        ys.push(thisy);
+        thisy -= d;
+        descent = d;
+    }
+    let width = ws.iter().copied().fold(0.0, f64::max);
+    let (ymax, ymin) = (0.0, ys[ys.len() - 1] - descent);
+    let height = ymax - ymin;
+    let offx = match ha {
+        HAlign::Left => 0.0,
+        HAlign::Center => width / 2.0,
+        HAlign::Right => width,
+    };
+    let offy = match va {
+        VAlign::Center => (ymin + ymax) / 2.0,
+        VAlign::Top => ymax,
+        VAlign::Baseline => ymin + descent,
+        VAlign::CenterBaseline => ymin + height - baseline / 2.0,
+        VAlign::Bottom => ymin,
+    };
+    let left = anchor.0 - offx;
+    let top = anchor.1 + offy - ymax;
+    let mut prims = Vec::new();
+    for ((line, w), y) in lines.iter().zip(&ws).zip(&ys) {
+        if line.is_empty() {
+            continue;
+        }
+        // Multi-alignment follows `ha`.
+        let dx = match ha {
+            HAlign::Left => 0.0,
+            HAlign::Center => (width - w) / 2.0,
+            HAlign::Right => width - w,
+        };
+        let pen = (left + dx, anchor.1 + offy - y);
+        let line_label = Label { text: (*line).to_owned(), ..label.clone() };
+        prims.push(place_text(m, pen, &line_label, size_px, HAlign::Left, VAlign::Baseline, 0.0, false).0);
+    }
+    (prims, PxRect { x0: left, y0: top, x1: left + width, y1: top + height })
+}
+
 /// `Bbox.shrunk_to_aspect` + `anchored`, in figure fractions.
 fn apply_box_aspect(pos: [f64; 4], aspect: f64, anchor: (f64, f64), fig_aspect: f64) -> [f64; 4] {
     let [l, b, w, h] = pos;
@@ -681,8 +862,33 @@ struct AxisTicks {
     minor: Vec<f64>,
 }
 
-fn axis_ticks(spec: &AxisSpec, lim: (f64, f64), length_pt: f64, x_axis: bool) -> AxisTicks {
+/// The ticks shown: located, labelled, minor ones off the majors and all
+/// within the view, compared in the scale's transformed space (log10 on a
+/// log axis), as `Axis.get_minorticklocs` and `_update_ticks` compare.
+fn axis_ticks(spec: &AxisSpec, lim: (f64, f64), length_pt: f64, x_axis: bool, log: bool) -> AxisTicks {
+    let tr = |v: f64| if log { v.log10() } else { v };
     let (lo, hi) = if lim.0 <= lim.1 { lim } else { (lim.1, lim.0) };
+    if log {
+        let (tlo, thi) = (tr(lo), tr(hi));
+        let majors: Vec<f64> = match &spec.major {
+            Ticks::Fixed(v) => v.clone(),
+            _ => Vec::new(),
+        };
+        let labels: Vec<String> = match &spec.formatter {
+            Formatter::Func(f) => majors.iter().map(|&v| f(v)).collect(),
+            Formatter::Scalar => majors.iter().map(|v| ticker::minus(&format!("{v}"))).collect(),
+        };
+        let tol = (thi - tlo) * 1e-5;
+        let minor: Vec<f64> = match &spec.minor {
+            Ticks::Fixed(v) => v.iter().copied().filter(|m| m.is_finite() && *m > 0.0 && !majors.iter().any(|j| (tr(*m) - tr(*j)).abs() <= tol)).collect(),
+            _ => Vec::new(),
+        };
+        let visible = |v: f64| v > 0.0 && ticker::interval_contains_close(tlo, thi, tr(v));
+        return AxisTicks {
+            major: majors.into_iter().zip(labels).filter(|(v, _)| visible(*v)).collect(),
+            minor: minor.into_iter().filter(|v| visible(*v)).collect(),
+        };
+    }
     let majors: Vec<f64> = match &spec.major {
         Ticks::Auto => {
             let nbins = ticker::auto_bins(length_pt, spec.tick_label_pt, x_axis);
@@ -713,6 +919,11 @@ fn axis_ticks(spec: &AxisSpec, lim: (f64, f64), length_pt: f64, x_axis: bool) ->
 impl Figure {
     /// Lays the figure out in logical pixels.
     pub fn layout(&self, m: &dyn TextMeasure) -> DrawList {
+        if let Some(c) = self.constrained {
+            let mut solved = self.constrained_positions(&c, m);
+            solved.constrained = None;
+            return solved.layout(m);
+        }
         let mut prims = vec![Prim::Fill {
             rect: PxRect { x0: 0.0, y0: 0.0, x1: self.width, y1: self.height },
             color: self.facecolor,
@@ -731,7 +942,7 @@ impl Figure {
                 y1: self.height - pos[1] * self.height,
             };
             axes_rects.push(r.clone());
-            self.layout_axes(ai, ax, &r, m, &mut prims);
+            self.layout_axes(ai, ax, &r, m, &mut prims, &mut Vec::new());
         }
         for t in &self.texts {
             let anchor = (t.x * self.width, self.height - t.y * self.height);
@@ -745,9 +956,9 @@ impl Figure {
     /// Lays out one axes: its patch, then its artists in z-order as
     /// `Axes.draw` sorts them (stable, children before spines, axes,
     /// title and legend at equal z-order).
-    fn layout_axes(&self, ai: usize, ax: &Axes, r: &PxRect, m: &dyn TextMeasure, out: &mut Vec<Prim>) {
+    fn layout_axes(&self, ai: usize, ax: &Axes, r: &PxRect, m: &dyn TextMeasure, out: &mut Vec<Prim>, ext: &mut Vec<PxRect>) {
         let to_x = |v: f64| r.x0 + (v - ax.xlim.0) / (ax.xlim.1 - ax.xlim.0) * (r.x1 - r.x0);
-        let to_y = |v: f64| r.y1 - (v - ax.ylim.0) / (ax.ylim.1 - ax.ylim.0) * (r.y1 - r.y0);
+        let to_y = |v: f64| r.y1 - ax.y_frac(v) * (r.y1 - r.y0);
         if let Some(face) = ax.facecolor {
             out.push(Prim::Fill { rect: r.clone(), color: face });
         }
@@ -755,7 +966,18 @@ impl Figure {
         for (ii, im) in ax.images.iter().enumerate() {
             let [l, rt, b, t] = im.extent;
             let dest = PxRect { x0: to_x(l), x1: to_x(rt), y0: to_y(t), y1: to_y(b) };
-            groups.push((0.0, vec![Prim::Image { axes: ai, image: ii, dest, clip: r.clone() }]));
+            let log_y = ax.y_log.then_some((b, t));
+            groups.push((0.0, vec![Prim::Image { axes: ai, image: ii, dest, clip: r.clone(), log_y }]));
+        }
+        for s in &ax.spans {
+            let (ya, yb) = (to_y(s.y0), to_y(s.y1));
+            let rect = PxRect { x0: r.x0, x1: r.x1, y0: ya.min(yb), y1: ya.max(yb) };
+            // The hatch tile is `int(dpi)` pixels square with `6 × count`
+            // lines across it, `x + y` two tile widths apart over them all.
+            let lines = (6 * s.hatch_count).max(1) as f64;
+            let spacing = 2.0 * self.dpi.floor() / lines;
+            let prim = Prim::Hatch { rect, face: s.face, hatch: s.hatch, hatch_width: pt(self, s.hatch_width_pt), spacing, clip: Some(r.clone()) };
+            groups.push((s.zorder, vec![prim]));
         }
         // What a "best" legend avoids: line vertices and scatter offsets.
         let mut avoid = legend::Avoid::default();
@@ -794,7 +1016,8 @@ impl Figure {
             avoid.lines.push(points.clone());
             let mut g = Vec::new();
             if let Some(w) = l.width_pt {
-                g.push(Prim::Path { points: points.clone(), color: l.color, width: pt(self, w), clip: Some(r.clone()) });
+                let dash = l.dash.map(|(on, off)| (pt(self, on), pt(self, off)));
+                g.push(Prim::Path { points: points.clone(), color: l.color, width: pt(self, w), clip: Some(r.clone()), dash });
             }
             if let Some(mk) = &l.marker {
                 g.push(self.markers(mk, points, Some(r.clone())));
@@ -805,20 +1028,38 @@ impl Figure {
         for t in &ax.texts {
             let anchor = (r.x0 + t.x * (r.x1 - r.x0), r.y1 - t.y * (r.y1 - r.y0));
             let (p, bb) = place_text(m, anchor, &t.label, pt(self, t.label.size_pt), t.ha, t.va, 0.0, false);
+            ext.push(bb.clone());
             avoid.bboxes.push(bb);
             texts.push(p);
         }
         groups.push((3.0, texts));
+        for t in &ax.data_texts {
+            let size = pt(self, t.label.size_pt);
+            let (mut prims, bb) = place_lines(m, (to_x(t.x), to_y(t.y)), &t.label, size, t.ha, t.va);
+            if let Some(b) = &t.bbox {
+                // `FancyBboxPatch` "square": the text's box grown by the pad.
+                let pad = b.pad * size;
+                let rect = PxRect { x0: bb.x0 - pad, y0: bb.y0 - pad, x1: bb.x1 + pad, y1: bb.y1 + pad };
+                prims.insert(0, Prim::Frame { rect, face: b.face, edge: b.edge, width: pt(self, b.width_pt) });
+            }
+            ext.push(bb.clone());
+            avoid.bboxes.push(bb);
+            groups.push((t.zorder, prims));
+        }
         let mut axis = Vec::new();
         let mut spines = Vec::new();
-        let x_high = self.layout_axis(ax, r, m, &mut axis, &mut spines);
+        let x_high = self.layout_axis(ax, r, m, &mut axis, &mut spines, ext);
         groups.push((2.5, spines));
         groups.push((ax.axis_zorder, axis));
         if let Some(title) = &ax.title {
-            groups.push((3.0, vec![self.title(ax, title, r, x_high, m)]));
+            let p = self.title(ax, title, r, x_high, m);
+            ext.extend(prim_bbox(&p).map(|b| collapsed(&b, true)));
+            groups.push((3.0, vec![p]));
         }
         if let Some(leg) = &ax.legend {
-            groups.push((5.0, legend::layout(self, ax, r, leg, m, &avoid)));
+            let prims = legend::layout(self, ax, r, leg, m, &avoid);
+            ext.extend(prims.iter().filter_map(prim_bbox));
+            groups.push((5.0, prims));
         }
         groups.sort_by(|a, b| a.0.total_cmp(&b.0));
         out.extend(groups.into_iter().flat_map(|g| g.1));
@@ -858,12 +1099,12 @@ impl Figure {
 
     /// The axis artists (grid, ticks, tick and axis labels) and spines.
     /// Returns the top of what sits above the axes, for the title.
-    fn layout_axis(&self, ax: &Axes, r: &PxRect, m: &dyn TextMeasure, prims: &mut Vec<Prim>, spines: &mut Vec<Prim>) -> f64 {
+    fn layout_axis(&self, ax: &Axes, r: &PxRect, m: &dyn TextMeasure, prims: &mut Vec<Prim>, spines: &mut Vec<Prim>, ext: &mut Vec<PxRect>) -> f64 {
         let to_x = |v: f64| r.x0 + (v - ax.xlim.0) / (ax.xlim.1 - ax.xlim.0) * (r.x1 - r.x0);
-        let to_y = |v: f64| r.y1 - (v - ax.ylim.0) / (ax.ylim.1 - ax.ylim.0) * (r.y1 - r.y0);
+        let to_y = |v: f64| r.y1 - ax.y_frac(v) * (r.y1 - r.y0);
         let (wpx, hpx) = (r.x1 - r.x0, r.y1 - r.y0);
-        let xt = axis_ticks(&ax.x, ax.xlim, wpx * 72.0 / self.dpi, true);
-        let yt = axis_ticks(&ax.y, ax.ylim, hpx * 72.0 / self.dpi, false);
+        let xt = axis_ticks(&ax.x, ax.xlim, wpx * 72.0 / self.dpi, true, false);
+        let yt = axis_ticks(&ax.y, ax.ylim, hpx * 72.0 / self.dpi, false, ax.y_log);
 
         for g in &ax.grids {
             let w = pt(self, g.width_pt);
@@ -931,11 +1172,13 @@ impl Figure {
                 if ax.x.labels_low {
                     let (p, bb) = place_text(m, (to_x(*v), r.y1 + pad(&ax.x)), &label, size, HAlign::Center, VAlign::Top, 0.0, false);
                     x_low = x_low.max(bb.y1);
+                    ext.push(bb.clone());
                     prims.push(p);
                 }
                 if ax.x.labels_high {
                     let (p, bb) = place_text(m, (to_x(*v), r.y0 - pad(&ax.x)), &label, size, HAlign::Center, VAlign::Bottom, 0.0, false);
                     x_high = x_high.min(bb.y0);
+                    ext.push(bb.clone());
                     prims.push(p);
                 }
             }
@@ -948,11 +1191,13 @@ impl Figure {
                 if ax.y.labels_low {
                     let (p, bb) = place_text(m, (r.x0 - pad(&ax.y), to_y(*v)), &label, size, HAlign::Right, VAlign::CenterBaseline, 0.0, false);
                     y_low = y_low.min(bb.x0);
+                    ext.push(bb.clone());
                     prims.push(p);
                 }
                 if ax.y.labels_high {
                     let (p, bb) = place_text(m, (r.x1 + pad(&ax.y), to_y(*v)), &label, size, HAlign::Left, VAlign::CenterBaseline, 0.0, false);
                     y_high = y_high.max(bb.x1);
+                    ext.push(bb.clone());
                     prims.push(p);
                 }
             }
@@ -968,19 +1213,169 @@ impl Figure {
             if ax.x.label_side == Side::High {
                 x_top = x_top.min(bb.y0);
             }
+            ext.push(collapsed(&bb, true));
             prims.push(p);
         }
         if let Some(label) = &ax.y.label {
             let size = pt(self, label.size_pt);
             let labelpad = pt(self, ax.y.labelpad_pt);
             let cy = (r.y0 + r.y1) / 2.0;
-            let (p, _) = match ax.y.label_side {
+            let (p, ybb) = match ax.y.label_side {
                 Side::Low => place_text(m, (y_low - labelpad, cy), label, size, HAlign::Center, VAlign::Bottom, 90.0, true),
                 Side::High => place_text(m, (y_high + labelpad, cy), label, size, HAlign::Center, VAlign::Top, 90.0, true),
             };
+            ext.push(collapsed(&ybb, false));
             prims.push(p);
         }
         x_top
+    }
+}
+
+
+/// `layout="constrained"` for the figures that use it: one subplot, and
+/// optionally a colour bar beside it from `fig.colorbar(im, ax=ax,
+/// fraction=…, pad=…)` (`make_axes`, location right).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Constrained {
+    /// The subplot's axes index.
+    pub axes: usize,
+    pub colorbar: Option<ColorbarSlot>,
+}
+
+/// A colour bar's `_colorbar_info`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ColorbarSlot {
+    pub axes: usize,
+    pub fraction: f64,
+    pub pad: f64,
+    pub shrink: f64,
+    pub aspect: f64,
+}
+
+/// `figure.constrained_layout.w_pad` and `h_pad` (rcParams: 0.04167 in).
+const CL_PAD_IN: f64 = 0.04167;
+
+/// `colorbar.make_axes(parents=[ax], location="right")`: the subplot shrunk
+/// to make room, and the colour bar's axes beside it (box aspect `aspect`,
+/// anchored left), as positions `[left, bottom, width, height]`.
+pub fn make_axes_right(parent: [f64; 4], fraction: f64, pad: f64, shrink: f64) -> ([f64; 4], [f64; 4]) {
+    let [l, b, w, h] = parent;
+    // `pb.splitx(1 - fraction - pad, 1 - fraction)`.
+    let pb1 = [l, b, w * (1.0 - fraction - pad), h];
+    let cx0 = l + w * (1.0 - fraction);
+    let cbw = w * fraction;
+    // `pbcb.shrunk(1.0, shrink).anchored((0.0, 0.5), pbcb)`.
+    let ch = h * shrink;
+    let cb = [cx0, b + (h - ch) * 0.5, cbw, ch];
+    (pb1, cb)
+}
+
+impl Figure {
+    /// The axes positions `do_constrained_layout` arrives at, in two passes
+    /// (decorations change size after the first).
+    fn constrained_positions(&self, c: &Constrained, m: &dyn TextMeasure) -> Figure {
+        let mut fig = self.clone();
+        let w_pad = CL_PAD_IN * self.dpi / self.width;
+        let h_pad = CL_PAD_IN * self.dpi / self.height;
+        // Its inner box before the first solve reads unsolved variables: zero wide.
+        let mut inner_w = 0.0;
+        for _ in 0..2 {
+            let pos = fig.axes[c.axes].position;
+            let bb = fig.layout_bbox(c.axes, m);
+            let mut new = [
+                pos[0] - bb[0],
+                w_pad,
+                bb[2] - (pos[0] + pos[2]),
+                w_pad,
+                pos[1] - bb[1],
+                h_pad,
+                bb[3] - (pos[1] + pos[3]),
+                h_pad,
+            ];
+            let mut cb_lmargin = 0.0;
+            if let Some(cb) = &c.colorbar {
+                let cbpos = fig.axes[cb.axes].position;
+                let cbbb = fig.layout_bbox(cb.axes, m);
+                new[3] += (cbbb[2] - cbbb[0]) + cb.pad * inner_w;
+                if cbbb[1] < bb[1] {
+                    new[4] += bb[1] - cbbb[1];
+                }
+                if cbbb[3] > bb[3] {
+                    new[6] += cbbb[3] - bb[3];
+                }
+                cb_lmargin = cbpos[0] - cbbb[0];
+            }
+            // Margins in this pass only (`reset_margins` ends each): left,
+            // leftcb, right, rightcb, bottom, bottomcb, top, topcb.
+            let mg = new;
+            let inner = [mg[0] + mg[1], mg[4] + mg[5], 1.0 - mg[2] - mg[3], 1.0 - mg[6] - mg[7]];
+            if inner[2] <= inner[0] || inner[3] <= inner[1] {
+                // 'constrained_layout not applied because axes sizes collapsed to zero.'
+                return fig;
+            }
+            fig.axes[c.axes].position = [inner[0], inner[1], inner[2] - inner[0], inner[3] - inner[1]];
+            let pw = inner[2] - inner[0];
+            if let Some(cb) = &c.colorbar {
+                // `reposition_colorbar`: past the parent's decorations and the pad.
+                let ph = inner[3] - inner[1];
+                let ch = ph * cb.shrink;
+                let pbcb = [inner[0], inner[1] + (ph - ch) * 0.5, pw * cb.fraction, ch];
+                // `get_bbox_for_cb`: inside the colour-bar margin.
+                let parent_x1 = 1.0 - mg[3];
+                let dx = parent_x1 - pbcb[0] + cb.pad * pw + cb_lmargin;
+                let a = &mut fig.axes[cb.axes];
+                a.position = [pbcb[0] + dx, pbcb[1], pbcb[2], pbcb[3]];
+                a.box_aspect = Some((cb.aspect, (0.0, 0.5)));
+            }
+            inner_w = pw;
+        }
+        fig
+    }
+
+    /// `_get_tightbbox_for_layout_only(ax)` in figure fractions
+    /// `[x0, y0, x1, y1]` (y up): the axes, its tick labels, its axis labels
+    /// along their depth only, its title one pixel wide, its texts and legend.
+    fn layout_bbox(&self, ai: usize, m: &dyn TextMeasure) -> [f64; 4] {
+        let ax = &self.axes[ai];
+        let pos = match ax.box_aspect {
+            Some((aspect, anchor)) => apply_box_aspect(ax.position, aspect, anchor, self.height / self.width),
+            None => ax.position,
+        };
+        let r = PxRect {
+            x0: pos[0] * self.width,
+            x1: (pos[0] + pos[2]) * self.width,
+            y0: self.height - (pos[1] + pos[3]) * self.height,
+            y1: self.height - pos[1] * self.height,
+        };
+        let mut scratch = Vec::new();
+        let mut ext = vec![r.clone()];
+        self.layout_axes(ai, ax, &r, m, &mut scratch, &mut ext);
+        let x0 = ext.iter().map(|b| b.x0).fold(f64::INFINITY, f64::min);
+        let x1 = ext.iter().map(|b| b.x1).fold(f64::NEG_INFINITY, f64::max);
+        let y0 = ext.iter().map(|b| b.y0).fold(f64::INFINITY, f64::min);
+        let y1 = ext.iter().map(|b| b.y1).fold(f64::NEG_INFINITY, f64::max);
+        [x0 / self.width, 1.0 - y1 / self.height, x1 / self.width, 1.0 - y0 / self.height]
+    }
+}
+
+/// A box collapsed to one pixel across its middle, horizontally or vertically.
+fn collapsed(b: &PxRect, horizontal: bool) -> PxRect {
+    if horizontal && b.x1 > b.x0 {
+        let x0 = (b.x0 + b.x1) / 2.0 - 0.5;
+        PxRect { x0, x1: x0 + 1.0, ..b.clone() }
+    } else if !horizontal && b.y1 > b.y0 {
+        let y0 = (b.y0 + b.y1) / 2.0 - 0.5;
+        PxRect { y0, y1: y0 + 1.0, ..b.clone() }
+    } else {
+        b.clone()
+    }
+}
+
+fn prim_bbox(p: &Prim) -> Option<PxRect> {
+    match p {
+        Prim::Text { bbox, .. } => Some(bbox.clone()),
+        Prim::Frame { rect, .. } => Some(rect.clone()),
+        _ => None,
     }
 }
 
@@ -1023,15 +1418,38 @@ fn filter_weights(n_src: usize, n_out: usize, src_per_out: f64, src_offset: f64,
         .collect()
 }
 
+/// For each output pixel, the source pixels and normalised weights of a
+/// filter at source coordinate `u` (`span_image_filter_rgba` on a mesh: the
+/// kernel is not widened when downsampling).
+fn mesh_weights(n_src: usize, us: impl Iterator<Item = f64>, hann: bool) -> Vec<Vec<(usize, f32)>> {
+    us.map(|u| {
+        if !hann {
+            let j = u.floor();
+            return if j >= 0.0 && (j as usize) < n_src { vec![(j as usize, 1.0)] } else { Vec::new() };
+        }
+        let lo = ((u - 1.5).floor().max(0.0)) as usize;
+        let hi = ((u + 1.5).ceil().min(n_src as f64)) as usize;
+        let mut w: Vec<(usize, f32)> =
+            (lo..hi).map(|j| (j, hanning(j as f64 + 0.5 - u) as f32)).filter(|p| p.1 > 0.0).collect();
+        let sum: f32 = w.iter().map(|p| p.1).sum();
+        if sum > 0.0 {
+            for p in &mut w {
+                p.1 /= sum;
+            }
+        }
+        w
+    })
+    .collect()
+}
+
 /// An image's pixels for a device-pixel rectangle: `dest` is where the
 /// image's extent lands (device pixels, possibly beyond the window) and
 /// `out` the region to fill, both `[x0, y0, x1, y1]`. Returns RGBA8 rows.
 pub fn rasterize_image(im: &Image, dest: [f64; 4], out: [i64; 4]) -> (usize, usize, Vec<u8>) {
     let (ow, oh) = ((out[2] - out[0]).max(0) as usize, (out[3] - out[1]).max(0) as usize);
-    let mut px = vec![0u8; ow * oh * 4];
     let data = &im.data;
     if ow == 0 || oh == 0 || data.cols == 0 || data.rows == 0 {
-        return (ow, oh, px);
+        return (ow, oh, vec![0u8; ow * oh * 4]);
     }
     let (dw, dh) = (dest[2] - dest[0], dest[3] - dest[1]);
     // Source columns/rows per device pixel; x runs left→right with the
@@ -1048,6 +1466,15 @@ pub fn rasterize_image(im: &Image, dest: [f64; 4], out: [i64; 4]) -> (usize, usi
     };
     let cols = filter_weights(data.cols, ow, cpp, (out[0] as f64 - dest[0]) * cpp, hann);
     let rows = filter_weights(data.rows, oh, rpp, (out[1] as f64 - dest[1]) * rpp, hann);
+    (ow, oh, resample_rows(im, &cols, &rows))
+}
+
+/// The image colour-mapped and resampled with per-column and per-row
+/// filter weights: RGBA8 rows, `cols.len()` by `rows.len()`.
+fn resample_rows(im: &Image, cols: &[Vec<(usize, f32)>], rows: &[Vec<(usize, f32)>]) -> Vec<u8> {
+    let data = &im.data;
+    let ow = cols.len();
+    let mut px = vec![0u8; ow * rows.len() * 4];
     // Colour-map the data once (the RGBA interpolation stage), as
     // `Normalize` and `Colormap.__call__` do it in float32.
     let lut = im.cmap.exact;
@@ -1096,7 +1523,7 @@ pub fn rasterize_image(im: &Image, dest: [f64; 4], out: [i64; 4]) -> (usize, usi
             }
         }
     }
-    (ow, oh, px)
+    px
 }
 
 /// Where Agg puts an image (`_ImageBase._make_image` with
@@ -1130,6 +1557,76 @@ pub fn image_placement(dest: [f64; 4], clip: [f64; 4]) -> Option<([i64; 4], [f64
         (draw_y + out_h).min(round(clip[3])) as i64,
     ];
     (out[2] > out[0] && out[3] > out[1]).then_some((out, virtual_dest))
+}
+
+/// An image on a log y axis as Agg draws one through a non-affine
+/// transform, in device pixels (y down): `_make_image` sizes the output to
+/// the clipped box's whole pixels (`int`, no stretch) and pastes it at the
+/// box's rounded corner; `_get_transform_mesh` maps each output pixel's
+/// lower-left corner (display coordinates, y up) back to the data, where
+/// the filter samples. `dest` is the extent's rectangle, `clip` the axes
+/// box, `log_y` the extent's `(bottom, top)`. Returns the pixel rectangle
+/// and its RGBA8 rows.
+pub fn rasterize_image_mesh(im: &Image, dest: [f64; 4], clip: [f64; 4], log_y: (f64, f64)) -> Option<([i64; 4], usize, usize, Vec<u8>)> {
+    let (cx0, cx1) = (dest[0].max(clip[0]), dest[2].min(clip[2]));
+    let (cy0, cy1) = (dest[1].max(clip[1]), dest[3].min(clip[3]));
+    let (ow, oh) = ((cx1 - cx0).max(0.0) as usize, (cy1 - cy0).max(0.0) as usize);
+    let data = &im.data;
+    if ow == 0 || oh == 0 || data.cols == 0 || data.rows == 0 {
+        return None;
+    }
+    let (bottom, top) = log_y;
+    if !(bottom > 0.0 && top > 0.0 && bottom != top) {
+        return None;
+    }
+    // `RendererAgg.draw_image` rounds the corner (display y up).
+    let left = (cx0 + 0.5).floor();
+    let top_px = (cy1 - 0.5).ceil() - oh as f64;
+    let (dw, dh) = (dest[2] - dest[0], dest[3] - dest[1]);
+    let near = |d: f64, n: f64| d > 3.0 * n || d == n || d == 2.0 * n;
+    let hann = match im.interpolation {
+        Interpolation::Nearest => false,
+        Interpolation::Auto => !(near(dw.abs(), data.cols as f64) && near(dh.abs(), data.rows as f64)),
+    };
+    let us = (0..ow).map(|i| (cx0 + i as f64 - dest[0]) / dw * data.cols as f64);
+    let (lt, lb) = (top.log10(), bottom.log10());
+    let vs = (0..oh).map(|r| {
+        // Row `r` from the top is `oh - 1 - r` up from the box's bottom edge.
+        let ys = cy1 - (oh - 1 - r) as f64;
+        let f = (ys - dest[1]) / dh;
+        let v = 10f64.powf(lt + f * (lb - lt));
+        (v - top) / (bottom - top) * data.rows as f64
+    });
+    let (cols, rows) = (mesh_weights(data.cols, us, hann), mesh_weights(data.rows, vs, hann));
+    let px = resample_rows(im, &cols, &rows);
+    // `set_clipbox` rounds the axes box to whole pixels.
+    let round = |v: f64| (v + 0.5).floor();
+    let out = [left as i64, top_px as i64, left as i64 + ow as i64, top_px as i64 + oh as i64];
+    let c = [round(clip[0]) as i64, round(clip[1]) as i64, round(clip[2]) as i64, round(clip[3]) as i64];
+    let vis = [out[0].max(c[0]), out[1].max(c[1]), out[2].min(c[2]), out[3].min(c[3])];
+    if vis[2] <= vis[0] || vis[3] <= vis[1] {
+        return None;
+    }
+    let (vw, vh) = ((vis[2] - vis[0]) as usize, (vis[3] - vis[1]) as usize);
+    let mut cropped = vec![0u8; vw * vh * 4];
+    for y in 0..vh {
+        let sy = (vis[1] - out[1]) as usize + y;
+        let sx = (vis[0] - out[0]) as usize;
+        cropped[y * vw * 4..(y + 1) * vw * 4].copy_from_slice(&px[(sy * ow + sx) * 4..(sy * ow + sx + vw) * 4]);
+    }
+    Some((vis, vw, vh, cropped))
+}
+
+/// An image primitive's device pixels: where they go and their RGBA8 rows,
+/// through [`image_placement`] and [`rasterize_image`], or on a log axis
+/// [`rasterize_image_mesh`]. `dest` and `clip` are device rectangles.
+pub fn image_pixels(im: &Image, dest: [f64; 4], clip: [f64; 4], log_y: Option<(f64, f64)>) -> Option<([i64; 4], usize, usize, Vec<u8>)> {
+    if let Some(log) = log_y {
+        return rasterize_image_mesh(im, dest, clip, log);
+    }
+    let (out, virtual_dest) = image_placement(dest, clip)?;
+    let (w, h, px) = rasterize_image(im, virtual_dest, out);
+    Some((out, w, h, px))
 }
 
 /// A colour bar's colours, bottom (low) to top, as a 256 × 1 image.
@@ -1186,7 +1683,7 @@ mod tests {
         let (main, _, _) = subplot_with_colorbar();
         let mut ax = Axes { xlim: (0.0, 1797.0), ylim: (10.0, 110.0), ..Axes::new(main, AxisSpec::origin(BLACK), AxisSpec::origin(BLACK)) };
         ax.y.label = Some(Label::new("Frequency [MHz]", 12.0, BLACK));
-        let fig = Figure { width: 874.0, height: 480.0, dpi: 100.0, facecolor: WHITE, axes: vec![ax], texts: Vec::new() };
+        let fig = Figure { width: 874.0, height: 480.0, dpi: 100.0, facecolor: WHITE, axes: vec![ax], texts: Vec::new(), constrained: None };
         let list = fig.layout(&Fixed);
         let texts: Vec<_> = list
             .prims

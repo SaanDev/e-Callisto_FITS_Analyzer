@@ -80,7 +80,7 @@ pub enum AnnotationMode {
 #[derive(Clone, Debug, Default)]
 pub struct ToolState {
     pub measurement: Option<Measurement>,
-    measurement_capture_points: Vec<(f64, f64)>,
+    pub(super) measurement_capture_points: Vec<(f64, f64)>,
     pub ruler: RulerReadout,
     pub drift_points: Vec<(f64, f64)>,
     pub lasso_active: bool,
@@ -134,7 +134,7 @@ impl Session {
     }
 
     /// `_measurement_overlay_label`.
-    fn measurement_overlay_label(m: &Measurement) -> String {
+    pub(super) fn measurement_overlay_label(m: &Measurement) -> String {
         format!(
             "dt={} s\ndf={} MHz\n{} MHz/s",
             pyf(m.duration_s, 3),
@@ -143,7 +143,7 @@ impl Session {
         )
     }
 
-    fn measurement_points(m: &Measurement) -> [(f64, f64); 2] {
+    pub(super) fn measurement_points(m: &Measurement) -> [(f64, f64); 2] {
         [(m.point1.time_s, m.point1.frequency_mhz), (m.point2.time_s, m.point2.frequency_mhz)]
     }
 
@@ -347,7 +347,7 @@ impl Session {
     }
 
     /// `_current_light_curve_source_data`: the plotted data, before units.
-    fn current_light_curve_source(&self) -> Option<Arc<Array2>> {
+    pub(super) fn current_light_curve_source(&self) -> Option<Arc<Array2>> {
         let d = self.data.as_ref()?;
         let shape = (d.freqs.len(), d.time.len());
         [self.current_plot_source.clone(), self.noise_reduced.clone(), Some(d.raw.clone())]
@@ -381,7 +381,7 @@ impl Session {
     }
 
     /// `_build_active_light_curve_overlays`.
-    fn build_active_light_curve_overlays(&self) -> (Vec<LightCurveOverlay>, Vec<LightCurveRecord>) {
+    pub(super) fn build_active_light_curve_overlays(&self) -> (Vec<LightCurveOverlay>, Vec<LightCurveRecord>) {
         let mut overlays = Vec::new();
         let mut records = Vec::new();
         for (i, r) in self.tools.light_curves.iter().enumerate() {
@@ -394,7 +394,7 @@ impl Session {
     }
 
     /// `_store_light_curve_records`: one record unless the mode is multiple.
-    fn store_light_curve_records(&mut self, mut records: Vec<LightCurveRecord>) {
+    pub(super) fn store_light_curve_records(&mut self, mut records: Vec<LightCurveRecord>) {
         records.retain(|r| r.frequency_mhz.is_finite());
         if !self.tools.light_curve_settings.multiple && records.len() > 1 {
             records.drain(..records.len() - 1);
@@ -553,7 +553,7 @@ impl Session {
     }
 
     /// `_render_annotations` (the hardware overlay).
-    fn render_annotations(&mut self) {
+    pub(super) fn render_annotations(&mut self) {
         let visible: &[Annotation] = if self.tools.annotations_visible { &self.tools.annotations } else { &[] };
         let list = visible.to_vec();
         self.canvas.set_annotations(&list);
@@ -578,6 +578,7 @@ impl Session {
         self.tools.annotations.push(ann);
         self.render_annotations();
         self.log_operation(format!("Added annotation: {kind}"));
+        self.mark_project_dirty();
     }
 
     /// `_reset_annotation_mode`.
@@ -663,6 +664,7 @@ impl Session {
         self.render_annotations();
         self.show_message(status.to_owned(), 3000);
         self.log_operation(log);
+        self.mark_project_dirty();
         true
     }
 
@@ -719,6 +721,7 @@ impl Session {
         self.render_annotations();
         let state = if self.tools.annotations_visible { "shown" } else { "hidden" };
         self.show_message(format!("Annotations {state}."), 2500);
+        self.mark_project_dirty();
     }
 
     /// `delete_last_annotation`.
@@ -729,6 +732,7 @@ impl Session {
         }
         self.render_annotations();
         self.show_message("Deleted last annotation.", 2500);
+        self.mark_project_dirty();
     }
 
     /// `clear_annotations`.
@@ -736,6 +740,7 @@ impl Session {
         self.tools.annotations.clear();
         self.render_annotations();
         self.show_message("Cleared annotations.", 2500);
+        self.mark_project_dirty();
     }
 
     fn commit_shape(&mut self, kind: AnnotationKind, points: &[(f64, f64)]) {
@@ -863,6 +868,7 @@ impl Session {
         self.tools.annotations.clear();
         self.tools.annotations_visible = true;
         self.tools.annotation_style = AnnotationStyleDefaults::default();
+        self.project_extras.active_preset = None;
         self.tools.lasso_mask = None;
         self.tools.pending_isolation = None;
         self.render_annotations();

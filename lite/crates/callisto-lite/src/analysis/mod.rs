@@ -202,6 +202,7 @@ impl AnalysisWindows {
             w.restore_session(&session);
         }
         self.sync_guard = false;
+        s.mark_project_dirty();
         if log {
             s.log_analysis(format!("Updated analysis session ({}).", source.tag()));
         }

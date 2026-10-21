@@ -13,10 +13,13 @@ pub mod fonts;
 pub mod gpu;
 pub mod icons;
 pub mod menus;
+pub mod project;
+pub mod report_dialog;
 pub mod session;
 pub mod theme;
 pub mod tools;
 pub mod ui;
+pub mod vector_export;
 
 pub const APP_NAME: &str = "e-CALLISTO FITS Analyzer Lite";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");

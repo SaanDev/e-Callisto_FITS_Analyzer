@@ -108,6 +108,24 @@ impl Header {
         out
     }
 
+    /// astropy's `Header.fromstring(text, sep="\n")`: one card per line,
+    /// up to END.
+    pub fn from_text(text: &str) -> Self {
+        let mut cards = Vec::new();
+        for line in text.split('\n') {
+            let line: String = line.trim_end_matches('\r').chars().take(CARD).collect();
+            let key = line.get(..8).unwrap_or(&line[..]).trim_end().to_string();
+            if key == "END" {
+                break;
+            }
+            if line.trim().is_empty() {
+                continue;
+            }
+            cards.push(parse_card(&format!("{line:<80}"), key));
+        }
+        Header { cards }
+    }
+
     fn find(&self, key: &str) -> Option<&Card> {
         self.cards.iter().find(|c| c.key.eq_ignore_ascii_case(key))
     }
@@ -297,6 +315,11 @@ impl FitsFile {
             warnings.push("file appears truncated".into());
         }
         Ok(Self { bytes, hdus, warnings })
+    }
+
+    /// The data bytes of HDU `index`.
+    pub fn hdu_data(&self, index: usize) -> &[u8] {
+        self.data(&self.hdus[index])
     }
 
     fn data(&self, hdu: &Hdu) -> &[u8] {

@@ -10,6 +10,7 @@
 //! layout, not in the fonts.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::path::{Path, PathBuf};
 
 use callisto_core::mpl::analysis_figures::{BLUE, FitGraph, GraphText, analyzer_scatter_figure, fit_figure, max_intensity_figure, power_law_label};
@@ -34,7 +35,7 @@ fn parity_dir() -> PathBuf {
 /// point; mathtext's glyph metrics and kerning by character and size.
 #[derive(Default)]
 struct Recorded {
-    text: HashMap<(String, i64), (f64, f64, f64)>,
+    text: HashMap<(String, i64, String), (f64, f64, f64)>,
     glyphs: HashMap<String, GlyphMetrics>,
     kerns: HashMap<String, f64>,
     x_height: HashMap<i64, f64>,
@@ -48,9 +49,12 @@ impl Recorded {
     fn new(case: &Value) -> Self {
         let mut r = Recorded::default();
         for (k, v) in case["metrics"].as_object().unwrap() {
-            let (text, size) = k.rsplit_once('|').unwrap();
+            // `text|size|weight|style`.
+            let mut parts = k.rsplitn(4, '|');
+            let (style, weight, size, text) = (parts.next().unwrap(), parts.next().unwrap(), parts.next().unwrap(), parts.next().unwrap());
             let size: f64 = size.parse().unwrap();
-            r.text.insert((text.to_owned(), milli(size)), (v[0].as_f64().unwrap(), v[1].as_f64().unwrap(), v[2].as_f64().unwrap()));
+            let face = format!("{weight}|{style}");
+            r.text.insert((text.to_owned(), milli(size), face), (v[0].as_f64().unwrap(), v[1].as_f64().unwrap(), v[2].as_f64().unwrap()));
         }
         for ax in case["analysis"].as_array().into_iter().flatten() {
             for m in ax["legend"]["math"].as_array().into_iter().flatten() {
@@ -70,8 +74,14 @@ impl Recorded {
 }
 
 impl TextMeasure for Recorded {
-    fn measure(&self, text: &str, size_px: f64, _face: Face) -> TextExtent {
-        let key = (text.to_owned(), milli(size_px * 72.0 / 100.0));
+    fn measure(&self, text: &str, size_px: f64, face: Face) -> TextExtent {
+        let face = match face {
+            Face::Styled { bold, italic, .. } => format!("{}|{}", if bold { "bold" } else { "normal" }, if italic { "italic" } else { "normal" }),
+            Face::UiSemibold => "semibold|normal".to_owned(),
+            Face::UiBold => "bold|normal".to_owned(),
+            _ => "normal|normal".to_owned(),
+        };
+        let key = (text.to_owned(), milli(size_px * 72.0 / 100.0), face);
         let (w, h, d) = *self.text.get(&key).unwrap_or_else(|| panic!("no metrics for {key:?}"));
         TextExtent { width: w, height: h, descent: d }
     }
@@ -103,6 +113,33 @@ fn analysis_figure(case: &Value, w: f64, h: f64) -> callisto_core::mpl::Figure {
     let (x, y) = (floats(&case["x"]), floats(&case["y"]));
     let stem = "INDIA-GAURI_20261007_041500_02";
     match case["name"].as_str().unwrap() {
+        "type ii saved" => {
+            use callisto_core::mpl::type_ii_figures::{BandTrace, SpectrumImage, spectrum_figure};
+            let shape = floats(&case["shape"]);
+            let e = floats(&case["extent"]);
+            let l = floats(&case["levels"]);
+            let image = SpectrumImage {
+                data: std::sync::Arc::new(callisto_core::radio::array::Array2::filled(shape[0] as usize, shape[1] as usize, 0.0)),
+                extent: [e[0], e[1], e[2], e[3]],
+                cmap: callisto_core::plot::Colormap::by_name("viridis"),
+                levels: Some((l[0], l[1])),
+                colorbar_label: "Intensity [Digits]".into(),
+            };
+            let fits = case["fits"].as_array().unwrap();
+            let band = |key: &str, i: usize, label: &str, mc: [u8; 4], lc: [u8; 4]| {
+                let pts: Vec<(f64, f64)> = case[key].as_array().unwrap().iter().map(point).collect();
+                let (a, b) = (fits[i][0].as_f64().unwrap(), fits[i][1].as_f64().unwrap());
+                let (lo, hi) = (pts[0].0, pts[pts.len() - 1].0);
+                let xs: Vec<f64> = (0..400).map(|k| lo + (hi - lo) * k as f64 / 399.0).collect();
+                let ys = xs.iter().map(|t| a * t.powf(-b)).collect();
+                BandTrace { label: label.into(), points: pts, fit: Some((xs, ys)), marker_color: mc, line_color: lc, marker_size: 6.75, line_width: 1.5 }
+            };
+            let bands = [
+                band("upper", 0, "Upper band", [0xff, 0x8c, 0x42, 255], [0xff, 0x5a, 0x1f, 255]),
+                band("lower", 1, "Lower band", [0x38, 0xbd, 0xf8, 255], [0x0e, 0xa5, 0xe9, 255]),
+            ];
+            spectrum_figure(Some(&image), &bands, &format!("{stem}_Type_II_Band_Splitting"), GraphText::default())
+        }
         "max scatter" => max_intensity_figure(&x, &y, "Maximum Intensity for Each Time Channel", "Time (s)", None, w, h),
         "analyzer max" => {
             analyzer_scatter_figure(&x, &y, BLUE, &format!("{stem}_Maximum_Intensity"), "Time (s)", "Frequency (MHz)", false, w, h)
@@ -125,7 +162,11 @@ fn analysis_figure(case: &Value, w: f64, h: f64) -> callisto_core::mpl::Figure {
                 x_label: "Time (s)",
                 y_label: "Frequency (MHz)",
             };
-            fit_figure(&g, GraphText::default(), w, h)
+            if case["name"] == "fit graph saved" {
+                callisto_core::mpl::analysis_figures::fit_graph_figure(&g, GraphText::default())
+            } else {
+                fit_figure(&g, GraphText::default(), w, h)
+            }
         }
     }
 }
@@ -143,7 +184,10 @@ fn check_analysis(name: &str, case: &Value, fig: &callisto_core::mpl::Figure, li
     let extra = &case["analysis"][0];
     let markers: Vec<&Prim> = list.prims.iter().filter(|p| matches!(p, Prim::Markers { .. } | Prim::Path { .. })).collect();
     // Data positions: the first and last of each collection, then each line.
-    let refs: Vec<&Value> = extra["collections"].as_array().unwrap().iter().chain(extra["lines"].as_array().unwrap()).collect();
+    // Lines in drawing order: by z-order, stably.
+    let mut lines: Vec<&Value> = extra["lines"].as_array().unwrap().iter().collect();
+    lines.sort_by(|a, b| a["zorder"].as_f64().unwrap_or(2.0).total_cmp(&b["zorder"].as_f64().unwrap_or(2.0)));
+    let refs: Vec<&Value> = extra["collections"].as_array().unwrap().iter().chain(lines).collect();
     let mut data = markers.iter().filter(|p| match p {
         Prim::Markers { clip, .. } | Prim::Path { clip, .. } => clip.is_some(),
         _ => false,
@@ -218,6 +262,142 @@ fn check_analysis(name: &str, case: &Value, fig: &callisto_core::mpl::Figure, li
     }
 }
 
+/// The main window's Export Figure from the recorded graph.
+fn spectrum_case(case: &Value) -> callisto_core::mpl::Figure {
+    use callisto_core::mpl::spectrum_figures::{LightCurve, Measurement, SpectrumAnnotation, SpectrumGraph, dynamic_spectrum_figure};
+    use callisto_core::mpl::type_ii_figures::SpectrumImage;
+    let g = &case["graph"];
+    let shape = floats(&case["shape"]);
+    let e = floats(&case["extent"]);
+    let l = floats(&case["levels"]);
+    let pair = |v: &Value| (v[0].as_f64().unwrap(), v[1].as_f64().unwrap());
+    let t = &case["text"];
+    let text = GraphText {
+        tick_pt: t["tick"].as_f64().unwrap(),
+        label_pt: t["label"].as_f64().unwrap(),
+        title_pt: t["title"].as_f64().unwrap(),
+        family: 0,
+        title_bold: t["title_bold"].as_bool().unwrap(),
+        title_italic: t["title_italic"].as_bool().unwrap(),
+        axis_bold: t["axis_bold"].as_bool().unwrap(),
+        axis_italic: t["axis_italic"].as_bool().unwrap(),
+        ticks_bold: t["ticks_bold"].as_bool().unwrap(),
+        ticks_italic: t["ticks_italic"].as_bool().unwrap(),
+    };
+    let s = |v: &Value| v.as_str().unwrap_or("").to_owned();
+    let light_curves = g["light_curves"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|c| LightCurve {
+            time: floats(&c["time"]),
+            y: floats(&c["y"]),
+            color: s(&c["color"]),
+            line_width: c["line_width"].as_f64().unwrap(),
+            opacity: c["opacity"].as_f64().unwrap(),
+            line_style: s(&c["line_style"]),
+            label: c["show_label"].as_bool().unwrap().then(|| (s(&c["label"]), c["label_x"].as_f64().unwrap(), c["label_y"].as_f64().unwrap())),
+        })
+        .collect();
+    let annotations = g["annotations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|a| a["visible"].as_bool().unwrap_or(true))
+        .map(|a| {
+            let points: Vec<(f64, f64)> = a["points"].as_array().unwrap().iter().map(pair).collect();
+            match a["kind"].as_str().unwrap() {
+                "text" => SpectrumAnnotation::Text {
+                    x: points[0].0,
+                    y: points[0].1,
+                    text: s(&a["text"]),
+                    color: s(&a["color"]),
+                    font_size: a["font_size"].as_f64().unwrap(),
+                    bold: a["font_bold"].as_bool().unwrap(),
+                    italic: a["font_italic"].as_bool().unwrap(),
+                    font_family: s(&a["font_family"]),
+                },
+                kind => SpectrumAnnotation::Path { points, closed: kind == "polygon", color: s(&a["color"]), line_width: a["line_width"].as_f64().unwrap_or(1.5) },
+            }
+        })
+        .collect();
+    let view = g.get("view").filter(|v| !v.is_null()).map(|v| (pair(&v["xlim"]), pair(&v["ylim"])));
+    let graph = SpectrumGraph {
+        image: SpectrumImage {
+            data: std::sync::Arc::new(callisto_core::radio::array::Array2::filled(shape[0] as usize, shape[1] as usize, 0.0)),
+            extent: [e[0], e[1], e[2], e[3]],
+            cmap: callisto_core::plot::Colormap::by_name("viridis"),
+            levels: Some((l[0], l[1])),
+            colorbar_label: "Intensity [Digits]".into(),
+        },
+        title: s(&g["title"]),
+        x_label: s(&g["x_label"]),
+        y_label: "Frequency [MHz]".into(),
+        ut_start_sec: g["ut_start_sec"].as_f64(),
+        view,
+        log_frequency_bounds: g.get("log_frequency_bounds").filter(|v| !v.is_null()).map(pair),
+        gap_spans: g["gap_spans"].as_array().into_iter().flatten().map(pair).collect(),
+        light_curves,
+        annotations,
+        measurement: (!case["measurement"].is_null()).then(|| Measurement {
+            points: case["measurement"]["points"].as_array().unwrap().iter().map(pair).collect(),
+            label: s(&case["measurement"]["label"]),
+        }),
+        text,
+    };
+    dynamic_spectrum_figure(&graph)
+}
+
+/// The Export Figure's checks: the view, every line and the ruler's points
+/// in drawing order, the hatched gaps and the ruler label's box.
+fn check_spectrum(name: &str, case: &Value, fig: &callisto_core::mpl::Figure, list: &callisto_core::mpl::DrawList, failures: &mut Vec<String>) {
+    let near = |a: f64, b: f64| (a - b).abs() <= 1e-9 * (1.0 + b.abs());
+    let ax = &case["axes"][0];
+    let (xl, yl) = (floats(&ax["xlim"]), floats(&ax["ylim"]));
+    let ours = &fig.axes[0];
+    if !(near(ours.xlim.0, xl[0]) && near(ours.xlim.1, xl[1]) && near(ours.ylim.0, yl[0]) && near(ours.ylim.1, yl[1])) {
+        failures.push(format!("{name}: view {:?} {:?}, matplotlib {xl:?} {yl:?}", ours.xlim, ours.ylim));
+    }
+    let extra = &case["analysis"][0];
+    let mut refs: Vec<&Value> = extra["lines"].as_array().unwrap().iter().chain(extra["collections"].as_array().unwrap()).collect();
+    refs.sort_by(|a, b| a["zorder"].as_f64().unwrap_or(2.0).total_cmp(&b["zorder"].as_f64().unwrap_or(2.0)));
+    let data: Vec<Arc<Vec<(f64, f64)>>> = list
+        .prims
+        .iter()
+        .filter_map(|p| match p {
+            Prim::Markers { centers, clip: Some(_), .. } => Some(centers.clone()),
+            Prim::Path { points, clip: Some(_), .. } => Some(points.clone()),
+            _ => None,
+        })
+        .collect();
+    if data.len() != refs.len() {
+        failures.push(format!("{name}: {} data primitives, matplotlib {}", data.len(), refs.len()));
+    }
+    for (r, pts) in refs.iter().zip(&data) {
+        let want = (point(&r["first"][0]), point(&r["last"][0]));
+        let close2 = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6;
+        let got = (pts[0], pts[pts.len() - 1]);
+        if pts.len() != r["n"].as_u64().unwrap() as usize || !close2(got.0, want.0) || !close2(got.1, want.1) {
+            failures.push(format!("{name}: data {} points {got:?}, matplotlib {} {want:?}", pts.len(), r["n"]));
+        }
+    }
+    let hatches: Vec<&PxRect> = list.prims.iter().filter_map(|p| if let Prim::Hatch { rect, .. } = p { Some(rect) } else { None }).collect();
+    let patches = extra["patches"].as_array().unwrap();
+    if hatches.len() != patches.len() {
+        failures.push(format!("{name}: {} hatched spans, matplotlib {}", hatches.len(), patches.len()));
+    }
+    for (p, h) in patches.iter().zip(&hatches) {
+        if !close(rect(&p["rect"]), h, 0.01) {
+            failures.push(format!("{name}: gap span {h:?}, matplotlib {:?}", rect(&p["rect"])));
+        }
+    }
+    let frames: Vec<&PxRect> = list.prims.iter().filter_map(|p| if let Prim::Frame { rect, .. } = p { Some(rect) } else { None }).collect();
+    let boxes: Vec<[f64; 4]> = case["texts"].as_array().unwrap().iter().filter_map(|t| t.get("patch").map(rect)).collect();
+    if frames.len() != boxes.len() || frames.iter().zip(&boxes).any(|(f, b)| !close(*b, f, 0.01)) {
+        failures.push(format!("{name}: text boxes {frames:?}, matplotlib {boxes:?}"));
+    }
+}
+
 fn rect(v: &Value) -> [f64; 4] {
     let a = v.as_array().unwrap();
     [a[0].as_f64().unwrap(), a[1].as_f64().unwrap(), a[2].as_f64().unwrap(), a[3].as_f64().unwrap()]
@@ -256,6 +436,7 @@ fn figures_match_matplotlib() {
                 preview_figure(&r.data, &r.freqs, &r.time, w, h, colors(&case["colors"]))
             }
             "analysis" => analysis_figure(case, w, h),
+            "spectrum" => spectrum_case(case),
             "comparison grid" => {
                 let files: Vec<String> = case["files"].as_array().unwrap().iter().map(|f| fixture(f.as_str().unwrap()).to_string_lossy().into_owned()).collect();
                 let datasets = datasets_from_paths(&files).unwrap();
@@ -338,6 +519,9 @@ fn figures_match_matplotlib() {
             check_analysis(name, case, &fig, &list, &recorded, &mut failures);
             analysis_checked += 1;
         }
+        if case["kind"] == "spectrum" {
+            check_spectrum(name, case, &fig, &list, &mut failures);
+        }
         for (i, ax) in case["axes"].as_array().unwrap().iter().enumerate() {
             if !close(rect(&ax["rect"]), &list.axes_rects[i], 0.01) {
                 failures.push(format!("{name}: axes {i}: {:?} vs {:?}", rect(&ax["rect"]), list.axes_rects[i]));
@@ -352,18 +536,36 @@ fn figures_match_matplotlib() {
             })
             .collect();
         let refs = case["texts"].as_array().unwrap();
-        if ours.len() != refs.len() {
-            failures.push(format!("{name}: {} texts vs matplotlib's {}", ours.len(), refs.len()));
+        // A text of several lines is one primitive per line.
+        let expected: usize = refs.iter().map(|t| t["text"].as_str().unwrap().split('\n').filter(|l| !l.is_empty()).count()).sum();
+        if ours.len() != expected {
+            failures.push(format!("{name}: {} texts vs matplotlib's {expected}", ours.len()));
         }
         for t in refs {
             let (s, rot, want) = (t["text"].as_str().unwrap(), t["rotation"].as_f64().unwrap(), rect(&t["bbox"]));
-            let found = ours.iter().filter(|o| o.0 == s && (o.1 - rot).abs() < 1e-9).min_by(|a, b| {
-                let d = |r: &PxRect| (r.x0 - want[0]).abs() + (r.y0 - want[1]).abs();
-                d(a.2).total_cmp(&d(b.2))
-            });
+            let find = |line: &str, want: [f64; 4]| {
+                ours.iter().filter(|o| o.0 == line && (o.1 - rot).abs() < 1e-9).min_by(|a, b| {
+                    let d = |r: &PxRect| (r.x0 - want[0]).abs() + (r.y0 - want[1]).abs();
+                    d(a.2).total_cmp(&d(b.2))
+                })
+            };
+            let found = if s.contains('\n') {
+                // The block's extent: the union of its lines' (top and left
+                // edges from the first line and the widest, bottom from the last).
+                let lines: Vec<&str> = s.split('\n').filter(|l| !l.is_empty()).collect();
+                let parts: Option<Vec<&PxRect>> = lines.iter().map(|l| find(l, want).map(|o| o.2)).collect();
+                parts.map(|p| PxRect {
+                    x0: p.iter().map(|r| r.x0).fold(f64::INFINITY, f64::min),
+                    y0: p.iter().map(|r| r.y0).fold(f64::INFINITY, f64::min),
+                    x1: p.iter().map(|r| r.x1).fold(f64::NEG_INFINITY, f64::max),
+                    y1: p.iter().map(|r| r.y1).fold(f64::NEG_INFINITY, f64::max),
+                })
+            } else {
+                find(s, want).map(|o| o.2.clone())
+            };
             match found {
-                Some(o) if close(want, o.2, 0.01) => {}
-                Some(o) => failures.push(format!("{name}: {s:?} at {:?}, matplotlib {want:?}", o.2)),
+                Some(o) if close(want, &o, 0.01) => {}
+                Some(o) => failures.push(format!("{name}: {s:?} at {o:?}, matplotlib {want:?}")),
                 None => failures.push(format!("{name}: {s:?} missing")),
             }
         }

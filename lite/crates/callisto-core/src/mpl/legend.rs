@@ -249,7 +249,7 @@ pub(super) fn layout(fig: &Figure, ax: &Axes, r: &PxRect, leg: &Legend, m: &dyn 
         let xs = [0.0, da_w / 2.0, da_w].map(|v| ox + v * dpi_cor);
         if let Some(w) = line.width_pt {
             let points = Arc::new(xs.iter().map(|&x| (x, hy)).collect());
-            out.push(Prim::Path { points, color: line.color, width: w * dpi_cor, clip: None });
+            out.push(Prim::Path { points, color: line.color, width: w * dpi_cor, clip: None, dash: None });
         }
         if let Some(mk) = &line.marker {
             out.push(fig.markers(mk, Arc::new(vec![(xs[1], hy)]), None));

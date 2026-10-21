@@ -186,6 +186,7 @@ impl MaxWindow {
         let analyzer = self.analyzer_state.clone().unwrap_or_default();
         let type_ii = self.type_ii_state.clone().unwrap_or_default();
         AnalysisSession {
+            identity: Default::default(),
             source: SessionSource { filename: self.filename.clone(), ..self.source.clone() },
             max_intensity: Some(MaxIntensityBlock {
                 time_channels: self.time_channels.clone(),
@@ -231,6 +232,7 @@ impl MaxWindow {
                 marker: None,
                 label: None,
                 zorder: 2.0,
+                dash: None,
             });
         }
         fig

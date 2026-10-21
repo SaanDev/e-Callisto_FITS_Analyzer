@@ -282,4 +282,12 @@ capture("time_ut")
 win.axis_log_radio.setChecked(True)
 capture("axis_log")
 
+# A project the full app saved (parity/make_project_reference.py), opened
+# over the log axis: its spectrum, thresholds, colormap, Graph Properties,
+# view, light curve and annotations.
+project = REPO / "lite" / "parity" / "out" / "projects" / "processed.efaproj"
+if project.exists():
+    win.open_project_path(str(project))
+    capture("project_processed")
+
 win.close()

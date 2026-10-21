@@ -42,6 +42,14 @@ pub struct Settings {
     pub display_range_presets: Vec<DisplayRangePreset>,
     /// Analysis → Plot Light Curves → Settings (`analysis/light_curve_settings_json`).
     pub light_curve: LightCurvePrefs,
+    /// File → Recent Projects, newest first.
+    pub recent_projects: Vec<String>,
+    /// `runtime/clean_exit`: false while Lite runs, true once it closed.
+    pub clean_exit: bool,
+    /// `processing/presets_json`: the presets as `dump_presets_json` writes them.
+    pub presets_json: String,
+    /// `processing/default_preset_name`.
+    pub default_preset_name: String,
 }
 
 /// The light-curve settings with the full app's keys.
@@ -108,7 +116,47 @@ impl Default for Settings {
             frequency_axis_log: false,
             display_range_presets: Vec::new(),
             light_curve: LightCurvePrefs::default(),
+            recent_projects: Vec::new(),
+            clean_exit: true,
+            presets_json: String::new(),
+            default_preset_name: String::new(),
         }
+    }
+}
+
+/// `_sanitize_export_stem`: one space per run of blanks, `_` per run of
+/// characters Windows refuses, no edge spaces or dots.
+pub fn sanitize_export_stem(text: &str) -> String {
+    let mut out = String::new();
+    let (mut space, mut bad) = (false, false);
+    for c in text.trim().chars() {
+        if c.is_whitespace() {
+            if !space {
+                out.push(' ');
+            }
+            (space, bad) = (true, false);
+        } else if "\\/:*?\"<>|".contains(c) {
+            if !bad {
+                out.push('_');
+            }
+            (space, bad) = (false, true);
+        } else {
+            out.push(c);
+            (space, bad) = (false, false);
+        }
+    }
+    let out = out.trim_matches([' ', '.']).to_owned();
+    if out.is_empty() { "export".into() } else { out }
+}
+
+/// `_view_config_path_with_extension`.
+fn view_config_path_with_extension(path: &str) -> String {
+    let text = path.trim();
+    let lower = text.to_lowercase();
+    if text.is_empty() || lower.ends_with(".efaview.json") || lower.ends_with(".json") {
+        text.to_owned()
+    } else {
+        format!("{text}.efaview.json")
     }
 }
 
@@ -149,6 +197,24 @@ impl Settings {
         self.recent_fits.truncate(MAX_RECENT_ENTRIES);
     }
 
+    /// `add_recent_project`.
+    pub fn add_recent_project(&mut self, path: &str) {
+        if path.trim().is_empty() {
+            return;
+        }
+        let project = normalized(path);
+        let key = selection_key(std::slice::from_ref(&project));
+        self.recent_projects.retain(|e| selection_key(std::slice::from_ref(e)) != key);
+        self.recent_projects.insert(0, project);
+        self.recent_projects.truncate(MAX_RECENT_ENTRIES);
+    }
+
+    /// `remove_recent_project`.
+    pub fn remove_recent_project(&mut self, path: &str) {
+        let key = selection_key(&[path.to_owned()]);
+        self.recent_projects.retain(|e| selection_key(std::slice::from_ref(e)) != key);
+    }
+
     /// `remove_recent_fits`.
     pub fn remove_recent_fits(&mut self, paths: &[String]) {
         let unwanted = selection_key(paths);
@@ -177,11 +243,26 @@ pub enum ImportSource {
 /// What an open input dialog is asking for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputPurpose {
+    ExportFitsBitpix,
+    SavePreset,
+    ApplyPreset,
+    SetDefaultPreset,
+    DeletePreset,
     SaveRangePreset,
     ApplyRangePreset,
     DeleteRangePreset,
     EditTextLabel,
     MoveTextLabel,
+}
+
+/// What waits for the answer to "Unsaved Project".
+#[derive(Clone, Debug)]
+enum Deferred {
+    LoadFile,
+    OpenFits(Vec<String>),
+    OpenProjectDialog,
+    OpenProject(PathBuf),
+    Close,
 }
 
 pub struct LiteApp {
@@ -220,6 +301,8 @@ pub struct LiteApp {
     pub learmonth: Option<LearmonthDialog>,
     /// The "Importing FITS Files" dialog and where the import came from.
     pub importing: Option<(ImportDialog, Option<ImportSource>)>,
+    /// File → Generate Project Report, while it is being written.
+    report: Option<crate::report_dialog::ReportDialog>,
     /// The frequency-combine options dialog is finishing an import.
     import_combine: Option<ImportSource>,
     /// Lite's own download caches.
@@ -227,6 +310,17 @@ pub struct LiteApp {
     pub learmonth_cache: PathBuf,
     /// The Maximum Intensities, Analyzer and Type II windows.
     pub analysis: crate::analysis::AnalysisWindows,
+    /// The `.efaproj` behind the window.
+    pub project: crate::project::ProjectState,
+    /// What waits for the "Unsaved Project" question.
+    unsaved_prompt: Option<Deferred>,
+    /// The window may close: the question was answered.
+    allow_close: bool,
+    /// Where autosave snapshots go (`recovery_dir`).
+    pub recovery_root: PathBuf,
+    last_autosave: std::time::Instant,
+    /// The last run did not close cleanly: offer its newest snapshot.
+    recovery_prompt: Option<PathBuf>,
     /// Processing → Batch Processing → Open Batch Processor.
     pub batch: Option<crate::tools::batch::BatchDialog>,
     /// Multi-Station Comparison (also the downloader's Compare).
@@ -242,7 +336,7 @@ impl LiteApp {
         Self::with_settings(&cc.egui_ctx, settings)
     }
 
-    pub fn with_settings(ctx: &egui::Context, settings: Settings) -> Self {
+    pub fn with_settings(ctx: &egui::Context, mut settings: Settings) -> Self {
         egui_extras::install_image_loaders(ctx);
         let fonts = SystemFonts::load();
         fonts.install(ctx);
@@ -257,6 +351,18 @@ impl LiteApp {
         let cache_root = data_dir.join("callisto_cache");
         let learmonth_cache = data_dir.join("learmonth_cache");
         let online = std::env::var_os("CALLISTO_LITE_OFFLINE").is_none();
+        let recovery_root = match std::env::var("CALLISTO_LITE_RECOVERY_DIR") {
+            Ok(v) if !v.trim().is_empty() => PathBuf::from(v.trim()),
+            _ => data_dir.join("recovery"),
+        };
+        // `_prompt_recovery_if_needed`.
+        let prompt_disabled = std::env::var("E_CALLISTO_DISABLE_RECOVERY_PROMPT").is_ok_and(|v| v.trim() == "1");
+        let recovery_prompt = if settings.clean_exit || prompt_disabled {
+            None
+        } else {
+            callisto_core::project::recovery::latest_snapshot(&recovery_root)
+        };
+        settings.clean_exit = false;
         session.set_archive(Some(cache_root.clone()), online);
         let stations = if online {
             StationService::online()
@@ -290,10 +396,17 @@ impl LiteApp {
             batch: None,
             comparison: None,
             importing: None,
+            report: None,
             import_combine: None,
             cache_root,
             learmonth_cache,
             analysis: Default::default(),
+            project: crate::project::ProjectState::new(crate::project::ProjectState::default_cache_root(&data_dir)),
+            unsaved_prompt: None,
+            allow_close: false,
+            recovery_root,
+            last_autosave: std::time::Instant::now(),
+            recovery_prompt,
             commands: Vec::new(),
             applied_theme: None,
             frames: 0,
@@ -304,6 +417,8 @@ impl LiteApp {
         MenuState {
             has_data: self.session.has_data(),
             recent_files: self.settings.recent_fits.iter().map(|e| fits_entry_label(e)).collect(),
+            recent_projects: self.settings.recent_projects.iter().map(|p| callisto_core::radio::naming::basename(p).to_owned()).collect(),
+            has_project: self.project.has_content(&self.session),
             can_undo: self.session.can_undo(),
             can_redo: self.session.can_redo(),
             theme: self.settings.theme_mode,
@@ -398,12 +513,88 @@ impl LiteApp {
         s.apply_display_range(time.0, time.1, freq.0, freq.1, true);
     }
 
+    /// `save_current_preset`, `apply_saved_preset`, `set_default_preset` and
+    /// `delete_saved_preset`, once a name is given.
+    fn finish_preset(&mut self, purpose: InputPurpose, value: String) {
+        use callisto_core::presets;
+        let list = presets::parse(&self.settings.presets_json);
+        let find = |name: &str| list.iter().find(|p| p.get("name").map(|n| n.py_str()).as_deref() == Some(name)).cloned();
+        match purpose {
+            InputPurpose::SavePreset => {
+                if value.trim().is_empty() {
+                    return;
+                }
+                let Ok(preset) = presets::build(value.trim(), self.session.preset_settings_payload()) else { return };
+                let Ok((merged, replaced)) = presets::upsert(&list, &preset) else { return };
+                self.settings.presets_json = presets::dump(&merged);
+                let name = preset.get("name").map(|n| n.py_str()).unwrap_or_default();
+                self.session.set_active_preset(preset);
+                self.session.mark_project_dirty();
+                let verb = if replaced { "Updated" } else { "Saved" };
+                self.session.show_message(format!("{verb} preset '{name}'."), 3000);
+            }
+            InputPurpose::ApplyPreset => {
+                if let Some(preset) = find(&value)
+                    && let Err(e) = self.session.apply_preset_payload(&preset, true, true, true)
+                {
+                    self.notice = Some(Notice { kind: NoticeKind::Warning, title: "Preset Version Unsupported".into(), text: e });
+                }
+            }
+            InputPurpose::SetDefaultPreset => {
+                if value.is_empty() {
+                    return;
+                }
+                self.settings.default_preset_name = presets::normalize_name(&value);
+                self.session.show_message(format!("Default FITS-load preset set to '{value}'."), 3000);
+            }
+            InputPurpose::DeletePreset => {
+                let (updated, removed) = presets::delete(&list, &value);
+                if removed {
+                    self.settings.presets_json = presets::dump(&updated);
+                    if presets::name_key(&self.settings.default_preset_name) == presets::name_key(&value) {
+                        self.settings.default_preset_name.clear();
+                    }
+                    self.session.show_message(format!("Deleted preset '{value}'."), 2500);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `_default_preset_payload`: the default preset, forgotten once deleted.
+    fn sync_default_preset(&mut self) {
+        let name = self.settings.default_preset_name.trim().to_owned();
+        if name.is_empty() {
+            self.session.default_preset = None;
+            return;
+        }
+        let key = callisto_core::presets::name_key(&name);
+        let found = callisto_core::presets::parse(&self.settings.presets_json)
+            .into_iter()
+            .find(|p| callisto_core::presets::name_key(&p.get("name").map(|n| n.py_str()).unwrap_or_default()) == key);
+        if found.is_none() {
+            self.settings.default_preset_name.clear();
+        }
+        self.session.default_preset = found;
+    }
+
     /// A name or choice came back from an input dialog.
     fn finish_input(&mut self, purpose: InputPurpose, value: String) {
         if matches!(purpose, InputPurpose::EditTextLabel | InputPurpose::MoveTextLabel) {
             if let Some((index, _)) = self.session.text_annotations().into_iter().find(|(_, label)| *label == value) {
                 self.text_label_chosen(purpose, index);
             }
+            return;
+        }
+        if purpose == InputPurpose::ExportFitsBitpix {
+            self.finish_export_fits(&value);
+            return;
+        }
+        if matches!(
+            purpose,
+            InputPurpose::SavePreset | InputPurpose::ApplyPreset | InputPurpose::SetDefaultPreset | InputPurpose::DeletePreset
+        ) {
+            self.finish_preset(purpose, value);
             return;
         }
         let s = &mut self.session;
@@ -434,12 +625,10 @@ impl LiteApp {
                     s.apply_display_range_preset(&preset);
                 }
             }
-            InputPurpose::DeleteRangePreset => {
-                if crate::session::delete_preset(presets, &value) {
-                    s.show_message(format!("Deleted display range preset '{value}'."), 2500);
-                }
+            InputPurpose::DeleteRangePreset if crate::session::delete_preset(presets, &value) => {
+                s.show_message(format!("Deleted display range preset '{value}'."), 2500);
             }
-            InputPurpose::EditTextLabel | InputPurpose::MoveTextLabel => {}
+            _ => {}
         }
     }
 
@@ -512,6 +701,379 @@ impl LiteApp {
         });
     }
 
+    /// `export_figure`: the main plot as an OriginPro graph (`save_figure`
+    /// at 300 dpi, trimmed to the drawing); the screen keeps its own look.
+    fn export_figure(&mut self, ctx: &egui::Context) {
+        if !self.session.has_data() {
+            self.notice = Some(Notice { kind: NoticeKind::Warning, title: "No File Loaded".into(), text: "Load a FITS file before exporting.".into() });
+            return;
+        }
+        let Some(path) = crate::analysis::max_window::export_dialog(&sanitize_export_stem(&self.session.graph_title_for_export())) else {
+            return;
+        };
+        let shown = path.to_string_lossy().into_owned();
+        if cfg!(windows) && shown.to_lowercase().starts_with("c:\\program files") {
+            self.notice = Some(Notice {
+                kind: NoticeKind::Warning,
+                title: "Permission Denied".into(),
+                text: "Windows does not allow saving files inside Program Files.
+Please choose another folder such as Documents or Desktop.".into(),
+            });
+            return;
+        }
+        let result = match self.session.origin_export_graph() {
+            None => Err("There is no dynamic spectrum to export.".to_owned()),
+            Some(graph) => {
+                let fig = callisto_core::mpl::spectrum_figures::dynamic_spectrum_figure(&graph);
+                crate::figure_export::save_figure_padded(ctx, &fig, &path, 300.0, 0.08).map_err(|e| e.to_string())
+            }
+        };
+        self.notice = Some(match result {
+            Ok(()) => Notice { kind: NoticeKind::Information, title: "Export Complete".into(), text: format!("Figure saved:
+{shown}") },
+            Err(e) => Notice { kind: NoticeKind::Critical, title: "Export Failed".into(), text: format!("An error occurred:
+{e}") },
+        });
+    }
+
+    /// `generate_project_report`: the report's data gathered here, then
+    /// written by a worker behind the progress dialog.
+    fn generate_project_report(&mut self, ctx: &egui::Context) {
+        let info = |text: &str| Some(Notice { kind: NoticeKind::Information, title: "Generate Project Report".into(), text: text.into() });
+        if !self.session.has_data() {
+            self.notice = info("Load a FITS file first.");
+            return;
+        }
+        if self.report.is_some() {
+            self.notice = info("A project report is already being generated.");
+            return;
+        }
+        let project = self.project.path.clone();
+        let default = self.session.project_report_default_path(project.as_deref());
+        let mut dialog = rfd::FileDialog::new().set_title("Generate Project Report").add_filter("PDF (*.pdf)", &["pdf"]);
+        if let Some(name) = default.file_name() {
+            dialog = dialog.set_file_name(name.to_string_lossy());
+        }
+        if let Some(dir) = default.parent().filter(|d| !d.as_os_str().is_empty()) {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(mut path) = dialog.save_file() else { return };
+        // `_pick_project_report_path`: a PDF, whatever the extension typed.
+        if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")) {
+            path.set_extension("pdf");
+        }
+        if cfg!(windows) && path.to_string_lossy().to_lowercase().starts_with("c:\\program files") {
+            self.notice = Some(Notice {
+                kind: NoticeKind::Warning,
+                title: "Permission Denied".into(),
+                text: "Windows does not allow saving files inside Program Files.\nPlease choose another folder such as Documents or Desktop.".into(),
+            });
+            return;
+        }
+        let input = self.session.project_report_input(ctx, project.as_deref(), self.analysis.type_ii.as_ref());
+        self.report = Some(crate::report_dialog::ReportDialog::start(ctx, path, input));
+    }
+
+    /// `export_to_fits` once the BITPIX is chosen.
+    fn finish_export_fits(&mut self, choice: &str) {
+        let Some(data) = self.session.fits_export_source() else { return };
+        let rec = callisto_core::radio::fits_export::recommend_bitpix(&data.data);
+        let t = choice.trim();
+        let bitpix = if t.starts_with('8') {
+            8
+        } else if t.starts_with("16") {
+            16
+        } else if t.starts_with("32") {
+            32
+        } else {
+            rec
+        };
+        let name = format!("{}.fit", sanitize_export_stem(&self.session.graph_title_for_export()));
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Export to FITS")
+            .set_file_name(name)
+            .add_filter("FITS files (*.fit *.fits *.fit.gz *.fits.gz)", &["fit", "fits", "gz"])
+            .save_file()
+        else {
+            return;
+        };
+        let mut path = path.to_string_lossy().into_owned();
+        let lower = path.to_lowercase();
+        if ![".fit", ".fits", ".fit.gz", ".fits.gz"].iter().any(|s| lower.ends_with(s)) {
+            path.push_str(".fit");
+        }
+        if let Err(e) = self.session.export_fits(Path::new(&path), bitpix) {
+            self.notice = Some(Notice { kind: NoticeKind::Critical, title: "Export Failed".into(), text: format!("Could not write FITS file:\n{e}") });
+        }
+    }
+
+    /// `export_analysis_log`.
+    fn export_analysis_log(&mut self) {
+        if !self.session.has_data() {
+            self.notice = Some(Notice { kind: NoticeKind::Information, title: "Export Analysis Log".into(), text: "Load a FITS file first.".into() });
+            return;
+        }
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Export Analysis Log")
+            .set_file_name(sanitize_export_stem(&self.session.graph_title_for_export()))
+            .add_filter("CSV (*.csv)", &["csv"])
+            .add_filter("Text (*.txt)", &["txt"])
+            .add_filter("All Files (*)", &["*"]);
+        if let Some(dir) = self.project_start_dir() {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(path) = dialog.save_file() else { return };
+        let stem = path.with_extension("");
+        let project = self.project.path.clone();
+        if let Err(e) = self.session.export_analysis_log(&stem, project.as_deref()) {
+            self.notice = Some(Notice { kind: NoticeKind::Critical, title: "Export Analysis Log Failed".into(), text: e.to_string() });
+        }
+    }
+
+    /// `export_provenance_report`.
+    fn export_provenance_report(&mut self) {
+        if !self.session.has_data() {
+            self.notice = Some(Notice { kind: NoticeKind::Information, title: "Export Provenance".into(), text: "Load a FITS file first.".into() });
+            return;
+        }
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Export Provenance Report")
+            .set_file_name(format!("{}_provenance", sanitize_export_stem(&self.session.graph_title_for_export())))
+            .add_filter("Provenance JSON (*.json)", &["json"])
+            .add_filter("Markdown (*.md)", &["md"])
+            .add_filter("All Files (*)", &["*"])
+            .save_file()
+        else {
+            return;
+        };
+        if let Err(e) = self.session.export_provenance(&path.with_extension("")) {
+            self.notice = Some(Notice { kind: NoticeKind::Critical, title: "Export Provenance Failed".into(), text: e.to_string() });
+        }
+    }
+
+    /// `export_view_config`.
+    fn export_view_config(&mut self) {
+        let Some(text) = self.session.view_config_text() else {
+            self.notice = Some(Notice {
+                kind: NoticeKind::Information,
+                title: "Export View Config".into(),
+                text: "Load a FITS file before exporting a view config.".into(),
+            });
+            return;
+        };
+        let stem = sanitize_export_stem(if self.session.filename().is_empty() { "view_config" } else { self.session.filename() });
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Export View Config")
+            .set_file_name(view_config_path_with_extension(&stem))
+            .add_filter("e-CALLISTO View Config (*.efaview.json)", &["json"])
+            .add_filter("JSON Files (*.json)", &["json"])
+            .save_file()
+        else {
+            return;
+        };
+        let path = view_config_path_with_extension(&path.to_string_lossy());
+        if let Err(e) = std::fs::write(&path, text) {
+            self.notice = Some(Notice {
+                kind: NoticeKind::Critical,
+                title: "Export View Config Failed".into(),
+                text: format!("Could not write view config:\n{e}"),
+            });
+            return;
+        }
+        self.notice = Some(Notice { kind: NoticeKind::Information, title: "Export View Config".into(), text: format!("View config saved:\n{path}") });
+    }
+
+    /// `import_view_config`.
+    fn import_view_config(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Import View Config")
+            .add_filter("e-CALLISTO View Config (*.efaview.json)", &["json"])
+            .add_filter("JSON Files (*.json)", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+        let cfg = std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| callisto_core::view_config::ViewConfig::parse(&t));
+        match cfg {
+            Err(e) => {
+                self.notice = Some(Notice {
+                    kind: NoticeKind::Warning,
+                    title: "Import View Config Failed".into(),
+                    text: format!("Could not read view config:\n{e}"),
+                })
+            }
+            Ok(cfg) => {
+                if self.session.apply_view_config(&cfg) {
+                    self.notice = Some(Notice { kind: NoticeKind::Information, title: "Import View Config".into(), text: "View config applied.".into() });
+                }
+            }
+        }
+    }
+
+    /// `_maybe_prompt_save_dirty`: `then` now, or once the question is answered.
+    fn after_unsaved_question(&mut self, then: Deferred) {
+        let skip = std::env::var("E_CALLISTO_DISABLE_SAVE_PROMPT").is_ok_and(|v| v.trim() == "1");
+        if skip || !self.project.is_dirty(&self.session) {
+            self.run_deferred_now(then);
+        } else {
+            self.unsaved_prompt = Some(then);
+        }
+    }
+
+    fn run_deferred(&mut self, ctx: &egui::Context, then: Deferred) {
+        if matches!(then, Deferred::Close) {
+            self.allow_close = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else {
+            self.run_deferred_now(then);
+        }
+    }
+
+    fn run_deferred_now(&mut self, then: Deferred) {
+        let before = self.session.opened.len();
+        match then {
+            Deferred::LoadFile => self.load_file(),
+            Deferred::OpenFits(paths) => {
+                self.open_paths(&paths);
+            }
+            Deferred::OpenProjectDialog => self.open_project_dialog(),
+            Deferred::OpenProject(path) => {
+                self.open_project_path(&path);
+            }
+            Deferred::Close => self.allow_close = true,
+        }
+        self.after_open(before);
+    }
+
+    /// Where the project dialogs start: the project's folder, else the FITS file's.
+    fn project_start_dir(&self) -> Option<PathBuf> {
+        self.project.path.as_ref().and_then(|p| p.parent().map(Path::to_path_buf)).or_else(|| {
+            self.session.data.as_ref().and_then(|d| d.source_path.as_ref()).and_then(|s| Path::new(s).parent().map(Path::to_path_buf))
+        })
+    }
+
+    /// `open_project`'s file dialog.
+    fn open_project_dialog(&mut self) {
+        let mut dialog =
+            rfd::FileDialog::new().set_title("Open Project").add_filter("e-CALLISTO Project (*.efaproj)", &["efaproj"]);
+        if let Some(dir) = self.project_start_dir() {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(path) = dialog.pick_file() {
+            self.open_project_path(&path);
+        }
+    }
+
+    /// `_load_snapshot_path`.
+    fn recover_snapshot(&mut self, path: &Path) {
+        if let Err(e) = self.project.recover(&mut self.session, path) {
+            self.notice = Some(Notice {
+                kind: NoticeKind::Warning,
+                title: "Recovery Failed".into(),
+                text: format!("Could not open recovery snapshot:\n{e}"),
+            });
+        }
+    }
+
+    /// `open_project_path`.
+    pub fn open_project_path(&mut self, path: &Path) -> bool {
+        match self.project.open(&mut self.session, path) {
+            Ok(_) => {
+                self.settings.add_recent_project(&path.to_string_lossy());
+                true
+            }
+            Err(e) => {
+                self.notice = Some(Notice {
+                    kind: NoticeKind::Critical,
+                    title: "Open Project Failed".into(),
+                    text: crate::project::open_error_text(&e),
+                });
+                false
+            }
+        }
+    }
+
+    /// `open_recent_project`.
+    fn open_recent_project(&mut self, index: usize) {
+        let Some(path) = self.settings.recent_projects.get(index).cloned() else { return };
+        if !Path::new(&path).is_file() {
+            self.settings.remove_recent_project(&path);
+            self.notice = Some(Notice {
+                kind: NoticeKind::Warning,
+                title: "Open Recent".into(),
+                text: format!("This project is no longer available and was removed from the recent list:\n{path}"),
+            });
+            return;
+        }
+        self.after_unsaved_question(Deferred::OpenProject(PathBuf::from(path)));
+    }
+
+    fn nothing_to_save(&mut self) -> bool {
+        if self.project.has_content(&self.session) {
+            return false;
+        }
+        self.notice = Some(Notice {
+            kind: NoticeKind::Information,
+            title: "Save Project".into(),
+            text: "There is nothing to save yet: load a FITS file, solar images or a GCS event first.".into(),
+        });
+        true
+    }
+
+    /// `save_project`.
+    pub fn save_project(&mut self) -> bool {
+        if self.nothing_to_save() {
+            return false;
+        }
+        match self.project.path.clone() {
+            Some(path) => self.write_project_to(&path, self.project.storage),
+            None => self.save_project_as(),
+        }
+    }
+
+    /// `save_project_as`. The parts Lite only keeps stay in the storage they
+    /// were opened with: Lite can write their images back, not relink them.
+    pub fn save_project_as(&mut self) -> bool {
+        if self.nothing_to_save() {
+            return false;
+        }
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Save Project As")
+            .set_file_name(crate::project::ProjectState::default_filename(&self.session))
+            .add_filter("e-CALLISTO Project (*.efaproj)", &["efaproj"]);
+        if let Some(dir) = self.project_start_dir() {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(mut path) = dialog.save_file() else { return false };
+        if !path.to_string_lossy().to_lowercase().ends_with(".efaproj") {
+            path = PathBuf::from(format!("{}.efaproj", path.display()));
+        }
+        let key = |p: &Path| selection_key(&[p.to_string_lossy().into_owned()]);
+        if self.project.path.as_deref().map(key) != Some(key(&path)) {
+            // A copy gets its own identity, so the two never share an unpack folder.
+            self.project.new_identity();
+        }
+        self.write_project_to(&path, self.project.storage)
+    }
+
+    /// `_write_project_to`.
+    fn write_project_to(&mut self, path: &Path, storage: &'static str) -> bool {
+        match self.project.save(&mut self.session, path, storage) {
+            Ok(()) => {
+                self.settings.add_recent_project(&path.to_string_lossy());
+                true
+            }
+            Err(e) => {
+                self.notice = Some(Notice {
+                    kind: NoticeKind::Critical,
+                    title: "Save Project Failed".into(),
+                    text: format!("Could not save project:\n{e}"),
+                });
+                false
+            }
+        }
+    }
+
     /// `open_recent_fits`.
     fn open_recent_fits(&mut self, index: usize) {
         let Some(paths) = self.settings.recent_fits.get(index).cloned() else { return };
@@ -526,7 +1088,7 @@ impl LiteApp {
             });
             return;
         }
-        self.open_paths(&paths);
+        self.after_unsaved_question(Deferred::OpenFits(paths));
     }
 
     fn handle(&mut self, command: Command) {
@@ -550,8 +1112,98 @@ impl LiteApp {
                 self.settings.auto_clean_max_outliers = !self.settings.auto_clean_max_outliers
             }
             Command::ToggleSidebar => self.settings.sidebar_collapsed = !self.settings.sidebar_collapsed,
-            Command::Open => self.load_file(),
+            Command::Open => self.after_unsaved_question(Deferred::LoadFile),
             Command::OpenRecentFits(i) => self.open_recent_fits(i),
+            Command::OpenProject => self.after_unsaved_question(Deferred::OpenProjectDialog),
+            Command::OpenRecentProject(i) => self.open_recent_project(i),
+            Command::ClearRecentProjects => self.settings.recent_projects.clear(),
+            Command::OpenRestoredAnalysis => {
+                // `open_restored_analysis_windows`: the windows the session asks for.
+                match self.session.with_analysis_context(self.session.analysis.as_ref()) {
+                    Some(session) => {
+                        self.session.pending_analysis_restore = Some(crate::session::project::PendingAnalysisRestore {
+                            open_max: session.ui.restore_max_window,
+                            open_analyzer: session.ui.restore_analyzer_window,
+                            open_type_ii: session.ui.restore_type_ii_window,
+                            warning: String::new(),
+                        });
+                    }
+                    None => self.session.show_message("No saved analysis session is available.", 4000),
+                }
+            }
+            Command::ExportViewConfig => self.export_view_config(),
+            Command::ExportAnalysisLog => self.export_analysis_log(),
+            Command::ExportToFit => match self.session.fits_export_source() {
+                None => {
+                    self.notice = Some(Notice { kind: NoticeKind::Warning, title: "No Data".into(), text: "Load a FITS file before exporting.".into() })
+                }
+                Some(data) => {
+                    let rec = callisto_core::radio::fits_export::recommend_bitpix(&data.data);
+                    let items = vec![
+                        format!("Auto (Recommended: {rec})"),
+                        "8 (unsigned byte)".to_owned(),
+                        "16 (signed int16)".to_owned(),
+                        "32 (signed int32)".to_owned(),
+                    ];
+                    self.input = Some((
+                        dialogs::InputDialog::item("Export FITS - BITPIX", "Choose BITPIX for the exported FITS:", items),
+                        InputPurpose::ExportFitsBitpix,
+                    ));
+                }
+            },
+            Command::ExportProvenanceReport => self.export_provenance_report(),
+            Command::ImportViewConfig => self.import_view_config(),
+            Command::SavePreset => {
+                self.input = Some((dialogs::InputDialog::text("Save Preset", "Preset name:"), InputPurpose::SavePreset));
+            }
+            Command::ApplyPreset | Command::DeletePreset | Command::SetDefaultPreset => {
+                let presets = callisto_core::presets::parse(&self.settings.presets_json);
+                let (title, empty, label, purpose) = match command {
+                    Command::ApplyPreset => ("Apply Preset", "No presets have been saved yet.", "Choose preset:", InputPurpose::ApplyPreset),
+                    Command::DeletePreset => ("Delete Preset", "No presets are available.", "Choose preset:", InputPurpose::DeletePreset),
+                    _ => ("Set Default Preset", "No presets have been saved yet.", "Apply on FITS load:", InputPurpose::SetDefaultPreset),
+                };
+                if presets.is_empty() {
+                    self.notice = Some(Notice { kind: NoticeKind::Information, title: title.into(), text: empty.into() });
+                } else {
+                    let names: Vec<String> = presets.iter().map(|p| p.get("name").map(|n| n.py_str()).unwrap_or_default()).collect();
+                    let mut dialog = dialogs::InputDialog::item(title, label, names.clone());
+                    if purpose == InputPurpose::SetDefaultPreset {
+                        let key = callisto_core::presets::name_key(&self.settings.default_preset_name);
+                        dialog.choice = names.iter().position(|n| callisto_core::presets::name_key(n) == key).unwrap_or(0);
+                    }
+                    self.input = Some((dialog, purpose));
+                }
+            }
+            Command::ClearDefaultPreset => {
+                let old = std::mem::take(&mut self.settings.default_preset_name);
+                if old.trim().is_empty() {
+                    self.notice = Some(Notice {
+                        kind: NoticeKind::Information,
+                        title: "Clear Default Preset".into(),
+                        text: "No default preset is set.".into(),
+                    });
+                } else {
+                    self.session.show_message("Default FITS-load preset cleared.", 2500);
+                }
+            }
+
+            Command::RecoverLastSession => match callisto_core::project::recovery::latest_snapshot(&self.recovery_root) {
+                Some(path) => self.recover_snapshot(&path),
+                None => {
+                    self.notice = Some(Notice {
+                        kind: NoticeKind::Information,
+                        title: "Recover Last Session".into(),
+                        text: "No recovery snapshot was found.".into(),
+                    })
+                }
+            },
+            Command::SaveProject => {
+                self.save_project();
+            }
+            Command::SaveProjectAs => {
+                self.save_project_as();
+            }
             Command::ClearRecentFiles => self.settings.recent_fits.clear(),
             Command::Undo => s.undo(),
             Command::Redo => s.redo(),
@@ -839,6 +1491,33 @@ impl LiteApp {
             let from = self.importing.take().and_then(|(_, f)| f);
             self.finish_import(outcome, from);
         }
+        if let Some(d) = &mut self.report {
+            use crate::report_dialog::{Event, Outcome};
+            for event in d.show(ctx, palette) {
+                match event {
+                    // `_on_project_report_progress`.
+                    Event::Progress(text) => self.session.show_message(text, 2500),
+                    Event::Cancel => self.session.show_message("Cancelling project report generation...", 3000),
+                    Event::Done(outcome) => {
+                        self.report = None;
+                        match outcome {
+                            Outcome::Finished(r) => {
+                                let shown = r.path.to_string_lossy().into_owned();
+                                let name = callisto_core::radio::naming::basename(&shown).to_owned();
+                                self.session.show_message(format!("Project report generated: {name}"), 5000);
+                                self.session.log_operation(format!("Generated project report: {name}"));
+                                self.notice = Some(Notice { kind: NoticeKind::Information, title: "Project Report Complete".into(), text: format!("Report saved:\n{shown}") });
+                            }
+                            Outcome::Failed(m) => {
+                                let text = if m.is_empty() { "Unknown error.".to_owned() } else { m };
+                                self.notice = Some(Notice { kind: NoticeKind::Critical, title: "Generate Project Report Failed".into(), text });
+                            }
+                            Outcome::Cancelled => self.session.show_message("Project report generation cancelled.", 4000),
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Main-window shortcuts (the menus show them; Qt makes them work anywhere).
@@ -870,8 +1549,15 @@ impl LiteApp {
                 .filter(|p| !p.is_empty())
                 .collect()
         });
-        if !dropped.is_empty() && dropped.iter().all(|p| is_fits_path(p)) {
-            self.open_paths(&dropped);
+        if dropped.is_empty() {
+            return;
+        }
+        // `classify_dropped_paths`: one project, or FITS files.
+        if dropped.len() == 1 && dropped[0].to_lowercase().ends_with(".efaproj") {
+            let path = PathBuf::from(&dropped[0]);
+            self.after_unsaved_question(Deferred::OpenProject(path));
+        } else if dropped.iter().all(|p| is_fits_path(p)) {
+            self.after_unsaved_question(Deferred::OpenFits(dropped));
         }
     }
 }
@@ -941,14 +1627,92 @@ impl eframe::App for LiteApp {
             // Commands run after the window was drawn: draw their result.
             ctx.request_repaint();
         }
+        self.sync_default_preset();
         for command in commands {
+            if matches!(command, Command::ExportFigure) {
+                self.export_figure(&ctx);
+                continue;
+            }
+            if matches!(command, Command::GenerateProjectReport) {
+                self.generate_project_report(&ctx);
+                continue;
+            }
             let before = self.session.opened.len();
             self.handle(command);
             self.after_open(before);
         }
+        if std::mem::take(&mut self.session.project_detached) {
+            self.project.path = None;
+        }
 
         if self.session.flush_deferred() {
             ctx.request_repaint();
+        }
+        // `_apply_pending_analysis_restore`, once an opened project's plot is up.
+        if let Some(p) = self.session.take_pending_analysis_restore() {
+            let auto_clean = self.settings.auto_clean_max_outliers;
+            let session = self.session.analysis.clone();
+            if p.open_max {
+                self.analysis.open_or_focus_max(&mut self.session, session.clone(), p.open_analyzer, false, auto_clean);
+            } else if p.open_analyzer {
+                self.analysis.open_or_focus_analyzer(&mut self.session, session.clone(), auto_clean);
+            }
+            if p.open_type_ii {
+                let ui_family = self.fonts.ui_family().unwrap_or("Segoe UI");
+                self.analysis.open_or_focus_type_ii(&mut self.session, session, ui_family, self.fonts.families());
+            }
+        }
+        // `closeEvent` asks about unsaved changes first.
+        if ctx.input(|i| i.viewport().close_requested()) {
+            if !self.allow_close && self.project.is_dirty(&self.session) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.unsaved_prompt = Some(Deferred::Close);
+            } else {
+                self.settings.clean_exit = true;
+            }
+        }
+        // The autosave timer: every three minutes, while there are unsaved changes.
+        if self.last_autosave.elapsed() >= std::time::Duration::from_secs(180) {
+            self.last_autosave = std::time::Instant::now();
+            let root = self.recovery_root.clone();
+            self.project.autosave(&mut self.session, &root);
+        }
+        ctx.request_repaint_after(std::time::Duration::from_secs(180).saturating_sub(self.last_autosave.elapsed()));
+        if let Some(path) = self.recovery_prompt.clone() {
+            match dialogs::question_box(
+                &ctx,
+                "Recover Last Session",
+                "An unclean exit was detected. Recover the latest autosave snapshot?",
+                &["Yes", "No"],
+                0,
+                &palette,
+            ) {
+                Some(0) => {
+                    self.recovery_prompt = None;
+                    self.recover_snapshot(&path);
+                }
+                Some(_) => self.recovery_prompt = None,
+                None => {}
+            }
+        }
+        if let Some(then) = self.unsaved_prompt.take() {
+            match dialogs::question_box(
+                &ctx,
+                "Unsaved Project",
+                "You have unsaved project changes.\n\nSave before continuing?",
+                &["Save", "Discard", "Cancel"],
+                0,
+                &palette,
+            ) {
+                Some(0) => {
+                    if self.save_project() {
+                        self.run_deferred(&ctx, then);
+                    }
+                }
+                Some(1) => self.run_deferred(&ctx, then),
+                Some(_) => {}
+                None => self.unsaved_prompt = Some(then),
+            }
         }
         self.analysis.show(&ctx, &palette, &mut self.session, self.settings.auto_clean_max_outliers);
         if self.notice.is_none() && !self.session.notices.is_empty() {

@@ -5,7 +5,7 @@
 //! patches snapped to the pixel grid (`PathSnapper`), all antialiased and
 //! clipped to the axes' rounded clip box.
 
-use tiny_skia::{FillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, PixmapMut, Stroke, Transform};
+use tiny_skia::{FillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, PixmapMut, Stroke, StrokeDash, Transform};
 
 use super::{MarkerKind, Prim, PxRect, Rgba};
 
@@ -57,6 +57,11 @@ pub fn device_bounds(prim: &Prim, scale: f64) -> Option<[i64; 4]> {
             add(rect.x0 * scale, rect.y0 * scale, width * scale + 2.0);
             add(rect.x1 * scale, rect.y1 * scale, width * scale + 2.0);
             &None
+        }
+        Prim::Hatch { rect, clip, .. } => {
+            add(rect.x0 * scale, rect.y0 * scale, 1.0);
+            add(rect.x1 * scale, rect.y1 * scale, 1.0);
+            clip
         }
         _ => return None,
     };
@@ -146,7 +151,7 @@ pub fn draw(prim: &Prim, pix: &mut PixmapMut, scale: f64, origin: (f64, f64)) {
                 }
             }
         }
-        Prim::Path { points, color, width, clip } => {
+        Prim::Path { points, color, width, clip, dash } => {
             let mask = clip_mask(clip, pix);
             let mut pb = PathBuilder::new();
             for (i, &(x, y)) in points.iter().enumerate() {
@@ -158,8 +163,48 @@ pub fn draw(prim: &Prim, pix: &mut PixmapMut, scale: f64, origin: (f64, f64)) {
                 }
             }
             if let Some(path) = pb.finish() {
-                let stroke = Stroke { width: (width * scale) as f32, line_cap: LineCap::Square, line_join: LineJoin::Round, ..Stroke::default() };
+                // `lines.solid_capstyle` projecting, `lines.dash_capstyle` butt.
+                let (cap, dash) = match dash {
+                    Some((on, off)) => (LineCap::Butt, StrokeDash::new(vec![(on * scale) as f32, (off * scale) as f32], 0.0)),
+                    None => (LineCap::Square, None),
+                };
+                let stroke = Stroke { width: (width * scale) as f32, line_cap: cap, line_join: LineJoin::Round, dash, ..Stroke::default() };
                 pix.stroke_path(&path, &paint(*color), &stroke, Transform::identity(), mask.as_ref());
+            }
+        }
+        Prim::Hatch { rect, face, hatch, hatch_width, spacing, clip } => {
+            // `PathSnapper` without a stroke rounds the corners to whole
+            // pixels; the clip box is whole pixels too, so their overlap is.
+            let snap = |v: f64| (v * scale + 0.5).floor();
+            let mut b = [snap(rect.x0), snap(rect.y0), snap(rect.x1), snap(rect.y1)];
+            if let Some(c) = clip {
+                let c = clip_box(c, scale);
+                b = [b[0].max(c[0] as f64), b[1].max(c[1] as f64), b[2].min(c[2] as f64), b[3].min(c[3] as f64)];
+            }
+            if b[2] <= b[0] || b[3] <= b[1] {
+                return;
+            }
+            let Some(r) = tiny_skia::Rect::from_ltrb((b[0] - ox) as f32, (b[1] - oy) as f32, (b[2] - ox) as f32, (b[3] - oy) as f32) else { return };
+            pix.fill_path(&PathBuilder::from_rect(r), &paint(*face), FillRule::Winding, Transform::identity(), None);
+            let Some(mut mask) = Mask::new(pix.width(), pix.height()) else { return };
+            mask.fill_path(&PathBuilder::from_rect(r), FillRule::Winding, false, Transform::identity());
+            // The tile's lines, `x + y = k · spacing` from the canvas corner.
+            let sp = spacing * scale;
+            if sp <= 0.0 || *hatch_width <= 0.0 {
+                return;
+            }
+            let w = hatch_width * scale;
+            let mut pb = PathBuilder::new();
+            let (k0, k1) = (((b[0] + b[1] - w) / sp).floor() as i64, ((b[2] + b[3] + w) / sp).ceil() as i64);
+            for k in k0..=k1 {
+                let c = k as f64 * sp;
+                let (ya, yb) = (b[1] - w, b[3] + w);
+                pb.move_to((c - ya - ox) as f32, (ya - oy) as f32);
+                pb.line_to((c - yb - ox) as f32, (yb - oy) as f32);
+            }
+            if let Some(path) = pb.finish() {
+                let stroke = Stroke { width: w as f32, line_cap: LineCap::Butt, ..Stroke::default() };
+                pix.stroke_path(&path, &paint(*hatch), &stroke, Transform::identity(), Some(&mask));
             }
         }
         Prim::Frame { rect, face, edge, width } => {

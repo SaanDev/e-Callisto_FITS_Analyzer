@@ -443,6 +443,11 @@ impl PlotCanvas {
         })
     }
 
+    /// The image item's `getLevels()`, while an image is shown.
+    pub fn levels(&self) -> Option<(f64, f64)> {
+        self.image.as_ref().map(|_| self.levels)
+    }
+
     pub fn full_view(&self) -> Option<View> {
         self.full_view
     }

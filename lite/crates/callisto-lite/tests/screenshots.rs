@@ -178,7 +178,7 @@ fn data_states_match_full_app() {
     let gauri = [fixture("INDIA-GAURI_20261007_041500_02.fit.gz"), fixture("INDIA-GAURI_20261007_043000_02.fit.gz")];
     for (theme, name) in [(ThemeMode::Light, "light"), (ThemeMode::Dark, "dark")] {
         let mut h = harness(theme, |_| {});
-        let steps: [Step<'_>; 7] = [
+        let steps: [Step<'_>; 8] = [
             ("empty", Box::new(|_| {})),
             (
                 "single",
@@ -202,6 +202,15 @@ fn data_states_match_full_app() {
             ("units_db", Box::new(|app| app.session.set_units_mode(true))),
             ("time_ut", Box::new(|app| app.session.set_time_axis(true))),
             ("axis_log", Box::new(|app| app.session.set_frequency_axis_log(true))),
+            (
+                "project_processed",
+                Box::new(|app| {
+                    let p = lite_dir().join("parity/out/projects/processed.efaproj");
+                    if p.exists() {
+                        app.open_project_path(&p);
+                    }
+                }),
+            ),
         ];
         for (state, action) in steps {
             action(h.state_mut());

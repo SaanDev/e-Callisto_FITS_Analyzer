@@ -101,8 +101,11 @@ fn placeholder() -> Preview {
         lines: Vec::new(),
         legend: None,
         axis_zorder: 1.5,
+        y_log: false,
+        spans: Vec::new(),
+        data_texts: Vec::new(),
     };
-    let fig = Figure { width: 1200.0, height: 800.0, dpi: 100.0, facecolor: WHITE, axes: vec![ax], texts: Vec::new() };
+    let fig = Figure { width: 1200.0, height: 800.0, dpi: 100.0, facecolor: WHITE, axes: vec![ax], texts: Vec::new(), constrained: None };
     Preview { title: "Preview".into(), result: None, view: FigureView::new(fig), scroll: 0.0 }
 }
 

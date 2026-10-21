@@ -240,7 +240,7 @@ colours shift. Lite reproduces it for now; fixing it in both is a decision for y
 | Analysis figures (scatter, best fit, power-law labels in mathtext, legends) | Every axes, text extent and tick identical to matplotlib's (`figures_parity`) |
 | Settings dialogs: ridge tracking, light-curve frequency and settings, text annotation, colour, choose label | 1.2–6.0 % (small, text-heavy windows) |
 | Analysis Summary section | Done |
-| Type II band-splitting window and its graph settings dialog | Done. Window in 5 states (empty, points, fits, results, B versus R), light and dark: 1.0–1.4 % of pixels differ; every detail label's rich text identical to the full app's; graph settings 1.8–1.9 %. Save Plot draws both figures with `add_subplot` placement, as the Analyzer's Save Graph does; matplotlib's constrained layout, the font family and bold/italic of the saved figures come with Phase 4's figure export |
+| Type II band-splitting window and its graph settings dialog | Done. Window in 5 states (empty, points, fits, results, B versus R), light and dark: 1.0–1.4 % of pixels differ; every detail label's rich text identical to the full app's; graph settings 1.8–1.9 %. Save Plot draws both figures with matplotlib's constrained layout, in the settings' font family and bold/italic (Phase 4) |
 
 Found in the full app while porting (Lite reproduces them; fixing them in
 both apps is a decision for you):
@@ -337,6 +337,36 @@ Found earlier in the full app while porting:
 - `.efaproj` read and write, two-way with pass-through; recovery; Analysis Session; presets; view config.
 - Figure export in all six formats; Export to FIT; project report; provenance report; analysis log.
 - **Exit:** round-trip tests pass; exported figures and reports match the full app's side by side.
+
+**Status (2026-10-21), on `master`:**
+
+| Item | State |
+|---|---|
+| `.efaproj` read and write (zip, `meta.json`, `arrays.npz`, embedded files, atomic save, schema 1 and 2) | Done. `project_parity`: Lite opens five projects the full app wrote (raw, processed, analysis, combined, schema-1 legacy) and saves them; meta key for key and every array (dtype, shape, values) equal what the full app writes back itself. The full app's reader opens Lite's files, and their `meta.json` is byte-identical to `json.dumps` (`parity/check_lite_projects.py`) |
+| Parts Lite does not have (solar, GCS, geomagnetic, event context, composer) | Kept and written back unchanged: sections, arrays, embedded files. They keep the storage (link or embed) they were opened with |
+| Open, Save, Save As, Recent Projects, drag and drop, "Unsaved Project" on open and close | Done; dirty marking at the full app's 20 places |
+| Main window after opening a project | 1.1 % of pixels differ, as for the other states |
+| Recovery (autosave every 3 minutes while unsaved, unclean-exit prompt, Recover Last Session) | Done; snapshots in Lite's own data folder, the newest ten kept |
+| Presets (save, apply, default on load, delete) | Done. The preset of the processed state, and that preset applied to the raw project and saved, equal the full app's |
+| Import and Export View Config | Done; the exported file equals the full app's (`json.dumps` layout) |
+| Analysis Session → Open Restored Analysis | Done |
+| Export Analysis Log (CSV + TXT) and Export Provenance Report (JSON + Markdown) | Done; equal the full app's but for the time, run id and app identity |
+| Export to FIT | Done; byte-identical to the full app's file for a raw, a processed and a combined dataset |
+| Export Figure (`dynamic_spectrum_figure`): colour bar, hatched gaps, UT or seconds axis, log frequency axis, light curves, annotations, the ruler, the on-screen zoom and levels, Graph Properties font and emphasis | Done. `figures_parity`: four graphs (plain; zoomed with gaps and every overlay; labels outside the axes; log axis with bold/italic text) laid out as matplotlib lays them out, to 0.01 px. `export_figure`: Lite's 300 dpi PNG of five projects against the full app's export: same size, 0.7–1.1 % of pixels differ (3.5 % on a log axis, where the image's aliased noise follows sub-pixel text-width differences) |
+| Constrained layout, Save Graph and Save Plot | Done: margins are reset between the layout's two passes and `savefig` lays out once, as matplotlib does (both were wrong before and cancelled out for the earlier figures). Save Plot now uses the Type II settings' font family and emphasis |
+| PDF and EPS as vector files | Done: paths, clipping and alpha (PDF; PostScript draws it opaque, as matplotlib's backend does), images at 300 dpi, text as glyph outlines (matplotlib embeds Type 42 fonts, so its text stays selectable). Pages equal the full app's tight box to 0.01 pt; the PDF replayed through matplotlib shows the PNG export's picture |
+| Generate Project Report (PDF) | Done, without the Event Story (it needs the event context Lite does not have). ReportLab's layout is ported (paragraphs wrapped by words or characters, tables split between rows, KeepTogether, frames and page breaks; DejaVu Sans bundled, as the full app takes it from matplotlib). `report_parity`: Lite lays out the full app's report input exactly as ReportLab did (188 flowables per report, positions to 1e-6 pt, every line break). `project_report`: Lite builds the report of four projects from its own state; same pages, positions and lines as the full app's, figures within 3 px of its size and 1.1–2.3 % of pixels apart (8.4 % for a zoomed noisy spectrum, whose aliasing follows sub-pixel text-width differences). Progress dialog with Cancel, the full app's messages |
+
+Found in the full app while porting (Lite reproduces them):
+
+- An isolated burst's auto-cleaned maxima never restore their windows from a
+  project: the session holds fewer points (1675) than the data has columns
+  (3600), and `validate_session_for_source` reports "Analysis vector length
+  does not match current dataset time-axis length."
+- Opening a project leaves the Timeline section on the previous dataset's
+  observations: `_apply_project_payload` never calls `_refresh_timeline_panel`.
+- File → Save As in the main window is never connected and always disabled.
+- Without an analysis session, the project report still draws a "Maximum Intensity Fit" graph (empty, x axis "Time channel") and a Type II figure without lanes, captioned "Maximum-intensity trace." and "Drawn from the Type II band-splitting view.": `np.asarray(None, dtype=float)` is one NaN, so the checks for data (`n == 0`, `_has_band_points`) pass.
 
 ### Phase 5: app shell and release
 - User guide, generated from `ui/help/user_guide_content.py` without the chapters for removed features, plus citation, bug report, update check, About, startup splash, and first-start settings import.

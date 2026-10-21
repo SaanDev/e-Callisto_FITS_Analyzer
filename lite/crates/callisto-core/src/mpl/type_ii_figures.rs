@@ -3,22 +3,19 @@
 //! (`type_ii_spectrum_figure`), and the magnetic field against shock
 //! height (`fit_graph_figure`), as OriginPro graphs.
 //!
-//! The full app lays these out with `layout="constrained"`; Lite places
-//! the axes as `fig.add_subplot(111)` does until Phase 4 brings the saved
-//! figures to matplotlib's layout.
+//! Both are laid out by matplotlib's constrained layout, as the full app's are.
 
 use std::sync::Arc;
 
-use super::analysis_figures::{FitGraph, GraphText, SUBPLOT, fit_figure, power_law_label_for};
+use super::analysis_figures::{FitGraph, GraphText, SUBPLOT, fit_graph_figure, power_law_label_for};
 use super::figures::colorbar_axes;
 use super::legend::{Legend, Loc};
-use super::{AxisSpec, Axes, BLACK, Face, Figure, Image, Interpolation, Label, Line2D, Marker, MarkerKind, Rgba, WHITE, colorbar_beside, colorbar_image};
+use super::{AxisSpec, Axes, BLACK, Figure, Image, Interpolation, Label, Line2D, Marker, MarkerKind, Rgba, WHITE, colorbar_image, make_axes_right, ColorbarSlot, Constrained};
 use crate::plot::Colormap;
 use crate::radio::array::Array2;
 
-/// `SPECTRUM_FIGSIZE` and `GRAPH_FIGSIZE` at 100 dpi.
+/// `SPECTRUM_FIGSIZE` at 100 dpi.
 const SPECTRUM_SIZE: (f64, f64) = (800.0, 500.0);
-const GRAPH_SIZE: (f64, f64) = (640.0, 480.0);
 
 /// `SpectrumImage`: the spectrogram in display units; `extent` is
 /// `(x0, x1, y_bottom, y_top)` with row 0 at `y_top`.
@@ -51,19 +48,20 @@ fn finite(x: &[f64], y: &[f64]) -> (Vec<f64>, Vec<f64>) {
     x.iter().zip(y).filter(|(a, b)| a.is_finite() && b.is_finite()).map(|(a, b)| (*a, *b)).unzip()
 }
 
-fn origin_axis(label: &str, text: GraphText) -> AxisSpec {
+/// An axis as `style_origin_axes` and `label_kw` leave it.
+pub(super) fn origin_axis(label: &str, text: GraphText) -> AxisSpec {
     let mut s = AxisSpec::origin(BLACK);
-    s.label = Some(Label::new(label, text.label_pt, BLACK).with_face(Face::Origin));
+    s.label = Some(Label::new(label, text.label_pt, BLACK).with_face(text.label_face()));
     s.tick_label_pt = text.tick_pt;
     s.major_width_pt = 1.5;
     s.minor_width_pt = 1.0;
     s.pad_pt = 5.0;
-    s.face = Face::Origin;
+    s.face = text.tick_face();
     s
 }
 
 /// The data's finite range, for a spectrum without display levels.
-fn finite_limits(data: &[f32]) -> (f64, f64) {
+pub(super) fn finite_limits(data: &[f32]) -> (f64, f64) {
     let (lo, hi) = data
         .iter()
         .filter(|v| v.is_finite())
@@ -74,11 +72,12 @@ fn finite_limits(data: &[f32]) -> (f64, f64) {
 /// `type_ii_spectrum_figure`: the spectrum (when there is one) with its
 /// colour scale, each lane's points (black-edged markers) and fit.
 pub fn spectrum_figure(image: Option<&SpectrumImage>, bands: &[BandTrace], title: &str, text: GraphText) -> Figure {
-    let cell = [SUBPLOT[0], SUBPLOT[1], SUBPLOT[0] + SUBPLOT[2], SUBPLOT[1] + SUBPLOT[3]];
+    // `fig.colorbar(im, ax=ax, pad=0.02, fraction=0.05)` under constrained
+    // layout: `make_axes` places the bar first, the layout then moves both.
     let (main, bar) = match image {
         Some(_) => {
-            let (m, b, a) = colorbar_beside(cell, 0.05, 0.02);
-            (m, Some((b, a)))
+            let (m, b) = make_axes_right(SUBPLOT, 0.05, 0.02, 1.0);
+            (m, Some(b))
         }
         None => (SUBPLOT, None),
     };
@@ -102,6 +101,7 @@ pub fn spectrum_figure(image: Option<&SpectrumImage>, bands: &[BandTrace], title
                 }),
                 label: Some(band.label.clone()),
                 zorder: 4.0,
+                dash: None,
             });
         }
         if let Some((fx, fy)) = &band.fit {
@@ -115,13 +115,14 @@ pub fn spectrum_figure(image: Option<&SpectrumImage>, bands: &[BandTrace], title
                     marker: None,
                     label: Some(format!("{} fit", band.label)),
                     zorder: 5.0,
+                    dash: None,
                 });
             }
         }
     }
     ax.autoscale();
     let mut colorbar = None;
-    if let (Some(im), Some((bar, aspect))) = (image, bar) {
+    if let (Some(im), Some(bar)) = (image, bar) {
         let [x0, x1, bottom, top] = im.extent;
         let (vmin, vmax) = match im.levels {
             Some((lo, hi)) if lo.is_finite() && hi.is_finite() && hi > lo => (lo, hi),
@@ -130,25 +131,45 @@ pub fn spectrum_figure(image: Option<&SpectrumImage>, bands: &[BandTrace], title
         ax.images.push(Image { data: im.data.clone(), extent: im.extent, origin_upper: true, cmap: im.cmap, vmin, vmax, interpolation: Interpolation::Auto });
         ax.xlim = (x0.min(x1), x0.max(x1));
         ax.ylim = (bottom, top);
-        // `_style_colorbar`: a thin black box, inward ticks at the right.
-        let label = Label::new(im.colorbar_label.clone(), text.label_pt, BLACK).with_face(Face::Origin);
-        let mut cb = colorbar_axes(bar, Some(aspect), colorbar_image(&im.cmap, vmin, vmax), BLACK, label, text.tick_pt);
-        cb.spine_width_pt = 1.0;
-        cb.y.major_len_pt = 5.0;
-        cb.y.major_width_pt = 1.0;
-        cb.y.minor_len_pt = 2.5;
-        cb.y.minor_width_pt = 0.8;
-        cb.y.face = Face::Origin;
-        colorbar = Some(cb);
+        colorbar = Some(origin_colorbar(bar, &im.cmap, vmin, vmax, &im.colorbar_label, text));
     }
     if !title.is_empty() {
-        ax.title = Some(Label::new(title, text.title_pt, BLACK).with_face(Face::Origin));
+        ax.title = Some(Label::new(title, text.title_pt, BLACK).with_face(text.title_face()));
     }
     if !ax.lines.is_empty() {
-        ax.legend = Some(Legend::origin(Loc::Best, (text.tick_pt - 1.0).max(6.0)));
+        ax.legend = Some(Legend { face: text.face(), ..Legend::origin(Loc::Best, (text.tick_pt - 1.0).max(6.0)) });
     }
+    let slot = colorbar.is_some().then_some(ColorbarSlot { axes: 1, fraction: 0.05, pad: 0.02, shrink: 1.0, aspect: 20.0 });
     let axes = std::iter::once(ax).chain(colorbar).collect();
-    Figure { width: SPECTRUM_SIZE.0, height: SPECTRUM_SIZE.1, dpi: 100.0, facecolor: WHITE, axes, texts: Vec::new() }
+    Figure {
+        width: SPECTRUM_SIZE.0,
+        height: SPECTRUM_SIZE.1,
+        dpi: 100.0,
+        facecolor: WHITE,
+        axes,
+        texts: Vec::new(),
+        constrained: Some(Constrained { axes: 0, colorbar: slot }),
+    }
+}
+
+/// `fig.colorbar(im, ax=ax)` styled by `_style_colorbar`: a thin black
+/// box, inward ticks at the right, the label (when there is one) in
+/// `label_kw`, the tick labels emphasised as the graph's.
+pub(super) fn origin_colorbar(bar: [f64; 4], cmap: &Colormap, vmin: f64, vmax: f64, label: &str, text: GraphText) -> Axes {
+    let label = Label::new(label, text.label_pt, BLACK).with_face(text.label_face());
+    let mut cb = colorbar_axes(bar, Some((20.0, (0.0, 0.5))), colorbar_image(cmap, vmin, vmax), BLACK, label, text.tick_pt);
+    if cb.y.label.as_ref().is_some_and(|l| l.text.is_empty()) {
+        cb.y.label = None;
+    }
+    cb.spine_width_pt = 1.0;
+    cb.y.major_len_pt = 5.0;
+    cb.y.major_width_pt = 1.0;
+    cb.y.minor_len_pt = 2.5;
+    cb.y.minor_width_pt = 0.8;
+    cb.y.face = text.tick_face();
+    // `origin_graph_style`'s tick pad holds for the bar too.
+    cb.y.pad_pt = 5.0;
+    cb
 }
 
 /// The B versus R view: `fit_graph_figure` of the magnetic field and its
@@ -167,5 +188,5 @@ pub fn bvr_figure(heights: &[f64], field: &[f64], fit_x: &[f64], fit_y: &[f64], 
         x_label: "Shock Height (R\u{209b})",
         y_label: "Magnetic Field (G)",
     };
-    fit_figure(&g, text, GRAPH_SIZE.0, GRAPH_SIZE.1)
+    fit_graph_figure(&g, text)
 }

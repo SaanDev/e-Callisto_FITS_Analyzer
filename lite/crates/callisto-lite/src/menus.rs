@@ -88,6 +88,8 @@ pub enum Command {
     ToggleSidebar,
     /// File → Recent Files, by position (newest first).
     OpenRecentFits(usize),
+    OpenRecentProject(usize),
+    ClearRecentProjects,
     ClearRecentFiles,
     TrimTimelineStart,
     TrimTimelineEnd,
@@ -174,6 +176,10 @@ pub struct MenuState {
     pub has_data: bool,
     /// File → Recent Files labels (`fits_entry_label`), newest first.
     pub recent_files: Vec<String>,
+    /// File → Recent Projects: the files' names, newest first.
+    pub recent_projects: Vec<String>,
+    /// `_project_has_content`: Save Project and Save Project As.
+    pub has_project: bool,
     pub can_undo: bool,
     pub can_redo: bool,
     pub theme: ThemeMode,
@@ -198,6 +204,18 @@ fn recent_files_items(labels: &[String]) -> Vec<Item> {
     items
 }
 
+/// The Recent Projects submenu: the projects, then Clear; or a placeholder.
+fn recent_projects_items(names: &[String]) -> Vec<Item> {
+    if names.is_empty() {
+        return vec![Item::action("No Recent Projects", Command::OpenProject).enabled(false)];
+    }
+    let mut items: Vec<Item> =
+        names.iter().enumerate().map(|(i, n)| Item::action(n.clone(), Command::OpenRecentProject(i))).collect();
+    items.push(Item::Separator);
+    items.push(Item::action("Clear Recent Projects", Command::ClearRecentProjects));
+    items
+}
+
 pub fn menu_bar(s: &MenuState) -> Vec<Menu> {
     use Command as C;
     let a = Item::action;
@@ -211,9 +229,9 @@ pub fn menu_bar(s: &MenuState) -> Vec<Menu> {
                 a("Combine FITS Files...", C::CombineFits),
                 Item::Separator,
                 a("Open Project...", C::OpenProject).shortcut("Ctrl+Shift+O"),
-                Item::submenu("Recent Projects", vec![a("No Recent Projects", C::OpenProject).enabled(false)]),
-                a("Save Project", C::SaveProject).shortcut("Ctrl+S").enabled(data),
-                a("Save Project As...", C::SaveProjectAs).shortcut("Ctrl+Shift+S").enabled(data),
+                Item::submenu("Recent Projects", recent_projects_items(&s.recent_projects)),
+                a("Save Project", C::SaveProject).shortcut("Ctrl+S").enabled(s.has_project),
+                a("Save Project As...", C::SaveProjectAs).shortcut("Ctrl+Shift+S").enabled(s.has_project),
                 a("Recover Last Session...", C::RecoverLastSession),
                 a("Generate Project Report...", C::GenerateProjectReport).enabled(data),
                 Item::Separator,

@@ -3,13 +3,13 @@
 //! cropped to the drawn content plus 0.1 inch, at the requested dpi.
 //! PNG and TIFF are rasterised; SVG is written as vector paths (text as
 //! glyph outlines, as matplotlib's default `svg.fonttype = 'path'`); PDF
-//! and EPS embed the rasterised figure.
+//! and EPS are vector files too ([`crate::vector_export`]).
 
 use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use callisto_core::mpl::{Face, Figure, GlyphRun, MarkerKind, Prim, PxRect, rasterize_image, render};
+use callisto_core::mpl::{Face, Figure, GlyphRun, MarkerKind, Prim, PxRect, image_pixels, rasterize_image, rasterize_image_mesh, render};
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
 use crate::fonts::{MplMeasure, mpl_font, with_mpl_face};
@@ -20,7 +20,7 @@ thread_local! {
 }
 
 /// The union of everything drawn, plus `pad` (`bbox_inches='tight'`).
-fn tight_bbox(fig: &Figure, list: &callisto_core::mpl::DrawList) -> PxRect {
+pub(crate) fn tight_bbox(fig: &Figure, list: &callisto_core::mpl::DrawList) -> PxRect {
     let mut b = PxRect { x0: f64::INFINITY, y0: f64::INFINITY, x1: f64::NEG_INFINITY, y1: f64::NEG_INFINITY };
     let mut add = |r: &PxRect| {
         b.x0 = b.x0.min(r.x0.min(r.x1));
@@ -52,7 +52,16 @@ fn paint(c: [u8; 4]) -> Paint<'static> {
 
 /// Glyph outlines of `text` at `size_px` in `face`, pen at the origin, y
 /// down; a math label's glyphs where mathtext placed them.
-fn text_path(ctx: &egui::Context, text: &str, size_px: f64, face: Face, runs: &[GlyphRun]) -> Option<tiny_skia::Path> {
+pub(crate) fn text_path(ctx: &egui::Context, text: &str, size_px: f64, face: Face, runs: &[GlyphRun]) -> Option<tiny_skia::Path> {
+    if runs.is_empty() && matches!(face, Face::Styled { .. }) {
+        // A graph font list: each glyph from the font that has it.
+        let mut pb = PathBuilder::new();
+        crate::fonts::styled_layout(face, text, size_px, |ft, gid, x| {
+            let scale = (size_px / ft.units_per_em() as f64) as f32;
+            ft.outline_glyph(gid, &mut Outline { pb: &mut pb, scale, dx: x as f32, dy: 0.0 });
+        })?;
+        return pb.finish();
+    }
     // (character, x, y, size)
     let glyphs: Vec<(char, f32, f32, f64)> = if runs.is_empty() {
         let galley = ctx.fonts_mut(|f| f.layout_no_wrap(text.to_owned(), mpl_font(face, size_px as f32), egui::Color32::WHITE));
@@ -122,6 +131,8 @@ pub fn rasterize(ctx: &egui::Context, fig: &Figure, scale: f64) -> Result<Pixmap
     at_dpi.width *= scale;
     at_dpi.height *= scale;
     at_dpi.dpi *= scale;
+    // `savefig(bbox_inches="tight")` lays the figure out once, for the
+    // tight box, then draws with the layout engine off.
     let fig = &at_dpi;
     let mut list = fig.layout(&MplMeasure { ctx });
     let bbox = tight_bbox(fig, &list);
@@ -153,17 +164,16 @@ pub fn rasterize(ctx: &egui::Context, fig: &Figure, scale: f64) -> Result<Pixmap
                     pix.stroke_path(&path, &paint(*color), &stroke, to, None);
                 }
             }
-            Prim::Image { axes, image, dest, clip } => {
+            Prim::Image { axes, image, dest, clip, log_y } => {
                 let Some(im) = fig.axes.get(*axes).and_then(|a| a.images.get(*image)) else { continue };
                 let map = |x: f64, y: f64| (x, y);
                 let (dx0, dy0) = map(dest.x0.min(dest.x1), dest.y0.min(dest.y1));
                 let (dx1, dy1) = map(dest.x0.max(dest.x1), dest.y0.max(dest.y1));
                 let (cx0, cy0) = map(clip.x0, clip.y0);
                 let (cx1, cy1) = map(clip.x1, clip.y1);
-                let Some((out, virtual_dest)) = callisto_core::mpl::image_placement([dx0, dy0, dx1, dy1], [cx0, cy0, cx1, cy1]) else {
+                let Some((out, iw, ih, px)) = image_pixels(im, [dx0, dy0, dx1, dy1], [cx0, cy0, cx1, cy1], *log_y) else {
                     continue;
                 };
-                let (iw, ih, px) = rasterize_image(im, virtual_dest, out);
                 let Some(mut sub) = Pixmap::new(iw as u32, ih as u32) else { continue };
                 for (i, c) in px.as_chunks::<4>().0.iter().enumerate() {
                     let a = c[3] as u32;
@@ -173,7 +183,7 @@ pub fn rasterize(ctx: &egui::Context, fig: &Figure, scale: f64) -> Result<Pixmap
                 }
                 pix.draw_pixmap(out[0] as i32, out[1] as i32, sub.as_ref(), &tiny_skia::PixmapPaint::default(), Transform::identity(), None);
             }
-            Prim::Markers { .. } | Prim::Path { .. } | Prim::Frame { .. } => {
+            Prim::Markers { .. } | Prim::Path { .. } | Prim::Frame { .. } | Prim::Hatch { .. } => {
                 render::draw(p, &mut pix.as_mut(), 1.0, (0.0, 0.0));
             }
             Prim::Text { pos, text, size_px, color, rotation, face, glyphs, .. } => {
@@ -194,14 +204,32 @@ pub fn save_figure(ctx: &egui::Context, fig: &Figure, path: &Path, dpi: f64) -> 
     save_figure_padded(ctx, fig, path, dpi, 0.1)
 }
 
+/// `figure_png_bytes(fig, dpi=…, tight=True)`: the figure as PNG bytes,
+/// with its size and RGBA rows.
+pub fn png_bytes(ctx: &egui::Context, fig: &Figure, dpi: f64, pad_inches: f64) -> Result<(Vec<u8>, u32, u32, Vec<u8>)> {
+    PAD_INCHES.with(|p| p.set(pad_inches));
+    let pix = rasterize(ctx, fig, dpi / fig.dpi)?;
+    let (w, h) = (pix.width(), pix.height());
+    let rgba = pix.data().to_vec();
+    let mut png = Vec::new();
+    image::write_buffer_with_format(&mut std::io::Cursor::new(&mut png), &rgba, w, h, image::ExtendedColorType::Rgba8, image::ImageFormat::Png)?;
+    Ok((png, w, h, rgba))
+}
+
 /// [`save_figure`] with `pad_inches` around the drawing (the full app's
 /// `save_figure(tight=True)` pads 0.08 inch); JPEG at quality 95.
 pub fn save_figure_padded(ctx: &egui::Context, fig: &Figure, path: &Path, dpi: f64, pad_inches: f64) -> Result<()> {
     PAD_INCHES.with(|p| p.set(pad_inches));
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_else(|| "png".into());
     let scale = dpi / fig.dpi;
-    if ext == "svg" {
-        return std::fs::write(path, svg(ctx, fig)?).with_context(|| format!("writing {}", path.display()));
+    let vector = match ext.as_str() {
+        "svg" => Some(svg(ctx, fig)?.into_bytes()),
+        "pdf" => Some(crate::vector_export::pdf(ctx, fig, dpi)?),
+        "eps" | "ps" => Some(crate::vector_export::eps(ctx, fig, dpi)?),
+        _ => None,
+    };
+    if let Some(bytes) = vector {
+        return std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()));
     }
     let pix = rasterize(ctx, fig, scale)?;
     let (w, h) = (pix.width(), pix.height());
@@ -216,8 +244,6 @@ pub fn save_figure_padded(ctx: &egui::Context, fig: &Figure, path: &Path, dpi: f
             let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::BufWriter::new(file), 95);
             enc.encode(&rgb, w, h, image::ExtendedColorType::Rgb8)?;
         }
-        "pdf" => std::fs::write(path, pdf(&rgb, w, h, dpi)?)?,
-        "eps" | "ps" => std::fs::write(path, eps(&rgb, w, h, dpi))?,
         other => bail!("Format '{other}' is not supported."),
     }
     Ok(())
@@ -258,12 +284,6 @@ pub fn save_raster(path: &Path, ext: &str, rgba: &[u8], w: u32, h: u32) -> Resul
         other => bail!("Unsupported export format: {other}."),
     }
     Ok(())
-}
-
-/// A one-page PDF holding the image at its physical size.
-fn pdf(rgb: &[u8], w: u32, h: u32, dpi: f64) -> Result<Vec<u8>> {
-    let (pw, ph) = (w as f64 * 72.0 / dpi, h as f64 * 72.0 / dpi);
-    pdf_on_page(rgb, w, h, (pw, ph), [0.0, 0.0, pw, ph])
 }
 
 /// A one-page PDF of `page` points with the image in `[x, y, width, height]`.
@@ -370,13 +390,33 @@ fn svg_shape(p: &Prim) -> String {
                 });
             }
         }
-        Prim::Path { points, color, width, .. } => {
+        Prim::Path { points, color, width, dash, .. } => {
             let pts: Vec<String> = points.iter().map(|(x, y)| format!("{x:.3},{y:.3}")).collect();
+            let (cap, dashes) = match dash {
+                Some((on, off)) => ("butt", format!(" stroke-dasharray=\"{on:.3},{off:.3}\"")),
+                None => ("square", String::new()),
+            };
             s.push_str(&format!(
-                "<polyline points=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{width:.3}\" stroke-linecap=\"square\" stroke-linejoin=\"round\"/>\n",
+                "<polyline points=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{width:.3}\" stroke-linecap=\"{cap}\" stroke-linejoin=\"round\"{dashes}/>\n",
                 pts.join(" "),
                 svg_stroke(*color)
             ));
+        }
+        Prim::Hatch { rect, face, hatch, hatch_width, spacing, .. } => {
+            let (x, y, w, h) = (rect.x0, rect.y0, rect.x1 - rect.x0, rect.y1 - rect.y0);
+            s.push_str(&format!("<rect x=\"{x:.3}\" y=\"{y:.3}\" width=\"{w:.3}\" height=\"{h:.3}\" fill=\"{}\"/>\n", svg_color(*face)));
+            // The hatch lines, clipped to the band.
+            let id = format!("hatch{}", (x * 1000.0 + y * 7.0) as i64);
+            s.push_str(&format!(
+                "<clipPath id=\"{id}\"><rect x=\"{x:.3}\" y=\"{y:.3}\" width=\"{w:.3}\" height=\"{h:.3}\"/></clipPath>\n<g clip-path=\"url(#{id})\" stroke=\"{}\" stroke-width=\"{hatch_width:.3}\">\n",
+                svg_stroke(*hatch)
+            ));
+            let (k0, k1) = (((rect.x0 + rect.y0) / spacing).floor() as i64 - 1, ((rect.x1 + rect.y1) / spacing).ceil() as i64 + 1);
+            for k in k0..=k1 {
+                let c = k as f64 * spacing;
+                s.push_str(&format!("<line x1=\"{:.3}\" y1=\"{:.3}\" x2=\"{:.3}\" y2=\"{:.3}\"/>\n", c - rect.y0, rect.y0, c - rect.y1, rect.y1));
+            }
+            s.push_str("</g>\n");
         }
         Prim::Frame { rect, face, edge, width } => s.push_str(&format!(
             "<rect x=\"{:.3}\" y=\"{:.3}\" width=\"{:.3}\" height=\"{:.3}\" fill=\"{}\" stroke=\"{}\" stroke-width=\"{width:.3}\"/>\n",
@@ -418,7 +458,7 @@ fn svg(ctx: &egui::Context, fig: &Figure) -> Result<String> {
                     a.0, a.1, b.0, b.1, color[0], color[1], color[2], color[3] as f64 / 255.0, width, if *square_caps { "square" } else { "butt" }
                 ));
             }
-            Prim::Image { axes, image, dest, clip } => {
+            Prim::Image { axes, image, dest, clip, log_y } => {
                 let Some(im) = fig.axes.get(*axes).and_then(|a| a.images.get(*image)) else { continue };
                 // Rasterised at 3× (matplotlib's image.composite_image at 72 dpi is coarser).
                 let sc = 3.0;
@@ -429,7 +469,17 @@ fn svg(ctx: &egui::Context, fig: &Figure) -> Result<String> {
                 }
                 let d = [dest.x0.min(dest.x1) * sc, dest.y0.min(dest.y1) * sc, dest.x0.max(dest.x1) * sc, dest.y0.max(dest.y1) * sc];
                 let out = [(x0 * sc).floor() as i64, (y0 * sc).floor() as i64, (x1 * sc).ceil() as i64, (y1 * sc).ceil() as i64];
-                let (iw, ih, px) = rasterize_image(im, d, out);
+                let c = [clip.x0 * sc, clip.y0 * sc, clip.x1 * sc, clip.y1 * sc];
+                let (out, iw, ih, px) = match log_y {
+                    Some(log) => match rasterize_image_mesh(im, d, c, *log) {
+                        Some(r) => r,
+                        None => continue,
+                    },
+                    None => {
+                        let (iw, ih, px) = rasterize_image(im, d, out);
+                        (out, iw, ih, px)
+                    }
+                };
                 let mut png = Vec::new();
                 image::write_buffer_with_format(&mut std::io::Cursor::new(&mut png), &px, iw as u32, ih as u32, image::ExtendedColorType::Rgba8, image::ImageFormat::Png)?;
                 s.push_str(&format!(
@@ -437,7 +487,7 @@ fn svg(ctx: &egui::Context, fig: &Figure) -> Result<String> {
                     out[0] as f64 / sc, out[1] as f64 / sc, iw as f64 / sc, ih as f64 / sc, base64(&png)
                 ));
             }
-            Prim::Markers { .. } | Prim::Path { .. } | Prim::Frame { .. } => s.push_str(&svg_shape(p)),
+            Prim::Markers { .. } | Prim::Path { .. } | Prim::Frame { .. } | Prim::Hatch { .. } => s.push_str(&svg_shape(p)),
             Prim::Text { pos, text, size_px, color, rotation, face, glyphs, .. } => {
                 let Some(path) = text_path(ctx, text, *size_px, *face, glyphs) else { continue };
                 let mut d = String::new();

@@ -360,6 +360,7 @@ impl TypeIIWindow {
         let (lt, lf) = arrays(&self.lower);
         let inputs = self.inputs();
         AnalysisSession {
+            identity: Default::default(),
             source: base.source.clone(),
             max_intensity: base.max_intensity.clone(),
             analyzer: base.analyzer.clone(),
@@ -1171,8 +1172,18 @@ impl TypeIIWindow {
         use callisto_core::mpl::analysis_figures::GraphText;
         use callisto_core::mpl::type_ii_figures::{BandTrace, SpectrumImage, bvr_figure, spectrum_figure};
         let s = &self.current_style;
-        // The font family and emphasis are not drawn yet (Phase 4's figures).
-        let text = GraphText { tick_pt: s.tick_font_px as f64, label_pt: s.axis_label_font_px as f64, title_pt: s.title_font_px as f64 };
+        let text = GraphText {
+            tick_pt: s.tick_font_px as f64,
+            label_pt: s.axis_label_font_px as f64,
+            title_pt: s.title_font_px as f64,
+            family: GraphText::family_id(&crate::fonts::normalize_font_family(&s.font_family)),
+            title_bold: s.title_bold,
+            title_italic: s.title_italic,
+            axis_bold: s.axis_bold,
+            axis_italic: s.axis_italic,
+            ticks_bold: s.ticks_bold,
+            ticks_italic: s.ticks_italic,
+        };
         if self.bvr {
             let p = self.bvr_profile()?;
             if p.heights_rs.len() < 2 || p.magnetic_field_g.len() < 2 {
@@ -1285,6 +1296,7 @@ mod tests {
         };
         // A normalised session: each empty band comes back as one NaN point.
         let session = AnalysisSession {
+            identity: Default::default(),
             source: Default::default(),
             max_intensity: None,
             analyzer: Default::default(),

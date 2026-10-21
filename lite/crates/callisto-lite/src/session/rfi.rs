@@ -107,6 +107,7 @@ impl Session {
         let result = clean_rfi(&data, self.rfi.settings);
         self.noise_reduced_original = Some(data);
         self.noise_reduced_original_plot_type = title.to_owned();
+        (self.noise_vmin, self.noise_vmax) = finite_data_limits(&result.data.data).unzip();
         self.noise_reduced = Some(Arc::new(result.data));
         self.rfi.masked_channel_indices = result.masked_channel_indices;
         Some("RFI Cleaned".into())

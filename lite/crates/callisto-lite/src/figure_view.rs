@@ -6,7 +6,7 @@
 
 use egui::{Color32, Pos2, Rect, Stroke, TextureHandle, TextureOptions, Ui, pos2, vec2};
 
-use callisto_core::mpl::{DrawList, Figure, Prim, PxRect, agg_rotated_text_offset, image_placement, rasterize_image, render};
+use callisto_core::mpl::{DrawList, Figure, Prim, PxRect, agg_rotated_text_offset, image_pixels, render};
 
 use crate::fonts::{MplMeasure, mpl_font};
 
@@ -101,7 +101,7 @@ impl FigureView {
                 images.push(Some((r, tex)));
                 continue;
             }
-            let Prim::Image { axes, image, dest, clip } = p else {
+            let Prim::Image { axes, image, dest, clip, log_y } = p else {
                 images.push(None);
                 continue;
             };
@@ -112,11 +112,10 @@ impl FigureView {
             let s = ppp as f64;
             let d = [dest.x0.min(dest.x1) * s, dest.y0.min(dest.y1) * s, dest.x0.max(dest.x1) * s, dest.y0.max(dest.y1) * s];
             let c = [clip.x0 * s, clip.y0 * s, clip.x1 * s, clip.y1 * s];
-            let Some((out, virtual_dest)) = image_placement(d, c) else {
+            let Some((out, w, h, px)) = image_pixels(im, d, c, *log_y) else {
                 images.push(None);
                 continue;
             };
-            let (w, h, px) = rasterize_image(im, virtual_dest, out);
             let img = egui::ColorImage::from_rgba_unmultiplied([w, h], &px);
             let tex = ui.ctx().load_texture(format!("figure-image-{i}"), img, TextureOptions::NEAREST);
             let r = Rect::from_min_max(
@@ -179,7 +178,7 @@ impl FigureView {
                     }
                     painter.line_segment([p0, p1], Stroke::new(w, color(*c)));
                 }
-                Prim::Image { .. } | Prim::Markers { .. } | Prim::Path { .. } | Prim::Frame { .. } => {
+                Prim::Image { .. } | Prim::Markers { .. } | Prim::Path { .. } | Prim::Frame { .. } | Prim::Hatch { .. } => {
                     if let Some(Some((r, tex))) = cache.images.get(i) {
                         let r = r.translate(origin.to_vec2());
                         painter.image(tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);

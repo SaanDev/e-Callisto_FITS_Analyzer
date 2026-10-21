@@ -14,4 +14,5 @@ pub mod maxima;
 pub mod measure;
 pub mod ridge;
 pub mod session;
+pub mod session_json;
 pub mod type_ii;

@@ -67,6 +67,9 @@ pub(super) fn colorbar_axes(position: [f64; 4], box_aspect: Option<(f64, (f64, f
         lines: Vec::new(),
         legend: None,
         axis_zorder: 1.5,
+        y_log: false,
+        spans: Vec::new(),
+        data_texts: Vec::new(),
     }
 }
 
@@ -124,6 +127,9 @@ pub fn preview_figure(data: &Array2, freqs: &[f64], times: &[f64], width: f64, h
         lines: Vec::new(),
         legend: None,
         axis_zorder: 1.5,
+        y_log: false,
+        spans: Vec::new(),
+        data_texts: Vec::new(),
     };
     let bar = colorbar_axes(
         cbar,
@@ -133,7 +139,7 @@ pub fn preview_figure(data: &Array2, freqs: &[f64], times: &[f64], width: f64, h
         Label::new("Background-subtracted intensity [dB]", 12.0, c.text),
         12.0,
     );
-    Figure { width, height, dpi: 100.0, facecolor: c.window, axes: vec![ax, bar], texts: Vec::new() }
+    Figure { width, height, dpi: 100.0, facecolor: c.window, axes: vec![ax, bar], texts: Vec::new(), constrained: None }
 }
 
 /// `_resolve_cmap`: a known colormap, else viridis.
@@ -173,7 +179,7 @@ pub fn batch_figure(spec: &BatchFigureSpec) -> Figure {
     ax.images = vec![image];
     ax.title = spec.title.as_ref().map(|t| Label::new(t.clone(), 14.4, BLACK));
     let bar = colorbar_axes(cbar, Some(aspect), colorbar_image(&cmap, vmin, vmax), BLACK, Label::new(spec.colorbar_label.clone(), 12.0, BLACK), 12.0);
-    Figure { width: 1000.0, height: 600.0, dpi: 100.0, facecolor: WHITE, axes: vec![ax, bar], texts: Vec::new() }
+    Figure { width: 1000.0, height: 600.0, dpi: 100.0, facecolor: WHITE, axes: vec![ax, bar], texts: Vec::new(), constrained: None }
 }
 
 /// What the grid export draws the panels with.
@@ -269,7 +275,7 @@ pub fn comparison_grid_figure(payloads: &[PanelPayload], o: &GridOptions) -> Fig
         va: VAlign::Top,
         rotation: 0.0,
     };
-    Figure { width, height, dpi: 100.0, facecolor: WHITE, axes, texts: vec![suptitle] }
+    Figure { width, height, dpi: 100.0, facecolor: WHITE, axes, texts: vec![suptitle], constrained: None }
 }
 
 /// `render_spectral_overview_figure` for a canvas of `width` × `height`.
@@ -367,6 +373,9 @@ pub fn overview_figure(result: &OverviewResult, width: f64, height: f64) -> Figu
             lines: Vec::new(),
             legend: None,
             axis_zorder: 1.5,
+            y_log: false,
+            spans: Vec::new(),
+            data_texts: Vec::new(),
         });
     }
     axes.push(colorbar_axes(
@@ -395,5 +404,5 @@ pub fn overview_figure(result: &OverviewResult, width: f64, height: f64) -> Figu
         },
         FigText { x: 0.47, y: 0.020, label: Label::new("Time [UTC]", 12.0, BLACK), ha: HAlign::Center, va: VAlign::Baseline, rotation: 0.0 },
     ];
-    Figure { width, height, dpi: 100.0, facecolor: WHITE, axes, texts }
+    Figure { width, height, dpi: 100.0, facecolor: WHITE, axes, texts, constrained: None }
 }

@@ -43,7 +43,7 @@ fn ui_axes(title: &str, x_label: &str, y_label: &str, origin_ticks: bool) -> Axe
 }
 
 fn page(ax: Axes, width: f64, height: f64) -> Figure {
-    Figure { width, height, dpi: 100.0, facecolor: WHITE, axes: vec![ax], texts: Vec::new() }
+    Figure { width, height, dpi: 100.0, facecolor: WHITE, axes: vec![ax], texts: Vec::new(), constrained: None }
 }
 
 /// The Analyzer's canvas before anything is plotted: an empty axes from
@@ -69,6 +69,7 @@ pub fn max_intensity_figure(x: &[f64], y: &[f64], title: &str, x_label: &str, se
             marker: Some(Marker { kind: MarkerKind::Star, size_pt: 14.0, face: TAB_BLUE, edge: BLACK, edge_width_pt: 1.0 }),
             label: None,
             zorder: 5.0,
+            dash: None,
         });
     }
     ax.autoscale();
@@ -96,17 +97,66 @@ pub fn analyzer_scatter_figure(
     page(ax, width, height)
 }
 
-/// `GraphText`'s defaults: Origin's Arial, 11 pt ticks, 12 pt labels and title.
+/// `GraphText`: the font, sizes in points and emphasis of a graph's titles,
+/// labels and ticks. The defaults: Origin's Arial, 11 pt ticks, 12 pt labels
+/// and title, nothing bold or italic.
 #[derive(Clone, Copy, Debug)]
 pub struct GraphText {
     pub tick_pt: f64,
     pub label_pt: f64,
     pub title_pt: f64,
+    /// The family the user picked, ahead of Arial ([`super::family_chain_id`]
+    /// of it); 0 for Origin's Arial alone.
+    pub family: u16,
+    pub title_bold: bool,
+    pub title_italic: bool,
+    pub axis_bold: bool,
+    pub axis_italic: bool,
+    pub ticks_bold: bool,
+    pub ticks_italic: bool,
 }
 
 impl Default for GraphText {
     fn default() -> Self {
-        GraphText { tick_pt: 11.0, label_pt: 12.0, title_pt: 12.0 }
+        GraphText {
+            tick_pt: 11.0,
+            label_pt: 12.0,
+            title_pt: 12.0,
+            family: 0,
+            title_bold: false,
+            title_italic: false,
+            axis_bold: false,
+            axis_italic: false,
+            ticks_bold: false,
+            ticks_italic: false,
+        }
+    }
+}
+
+impl GraphText {
+    /// The family id for a `font_family` ("" keeps Origin's Arial).
+    pub fn family_id(font_family: &str) -> u16 {
+        super::family_chain_id(&[font_family.to_owned()])
+    }
+
+    /// `families()` at the normal weight: the legend and the overlay texts.
+    pub fn face(&self) -> Face {
+        Face::graph(self.family, false, false)
+    }
+
+    /// `title_kw()`.
+    pub fn title_face(&self) -> Face {
+        Face::graph(self.family, self.title_bold, self.title_italic)
+    }
+
+    /// `label_kw()`.
+    pub fn label_face(&self) -> Face {
+        Face::graph(self.family, self.axis_bold, self.axis_italic)
+    }
+
+    /// `_emphasise_ticks`.
+    pub fn tick_face(&self) -> Face {
+        Face::graph(self.family, self.ticks_bold, self.ticks_italic)
     }
 }
 
@@ -129,12 +179,12 @@ pub struct FitGraph<'a> {
 pub fn fit_figure(g: &FitGraph, text: GraphText, width: f64, height: f64) -> Figure {
     let spec = |label: &str| {
         let mut s = AxisSpec::origin(BLACK);
-        s.label = Some(Label::new(label, text.label_pt, BLACK).with_face(Face::Origin));
+        s.label = Some(Label::new(label, text.label_pt, BLACK).with_face(text.label_face()));
         s.tick_label_pt = text.tick_pt;
         s.major_width_pt = 1.5;
         s.minor_width_pt = 1.0;
         s.pad_pt = 5.0;
-        s.face = Face::Origin;
+        s.face = text.tick_face();
         s
     };
     let mut ax = Axes::new(SUBPLOT, spec(g.x_label), spec(g.y_label));
@@ -158,6 +208,7 @@ pub fn fit_figure(g: &FitGraph, text: GraphText, width: f64, height: f64) -> Fig
             marker: Some(Marker { kind: MarkerKind::Square, size_pt: 6.0, face: BLACK, edge: BLACK, edge_width_pt: 1.0 }),
             label: Some(g.data_label.to_owned()),
             zorder: 3.0,
+            dash: None,
         });
     }
     let (fx, fy) = finite(g.fit_x, g.fit_y);
@@ -170,17 +221,26 @@ pub fn fit_figure(g: &FitGraph, text: GraphText, width: f64, height: f64) -> Fig
             marker: None,
             label: Some(g.fit_label.to_owned()),
             zorder: 4.0,
+            dash: None,
         });
     }
     if !g.title.is_empty() {
-        ax.title = Some(Label::new(g.title, text.title_pt, BLACK).with_face(Face::Origin));
+        ax.title = Some(Label::new(g.title, text.title_pt, BLACK).with_face(text.title_face()));
     }
     // `get_legend_handles_labels`: only lines with a label.
     if ax.lines.iter().any(|l| l.label.as_deref().is_some_and(|s| !s.is_empty() && !s.starts_with('_'))) {
-        ax.legend = Some(Legend::origin(Loc::Best, (text.tick_pt - 1.0).max(6.0)));
+        ax.legend = Some(Legend { face: text.face(), ..Legend::origin(Loc::Best, (text.tick_pt - 1.0).max(6.0)) });
     }
     ax.autoscale();
     page(ax, width, height)
+}
+
+/// `fit_graph_figure`: [`fit_figure`] on its own 6.4 × 4.8 in page,
+/// laid out by matplotlib's constrained layout (Save Graph, Save Plot).
+pub fn fit_graph_figure(g: &FitGraph, text: GraphText) -> Figure {
+    let mut fig = fit_figure(g, text, 640.0, 480.0);
+    fig.constrained = Some(super::Constrained { axes: 0, colorbar: None });
+    fig
 }
 
 /// `power_law_label`: `prefix: f = a x⁻ᵇ`, the exponent a mathtext
@@ -191,8 +251,13 @@ pub fn power_law_label(a: f64, b: f64, prefix: &str, variable: &str) -> String {
 
 /// `power_law_label(…, symbol=…)`: `prefix: B = a R⁻ᵇ` and the like.
 pub fn power_law_label_for(a: f64, b: f64, prefix: &str, symbol: &str, variable: &str) -> String {
+    power_law_label_digits(a, b, prefix, symbol, variable, 2)
+}
+
+/// `power_law_label(…, digits=…)`.
+pub fn power_law_label_digits(a: f64, b: f64, prefix: &str, symbol: &str, variable: &str, digits: usize) -> String {
     let head = if prefix.is_empty() { String::new() } else { format!("{prefix}: ") };
-    format!("{head}{symbol} = {a:.2} {variable}$\\mathregular{{^{{{:.2}}}}}$", -b)
+    format!("{head}{symbol} = {a:.digits$} {variable}$\\mathregular{{^{{{:.digits$}}}}}$", -b)
 }
 
 #[cfg(test)]

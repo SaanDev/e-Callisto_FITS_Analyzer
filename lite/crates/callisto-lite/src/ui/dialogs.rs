@@ -93,6 +93,49 @@ pub fn message_box(ctx: &egui::Context, notice: &Notice, p: &Palette) -> bool {
     .unwrap_or(false)
 }
 
+/// `QMessageBox.question`: the question icon, the text, and `buttons`
+/// right-aligned in order, `default` taking Enter. Returns the clicked
+/// button's index; closing the window or Escape picks the last (Cancel).
+pub fn question_box(ctx: &egui::Context, title: &str, text: &str, buttons: &[&str], default: usize, p: &Palette) -> Option<usize> {
+    let text_w = 360.0;
+    let probe = ctx.fonts_mut(|f| f.layout(text.to_owned(), ui_font(12.0, Weight::Regular), p.text, text_w));
+    let text_h = probe.size().y.max(32.0);
+    let widths: Vec<f32> = buttons
+        .iter()
+        .map(|b| (ctx.fonts_mut(|f| f.layout_no_wrap((*b).to_owned(), ui_font(12.0, Weight::Regular), Color32::WHITE).size().x) + 32.0).max(BUTTON_W))
+        .collect();
+    let buttons_w: f32 = widths.iter().sum::<f32>() + 6.0 * (buttons.len().saturating_sub(1)) as f32;
+    let width = (MARGIN * 2.0 + 32.0 + 16.0 + text_w).max(buttons_w + MARGIN * 2.0);
+    let size = vec2(width, MARGIN * 3.0 + text_h + BUTTON_H);
+    let cancel = buttons.len().saturating_sub(1);
+    dialog_window(ctx, &format!("question:{title}:{text}"), title, size, p, cancel, |ui| {
+        let full = ui.max_rect();
+        let icon = Rect::from_min_size(full.min + vec2(MARGIN, MARGIN), vec2(32.0, 32.0));
+        ui.painter().circle_filled(icon.center(), 16.0, Color32::from_rgb(0x1f, 0x6f, 0xeb));
+        ui.painter().text(icon.center(), egui::Align2::CENTER_CENTER, "?", ui_font(20.0, Weight::Bold), Color32::WHITE);
+        let galley = wrapped(ui, text, text_w, p.text);
+        ui.painter().galley(pos2(icon.right() + 16.0, full.top() + MARGIN), galley, p.text);
+        let mut x = full.right() - MARGIN - buttons_w;
+        let mut picked = None;
+        for (i, (label, w)) in buttons.iter().zip(&widths).enumerate() {
+            let r = Rect::from_min_size(pos2(x, full.bottom() - MARGIN - BUTTON_H), vec2(*w, BUTTON_H));
+            let kind = if i == default { ButtonKind::Primary } else { ButtonKind::Normal };
+            if widgets::push_button(ui, r, Id::new(("question", i)), label, kind, true, p).clicked() {
+                picked = Some(i);
+            }
+            x += w + 6.0;
+        }
+        if picked.is_none() {
+            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                picked = Some(default);
+            } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                picked = Some(cancel);
+            }
+        }
+        picked
+    })
+}
+
 /// `FrequencyCombineOptionsDialog`.
 pub struct CombineOptionsDialog {
     relation: FrequencyRelation,

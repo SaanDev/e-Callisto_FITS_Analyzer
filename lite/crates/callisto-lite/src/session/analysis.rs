@@ -66,6 +66,7 @@ impl Session {
         let clean = self.is_isolated_burst_plot() && auto_clean_isolated;
         let seed = analysis_seed(&data, &d.freqs, Some(&d.time), clean)?;
         let session = AnalysisSession {
+            identity: Default::default(),
             source: self.analysis_source_context(),
             max_intensity: Some(MaxIntensityBlock {
                 time_channels: seed.time_channels,
@@ -107,6 +108,7 @@ impl Session {
     /// The candidate `_open_or_focus_type_ii_dialog` makes without a session.
     pub fn empty_type_ii_session(&self) -> AnalysisSession {
         AnalysisSession {
+            identity: Default::default(),
             source: self.analysis_source_context(),
             max_intensity: None,
             analyzer: AnalyzerBlock::default(),
@@ -122,6 +124,7 @@ impl Session {
             return None;
         }
         s.source = self.analysis_source_context();
+        s.identity = s.identity.ensured();
         Some(s)
     }
 

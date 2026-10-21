@@ -60,7 +60,9 @@ def dump(fig, name, width, height):
     fig.set_dpi(100)
     fig.set_size_inches(width / 100, height / 100)
     canvas = FigureCanvasAgg(fig)
-    canvas.draw()
+    # Draw once, by writing the PNG, and measure that state: another draw
+    # would run a constrained layout again from where this one ended.
+    canvas.print_png(str(OUT / f"figure.{name}.png"))
     renderer = canvas.get_renderer()
     H = fig.bbox.height
 
@@ -90,11 +92,20 @@ def dump(fig, name, width, height):
         if bb.width == 0:
             continue
         size = t.get_fontsize()
-        texts.append({"text": t.get_text(), "size_pt": size, "rotation": t.get_rotation(), "bbox": rect(bb)})
-        _, ismath = t._preprocess_math(t.get_text())
-        for s, math in ((t.get_text(), ismath), ("lp", False)):
-            w, h, d = renderer.get_text_width_height_descent(s, t.get_fontproperties(), ismath=math)
-            metrics[f"{s}|{size}"] = [w, h, d]
+        entry = {"text": t.get_text(), "size_pt": size, "rotation": t.get_rotation(), "bbox": rect(bb),
+                 "weight": str(t.get_fontweight()), "style": t.get_fontstyle()}
+        patch = t.get_bbox_patch()
+        if patch is not None:
+            entry["patch"] = rect(patch.get_window_extent(renderer))
+        texts.append(entry)
+        # Metrics by weight and slant too (Agg measures each line on its own).
+        face = f"{entry['weight']}|{entry['style']}"
+        for line in t.get_text().split("\n") + ["lp"]:
+            clean, math = t._preprocess_math(line) if line != "lp" else ("lp", False)
+            if not clean:
+                continue
+            w, h, d = renderer.get_text_width_height_descent(clean, t.get_fontproperties(), ismath=math)
+            metrics[f"{clean}|{size}|{face}"] = [w, h, d]
     axes = []
     for ax in fig.axes:
         if not ax.get_visible():
@@ -107,7 +118,6 @@ def dump(fig, name, width, height):
             "xminor": [float(v) for v in ax.xaxis.get_minorticklocs()],
             "yminor": [float(v) for v in ax.yaxis.get_minorticklocs()],
         })
-    canvas.print_png(str(OUT / f"figure.{name}.png"))
     return {"name": name, "width": width, "height": height, "axes": axes, "texts": texts, "metrics": metrics}
 
 
@@ -166,13 +176,19 @@ def dump_analysis(fig, name, width, height):
             pts = line.get_transform().transform(line.get_xydata())
             lines.append({"marker": str(line.get_marker()), "markersize": line.get_markersize(),
                           "linestyle": str(line.get_linestyle()), "linewidth": line.get_linewidth(),
-                          "color": line.get_color(), "n": len(pts), "first": xy(pts[:1]), "last": xy(pts[-1:])})
+                          "color": line.get_color(), "zorder": line.get_zorder(), "n": len(pts), "first": xy(pts[:1]), "last": xy(pts[-1:])})
         collections = []
         for coll in ax.collections:
+            if not hasattr(coll, "get_sizes"):
+                continue  # the colour bar's dividers
             offs = coll.get_offset_transform().transform(coll.get_offsets())
             collections.append({"n": len(offs), "sizes": [float(v) for v in coll.get_sizes()[:1]],
-                                "linewidths": [float(v) for v in coll.get_linewidths()[:1]],
+                                "linewidths": [float(v) for v in coll.get_linewidths()[:1]], "zorder": coll.get_zorder(),
                                 "first": xy(offs[:1]), "last": xy(offs[-1:])})
+        patches = []
+        for p in ax.patches:
+            bb = p.get_window_extent(renderer)
+            patches.append({"rect": [bb.x0, H - bb.y1, bb.x1, H - bb.y0], "hatch": p.get_hatch(), "zorder": p.get_zorder()})
         legend = None
         leg = ax.get_legend()
         if leg is not None:
@@ -191,7 +207,7 @@ def dump_analysis(fig, name, width, height):
             legend = {"frame": [frame.x0, H - frame.y1, frame.x1, H - frame.y0], "loc": leg._loc, "handles": handles,
                       "math": math, "fontsize": leg._fontsize}
         axes_extra.append({"lines": lines, "collections": collections, "legend": legend,
-                           "title": ax.get_title()})
+                           "title": ax.get_title(), "patches": patches})
     case["analysis"] = axes_extra
     return case
 
@@ -281,6 +297,113 @@ def analysis_figures():
     case = dump_analysis(fig, "analyzer fit", 772, 598)
     case.update(kind="analysis", x=list(map(float, t_sec)), y=list(map(float, f_max)), a=float(a), b=float(b))
     cases.append(case)
+
+    # Save Graph: the same graph on its own page, laid out by constrained layout.
+    from src.backend.radio.radio_figures import fit_graph_figure
+    fig = fit_graph_figure(t_sec, f_max, fit_x=fit_x, fit_y=model(fit_x, a, b), data_label="Original Data",
+                           fit_label=power_law_label(a, b, prefix="Best Fit", variable="x"), title=f"{stem}_Best_Fit",
+                           x_label="Time (s)", y_label="Frequency (MHz)")
+    FigureCanvasAgg(fig)
+    case = dump_analysis(fig, "fit graph saved", 640, 480)
+    case.update(kind="analysis", x=list(map(float, t_sec)), y=list(map(float, f_max)), a=float(a), b=float(b))
+    cases.append(case)
+
+    # Type II Save Plot: the lanes and fits over the isolated burst, with its colour bar.
+    from src.backend.radio.frequency_axis import axis_edges, finite_data_limits, frequency_edges
+    from src.backend.radio.radio_figures import BandTrace, SpectrumImage, type_ii_spectrum_figure
+    from src.backend.radio.type_ii_band_splitting import fit_power_law, power_law
+    upper = [(300.0, 80.0), (340.0, 70.0), (380.0, 62.0), (420.0, 56.0)]
+    lower = [(300.0, 60.0), (340.0, 52.0), (380.0, 46.0), (420.0, 42.0)]
+    bands, fits = [], []
+    for label, pts, mc, lc in (("Upper band", upper, "#ff8c42", "#ff5a1f"), ("Lower band", lower, "#38bdf8", "#0ea5e9")):
+        t = np.array([p[0] for p in pts])
+        f = np.array([p[1] for p in pts])
+        fit = fit_power_law(t, f)
+        xs = np.linspace(t.min(), t.max(), 400)
+        bands.append(BandTrace(label, pts, (xs, power_law(xs, fit["a"], fit["b"])), marker_color=mc, line_color=lc,
+                               marker_size=0.75 * 9, line_width=0.75 * 2))
+        fits.append([float(fit["a"]), float(fit["b"])])
+    te = axis_edges(time, default_step=float(np.median(np.diff(time))))
+    fe = frequency_edges(freqs, default_step=1.0)
+    extent = (float(te[0]), float(te[-1]), float(fe[-1]), float(fe[0]))
+    levels = tuple(float(v) for v in finite_data_limits(iso))
+    image = SpectrumImage(iso, extent, "viridis", levels, "Intensity [Digits]")
+    fig = type_ii_spectrum_figure(image, bands, title=f"{stem}_Type_II_Band_Splitting")
+    FigureCanvasAgg(fig)
+    case = dump_analysis(fig, "type ii saved", 800, 500)
+    case.update(kind="analysis", x=[], y=[], extent=list(extent), levels=list(levels), fits=fits, upper=upper, lower=lower,
+                shape=list(iso.shape))
+    cases.append(case)
+    return cases
+
+
+def spectrum_figures():
+    """The main window's Export Figure (`dynamic_spectrum_figure`) for a
+    background-subtracted spectrum: the plain graph, one zoomed in on a UT
+    axis with hatched gaps, light curves, annotations and the ruler, and
+    one on a log frequency axis with emphasised text."""
+    import numpy as np
+
+    from src.backend.radio.fits_io import extract_ut_start_sec
+    from src.backend.radio.frequency_axis import finite_data_limits, frequency_step_mhz, matplotlib_extent
+    from src.backend.radio.radio_figures import GraphText, Measurement, SpectrumGraph, SpectrumImage, dynamic_spectrum_figure
+
+    name = "INDIA-GAURI_20261007_041500_02.fit.gz"
+    res = load_callisto_fits(str(FIX / name), memmap=False)
+    data = np.asarray(res.data, dtype=np.float32)
+    data = data - np.nanmean(data, axis=1, keepdims=True).astype(np.float32)
+    freqs, time = np.asarray(res.freqs, dtype=float), np.asarray(res.time, dtype=float)
+    extent = [float(v) for v in matplotlib_extent(freqs, time, default_step=frequency_step_mhz(freqs, default=1.0))]
+    stem = name.split(".")[0]
+    ut = float(extract_ut_start_sec(res.header0))
+    curve_t = time[::4]
+    curve = {"time": list(map(float, curve_t)), "y": list(map(float, 55.0 + 12.0 * np.sin(curve_t / 90.0))),
+             "color": "#00e5ff", "line_width": 2.0, "opacity": 0.95, "line_style": "dashed",
+             "show_label": True, "label": "45.0 MHz", "label_x": 150.0, "label_y": 70.0}
+    curve2 = {**curve, "y": list(map(float, 75.0 + 5.0 * np.cos(curve_t / 60.0))), "color": "#ff8c42", "line_style": "dotted",
+              "line_width": 1.5, "show_label": False}
+    annotations = [
+        {"kind": "line", "points": [[120.0, 50.0], [300.0, 80.0]], "color": "#ff00ff", "line_width": 2.0, "visible": True},
+        {"kind": "polygon", "points": [[400.0, 50.0], [500.0, 55.0], [450.0, 70.0]], "color": "", "line_width": 1.5, "visible": True},
+        {"kind": "text", "points": [[350.0, 60.0]], "text": "Type III", "color": "#ffffff", "font_size": 14,
+         "font_bold": True, "font_italic": False, "font_family": "", "visible": True},
+        {"kind": "line", "points": [[0.0, 0.0], [1.0, 1.0]], "color": "#000000", "visible": False},
+    ]
+    ruler = Measurement([(220.0, 75.0), (380.0, 52.0)], "dt=160.000 s\ndf=-23.000 MHz\n-0.143750 MHz/s")
+    runs = [
+        ("spectrum export", dict(title=f"{stem}-Background Subtracted", x_label="Time [s]"), None),
+        ("spectrum export overlays", dict(title=f"{stem}-Background Subtracted", x_label="Time [UT]", ut_start_sec=ut,
+                                          view={"xlim": (100.0, 700.0), "ylim": (45.0, 85.0)},
+                                          gap_spans=[(60.0, 62.5), (80.0, 81.0)], light_curves=[curve, curve2],
+                                          annotations=annotations, measurement=ruler), (-5.0, 20.0)),
+        # Labels outside the axes: the layout makes room for them as they move with it.
+        ("spectrum export outside", dict(title=f"{stem}-Background Subtracted", x_label="Time [UT]", ut_start_sec=ut,
+                                         view={"xlim": (120.0, 640.0), "ylim": (38.0, 86.0)},
+                                         light_curves=[{**curve, "label_x": 0.0, "label_y": 62.0, "label": "62.125 MHz"}],
+                                         annotations=[{**annotations[2], "points": [[600.0, 70.0]], "text": "Type III burst",
+                                                       "font_size": 16}]), None),
+        ("spectrum export log",dict(title=f"{stem}-Background Subtracted", x_label="Time [UT]", ut_start_sec=ut,
+                                     view={"xlim": (300.0, 560.0), "ylim": (46.0, 88.0)}, log_frequency_bounds=(45.0, 89.0),
+                                     text=GraphText(title_bold=True, axis_italic=True, ticks_bold=True, tick_size=10.0,
+                                                    label_size=13.0, title_size=14.0)), None),
+    ]
+    cases = []
+    for case_name, kw, levels in runs:
+        image = SpectrumImage(data, extent, "viridis", levels, "Intensity [Digits]")
+        graph = SpectrumGraph(image=image, y_label="Frequency [MHz]", **kw)
+        fig = dynamic_spectrum_figure(graph)
+        FigureCanvasAgg(fig)
+        case = dump_analysis(fig, case_name, 800, 500)
+        used = [float(v) for v in fig.axes[0].images[0].get_clim()]
+        text = kw.get("text") or GraphText()
+        case.update(kind="spectrum", shape=list(data.shape), extent=extent, levels=used,
+                    data_limits=[float(v) for v in finite_data_limits(data)],
+                    graph={k: v for k, v in kw.items() if k not in ("text", "measurement")},
+                    measurement=None if "measurement" not in kw else {"points": kw["measurement"].points, "label": kw["measurement"].label},
+                    text={"tick": text.tick_size, "label": text.label_size, "title": text.title_size,
+                          "title_bold": text.title_bold, "title_italic": text.title_italic, "axis_bold": text.axis_bold,
+                          "axis_italic": text.axis_italic, "ticks_bold": text.ticks_bold, "ticks_italic": text.ticks_italic})
+        cases.append(case)
     return cases
 
 
@@ -406,6 +529,7 @@ def main() -> int:
     case.update(kind="overview", files=names)
     cases.append(case)
     cases.extend(analysis_figures())
+    cases.extend(spectrum_figures())
     cases.extend(batch_figures())
     cases.extend(comparison_figures())
     (OUT / "figures.json").write_text(json.dumps(cases, indent=1, ensure_ascii=False), encoding="utf-8")

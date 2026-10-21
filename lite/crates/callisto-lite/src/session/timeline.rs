@@ -353,12 +353,14 @@ impl Session {
         let title = self.reapply_processing_chain();
         self.plot_data(&title, PlotView::Full);
         self.refresh_timeline_panel();
+        self.mark_project_dirty();
     }
 
     /// `_reapply_processing_chain`: rebuild the product over the new raw data.
     fn reapply_processing_chain(&mut self) -> String {
         let wanted = normalize_plot_type(&self.current_plot_type);
         self.noise_reduced = None;
+        (self.noise_vmin, self.noise_vmax) = (None, None);
         self.noise_reduced_original = None;
         self.noise_reduced_original_plot_type = "Background Subtracted".into();
         let method = self.background_applied.take();

@@ -170,6 +170,102 @@ pub fn normalize_font_family(value: &str) -> String {
     text.to_owned()
 }
 
+/// A face's file and its index in it.
+type FaceData = (std::sync::Arc<Vec<u8>>, u32);
+
+/// The system fonts, kept for the graph families resolved on demand.
+static FONT_DB: std::sync::OnceLock<fontdb::Database> = std::sync::OnceLock::new();
+
+/// [`Face::Styled`] font lists, once resolved.
+static STYLED: RwLock<Option<HashMap<StyleKey, std::sync::Arc<Vec<FaceData>>>>> = RwLock::new(None);
+
+/// A [`Face::Styled`] face: family list, bold, italic.
+type StyleKey = (u16, bool, bool);
+
+/// `family`'s face nearest `weight` and the slant, from the system fonts.
+fn db_face(db: &fontdb::Database, family: &str, weight: u16, italic: bool) -> Option<FaceData> {
+    let query = fontdb::Query {
+        families: &[fontdb::Family::Name(family)],
+        weight: fontdb::Weight(weight),
+        stretch: fontdb::Stretch::Normal,
+        style: if italic { fontdb::Style::Italic } else { fontdb::Style::Normal },
+    };
+    let id = db.query(&query)?;
+    if !db.face(id)?.families.iter().any(|(n, _)| n.eq_ignore_ascii_case(family)) {
+        return None;
+    }
+    db.with_face_data(id, |data, index| (std::sync::Arc::new(data.to_vec()), index))
+}
+
+/// The fonts a graph text in `family`'s list is set in, as matplotlib's
+/// `_find_fonts_by_props` finds them: the list's families, then the Origin
+/// ones and DejaVu Sans, each in its face nearest the weight and slant
+/// (`findfont` scores a missing italic above a missing bold).
+fn styled_faces(family: u16, bold: bool, italic: bool) -> std::sync::Arc<Vec<FaceData>> {
+    let key = (family, bold, italic);
+    if let Some(found) = STYLED.read().ok().and_then(|g| g.as_ref()?.get(&key).cloned()) {
+        return found;
+    }
+    let Some(db) = FONT_DB.get() else {
+        return std::sync::Arc::new(ORIGIN_FACE.read().ok().and_then(|g| g.clone()).into_iter().collect());
+    };
+    let weight = if bold { 700 } else { 400 };
+    let mut names = callisto_core::mpl::family_chain(family);
+    names.extend(ORIGIN_CANDIDATES.iter().map(|s| (*s).to_owned()));
+    names.push("DejaVu Sans".into());
+    let mut faces: Vec<FaceData> = Vec::new();
+    for name in &names {
+        let face = db_face(db, name, weight, italic)
+            .or_else(|| db_face(db, name, 400, italic))
+            .or_else(|| db_face(db, name, weight, false))
+            .or_else(|| db_face(db, name, 400, false));
+        if let Some(f) = face
+            && !faces.iter().any(|g| std::sync::Arc::ptr_eq(&g.0, &f.0) || (g.0.len() == f.0.len() && g.1 == f.1 && g.0 == f.0))
+        {
+            faces.push(f);
+        }
+    }
+    let faces = std::sync::Arc::new(faces);
+    if let Ok(mut g) = STYLED.write() {
+        g.get_or_insert_with(HashMap::new).insert(key, faces.clone());
+    }
+    faces
+}
+
+/// Lays out `text` in a [`Face::Styled`] face as FT2Font's `set_text` does
+/// with a fallback list: each character from the first font that has it,
+/// pen advancing by its advance, kerned against the previous glyph when
+/// both come from the same font. Calls `f` with each glyph's font, glyph
+/// and pen position; returns the pen's final advance. None for other faces.
+pub fn styled_layout(face: Face, text: &str, size_px: f64, mut f: impl FnMut(&ttf_parser::Face, ttf_parser::GlyphId, f64)) -> Option<f64> {
+    let Face::Styled { family, bold, italic } = face else { return None };
+    let data = styled_faces(family, bold, italic);
+    let fonts: Vec<ttf_parser::Face> = data.iter().filter_map(|(d, i)| ttf_parser::Face::parse(d, *i).ok()).collect();
+    if fonts.is_empty() {
+        return None;
+    }
+    let mut x = 0.0;
+    let mut prev: Option<(usize, char)> = None;
+    for c in text.chars() {
+        let (fi, gid) = fonts
+            .iter()
+            .enumerate()
+            .find_map(|(i, ft)| ft.glyph_index(c).filter(|g| g.0 != 0).map(|g| (i, g)))
+            .unwrap_or((0, ttf_parser::GlyphId(0)));
+        let ft = &fonts[fi];
+        if let Some((pi, pc)) = prev
+            && pi == fi
+        {
+            x += kern_px(ft, pc, c, size_px);
+        }
+        f(ft, gid, x);
+        let scale = size_px / ft.units_per_em() as f64;
+        x += ft.glyph_hor_advance(gid).unwrap_or(0) as f64 * scale;
+        prev = Some((fi, c));
+    }
+    Some(x)
+}
+
 /// The file of the face matplotlib text in `face` is drawn in: the Origin
 /// face or the UI family's weight when installed, the regular UI face otherwise.
 fn mpl_face_data(face: Face) -> Option<(std::sync::Arc<Vec<u8>>, u32)> {
@@ -178,6 +274,12 @@ fn mpl_face_data(face: Face) -> Option<(std::sync::Arc<Vec<u8>>, u32)> {
         Face::UiSemibold => Some(&UI_SEMIBOLD_FACE),
         Face::UiBold => Some(&UI_BOLD_FACE),
         Face::Origin => Some(&ORIGIN_FACE),
+        Face::Styled { family, bold, italic } => {
+            if let Some(f) = styled_faces(family, bold, italic).first() {
+                return Some(f.clone());
+            }
+            Some(&ORIGIN_FACE)
+        }
     };
     slot.and_then(|s| s.read().ok().and_then(|g| g.clone())).or_else(|| UI_FACE.read().ok()?.clone())
 }
@@ -196,6 +298,8 @@ pub fn mpl_font(face: Face, px: f32) -> FontId {
         Face::Origin if installed(&ORIGIN_FACE) => FontId::new(px, FontFamily::Name(ORIGIN.into())),
         Face::UiSemibold if installed(&UI_SEMIBOLD_FACE) => ui_font(px, Weight::Semibold),
         Face::UiBold if installed(&UI_BOLD_FACE) => ui_font(px, Weight::Bold),
+        // On screen: the Graph Properties family's faces stand in.
+        Face::Styled { bold, italic, .. } => graph_font(px, bold, italic),
         _ => FontId::proportional(px),
     }
 }
@@ -254,6 +358,20 @@ impl callisto_core::mpl::TextMeasure for MplMeasure<'_> {
     }
 
     fn measure(&self, text: &str, size_px: f64, mpl_face: Face) -> callisto_core::mpl::TextExtent {
+        let (mut y0, mut y1) = (f64::INFINITY, f64::NEG_INFINITY);
+        let styled = styled_layout(mpl_face, text, size_px, |ft, gid, _| {
+            if let Some(bb) = ft.glyph_bounding_box(gid) {
+                let scale = size_px / ft.units_per_em() as f64;
+                y0 = y0.min(bb.y_min as f64 * scale);
+                y1 = y1.max(bb.y_max as f64 * scale);
+            }
+        });
+        if let Some(width) = styled {
+            if !y0.is_finite() {
+                return callisto_core::mpl::TextExtent { width, height: 0.0, descent: 0.0 };
+            }
+            return callisto_core::mpl::TextExtent { width, height: y1 - y0, descent: -y0 };
+        }
         let galley = self.ctx.fonts_mut(|f| {
             f.layout_no_wrap(text.to_owned(), mpl_font(mpl_face, size_px as f32), egui::Color32::WHITE)
         });
@@ -341,6 +459,7 @@ impl SystemFonts {
     pub fn load() -> Self {
         let mut db = fontdb::Database::new();
         db.load_system_fonts();
+        let _ = FONT_DB.set(db.clone());
         Self { db }
     }
 

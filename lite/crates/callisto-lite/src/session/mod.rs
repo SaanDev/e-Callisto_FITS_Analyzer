@@ -8,6 +8,10 @@
 //! drives as the full app drives its `AcceleratedPlotWidget`.
 
 mod analysis;
+pub mod exports;
+mod presets;
+pub mod project;
+pub mod report;
 mod display_range;
 mod rfi;
 mod timeline;
@@ -254,7 +258,23 @@ pub struct Session {
     loaded_message_due: bool,
     /// Selections that opened, newest last, for File → Recent Files.
     pub opened: Vec<Vec<String>>,
-    log: Vec<String>,
+    /// `_processing_log`: (timestamp, message), the newest 500.
+    pub log: Vec<(String, String)>,
+    /// `noise_vmin` / `noise_vmax`: the processed data's range.
+    pub noise_vmin: Option<f64>,
+    pub noise_vmax: Option<f64>,
+    /// What a project held that Lite keeps without using: the radio part's
+    /// `active_preset`, `time_sync` and SWAVES panel (`swaves` and its arrays).
+    pub project_extras: project::RadioExtras,
+    /// `_pending_analysis_restore`: the windows an opened project reopens.
+    pub pending_analysis_restore: Option<project::PendingAnalysisRestore>,
+    /// How many changes `_mark_project_dirty` would have counted.
+    pub project_changes: u64,
+    /// The default preset, applied to every file as it loads.
+    pub default_preset: Option<callisto_core::pyjson::Json>,
+    /// New data loaded: the project file no longer describes the window
+    /// (`_apply_loaded_dataset` sets `_project_path = None`).
+    pub project_detached: bool,
 }
 
 impl Default for Session {
@@ -317,6 +337,13 @@ impl Session {
             loaded_message_due: false,
             opened: Vec::new(),
             log: Vec::new(),
+            noise_vmin: None,
+            noise_vmax: None,
+            project_extras: project::RadioExtras::default(),
+            pending_analysis_restore: None,
+            project_changes: 0,
+            default_preset: None,
+            project_detached: false,
         }
     }
 
@@ -350,8 +377,18 @@ impl Session {
         self.notices.push(Notice { kind, title: title.into(), text: text.into() });
     }
 
-    fn log_operation(&mut self, message: impl Into<String>) {
-        self.log.push(message.into());
+    /// `_mark_project_dirty`: counted, the project compares the count.
+    pub fn mark_project_dirty(&mut self) {
+        self.project_changes += 1;
+    }
+
+    pub fn log_operation(&mut self, message: impl Into<String>) {
+        let msg: String = message.into();
+        let msg = msg.trim().to_owned();
+        if msg.is_empty() {
+            return;
+        }
+        self.log.push((callisto_core::project::now_iso(), msg));
         if self.log.len() > 500 {
             self.log.drain(..self.log.len() - 500);
         }
@@ -540,7 +577,11 @@ impl Session {
         self.reset_noise_controls_to_defaults();
         let raw = self.data.as_ref().map(|d| d.raw.clone());
         self.fit_noise_clip_bounds_to_data(raw.as_deref());
-        let artemis_bg = self.prepare_artemis_display_defaults();
+        let default_applied = match self.default_preset.clone() {
+            Some(p) => self.apply_preset_payload(&p, false, false, false).is_ok(),
+            None => false,
+        };
+        let artemis_bg = !default_applied && self.prepare_artemis_display_defaults();
         let mut title = plot_title.to_owned();
         if self.noise_reduced.is_some() {
             title = self.current_plot_type.clone();
@@ -554,6 +595,8 @@ impl Session {
         if artemis_bg {
             self.show_message("ARTEMIS-IV — opened background subtracted", 8000);
         }
+        self.project_detached = true;
+        self.mark_project_dirty();
     }
 
     /// `_refresh_instrument_profile`: ARTEMIS-IV files have their own scale.
@@ -569,6 +612,7 @@ impl Session {
     /// `_reset_runtime_state_for_loaded_data`.
     fn reset_runtime_state_for_loaded_data(&mut self) {
         self.noise_reduced = None;
+        (self.noise_vmin, self.noise_vmax) = (None, None);
         self.noise_reduced_original = None;
         self.noise_reduced_original_plot_type = "Background Subtracted".into();
         self.background_applied = None;
@@ -795,6 +839,7 @@ impl Session {
             let title = self.current_plot_type.clone();
             self.plot_data(&title, PlotView::Keep);
         }
+        self.mark_project_dirty();
     }
 
     /// `set_axis_to_seconds` / `set_axis_to_utc`.
@@ -804,6 +849,7 @@ impl Session {
             let title = self.current_plot_type.clone();
             self.plot_data(&title, PlotView::Keep);
         }
+        self.mark_project_dirty();
     }
 
     // ------------------------------------------------- frequency axis
@@ -1001,6 +1047,7 @@ impl Session {
         let scale = if log { ClipScale::SignedLog } else { ClipScale::Linear };
         if scale != self.noise_clip_scale {
             self.set_noise_clip_state(Some(self.noise_clip_low), Some(self.noise_clip_high), Some(scale));
+            self.mark_project_dirty();
         }
     }
 
@@ -1105,6 +1152,7 @@ impl Session {
     fn set_background_product(&mut self, method: BackgroundMethod, data: Option<Array2>) -> bool {
         let Some(data) = data.or_else(|| self.background_subtracted_from_raw(method)) else { return false };
         let data = Arc::new(data);
+        (self.noise_vmin, self.noise_vmax) = finite_data_limits(&data.data).unzip();
         self.noise_reduced = Some(data.clone());
         self.noise_reduced_original = Some(data);
         self.noise_reduced_original_plot_type = "Background Subtracted".into();
@@ -1436,6 +1484,7 @@ impl Session {
         self.undo_stack.push(Entry::State(Box::new(s)));
         self.redo_stack.clear();
         self.trim_history();
+        self.mark_project_dirty();
     }
 
     /// `_restore_state`.
@@ -1538,6 +1587,7 @@ impl Session {
         self.noise_slider_drag_active = false;
         self.drop_interaction_overlays();
         self.noise_reduced = None;
+        (self.noise_vmin, self.noise_vmax) = (None, None);
         self.noise_reduced_original = None;
         self.noise_reduced_original_plot_type = "Background Subtracted".into();
         self.tools.lasso_mask = None;
@@ -1550,6 +1600,7 @@ impl Session {
         self.fit_noise_clip_bounds_to_data(raw.as_deref());
         self.plot_data("Raw", PlotView::Full);
         self.show_message("Reset to raw", 3000);
+        self.mark_project_dirty();
     }
 
     /// `reset_selection`: back to the processed original, or to the home
@@ -1611,6 +1662,7 @@ impl Session {
         self.current_plot_type = "Raw".into();
         self.home_view = None;
         self.log.clear();
+        self.project_extras = project::RadioExtras::default();
         self.canvas.clear();
         // _reset_sidebar_controls_to_defaults
         self.reset_noise_controls_to_defaults();

@@ -224,6 +224,7 @@ impl AnalyzerWindow {
             shock.fold = if shock.fold > 0 { shock.fold } else { self.fold as i64 };
         }
         AnalysisSession {
+            identity: Default::default(),
             source: SessionSource { filename: self.filename.clone(), ..self.source.clone() },
             max_intensity: Some(MaxIntensityBlock {
                 time_channels: self.time_channels.clone(),
@@ -499,7 +500,7 @@ impl AnalyzerWindow {
             return;
         };
         let Some(path) = export_dialog(&self.current_plot_title) else { return };
-        let fig = fit_figure(&self.fit_graph(&g), GraphText::default(), 640.0, 480.0);
+        let fig = callisto_core::mpl::analysis_figures::fit_graph_figure(&self.fit_graph(&g), GraphText::default());
         match crate::figure_export::save_figure_padded(ctx, &fig, &path, 300.0, 0.08) {
             Ok(()) => {
                 self.notice = Some(Notice { kind: NoticeKind::Information, title: "Export Complete".into(), text: format!("Plot saved:\n{}", path.display()) });

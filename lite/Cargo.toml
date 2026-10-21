@@ -29,6 +29,8 @@ tiny-skia = "0.11.4"
 # As egui_extras uses it (`svg`): no text or raster images in the icons.
 resvg = { version = "0.45.1", default-features = false }
 open = "5.4.4"
+# `.efaproj` projects and `.npz` arrays (deflate only).
+zip = { version = "9.0.4", default-features = false, features = ["deflate-flate2"] }
 
 # Debug builds of the GUI stack are very slow without some optimisation.
 [profile.dev]
