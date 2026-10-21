@@ -1,5 +1,6 @@
 # Build output.
 /target
+/dist/
 
 # Images. The reference screenshots are captured locally with
 # tools/capture_reference.py and tools/capture_states.py; the screenshot

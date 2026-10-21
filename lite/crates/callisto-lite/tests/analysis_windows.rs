@@ -55,7 +55,8 @@ fn compare(name: &str, lite: &RgbaImage) -> Option<f64> {
     Some(differing as f64 / (w * h) as f64 * 100.0)
 }
 
-const LASSO: [(f64, f64); 6] = [(100.0, 85.0), (300.0, 88.0), (500.0, 70.0), (520.0, 45.0), (350.0, 35.0), (150.0, 50.0)];
+const LASSO: [(f64, f64); 6] =
+    [(100.0, 85.0), (300.0, 88.0), (500.0, 70.0), (520.0, 45.0), (350.0, 35.0), (150.0, 50.0)];
 
 /// The main window with the burst isolated, as the capture leaves it.
 fn isolated(theme: ThemeMode) -> Harness<'static, LiteApp> {
@@ -87,7 +88,12 @@ fn isolated(theme: ThemeMode) -> Harness<'static, LiteApp> {
         let events = &mut h.input_mut().events;
         events.push(Event::PointerMoved(p));
         if let Some(pressed) = pressed {
-            events.push(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Default::default() });
+            events.push(Event::PointerButton {
+                pos: p,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            });
         }
         h.step();
     };
@@ -155,14 +161,20 @@ fn analysis_windows_match_full_app() {
         let shared = std::rc::Rc::new(std::cell::RefCell::new(window));
 
         let (w, pp) = (shared.clone(), p.clone());
-        results.push((format!("window_max_{name}"), shot(&format!("window_max_{name}"), [1000.0, 700.0], p.clone(), move |ui| {
-            w.borrow_mut().frame(ui, &pp);
-        })));
+        results.push((
+            format!("window_max_{name}"),
+            shot(&format!("window_max_{name}"), [1000.0, 700.0], p.clone(), move |ui| {
+                w.borrow_mut().frame(ui, &pp);
+            }),
+        ));
         assert!(shared.borrow_mut().track_ridge(), "the ridge was tracked");
         let (w, pp) = (shared.clone(), p.clone());
-        results.push((format!("window_max_ridge_{name}"), shot(&format!("window_max_ridge_{name}"), [1000.0, 700.0], p.clone(), move |ui| {
-            w.borrow_mut().frame(ui, &pp);
-        })));
+        results.push((
+            format!("window_max_ridge_{name}"),
+            shot(&format!("window_max_ridge_{name}"), [1000.0, 700.0], p.clone(), move |ui| {
+                w.borrow_mut().frame(ui, &pp);
+            }),
+        ));
         // The Analyzer, opened on the per-column maxima again.
         shared.borrow_mut().restore_per_column_maxima();
         let session = shared.borrow().session_state();
@@ -181,15 +193,21 @@ fn analysis_windows_match_full_app() {
             step(&mut an.borrow_mut());
             let (w, pp) = (an.clone(), p.clone());
             let shot_name = format!("{state}_{name}");
-            results.push((shot_name.clone(), shot(&shot_name, [1100.0, 700.0], p.clone(), move |ui| {
-                w.borrow_mut().frame(ui, &pp);
-            })));
+            results.push((
+                shot_name.clone(),
+                shot(&shot_name, [1100.0, 700.0], p.clone(), move |ui| {
+                    w.borrow_mut().frame(ui, &pp);
+                }),
+            ));
         }
         let mut d = RidgeSettingsDialog::new(&RidgeSettings::default());
         let pp = p.clone();
-        results.push((format!("dialog_ridge_settings_{name}"), shot(&format!("dialog_ridge_settings_{name}"), [291.0, 244.0], p.clone(), move |ui| {
-            d.frame(ui, &pp);
-        })));
+        results.push((
+            format!("dialog_ridge_settings_{name}"),
+            shot(&format!("dialog_ridge_settings_{name}"), [291.0, 244.0], p.clone(), move |ui| {
+                d.frame(ui, &pp);
+            }),
+        ));
     }
     for (n, r) in &results {
         match r {
@@ -214,7 +232,9 @@ fn reference_detail_labels(name: &str) -> Vec<String> {
     fn walk(v: &serde_json::Value, out: &mut Vec<String>) {
         match v {
             serde_json::Value::Object(m) => {
-                if m.get("class").and_then(|c| c.as_str()) == Some("QLabel") && m.get("rect").and_then(|r| r[0].as_i64()) == Some(962) {
+                if m.get("class").and_then(|c| c.as_str()) == Some("QLabel")
+                    && m.get("rect").and_then(|r| r[0].as_i64()) == Some(962)
+                {
                     out.push(m["text"].as_str().unwrap_or_default().to_owned());
                 }
                 m.values().for_each(|c| walk(c, out));
@@ -313,9 +333,12 @@ fn type_ii_window_matches_full_app() {
         let style = TypeIIPlotStyle::default();
         let mut d = TypeIISettingsDialog::new(&style, &style, ui_family, fonts.families());
         let pp = p.clone();
-        results.push((format!("dialog_type_ii_settings_{name}"), shot(&format!("dialog_type_ii_settings_{name}"), [460.0, 822.0], p.clone(), move |ui| {
-            d.frame(ui, &pp);
-        })));
+        results.push((
+            format!("dialog_type_ii_settings_{name}"),
+            shot(&format!("dialog_type_ii_settings_{name}"), [460.0, 822.0], p.clone(), move |ui| {
+                d.frame(ui, &pp);
+            }),
+        ));
     }
     for (n, r) in &results {
         match r {

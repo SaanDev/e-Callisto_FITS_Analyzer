@@ -8,11 +8,11 @@
 //! drives as the full app drives its `AcceleratedPlotWidget`.
 
 mod analysis;
+mod display_range;
 pub mod exports;
 mod presets;
 pub mod project;
 pub mod report;
-mod display_range;
 mod rfi;
 mod timeline;
 mod tools;
@@ -39,8 +39,8 @@ use crate::canvas::{CanvasEvent, ImageUpdate, PlotCanvas, TextStyle, View};
 pub use display_range::{DisplayRange, DisplayRangePreset, DisplayRangeRequest, delete_preset, upsert_preset};
 pub use rfi::RfiConfig;
 pub use timeline::ProbeResult;
-pub use tools::{AnnotationMode, LightCurveRecord, RulerReadout, ToolState};
 use timeline::{DatasetExtras, TimelineMsg};
+pub use tools::{AnnotationMode, LightCurveRecord, RulerReadout, ToolState};
 
 /// `MainWindow.DB_SCALE`: digits to dB for CALLISTO receivers.
 pub const DB_SCALE: f64 = 2500.0 / 256.0 / 25.4;

@@ -79,12 +79,10 @@ pub fn now_iso() -> String {
 /// `uuid4().hex`: 32 random hex digits (version 4 bits set).
 pub fn new_id() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
-        ^ COUNTER.fetch_add(0x9e37_79b9_7f4a_7c15, Ordering::Relaxed)
-        ^ (std::process::id() as u64) << 32;
+    let seed =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0)
+            ^ COUNTER.fetch_add(0x9e37_79b9_7f4a_7c15, Ordering::Relaxed)
+            ^ (std::process::id() as u64) << 32;
     // splitmix64
     let mut z = seed;
     let mut next = || {
@@ -159,10 +157,13 @@ pub fn normalize_annotations(items: Vec<Annotation>) -> Vec<Annotation> {
 
 /// `toggle_all_visibility`.
 pub fn toggle_all_visibility(items: Vec<Annotation>, visible: bool) -> Vec<Annotation> {
-    normalize_annotations(items).into_iter().map(|mut a| {
-        a.visible = visible;
-        a
-    }).collect()
+    normalize_annotations(items)
+        .into_iter()
+        .map(|mut a| {
+            a.visible = visible;
+            a
+        })
+        .collect()
 }
 
 /// `_text_annotation_label`: how a label is listed for Edit / Move.

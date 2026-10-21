@@ -132,7 +132,8 @@ impl Reader<'_> {
                     }
                 }
                 let start = self.i;
-                while self.i < self.s.len() && matches!(self.s[self.i], b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9') {
+                while self.i < self.s.len() && matches!(self.s[self.i], b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9')
+                {
                     self.i += 1;
                 }
                 let t = std::str::from_utf8(&self.s[start..self.i]).unwrap();
@@ -235,8 +236,22 @@ fn report_layout_matches_reportlab() {
             if got.page as f64 != f("page") || got.kind != s(w.get("kind")) {
                 bad.push(format!("page/kind {} {} vs {} {}", got.page, got.kind, f("page"), s(w.get("kind"))));
             }
-            if !(near(got.x, f("x")) && near(got.y, f("y")) && near(got.width, f("width")) && near(got.height, f("height"))) {
-                bad.push(format!("at {:.4} {:.4} {:.4}x{:.4} vs {:.4} {:.4} {:.4}x{:.4}", got.x, got.y, got.width, got.height, f("x"), f("y"), f("width"), f("height")));
+            if !(near(got.x, f("x"))
+                && near(got.y, f("y"))
+                && near(got.width, f("width"))
+                && near(got.height, f("height")))
+            {
+                bad.push(format!(
+                    "at {:.4} {:.4} {:.4}x{:.4} vs {:.4} {:.4} {:.4}x{:.4}",
+                    got.x,
+                    got.y,
+                    got.width,
+                    got.height,
+                    f("x"),
+                    f("y"),
+                    f("width"),
+                    f("height")
+                ));
             }
             if got.kind == "Paragraph" || got.kind == "Preformatted" {
                 let lines: Vec<String> = match w.get("lines") {
@@ -259,7 +274,13 @@ fn report_layout_matches_reportlab() {
                 };
                 let same = |a: &[f64], b: &[f64]| a.len() == b.len() && a.iter().zip(b).all(|(x, y)| near(*x, *y));
                 if !same(&got.col_widths, &nums("colWidths")) || !same(&got.row_heights, &nums("rowHeights")) {
-                    bad.push(format!("table {:?} {:?} vs {:?} {:?}", got.col_widths, got.row_heights, nums("colWidths"), nums("rowHeights")));
+                    bad.push(format!(
+                        "table {:?} {:?} vs {:?} {:?}",
+                        got.col_widths,
+                        got.row_heights,
+                        nums("colWidths"),
+                        nums("rowHeights")
+                    ));
                 }
             }
             if !bad.is_empty() {

@@ -78,15 +78,25 @@ impl AnalysisWindows {
     }
 
     /// `_open_or_focus_type_ii_dialog`.
-    pub fn open_or_focus_type_ii(&mut self, s: &mut Session, session: Option<AnalysisSession>, ui_family: &str, families: Vec<String>) {
+    pub fn open_or_focus_type_ii(
+        &mut self,
+        s: &mut Session,
+        session: Option<AnalysisSession>,
+        ui_family: &str,
+        families: Vec<String>,
+    ) {
         let Some(spectrum) = s.type_ii_spectrum() else {
             return s.show_message("Type II band-splitting requires noise-reduced data.", 4000);
         };
-        let candidate = s.with_analysis_context(session.as_ref()).or_else(|| s.with_analysis_context(s.analysis.as_ref()));
+        let candidate =
+            s.with_analysis_context(session.as_ref()).or_else(|| s.with_analysis_context(s.analysis.as_ref()));
         let normalized = candidate.is_some();
         let candidate = candidate.unwrap_or_else(|| s.empty_type_ii_session());
         match &mut self.type_ii {
-            None => self.type_ii = Some(TypeIIWindow::new(spectrum, s.filename(), &candidate, normalized, ui_family, families)),
+            None => {
+                self.type_ii =
+                    Some(TypeIIWindow::new(spectrum, s.filename(), &candidate, normalized, ui_family, families))
+            }
             Some(w) => {
                 w.set_spectrum(spectrum);
                 w.restore_session(&candidate);
@@ -99,10 +109,13 @@ impl AnalysisWindows {
 
     /// `_open_or_focus_analyzer_dialog`.
     pub fn open_or_focus_analyzer(&mut self, s: &mut Session, session: Option<AnalysisSession>, auto_clean: bool) {
-        let mut candidate = s.with_analysis_context(session.as_ref()).or_else(|| s.with_analysis_context(s.analysis.as_ref()));
+        let mut candidate =
+            s.with_analysis_context(session.as_ref()).or_else(|| s.with_analysis_context(s.analysis.as_ref()));
         match &candidate {
             None => candidate = s.build_analysis_seed(auto_clean),
-            Some(c) if c.max_intensity.is_none() => candidate = s.merge_seed_with_existing(s.build_analysis_seed(auto_clean), Some(c)),
+            Some(c) if c.max_intensity.is_none() => {
+                candidate = s.merge_seed_with_existing(s.build_analysis_seed(auto_clean), Some(c))
+            }
             _ => {}
         }
         let Some(candidate) = candidate else {
@@ -125,11 +138,19 @@ impl AnalysisWindows {
 
     /// `plot_max_intensities` (`prefer_current_plot`) and
     /// `_open_or_focus_max_dialog`.
-    pub fn open_or_focus_max(&mut self, s: &mut Session, session: Option<AnalysisSession>, auto_open_analyzer: bool, prefer_current_plot: bool, auto_clean: bool) {
+    pub fn open_or_focus_max(
+        &mut self,
+        s: &mut Session,
+        session: Option<AnalysisSession>,
+        auto_open_analyzer: bool,
+        prefer_current_plot: bool,
+        auto_clean: bool,
+    ) {
         let seed = || s.build_analysis_seed(auto_clean);
         let mut candidate = if prefer_current_plot { seed() } else { None };
         if candidate.is_none() {
-            candidate = s.with_analysis_context(session.as_ref()).or_else(|| s.with_analysis_context(s.analysis.as_ref()));
+            candidate =
+                s.with_analysis_context(session.as_ref()).or_else(|| s.with_analysis_context(s.analysis.as_ref()));
         }
         if candidate.is_none() {
             candidate = seed();
@@ -143,7 +164,8 @@ impl AnalysisWindows {
                 None => return s.show_message("Analysis window requires a plotted dynamic spectrum.", 4000),
             }
         }
-        let auto_outlier_mode = (prefer_current_plot && s.is_isolated_burst_plot() && auto_clean) || candidate.ui.auto_outlier_cleaned;
+        let auto_outlier_mode =
+            (prefer_current_plot && s.is_isolated_burst_plot() && auto_clean) || candidate.ui.auto_outlier_cleaned;
         if candidate.max_intensity.is_none() {
             return s.show_message("Analysis session has no max-intensity vectors.", 4000);
         }
@@ -275,11 +297,20 @@ impl StatusLine {
 
 /// A menu of the window's own menu bar.
 pub(crate) fn menu(title: &'static str, items: Vec<(&'static str, WindowAction, bool)>) -> Menu {
-    Menu { title, items: items.into_iter().map(|(label, a, on)| Item::action(label, Command::Window(a)).enabled(on)).collect() }
+    Menu {
+        title,
+        items: items.into_iter().map(|(label, a, on)| Item::action(label, Command::Window(a)).enabled(on)).collect(),
+    }
 }
 
 /// The menu bar along the top (`layout.setMenuBar`); returns what was chosen.
-pub(crate) fn window_menubar(ui: &mut Ui, width: f32, menus: &[Menu], st: &mut menubar::MenuBarState, p: &Palette) -> Vec<WindowAction> {
+pub(crate) fn window_menubar(
+    ui: &mut Ui,
+    width: f32,
+    menus: &[Menu],
+    st: &mut menubar::MenuBarState,
+    p: &Palette,
+) -> Vec<WindowAction> {
     let r = Rect::from_min_size(ui.max_rect().min, vec2(width, menubar::HEIGHT));
     let mut commands = Vec::new();
     menubar::show(ui, r, menus, st, &mut commands, p);
@@ -293,7 +324,15 @@ pub(crate) fn status_bar(ui: &Ui, rect: Rect, message: &str, p: &Palette) {
 
 /// A checkable `QPushButton` (`QPushButton:checked`: accent border and
 /// soft accent fill). Returns true when clicked.
-pub(crate) fn toggle_button(ui: &Ui, rect: Rect, id: Id, text: &str, checked: bool, enabled: bool, p: &Palette) -> bool {
+pub(crate) fn toggle_button(
+    ui: &Ui,
+    rect: Rect,
+    id: Id,
+    text: &str,
+    checked: bool,
+    enabled: bool,
+    p: &Palette,
+) -> bool {
     if !checked || !enabled {
         return qt::button(ui, rect, id, text, false, enabled, p).clicked();
     }
@@ -315,6 +354,14 @@ pub(crate) fn radio(ui: &Ui, rect: Rect, id: Id, label: &str, checked: bool, ena
         widgets::qt_box(ui, ind, 7.0, p.input_bg, p.border);
     }
     let text = crate::ui::qt::text_color(enabled, p);
-    widgets::text_left(ui, rect.left() + 24.0, rect.center().y, label, qt::FONT_PX, crate::fonts::Weight::Regular, text);
+    widgets::text_left(
+        ui,
+        rect.left() + 24.0,
+        rect.center().y,
+        label,
+        qt::FONT_PX,
+        crate::fonts::Weight::Regular,
+        text,
+    );
     enabled && resp.clicked() && !checked
 }

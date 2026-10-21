@@ -201,8 +201,12 @@ impl PlotCanvas {
                 continue;
             }
             let item = match s {
-                super::Series::Scatter { x, y, size, pen, brush } => Item::Scatter { x: x.clone(), y: y.clone(), size: *size, pen: *pen, brush: *brush },
-                super::Series::Curve { x, y, pen, antialias } => Item::Curve { x: x.clone(), y: y.clone(), pen: *pen, antialias: *antialias },
+                super::Series::Scatter { x, y, size, pen, brush } => {
+                    Item::Scatter { x: x.clone(), y: y.clone(), size: *size, pen: *pen, brush: *brush }
+                }
+                super::Series::Curve { x, y, pen, antialias } => {
+                    Item::Curve { x: x.clone(), y: y.clone(), pen: *pen, antialias: *antialias }
+                }
             };
             self.overlays.set(Role::Series(i), 0.0, item);
         }
@@ -321,7 +325,11 @@ impl PlotCanvas {
         if with_segments {
             self.overlays.set(Role::DriftLine, 0.0, Item::Curve { x, y, pen: line, antialias: false });
         } else if self.overlays.has(Role::DriftLine) {
-            self.overlays.set(Role::DriftLine, 0.0, Item::Curve { x: Vec::new(), y: Vec::new(), pen: line, antialias: false });
+            self.overlays.set(
+                Role::DriftLine,
+                0.0,
+                Item::Curve { x: Vec::new(), y: Vec::new(), pen: line, antialias: false },
+            );
         }
     }
 
@@ -347,9 +355,17 @@ impl PlotCanvas {
         );
         let line = Pen::new([24, 180, 255, 255], 2.0);
         if pts.len() >= 2 {
-            self.overlays.set(Role::MeasureLine, 34.0, Item::Curve { x: x[..2].to_vec(), y: y[..2].to_vec(), pen: line, antialias: false });
+            self.overlays.set(
+                Role::MeasureLine,
+                34.0,
+                Item::Curve { x: x[..2].to_vec(), y: y[..2].to_vec(), pen: line, antialias: false },
+            );
         } else if self.overlays.has(Role::MeasureLine) {
-            self.overlays.set(Role::MeasureLine, 34.0, Item::Curve { x: Vec::new(), y: Vec::new(), pen: line, antialias: false });
+            self.overlays.set(
+                Role::MeasureLine,
+                34.0,
+                Item::Curve { x: Vec::new(), y: Vec::new(), pen: line, antialias: false },
+            );
         }
         let text = label.trim();
         let last = *pts.last().unwrap();
@@ -357,7 +373,13 @@ impl PlotCanvas {
             self.overlays.set(
                 Role::MeasureText,
                 36.0,
-                Item::Text { x: last.0, y: last.1, text: text.to_owned(), color: Color32::WHITE, font: TextFont::app() },
+                Item::Text {
+                    x: last.0,
+                    y: last.1,
+                    text: text.to_owned(),
+                    color: Color32::WHITE,
+                    font: TextFont::app(),
+                },
             );
         } else if self.overlays.has(Role::MeasureText) {
             self.overlays.set(
@@ -388,7 +410,11 @@ impl PlotCanvas {
                 _ => PenStyle::Solid,
             };
             let pen = Pen::new(color, c.line_width.max(0.5)).styled(style);
-            self.overlays.set(Role::LightCurve(i), 19.0, Item::Curve { x: c.time.clone(), y: c.y.clone(), pen, antialias: false });
+            self.overlays.set(
+                Role::LightCurve(i),
+                19.0,
+                Item::Curve { x: c.time.clone(), y: c.y.clone(), pen, antialias: false },
+            );
             let label = c.label.trim();
             if c.show_label && !label.is_empty() {
                 let [r, g, b, _] = color_or(&c.color, [0x00, 0xe5, 0xff, 255]);
@@ -450,7 +476,11 @@ impl PlotCanvas {
 
     fn update_lasso_curve(&mut self) {
         let (x, y) = split(&self.capture.lasso);
-        self.overlays.set(Role::Lasso, 0.0, Item::Curve { x, y, pen: Pen::new([0, 212, 255, 255], 2.0), antialias: false });
+        self.overlays.set(
+            Role::Lasso,
+            0.0,
+            Item::Curve { x, y, pen: Pen::new([0, 212, 255, 255], 2.0), antialias: false },
+        );
     }
 
     /// `_update_annotation_capture_overlay`.
@@ -480,12 +510,22 @@ impl PlotCanvas {
             AnnotationKind::Text => vertices = cursor.into_iter().collect(),
         }
         let (lx, ly) = split(&line);
-        self.overlays.set(Role::CaptureLine, 0.0, Item::Curve { x: lx, y: ly, pen: Pen::new([0, 212, 255, 220], 2.0), antialias: false });
+        self.overlays.set(
+            Role::CaptureLine,
+            0.0,
+            Item::Curve { x: lx, y: ly, pen: Pen::new([0, 212, 255, 220], 2.0), antialias: false },
+        );
         let (vx, vy) = split(&vertices);
         self.overlays.set(
             Role::CaptureVertices,
             0.0,
-            Item::Scatter { x: vx, y: vy, size: 8.0, pen: Pen::new([255, 255, 255, 220], 1.0), brush: [0, 212, 255, 230] },
+            Item::Scatter {
+                x: vx,
+                y: vy,
+                size: 8.0,
+                pen: Pen::new([255, 255, 255, 220], 1.0),
+                brush: [0, 212, 255, 230],
+            },
         );
     }
 
@@ -559,7 +599,8 @@ impl PlotCanvas {
 
         match self.capture.mode {
             Some(Mode::Lasso) => {
-                if pressed_l && over
+                if pressed_l
+                    && over
                     && let Some(xy) = c.and_then(|c| self.scene_xy(c, geo))
                 {
                     self.capture.lasso_drag = true;
@@ -809,12 +850,13 @@ impl PlotCanvas {
             match batch {
                 Batch::Raster(list) => {
                     if fresh {
-                        let image = Raster::new(nx, ny, local_x as i32, local_y as i32, device).and_then(|mut raster| {
-                            for e in list {
-                                draw_item(&mut raster, &e.item, &to_device, ppp);
-                            }
-                            (!raster.is_blank()).then(|| raster.into_image())
-                        });
+                        let image =
+                            Raster::new(nx, ny, local_x as i32, local_y as i32, device).and_then(|mut raster| {
+                                for e in list {
+                                    draw_item(&mut raster, &e.item, &to_device, ppp);
+                                }
+                                (!raster.is_blank()).then(|| raster.into_image())
+                            });
                         let slot = &mut self.overlay_cache.textures[i];
                         match image {
                             Some(img) => {
@@ -872,15 +914,21 @@ fn draw_item(raster: &mut Raster, item: &Item, to_device: &dyn Fn(f64, f64) -> (
 
 /// A `TextItem` with anchor (0, 1): the text document's bottom-left corner
 /// at `at` (canvas coordinates), each line a font height below the last.
-fn draw_text_item(ui: &Ui, painter: &egui::Painter, px: &Pixels, at: (f64, f64), text: &str, color: Color32, font: &FontId) {
+fn draw_text_item(
+    ui: &Ui,
+    painter: &egui::Painter,
+    px: &Pixels,
+    at: (f64, f64),
+    text: &str,
+    color: Color32,
+    font: &FontId,
+) {
     if text.is_empty() || !(at.0.is_finite() && at.1.is_finite()) {
         return;
     }
     let lines: Vec<&str> = text.split('\n').collect();
-    let line_h = crate::fonts::qt_metrics(font).map_or_else(
-        || ui.ctx().fonts_mut(|f| f.row_height(font)) as f64,
-        |m| m.height() as f64,
-    );
+    let line_h = crate::fonts::qt_metrics(font)
+        .map_or_else(|| ui.ctx().fonts_mut(|f| f.row_height(font)) as f64, |m| m.height() as f64);
     let doc_h = (lines.len() as f64 * line_h - 1e-3).ceil() + 2.0 * DOC_MARGIN;
     let top = at.1 - doc_h;
     for (i, line) in lines.iter().enumerate() {

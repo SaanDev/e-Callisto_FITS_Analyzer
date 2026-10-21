@@ -10,7 +10,9 @@ use std::sync::Arc;
 use callisto_core::analysis::analyzer::resolve_time_seconds;
 use callisto_core::analysis::lasso::contains_points;
 use callisto_core::analysis::ridge::{RidgeSettings, track_ridge};
-use callisto_core::analysis::session::{AnalysisSession, AnalyzerBlock, MaxIntensityBlock, SessionSource, TypeIIBlock, UiBlock};
+use callisto_core::analysis::session::{
+    AnalysisSession, AnalyzerBlock, MaxIntensityBlock, SessionSource, TypeIIBlock, UiBlock,
+};
 use callisto_core::mpl::analysis_figures::{FitGraph, GraphText, TAB_BLUE, fit_figure, max_intensity_figure};
 use callisto_core::mpl::{Figure, Line2D};
 use callisto_core::radio::array::Array2;
@@ -148,7 +150,8 @@ impl MaxWindow {
     /// `set_auto_outlier_mode`.
     pub fn set_auto_outlier_mode(&mut self, enabled: bool) {
         if enabled {
-            self.status.show("Auto outlier cleaning enabled for isolated burst; manual outlier tools remain available.", 3500);
+            self.status
+                .show("Auto outlier cleaning enabled for isolated burst; manual outlier tools remain available.", 3500);
         }
     }
 
@@ -220,7 +223,8 @@ impl MaxWindow {
 
     fn figure(&self) -> Figure {
         let seed = if self.seed_drawn { self.seed } else { None };
-        let mut fig = max_intensity_figure(&self.time_seconds, &self.freqs, &self.title, "Time (s)", seed, 978.0, 564.0);
+        let mut fig =
+            max_intensity_figure(&self.time_seconds, &self.freqs, &self.title, "Time (s)", seed, 978.0, 564.0);
         if let Some(verts) = self.lasso.as_ref().and_then(|l| l.verts.as_ref()) {
             // The lasso's line: C0, `lines.linewidth`, over the points.
             let (x, y): (Vec<f64>, Vec<f64>) = verts.iter().copied().unzip();
@@ -262,7 +266,8 @@ impl MaxWindow {
             self.status.show("No points selected for removal", 3000);
             return;
         }
-        let keep = |v: &Vec<f64>| v.iter().zip(&self.selected).filter(|(_, s)| !**s).map(|(x, _)| *x).collect::<Vec<_>>();
+        let keep =
+            |v: &Vec<f64>| v.iter().zip(&self.selected).filter(|(_, s)| !**s).map(|(x, _)| *x).collect::<Vec<_>>();
         self.time_channels = keep(&self.time_channels);
         self.time_seconds = keep(&self.time_seconds);
         self.freqs = keep(&self.freqs);
@@ -310,7 +315,8 @@ impl MaxWindow {
         self.analyzer_state = None;
         self.redraw_points("Tracked Burst Ridge");
         self.seed_drawn = self.seed.is_some();
-        let (first, last) = (self.time_seconds.first().copied().unwrap_or(0.0), self.time_seconds.last().copied().unwrap_or(0.0));
+        let (first, last) =
+            (self.time_seconds.first().copied().unwrap_or(0.0), self.time_seconds.last().copied().unwrap_or(0.0));
         let mut message = format!("Tracked {} points from t = {first:.2} s to {last:.2} s.", result.time_indices.len());
         if !result.warnings.is_empty() {
             message.push(' ');
@@ -352,7 +358,9 @@ impl MaxWindow {
 
     /// `save_as_csv`.
     fn save_as_csv(&mut self) {
-        let Some(path) = rfd::FileDialog::new().set_title("Save CSV File").add_filter("CSV files (*.csv)", &["csv"]).save_file() else {
+        let Some(path) =
+            rfd::FileDialog::new().set_title("Save CSV File").add_filter("CSV files (*.csv)", &["csv"]).save_file()
+        else {
             return;
         };
         let mut out = String::from("Time Channel,Time (s),Frequency (MHz)\r\n");
@@ -384,15 +392,28 @@ impl MaxWindow {
     /// `export_figure`.
     fn export_figure(&mut self, ctx: &egui::Context) {
         if self.filename.is_empty() {
-            self.notice = Some(Notice { kind: NoticeKind::Warning, title: "No File Loaded".into(), text: "Load a FITS file before exporting.".into() });
+            self.notice = Some(Notice {
+                kind: NoticeKind::Warning,
+                title: "No File Loaded".into(),
+                text: "Load a FITS file before exporting.".into(),
+            });
             return;
         }
         let base = self.filename.split('.').next().unwrap_or("").to_owned();
         let Some(path) = export_dialog(&format!("{base}_MaxIntensityPlot")) else { return };
-        self.notice = Some(match crate::figure_export::save_figure_padded(ctx, &self.origin_figure(), &path, 300.0, 0.08) {
-            Ok(()) => Notice { kind: NoticeKind::Information, title: "Export Complete".into(), text: format!("Figure saved:\n{}", path.display()) },
-            Err(e) => Notice { kind: NoticeKind::Critical, title: "Export Failed".into(), text: format!("An error occurred:\n{e}") },
-        });
+        self.notice =
+            Some(match crate::figure_export::save_figure_padded(ctx, &self.origin_figure(), &path, 300.0, 0.08) {
+                Ok(()) => Notice {
+                    kind: NoticeKind::Information,
+                    title: "Export Complete".into(),
+                    text: format!("Figure saved:\n{}", path.display()),
+                },
+                Err(e) => Notice {
+                    kind: NoticeKind::Critical,
+                    title: "Export Failed".into(),
+                    text: format!("An error occurred:\n{e}"),
+                },
+            });
     }
 
     fn about(&mut self) {
@@ -428,7 +449,10 @@ impl MaxWindow {
             .stretch(1);
         BoxLayout::v([11; 4], 6)
             .add(row.into_item())
-            .widget(WidgetSpec::new("canvas", Size::new(1000, 600), Policy::Expanding, Policy::Expanding).min_hint(Size::new(10, 10)))
+            .widget(
+                WidgetSpec::new("canvas", Size::new(1000, 600), Policy::Expanding, Policy::Expanding)
+                    .min_hint(Size::new(10, 10)),
+            )
             .widget(WidgetSpec::new("status", Size::new(20, 22), Policy::Preferred, Policy::Preferred))
             .into()
     }
@@ -436,7 +460,8 @@ impl MaxWindow {
     fn geometry(ui: &Ui, r: Rect) -> Geometry {
         let mut g = Geometry::default();
         let top = menubar::HEIGHT as i32;
-        Self::layout(ui).set_geometry(IRect::new(0, top, r.width().round() as i32, r.height().round() as i32 - top), &mut g);
+        Self::layout(ui)
+            .set_geometry(IRect::new(0, top, r.width().round() as i32, r.height().round() as i32 - top), &mut g);
         g
     }
 
@@ -444,8 +469,17 @@ impl MaxWindow {
         use WindowAction as A;
         vec![
             menu("File", vec![("Save As", A::SaveAs, true), ("Export As", A::ExportAs, true)]),
-            menu("Edit", vec![("Reset All", A::ResetAll, true), ("Restore Per-Column Maxima", A::RestoreMaxima, self.pre_ridge.is_some())]),
-            menu("Analyze", vec![("Open Analyzer", A::OpenAnalyzer, true), ("Ridge Tracking Settings...", A::RidgeSettings, true)]),
+            menu(
+                "Edit",
+                vec![
+                    ("Reset All", A::ResetAll, true),
+                    ("Restore Per-Column Maxima", A::RestoreMaxima, self.pre_ridge.is_some()),
+                ],
+            ),
+            menu(
+                "Analyze",
+                vec![("Open Analyzer", A::OpenAnalyzer, true), ("Ridge Tracking Settings...", A::RidgeSettings, true)],
+            ),
             menu("About", vec![("About", A::About, true)]),
         ]
     }
@@ -466,7 +500,10 @@ impl MaxWindow {
                         self.seed_drawn = true;
                         self.figure_due = true;
                         self.status.show(
-                            format!("Tracking will start near t = {:.2} s, f = {:.2} MHz. Press Track Ridge.", d.0, d.1),
+                            format!(
+                                "Tracking will start near t = {:.2} s, f = {:.2} MHz. Press Track Ridge.",
+                                d.0, d.1
+                            ),
                             6000,
                         );
                     } else if let Some(l) = &mut self.lasso {

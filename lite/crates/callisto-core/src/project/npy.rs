@@ -249,9 +249,8 @@ pub fn read_npz(bytes: &[u8]) -> Result<BTreeMap<String, Npy>> {
 /// `np.savez_compressed`: each array deflated as `<key>.npy`.
 pub fn write_npz(arrays: &BTreeMap<String, Npy>) -> Result<Vec<u8>> {
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    let opts = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated)
-        .large_file(true);
+    let opts =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated).large_file(true);
     for (key, arr) in arrays {
         zip.start_file(format!("{key}.npy"), opts)?;
         zip.write_all(arr.bytes())?;

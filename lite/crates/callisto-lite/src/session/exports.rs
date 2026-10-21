@@ -99,7 +99,10 @@ pub fn py_repr(v: &Json) -> String {
         Json::Float(f) => pyjson::float_repr(*f),
         Json::Str(s) => py_repr_str(s),
         Json::Array(a) => format!("[{}]", a.iter().map(py_repr).collect::<Vec<_>>().join(", ")),
-        Json::Object(o) => format!("{{{}}}", o.iter().map(|(k, v)| format!("{}: {}", py_repr_str(k), py_repr(v))).collect::<Vec<_>>().join(", ")),
+        Json::Object(o) => format!(
+            "{{{}}}",
+            o.iter().map(|(k, v)| format!("{}: {}", py_repr_str(k), py_repr(v))).collect::<Vec<_>>().join(", ")
+        ),
     }
 }
 
@@ -205,8 +208,14 @@ impl Session {
             ("timestamp_utc", Cell::Text(chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string())),
             ("project_path", Cell::Text(project_path.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default())),
             ("fits_primary", Cell::Text(primary)),
-            ("fits_sources", Cell::Text(sources.into_iter().filter(|s| !s.trim().is_empty()).collect::<Vec<_>>().join("|"))),
-            ("combined_mode", Cell::Text(d.and_then(|d| d.combined_mode).map(|m| m.key().to_owned()).unwrap_or_default())),
+            (
+                "fits_sources",
+                Cell::Text(sources.into_iter().filter(|s| !s.trim().is_empty()).collect::<Vec<_>>().join("|")),
+            ),
+            (
+                "combined_mode",
+                Cell::Text(d.and_then(|d| d.combined_mode).map(|m| m.key().to_owned()).unwrap_or_default()),
+            ),
             ("station", Cell::Text(self.analysis_station_name())),
             ("date_obs", Cell::Text(self.analysis_date_obs())),
             ("fit_a", num(fit.map(|f| f.a))),
@@ -236,7 +245,11 @@ impl Session {
     }
 
     /// `append_csv_log` and `append_txt_summary` for `stem` (`<stem>_analysis_log.csv/.txt`).
-    pub fn export_analysis_log(&mut self, stem: &Path, project_path: Option<&Path>) -> std::io::Result<(PathBuf, PathBuf)> {
+    pub fn export_analysis_log(
+        &mut self,
+        stem: &Path,
+        project_path: Option<&Path>,
+    ) -> std::io::Result<(PathBuf, PathBuf)> {
         let (row, run_id, has_fit) = self.analysis_log_row(project_path);
         let csv_path = PathBuf::from(format!("{}_analysis_log.csv", stem.display()));
         let txt_path = PathBuf::from(format!("{}_analysis_log.txt", stem.display()));
@@ -291,11 +304,18 @@ impl Session {
         t.write_all(lines.join("\n").as_bytes())?;
         if has_fit {
             self.show_message(
-                format!("Analysis log exported: {}, {}", basename(&csv_path.to_string_lossy()), basename(&txt_path.to_string_lossy())),
+                format!(
+                    "Analysis log exported: {}, {}",
+                    basename(&csv_path.to_string_lossy()),
+                    basename(&txt_path.to_string_lossy())
+                ),
                 5000,
             );
         } else {
-            self.show_message("Analysis log exported, but analyzer fit state was missing (blank fields written).", 5000);
+            self.show_message(
+                "Analysis log exported, but analyzer fit state was missing (blank fields written).",
+                5000,
+            );
         }
         self.log_operation("Exported analysis log (CSV + TXT).");
         Ok((csv_path, txt_path))
@@ -311,7 +331,10 @@ impl Session {
             } else {
                 let lo = finite.iter().copied().fold(f64::INFINITY, f64::min);
                 let hi = finite.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-                Json::Array(vec![Json::Float(if finite.is_empty() { f64::NAN } else { lo }), Json::Float(if finite.is_empty() { f64::NAN } else { hi })])
+                Json::Array(vec![
+                    Json::Float(if finite.is_empty() { f64::NAN } else { lo }),
+                    Json::Float(if finite.is_empty() { f64::NAN } else { hi }),
+                ])
             }
         };
         let mut app = Object::new();
@@ -322,7 +345,10 @@ impl Session {
         source.insert("filename".into(), self.filename().into());
         source.insert("is_combined".into(), Json::Bool(d.is_some_and(|d| d.combined_mode.is_some())));
         source.insert("combined_mode".into(), d.and_then(|d| d.combined_mode).map_or(Json::Null, |m| m.key().into()));
-        source.insert("shape".into(), d.map_or(Json::Null, |d| Json::Array(vec![Json::from(d.raw.shape().0), Json::from(d.raw.shape().1)])));
+        source.insert(
+            "shape".into(),
+            d.map_or(Json::Null, |d| Json::Array(vec![Json::from(d.raw.shape().0), Json::from(d.raw.shape().1)])),
+        );
         source.insert("freq_range_mhz".into(), d.map_or(Json::Null, |d| range(&d.freqs)));
         source.insert("time_range_s".into(), d.map_or(Json::Null, |d| range(&d.time)));
         let sources: Vec<String> = match d {
@@ -350,13 +376,22 @@ impl Session {
         let max = self.with_analysis_context(self.analysis.as_ref()).and_then(|s| {
             let (legacy, vectors) = callisto_core::analysis::session_json::legacy_payload(&s)?;
             let mut o = Object::new();
-            for (k, key) in [("max_time_channels", "time_channels"), ("max_time_seconds", "time_seconds"), ("max_freqs", "freqs")] {
-                o.insert(key.into(), vectors.get(k).map_or(Json::Null, |v| Json::Array(v.iter().map(|x| Json::Float(*x)).collect())));
+            for (k, key) in
+                [("max_time_channels", "time_channels"), ("max_time_seconds", "time_seconds"), ("max_freqs", "freqs")]
+            {
+                o.insert(
+                    key.into(),
+                    vectors.get(k).map_or(Json::Null, |v| Json::Array(v.iter().map(|x| Json::Float(*x)).collect())),
+                );
             }
             for k in ["fundamental", "harmonic", "analyzer"] {
                 o.insert(k.into(), legacy.get(k).cloned().unwrap_or(Json::Null));
             }
-            o.insert("source_filename".into(), (if s.source.filename.is_empty() { self.filename().to_owned() } else { s.source.filename.clone() }).into());
+            o.insert(
+                "source_filename".into(),
+                (if s.source.filename.is_empty() { self.filename().to_owned() } else { s.source.filename.clone() })
+                    .into(),
+            );
             Some(Json::Object(o))
         });
         let mut p = Object::new();
@@ -391,7 +426,8 @@ impl Session {
     /// `payload_to_markdown`.
     pub fn provenance_markdown(payload: &Json) -> String {
         let section = |k: &str| payload.get(k).cloned().unwrap_or_else(Json::object);
-        let (app, source, proc, rfi, sync) = (section("app"), section("data_source"), section("processing"), section("rfi"), section("time_sync"));
+        let (app, source, proc, rfi, sync) =
+            (section("app"), section("data_source"), section("processing"), section("rfi"), section("time_sync"));
         let ann = payload.get("annotations").and_then(Json::as_array).cloned().unwrap_or_default();
         let ops = payload.get("operation_log").and_then(Json::as_array).cloned().unwrap_or_default();
         let field = |o: &Json, k: &str| o.get(k).map_or("None".to_owned(), py_str);
@@ -429,7 +465,12 @@ impl Session {
         lines.push(format!("- count: `{}`", ann.len()));
         for item in &ann {
             let points = item.get("points").and_then(Json::as_array).map_or(0, Vec::len);
-            lines.push(format!("- [{}] id={} visible={} points={points}", field(item, "kind"), field(item, "id"), field(item, "visible")));
+            lines.push(format!(
+                "- [{}] id={} visible={} points={points}",
+                field(item, "kind"),
+                field(item, "id"),
+                field(item, "visible")
+            ));
         }
         lines.push(String::new());
         lines.push("## Time Sync".into());
@@ -463,7 +504,11 @@ impl Session {
         std::fs::write(&json_path, pyjson::dumps(&payload))?;
         std::fs::write(&md_path, Self::provenance_markdown(&payload))?;
         self.show_message(
-            format!("Provenance exported: {}, {}", basename(&json_path.to_string_lossy()), basename(&md_path.to_string_lossy())),
+            format!(
+                "Provenance exported: {}, {}",
+                basename(&json_path.to_string_lossy()),
+                basename(&md_path.to_string_lossy())
+            ),
             5000,
         );
         self.log_operation("Exported provenance report (JSON + Markdown).");
@@ -575,8 +620,9 @@ impl Session {
             Some(mask) if mask.len() == d.freqs.len() => frequency_gap_spans(&d.freqs, Some(mask), step),
             _ => Vec::new(),
         };
-        let log_frequency_bounds =
-            (self.freq_axis_log && self.frequency_axis_log_usable()).then(|| self.positive_frequency_bounds()).flatten();
+        let log_frequency_bounds = (self.freq_axis_log && self.frequency_axis_log_usable())
+            .then(|| self.positive_frequency_bounds())
+            .flatten();
 
         // `_dynamic_spectrum_view_for_extent`: a view missing the spectrum is a stale default.
         let view = view.and_then(|v| {
@@ -588,7 +634,13 @@ impl Session {
         });
 
         Some(SpectrumGraph {
-            image: SpectrumImage { data: display, extent, cmap: Colormap::by_name(&self.graph.cmap), levels, colorbar_label },
+            image: SpectrumImage {
+                data: display,
+                extent,
+                cmap: Colormap::by_name(&self.graph.cmap),
+                levels,
+                colorbar_label,
+            },
             title,
             x_label,
             y_label,
@@ -667,13 +719,24 @@ impl Session {
 
         // `_origin_measurement`.
         let measurement = match &self.tools.measurement {
-            Some(m) => Some(Measurement { points: Self::measurement_points(m).to_vec(), label: Self::measurement_overlay_label(m) }),
+            Some(m) => Some(Measurement {
+                points: Self::measurement_points(m).to_vec(),
+                label: Self::measurement_overlay_label(m),
+            }),
             None if !self.tools.measurement_capture_points.is_empty() => {
                 Some(Measurement { points: self.tools.measurement_capture_points.clone(), label: String::new() })
             }
             None => None,
         };
         let plot_type = self.current_plot_type.clone();
-        self.origin_spectrum_graph(&source, &plot_type, self.canvas.view(), levels, self.origin_light_curves(), annotations, measurement)
+        self.origin_spectrum_graph(
+            &source,
+            &plot_type,
+            self.canvas.view(),
+            levels,
+            self.origin_light_curves(),
+            annotations,
+            measurement,
+        )
     }
 }

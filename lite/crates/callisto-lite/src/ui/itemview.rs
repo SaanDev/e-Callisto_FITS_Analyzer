@@ -84,22 +84,66 @@ pub struct Style {
 impl Style {
     /// `#DownloaderFileTree`.
     pub fn tree() -> Self {
-        Style { kind: Kind::Tree, row_h: 16.0, item_pad: 0.0, pad: (5.0, 5.0), radius: 8.0, alternate: false, header: true, header_centered: false, sortable: false, focus_border: false }
+        Style {
+            kind: Kind::Tree,
+            row_h: 16.0,
+            item_pad: 0.0,
+            pad: (5.0, 5.0),
+            radius: 8.0,
+            alternate: false,
+            header: true,
+            header_centered: false,
+            sortable: false,
+            focus_border: false,
+        }
     }
 
     /// `#EventResultsTable`.
     pub fn results_table(sortable: bool) -> Self {
-        Style { kind: Kind::Table, row_h: 30.0, item_pad: 5.0, pad: (5.0, 5.0), radius: 8.0, alternate: true, header: true, header_centered: true, sortable, focus_border: false }
+        Style {
+            kind: Kind::Table,
+            row_h: 30.0,
+            item_pad: 5.0,
+            pad: (5.0, 5.0),
+            radius: 8.0,
+            alternate: true,
+            header: true,
+            header_centered: true,
+            sortable,
+            focus_border: false,
+        }
     }
 
     /// `#EventStationList`.
     pub fn station_list() -> Self {
-        Style { kind: Kind::List, row_h: 16.0, item_pad: 0.0, pad: (5.0, 5.0), radius: 8.0, alternate: false, header: false, header_centered: false, sortable: false, focus_border: false }
+        Style {
+            kind: Kind::List,
+            row_h: 16.0,
+            item_pad: 0.0,
+            pad: (5.0, 5.0),
+            radius: 8.0,
+            alternate: false,
+            header: false,
+            header_centered: false,
+            sortable: false,
+            focus_border: false,
+        }
     }
 
     /// A plain `QListWidget` (Learmonth chunks): `padding: 6px 8px`, radius 10.
     pub fn plain_list() -> Self {
-        Style { kind: Kind::List, row_h: 16.0, item_pad: 0.0, pad: (8.0, 6.0), radius: 10.0, alternate: false, header: false, header_centered: false, sortable: false, focus_border: true }
+        Style {
+            kind: Kind::List,
+            row_h: 16.0,
+            item_pad: 0.0,
+            pad: (8.0, 6.0),
+            radius: 10.0,
+            alternate: false,
+            header: false,
+            header_centered: false,
+            sortable: false,
+            focus_border: true,
+        }
     }
 }
 
@@ -141,7 +185,10 @@ pub fn check_indicator(ui: &Ui, rect: Rect, state: Check, selected: bool, p: &Pa
         painter.rect_filled(rect, CornerRadius::ZERO, base);
     }
     // The gradient's darker top edge (base.darker(115) fading out).
-    painter.line_segment([pos2(rect.left(), rect.top() + 0.5), pos2(rect.right(), rect.top() + 0.5)], Stroke::new(1.0, darker(base, 1.08)));
+    painter.line_segment(
+        [pos2(rect.left(), rect.top() + 0.5), pos2(rect.right(), rect.top() + 0.5)],
+        Stroke::new(1.0, darker(base, 1.08)),
+    );
     let pad = 1.0 + rect.width() * 0.13;
     match state {
         Check::Partial => {
@@ -155,11 +202,7 @@ pub fn check_indicator(ui: &Ui, rect: Rect, state: Check, selected: bool, p: &Pa
         Check::Checked => {
             let h = rect.height();
             let o = rect.min + vec2(-0.8, 0.5);
-            let pts = [
-                o + vec2(pad + h * 0.11, h * 0.47),
-                o + vec2(h * 0.5, h - pad),
-                o + vec2(h - pad, pad),
-            ];
+            let pts = [o + vec2(pad + h * 0.11, h * 0.47), o + vec2(h * 0.5, h - pad), o + vec2(h - pad, pad)];
             let width = (1.5f32).max(0.13 * h).min(0.20 * h);
             painter.add(Shape::line(pts.to_vec(), Stroke::new(width, mark)));
         }
@@ -194,11 +237,18 @@ fn gradient_rect(r: Rect, top: Color32, bottom: Color32) -> egui::Mesh {
 /// hair over DirectWrite's, hence the 0.1. A cell: the text plus
 /// `::item { padding: 5px }` and the 3 px text margins, 16 px; a check
 /// box adds 20.
-pub fn content_width(ui: &Ui, header: &str, cells: impl Iterator<Item = String>, checkable: bool, sortable: bool) -> f32 {
+pub fn content_width(
+    ui: &Ui,
+    header: &str,
+    cells: impl Iterator<Item = String>,
+    checkable: bool,
+    sortable: bool,
+) -> f32 {
     let head = if header.is_empty() {
         28.0
     } else {
-        ((text_width(ui, header, FONT_PX, Weight::Bold) - 0.1).ceil() + 17.0 + if sortable { 22.0 } else { 0.0 }).max(28.0)
+        ((text_width(ui, header, FONT_PX, Weight::Bold) - 0.1).ceil() + 17.0 + if sortable { 22.0 } else { 0.0 })
+            .max(28.0)
     };
     let cell = cells
         .map(|c| {
@@ -212,7 +262,10 @@ pub fn content_width(ui: &Ui, header: &str, cells: impl Iterator<Item = String>,
 /// The viewport (inside frame and padding, below the header).
 pub fn viewport(rect: Rect, style: &Style) -> Rect {
     let top = rect.top() + 1.0 + style.pad.1 + if style.header { HEADER_H } else { 0.0 };
-    Rect::from_min_max(pos2(rect.left() + 1.0 + style.pad.0, top), pos2(rect.right() - 1.0 - style.pad.0, rect.bottom() - 1.0 - style.pad.1))
+    Rect::from_min_max(
+        pos2(rect.left() + 1.0 + style.pad.0, top),
+        pos2(rect.right() - 1.0 - style.pad.0, rect.bottom() - 1.0 - style.pad.1),
+    )
 }
 
 /// Whether `n` rows need the vertical scroll bar in `rect`.
@@ -262,7 +315,10 @@ pub fn item_view(
     let col_right = |i: usize| if i + 1 < widths.len() { col_x[i + 1] } else { vp.right() };
     if style.header {
         let top = rect.top() + 1.0 + style.pad.1;
-        let painter = ui.painter_at(Rect::from_min_max(pos2(vp.left(), top), pos2(vp.right() + if scroll { 10.0 } else { 0.0 }, top + HEADER_H)));
+        let painter = ui.painter_at(Rect::from_min_max(
+            pos2(vp.left(), top),
+            pos2(vp.right() + if scroll { 10.0 } else { 0.0 }, top + HEADER_H),
+        ));
         for (i, title) in headers.iter().enumerate() {
             let last = i + 1 == headers.len();
             let right = if last { vp.right() + if scroll { 10.0 } else { 0.0 } } else { col_right(i) };
@@ -274,11 +330,21 @@ pub fn item_view(
             // own rectangle, rounded to device pixels as Qt rounds it.
             let section = painter.with_clip_rect(r);
             super::qt::fill_exact(&section, r, CornerRadius::ZERO, p.border);
-            let inner = Rect::from_min_max(pos2(r.left() + 1.0, r.top() + 1.0), pos2(r.right() - if last { 1.0 } else { 0.0 }, r.bottom() - 1.0));
+            let inner = Rect::from_min_max(
+                pos2(r.left() + 1.0, r.top() + 1.0),
+                pos2(r.right() - if last { 1.0 } else { 0.0 }, r.bottom() - 1.0),
+            );
             super::qt::fill_exact(&section, inner, CornerRadius::ZERO, p.surface_alt);
-            let resp = ui.interact(r, id.with(("header", i)), if style.sortable && enabled { Sense::click() } else { Sense::hover() });
+            let resp = ui.interact(
+                r,
+                id.with(("header", i)),
+                if style.sortable && enabled { Sense::click() } else { Sense::hover() },
+            );
             let sorted = state.sort.filter(|(c, _)| *c == i);
-            let text_area = Rect::from_min_max(pos2(r.left() + 7.0, r.top()), pos2(r.right() - 7.0 - if sorted.is_some() { 19.0 } else { 0.0 }, r.bottom()));
+            let text_area = Rect::from_min_max(
+                pos2(r.left() + 7.0, r.top()),
+                pos2(r.right() - 7.0 - if sorted.is_some() { 19.0 } else { 0.0 }, r.bottom()),
+            );
             if style.header_centered {
                 text_center(ui, text_area.center(), title, FONT_PX, Weight::Semibold, p.muted);
             } else {
@@ -287,7 +353,11 @@ pub fn item_view(
             if let Some((_, asc)) = sorted {
                 let c = pos2(r.right() - 7.0 - 6.0, r.center().y);
                 let dir = if asc { -1.0 } else { 1.0 };
-                let pts = vec![pos2(c.x - 4.0, c.y - 2.0 * dir), pos2(c.x + 4.0, c.y - 2.0 * dir), pos2(c.x, c.y + 2.0 * dir)];
+                let pts = vec![
+                    pos2(c.x - 4.0, c.y - 2.0 * dir),
+                    pos2(c.x + 4.0, c.y - 2.0 * dir),
+                    pos2(c.x, c.y + 2.0 * dir),
+                ];
                 painter.add(Shape::convex_polygon(pts, p.muted, Stroke::NONE));
             }
             if resp.clicked() {
@@ -312,7 +382,13 @@ pub fn item_view(
         } else if style.alternate && k % 2 == 1 {
             painter.rect_filled(r, CornerRadius::ZERO, p.surface_alt);
         }
-        let text_color = if selected { Color32::WHITE } else if enabled { p.text } else { p.disabled };
+        let text_color = if selected {
+            Color32::WHITE
+        } else if enabled {
+            p.text
+        } else {
+            p.disabled
+        };
         let indent = if style.kind == Kind::Tree { INDENT * (row.depth as f32 + 1.0) } else { 0.0 };
         if let Some(expanded) = row.expanded {
             let c = pos2(vp.left() + INDENT * row.depth as f32 + 10.0, r.center().y);
@@ -324,7 +400,10 @@ pub fn item_view(
             };
             painter.add(Shape::convex_polygon(pts, color, Stroke::NONE));
             let branch = Rect::from_center_size(c, vec2(INDENT, style.row_h));
-            if ui.interact(branch, id.with(("branch", ri)), if enabled { Sense::click() } else { Sense::hover() }).clicked() {
+            if ui
+                .interact(branch, id.with(("branch", ri)), if enabled { Sense::click() } else { Sense::hover() })
+                .clicked()
+            {
                 events.push(Event::Expand(ri, !expanded));
             }
         }
@@ -335,10 +414,14 @@ pub fn item_view(
             if ci == 0
                 && let Some(check) = row.check
             {
-                let ind = Rect::from_min_size(pos2(x, (r.center().y - INDICATOR / 2.0).round()), vec2(INDICATOR, INDICATOR));
+                let ind =
+                    Rect::from_min_size(pos2(x, (r.center().y - INDICATOR / 2.0).round()), vec2(INDICATOR, INDICATOR));
                 check_indicator(ui, ind, check, selected, p);
                 let hit = ind.expand(2.0);
-                if ui.interact(hit, id.with(("check", ri)), if enabled { Sense::click() } else { Sense::hover() }).clicked() {
+                if ui
+                    .interact(hit, id.with(("check", ri)), if enabled { Sense::click() } else { Sense::hover() })
+                    .clicked()
+                {
                     events.push(Event::Toggled(ri));
                 }
                 x = ind.right() + 7.0;
@@ -352,11 +435,16 @@ pub fn item_view(
         if let Some(tip) = &row.tooltip
             && ui.rect_contains_pointer(r)
         {
-            egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), id.with(("tip", ri)), egui::PopupAnchor::Pointer)
-                .gap(12.0)
-                .show(|ui| {
-                    ui.label(tip);
-                });
+            egui::Tooltip::always_open(
+                ui.ctx().clone(),
+                ui.layer_id(),
+                id.with(("tip", ri)),
+                egui::PopupAnchor::Pointer,
+            )
+            .gap(12.0)
+            .show(|ui| {
+                ui.label(tip);
+            });
         }
     }
     if let Some(pos) = area.interact_pointer_pos()
@@ -380,7 +468,9 @@ pub fn item_view(
     }
     // Keyboard: arrows move the current row, Space toggles its check box.
     if focused && enabled && !visible.is_empty() {
-        let (up, down, space) = ui.input(|i| (i.key_pressed(egui::Key::ArrowUp), i.key_pressed(egui::Key::ArrowDown), i.key_pressed(egui::Key::Space)));
+        let (up, down, space) = ui.input(|i| {
+            (i.key_pressed(egui::Key::ArrowUp), i.key_pressed(egui::Key::ArrowDown), i.key_pressed(egui::Key::Space))
+        });
         let pos = state.current.and_then(|c| visible.iter().position(|&v| v == c));
         if up || down {
             let mut k = match pos {
@@ -423,11 +513,20 @@ pub fn item_view(
         });
         if wheel != 0.0 {
             let steps = (wheel.abs() * 3.0).round().max(1.0) as usize;
-            state.first = if wheel > 0.0 { state.first.saturating_sub(steps) } else { (state.first + steps).min(max_first) };
+            state.first =
+                if wheel > 0.0 { state.first.saturating_sub(steps) } else { (state.first + steps).min(max_first) };
         }
     }
     if scroll {
-        scrollbar(ui, Rect::from_min_max(pos2(vp.right(), vp.top()), pos2(vp.right() + 10.0, vp.bottom())), id.with("vbar"), state, visible.len(), per_page, p);
+        scrollbar(
+            ui,
+            Rect::from_min_max(pos2(vp.right(), vp.top()), pos2(vp.right() + 10.0, vp.bottom())),
+            id.with("vbar"),
+            state,
+            visible.len(),
+            per_page,
+            p,
+        );
     }
     events
 }

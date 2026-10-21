@@ -7,14 +7,17 @@
 use std::collections::BTreeMap;
 
 use callisto_core::analysis::analyzer::{
-    AnalyzerFit, ShockSummary, ShockUpdate, T0Mode, analysis_time_axis, analyzer_fit, burst_onset_t0, resolve_time_seconds,
-    update_shock_parameters,
+    AnalyzerFit, ShockSummary, ShockUpdate, T0Mode, analysis_time_axis, analyzer_fit, burst_onset_t0,
+    resolve_time_seconds, update_shock_parameters,
 };
 use callisto_core::analysis::density::{DensityModel, ShockParameters};
-use callisto_core::analysis::session::{AnalysisSession, AnalyzerBlock, FitParams, MaxIntensityBlock, SessionSource, TypeIIBlock, UiBlock};
+use callisto_core::analysis::session::{
+    AnalysisSession, AnalyzerBlock, FitParams, MaxIntensityBlock, SessionSource, TypeIIBlock, UiBlock,
+};
 use callisto_core::mpl::Figure;
 use callisto_core::mpl::analysis_figures::{
-    BLUE, FitGraph, GREEN, GraphText, PURPLE, RED, analyzer_scatter_figure, empty_axes_figure, fit_figure, power_law_label,
+    BLUE, FitGraph, GREEN, GraphText, PURPLE, RED, analyzer_scatter_figure, empty_axes_figure, fit_figure,
+    power_law_label,
 };
 use egui::{Color32, Id, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 
@@ -30,7 +33,8 @@ use crate::ui::{qt, widgets};
 pub const TITLE: &str = "Analyzer";
 
 /// `_COMPARISON_COLUMNS`: (header, digits).
-const COLUMNS: [(&str, usize); 4] = [("v\u{2080} (km/s)", 1), ("h\u{2080} (R\u{2609})", 3), ("v\u{304} (km/s)", 1), ("h\u{304} (R\u{2609})", 3)];
+const COLUMNS: [(&str, usize); 4] =
+    [("v\u{2080} (km/s)", 1), ("h\u{2080} (R\u{2609})", 3), ("v\u{304} (km/s)", 1), ("h\u{304} (R\u{2609})", 3)];
 
 const EXTRA_PLOTS: [&str; 3] = ["Shock Speed vs Shock Height", "Shock Speed vs Frequency", "Shock Height vs Frequency"];
 
@@ -377,7 +381,11 @@ impl AnalyzerWindow {
     /// `recalculate_shock_parameters` (Calculate).
     fn recalculate_shock_parameters(&mut self) {
         if self.fit.is_none() {
-            self.notice = Some(Notice { kind: NoticeKind::Information, title: "Analyzer".into(), text: "Please click 'Best Fit' first.".into() });
+            self.notice = Some(Notice {
+                kind: NoticeKind::Information,
+                title: "Analyzer".into(),
+                text: "Please click 'Best Fit' first.".into(),
+            });
             return;
         }
         self.update_shock_parameters(self.fold);
@@ -437,8 +445,22 @@ impl AnalyzerWindow {
             self.fit.as_ref().map_or_else(|| self.freq.clone(), |f| f.fit_freq.clone())
         };
         let (x, y, x_label, y_label, suffix, color) = match self.extra_choice {
-            0 => (u.shock_height.clone(), u.shock_speed.clone(), "Shock Height (R\u{209b})", "Shock Speed (km/s)", "Shock_Speed_vs_Shock_Height", GREEN),
-            1 => (freq_axis, u.shock_speed.clone(), "Frequency (MHz)", "Shock Speed (km/s)", "Shock_Speed_vs_Frequency", PURPLE),
+            0 => (
+                u.shock_height.clone(),
+                u.shock_speed.clone(),
+                "Shock Height (R\u{209b})",
+                "Shock Speed (km/s)",
+                "Shock_Speed_vs_Shock_Height",
+                GREEN,
+            ),
+            1 => (
+                freq_axis,
+                u.shock_speed.clone(),
+                "Frequency (MHz)",
+                "Shock Speed (km/s)",
+                "Shock_Speed_vs_Frequency",
+                PURPLE,
+            ),
             _ => (u.shock_height.clone(), freq_axis, "Shock Height (R\u{209b})", "Frequency (MHz)", "Rs_vs_Freq", RED),
         };
         let title = format!("{}_{suffix}", self.filename);
@@ -503,11 +525,19 @@ impl AnalyzerWindow {
         let fig = callisto_core::mpl::analysis_figures::fit_graph_figure(&self.fit_graph(&g), GraphText::default());
         match crate::figure_export::save_figure_padded(ctx, &fig, &path, 300.0, 0.08) {
             Ok(()) => {
-                self.notice = Some(Notice { kind: NoticeKind::Information, title: "Export Complete".into(), text: format!("Plot saved:\n{}", path.display()) });
+                self.notice = Some(Notice {
+                    kind: NoticeKind::Information,
+                    title: "Export Complete".into(),
+                    text: format!("Plot saved:\n{}", path.display()),
+                });
                 self.status.show("Export successful!", 3000);
             }
             Err(e) => {
-                self.notice = Some(Notice { kind: NoticeKind::Critical, title: "Export Failed".into(), text: format!("Could not save file:\n{e}") });
+                self.notice = Some(Notice {
+                    kind: NoticeKind::Critical,
+                    title: "Export Failed".into(),
+                    text: format!("Could not save file:\n{e}"),
+                });
                 self.status.show("Export failed!", 3000);
             }
         }
@@ -522,7 +552,8 @@ impl AnalyzerWindow {
         let r2 = self.r2_text.rsplit('=').next().unwrap_or("").trim().to_owned();
         let rmse = self.rmse_text.rsplit('=').next().unwrap_or("").trim().to_owned();
         let lines = self.summary_lines();
-        let vals: Vec<(String, String)> = lines.iter().map(|l| callisto_core::analysis::export::value_and_error(&rich::plain(l))).collect();
+        let vals: Vec<(String, String)> =
+            lines.iter().map(|l| callisto_core::analysis::export::value_and_error(&rich::plain(l))).collect();
         let avg_drift_abs = vals[1].0.parse::<f64>().map(|v| Cell::Num(v.abs())).unwrap_or(Cell::Str(String::new()));
         let t0 = self.fit.as_ref().map_or(0.0, |f| f.t0);
         let mut row = vec![Cell::Str(date), Cell::Str(station), Cell::Str(best_fit), Cell::Str(r2), Cell::Str(rmse)];
@@ -541,7 +572,11 @@ impl AnalyzerWindow {
         use callisto_core::xlsx;
         let row = self.data_row();
         let result = if self.existing_excel {
-            let Some(path) = rfd::FileDialog::new().set_title("Select Existing Excel File").add_filter("Excel Files (*.xlsx)", &["xlsx"]).pick_file() else {
+            let Some(path) = rfd::FileDialog::new()
+                .set_title("Select Existing Excel File")
+                .add_filter("Excel Files (*.xlsx)", &["xlsx"])
+                .pick_file()
+            else {
                 return;
             };
             xlsx::append_row(&path, &row).map_err(|e| ("Load Error", format!("Could not open Excel file:\n{e}")))
@@ -554,8 +589,12 @@ impl AnalyzerWindow {
             else {
                 return;
             };
-            let headers: Vec<xlsx::Cell> = callisto_core::analysis::export::ANALYZER_HEADERS.iter().map(|h| xlsx::Cell::Str((*h).into())).collect();
-            xlsx::write_rows(&path, &[headers, row]).map_err(|e| ("Write Error", format!("Could not write to Excel file:\n{e}")))
+            let headers: Vec<xlsx::Cell> = callisto_core::analysis::export::ANALYZER_HEADERS
+                .iter()
+                .map(|h| xlsx::Cell::Str((*h).into()))
+                .collect();
+            xlsx::write_rows(&path, &[headers, row])
+                .map_err(|e| ("Write Error", format!("Could not write to Excel file:\n{e}")))
         };
         match result {
             Ok(()) => self.status.show("\u{2705} Data saved to Excel successfully!", 3000),
@@ -580,10 +619,13 @@ impl AnalyzerWindow {
             Some(false) => row = row.widget(qt::spin_spec(ui, "t0_seconds", "-86400.00 s")),
             None => {}
         }
-        let left = BoxLayout::v([0; 4], 6)
-            .add(row.stretch(1).into_item())
-            .widget(WidgetSpec::new("canvas", Size::new(800, 500), Policy::Expanding, Policy::Expanding).min_hint(Size::new(10, 10)));
-        let right = WidgetSpec::new("panel", Size::new(288, 384), Policy::Expanding, Policy::Expanding).min_width(300).min_hint(Size::new(56, 56));
+        let left = BoxLayout::v([0; 4], 6).add(row.stretch(1).into_item()).widget(
+            WidgetSpec::new("canvas", Size::new(800, 500), Policy::Expanding, Policy::Expanding)
+                .min_hint(Size::new(10, 10)),
+        );
+        let right = WidgetSpec::new("panel", Size::new(288, 384), Policy::Expanding, Policy::Expanding)
+            .min_width(300)
+            .min_hint(Size::new(56, 56));
         let main = BoxLayout::h([0; 4], 6).add_stretched(left.into_item(), 3).add_stretched(Item::Widget(right), 1);
         BoxLayout::v([11; 4], 6)
             .add(main.into_item())
@@ -637,7 +679,8 @@ impl AnalyzerWindow {
     fn contents(&mut self, ui: &mut Ui, p: &Palette) {
         let full = ui.max_rect();
         let custom = (self.t0_mode == T0Mode::Custom).then_some(self.ut_start_sec.is_some());
-        let g = Self::main_layout(ui, custom).layout_window(Size::new(full.width().round() as i32, full.height().round() as i32));
+        let g = Self::main_layout(ui, custom)
+            .layout_window(Size::new(full.width().round() as i32, full.height().round() as i32));
         let rect = |id: &str| g.rect(id).to_egui(full.min);
         if qt::button(ui, rect("max"), Id::new("an_max"), "Maximum Intensities", false, true, p).clicked() {
             self.plot_max();
@@ -655,7 +698,19 @@ impl AnalyzerWindow {
         match custom {
             Some(false) => {
                 let mut v = self.custom_t0;
-                if qt::double_spin_box(ui, rect("t0_seconds"), Id::new("an_t0_seconds"), &mut v, (-86400.0, 86400.0), 1.0, 2, " s", false, true, p) {
+                if qt::double_spin_box(
+                    ui,
+                    rect("t0_seconds"),
+                    Id::new("an_t0_seconds"),
+                    &mut v,
+                    (-86400.0, 86400.0),
+                    1.0,
+                    2,
+                    " s",
+                    false,
+                    true,
+                    p,
+                ) {
                     self.custom_t0 = v;
                     self.refit_after_t0_change();
                 }
@@ -709,7 +764,8 @@ impl AnalyzerWindow {
         let viewport = Rect::from_min_max(area.min + vec2(1.0, 1.0), area.max - vec2(11.0, 1.0));
         ui.painter().rect_filled(viewport, 0.0, p.qt.window);
         // The scroll bar's column shows the window behind it.
-        let bar = Rect::from_min_max(pos2(viewport.right(), viewport.top()), pos2(area.right() - 1.0, viewport.bottom()));
+        let bar =
+            Rect::from_min_max(pos2(viewport.right(), viewport.top()), pos2(area.right() - 1.0, viewport.bottom()));
         ui.painter().rect_filled(bar, 0.0, p.page_bg);
 
         let width = viewport.width().round() as i32;
@@ -771,7 +827,9 @@ impl AnalyzerWindow {
         if let Some(i) = qt::combo(ui, rect("fold"), Id::new("an_fold"), &folds, Some(self.fold - 1), "", true, p) {
             self.fold = i + 1;
         }
-        if qt::button(ui, rect("calculate"), Id::new("an_calculate"), "Calculate", false, self.fit.is_some(), p).clicked() {
+        if qt::button(ui, rect("calculate"), Id::new("an_calculate"), "Calculate", false, self.fit.is_some(), p)
+            .clicked()
+        {
             self.recalculate_shock_parameters();
         }
         lbl(ui, "equation_label", "Best Fit Equation:");
@@ -796,10 +854,20 @@ impl AnalyzerWindow {
         if qt::button(ui, rect("save_data"), Id::new("an_save_data"), "Save Data", false, true, p).clicked() {
             self.save_data();
         }
-        qt::check_box(ui, rect("existing"), Id::new("an_existing"), "Existing Excel File", &mut self.existing_excel, true, p);
+        qt::check_box(
+            ui,
+            rect("existing"),
+            Id::new("an_existing"),
+            "Existing Excel File",
+            &mut self.existing_excel,
+            true,
+            p,
+        );
         lbl(ui, "extra_label", "Extra Plots:");
         let extras: Vec<String> = EXTRA_PLOTS.iter().map(|s| (*s).to_owned()).collect();
-        if let Some(i) = qt::combo(ui, rect("extra"), Id::new("an_extra"), &extras, Some(self.extra_choice), "", true, p) {
+        if let Some(i) =
+            qt::combo(ui, rect("extra"), Id::new("an_extra"), &extras, Some(self.extra_choice), "", true, p)
+        {
             self.extra_choice = i;
         }
         if qt::button(ui, rect("plot_extra"), Id::new("an_plot_extra"), "Plot", false, true, p).clicked() {
@@ -837,10 +905,16 @@ impl AnalyzerWindow {
                 line(pos2(s.right() - 0.5, s.top()), pos2(s.right() - 0.5, s.bottom()));
             }
             // Centred in the section's padding (6 px), clipped to it.
-            let inner = Rect::from_min_max(pos2(s.left() + 7.0, s.top() + 1.0), pos2(s.right() - 6.0, s.bottom() - 1.0));
+            let inner =
+                Rect::from_min_max(pos2(s.left() + 7.0, s.top() + 1.0), pos2(s.right() - 6.0, s.bottom() - 1.0));
             let clip = ui.painter_at(inner);
-            let galley = ui.ctx().fonts_mut(|f| f.layout_no_wrap((*header).to_owned(), ui_font(qt::FONT_PX, Weight::Semibold), p.muted));
-            let top = pos2((inner.center().x - galley.size().x / 2.0).round(), (inner.center().y - galley.size().y / 2.0).round());
+            let galley = ui
+                .ctx()
+                .fonts_mut(|f| f.layout_no_wrap((*header).to_owned(), ui_font(qt::FONT_PX, Weight::Semibold), p.muted));
+            let top = pos2(
+                (inner.center().x - galley.size().x / 2.0).round(),
+                (inner.center().y - galley.size().y / 2.0).round(),
+            );
             clip.galley(top, galley, p.muted);
             x += w;
         }
@@ -919,7 +993,8 @@ fn fusion_header(ui: &Ui, r: Rect, p: &Palette) {
     let base = lighter(b, lift);
     let (top, bottom) = (lighter(base, 104), darker(base, 102));
     let mut mesh = egui::Mesh::default();
-    for (pos, col) in [(r.left_top(), top), (r.right_top(), top), (r.right_bottom(), bottom), (r.left_bottom(), bottom)] {
+    for (pos, col) in [(r.left_top(), top), (r.right_top(), top), (r.right_bottom(), bottom), (r.left_bottom(), bottom)]
+    {
         mesh.vertices.push(egui::epaint::Vertex { pos, uv: egui::epaint::WHITE_UV, color: col });
     }
     mesh.indices.extend([0, 1, 2, 0, 2, 3]);
@@ -929,7 +1004,10 @@ fn fusion_header(ui: &Ui, r: Rect, p: &Palette) {
 /// `QFontMetrics::elidedText(…, Qt::ElideRight, width)`, by the face's
 /// design advances as Qt measures them.
 fn elide(ui: &Ui, text: &str, weight: Weight, width: f32) -> String {
-    let w = |s: &str| crate::fonts::design_width(s, qt::FONT_PX, weight).unwrap_or_else(|| widgets::text_width(ui, s, qt::FONT_PX, weight));
+    let w = |s: &str| {
+        crate::fonts::design_width(s, qt::FONT_PX, weight)
+            .unwrap_or_else(|| widgets::text_width(ui, s, qt::FONT_PX, weight))
+    };
     if w(text) <= width {
         return text.to_owned();
     }

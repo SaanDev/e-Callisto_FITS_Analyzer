@@ -9,13 +9,15 @@
 use std::sync::Arc;
 
 use super::{
-    AxesText, Axes, AxisSpec, FigText, Figure, Formatter, Grid, HAlign, Image, Interpolation, Label, Rgba, Side,
-    Ticks, VAlign, colorbar_beside, colorbar_image, grid_positions, hex, subplot_with_colorbar, BLACK, WHITE, Face,
+    Axes, AxesText, AxisSpec, BLACK, Face, FigText, Figure, Formatter, Grid, HAlign, Image, Interpolation, Label, Rgba,
+    Side, Ticks, VAlign, WHITE, colorbar_beside, colorbar_image, grid_positions, hex, subplot_with_colorbar,
 };
-use crate::radio::comparison::{Alignment, PanelPayload, comparison_colormap, dataset_extent, grid_dimensions, ut_tick};
 use crate::plot::Colormap;
 use crate::radio::array::Array2;
 use crate::radio::batch::{BatchFigureSpec, format_ut_tick};
+use crate::radio::comparison::{
+    Alignment, PanelPayload, comparison_colormap, dataset_extent, grid_dimensions, ut_tick,
+};
 use crate::radio::frequency_axis::frequency_edges;
 use crate::radio::processing::{BackgroundMethod, PLOTUTIL_DB_SCALE, subtract_background};
 use crate::radio::spectral_overview::{DISPLAY_LIMITS, OverviewResult, SECONDS_PER_PANEL};
@@ -33,7 +35,14 @@ pub struct QtColors {
     pub mid: Rgba,
 }
 
-pub(super) fn colorbar_axes(position: [f64; 4], box_aspect: Option<(f64, (f64, f64))>, image: Image, fg: Rgba, label: Label, tick_pt: f64) -> Axes {
+pub(super) fn colorbar_axes(
+    position: [f64; 4],
+    box_aspect: Option<(f64, (f64, f64))>,
+    image: Image,
+    fg: Rgba,
+    label: Label,
+    tick_pt: f64,
+) -> Axes {
     let (vmin, vmax) = (image.vmin, image.vmax);
     let mut y = AxisSpec::origin(fg);
     y.ticks_low = false;
@@ -84,8 +93,10 @@ pub fn preview_figure(data: &Array2, freqs: &[f64], times: &[f64], width: f64, h
     let finite = |v: &[f64]| v.iter().copied().filter(|x| x.is_finite()).collect::<Vec<_>>();
     let (fs, ts) = (finite(freqs), finite(times));
     let (extent, origin_upper, xlim, ylim) = if freqs.len() > 1 && times.len() > 1 && !fs.is_empty() && !ts.is_empty() {
-        let (fmin, fmax) = (fs.iter().copied().fold(f64::INFINITY, f64::min), fs.iter().copied().fold(f64::NEG_INFINITY, f64::max));
-        let (tmin, tmax) = (ts.iter().copied().fold(f64::INFINITY, f64::min), ts.iter().copied().fold(f64::NEG_INFINITY, f64::max));
+        let (fmin, fmax) =
+            (fs.iter().copied().fold(f64::INFINITY, f64::min), fs.iter().copied().fold(f64::NEG_INFINITY, f64::max));
+        let (tmin, tmax) =
+            (ts.iter().copied().fold(f64::INFINITY, f64::min), ts.iter().copied().fold(f64::NEG_INFINITY, f64::max));
         x.label = Some(Label::new("Time [s]", 12.0, c.text));
         y.label = Some(Label::new("Frequency [MHz]", 12.0, c.text));
         ([tmin, tmax, fmin, fmax], freqs[0] > freqs[freqs.len() - 1], (tmin, tmax), (fmin, fmax))
@@ -178,8 +189,23 @@ pub fn batch_figure(spec: &BatchFigureSpec) -> Figure {
     ax.facecolor = Some(WHITE);
     ax.images = vec![image];
     ax.title = spec.title.as_ref().map(|t| Label::new(t.clone(), 14.4, BLACK));
-    let bar = colorbar_axes(cbar, Some(aspect), colorbar_image(&cmap, vmin, vmax), BLACK, Label::new(spec.colorbar_label.clone(), 12.0, BLACK), 12.0);
-    Figure { width: 1000.0, height: 600.0, dpi: 100.0, facecolor: WHITE, axes: vec![ax, bar], texts: Vec::new(), constrained: None }
+    let bar = colorbar_axes(
+        cbar,
+        Some(aspect),
+        colorbar_image(&cmap, vmin, vmax),
+        BLACK,
+        Label::new(spec.colorbar_label.clone(), 12.0, BLACK),
+        12.0,
+    );
+    Figure {
+        width: 1000.0,
+        height: 600.0,
+        dpi: 100.0,
+        facecolor: WHITE,
+        axes: vec![ax, bar],
+        texts: Vec::new(),
+        constrained: None,
+    }
 }
 
 /// What the grid export draws the panels with.
@@ -206,7 +232,10 @@ pub fn comparison_grid_figure(payloads: &[PanelPayload], o: &GridOptions) -> Fig
     let (width, height) = ((5.0 * cols as f64 + 1.2) * 100.0, (3.6 * rows as f64 + 1.4) * 100.0);
     let extents: Vec<[f64; 4]> = payloads.iter().map(|p| dataset_extent(&p.dataset, &p.time_axis)).collect();
     let xlim = o.time_range.unwrap_or_else(|| {
-        (extents.iter().map(|e| e[0]).fold(f64::INFINITY, f64::min), extents.iter().map(|e| e[1]).fold(f64::NEG_INFINITY, f64::max))
+        (
+            extents.iter().map(|e| e[0]).fold(f64::INFINITY, f64::min),
+            extents.iter().map(|e| e[1]).fold(f64::NEG_INFINITY, f64::max),
+        )
     });
     let show_seconds = (xlim.1 - xlim.0).abs() <= 300.0;
     let ut = o.alignment == Alignment::Ut;
@@ -257,7 +286,14 @@ pub fn comparison_grid_figure(payloads: &[PanelPayload], o: &GridOptions) -> Fig
         ax.title_pad_pt = 9.0;
         axes.push(ax);
         if let Some((bar, aspect)) = bar {
-            bars.push(colorbar_axes(bar, Some(aspect), colorbar_image(&cmap, p.levels.0, p.levels.1), BLACK, Label::new(unit, 8.0, BLACK), 7.0));
+            bars.push(colorbar_axes(
+                bar,
+                Some(aspect),
+                colorbar_image(&cmap, p.levels.0, p.levels.1),
+                BLACK,
+                Label::new(unit, 8.0, BLACK),
+                7.0,
+            ));
         }
     }
     if !o.per_station
@@ -280,7 +316,8 @@ pub fn comparison_grid_figure(payloads: &[PanelPayload], o: &GridOptions) -> Fig
 
 /// `render_spectral_overview_figure` for a canvas of `width` × `height`.
 pub fn overview_figure(result: &OverviewResult, width: f64, height: f64) -> Figure {
-    let all: Vec<f64> = result.segments.iter().flat_map(|s| s.freqs.iter().copied()).filter(|f| f.is_finite()).collect();
+    let all: Vec<f64> =
+        result.segments.iter().flat_map(|s| s.freqs.iter().copied()).filter(|f| f.is_finite()).collect();
     let fmin = all.iter().copied().fold(f64::INFINITY, f64::min);
     let fmax = all.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let viridis = Colormap::by_name("viridis");
@@ -393,7 +430,14 @@ pub fn overview_figure(result: &OverviewResult, width: f64, height: f64) -> Figu
         result.focus_code
     );
     let texts = vec![
-        FigText { x: 0.5, y: 0.975, label: Label::new(title, 14.0, BLACK), ha: HAlign::Center, va: VAlign::Top, rotation: 0.0 },
+        FigText {
+            x: 0.5,
+            y: 0.975,
+            label: Label::new(title, 14.0, BLACK),
+            ha: HAlign::Center,
+            va: VAlign::Top,
+            rotation: 0.0,
+        },
         FigText {
             x: 0.020,
             y: 0.5,
@@ -402,7 +446,14 @@ pub fn overview_figure(result: &OverviewResult, width: f64, height: f64) -> Figu
             va: VAlign::Center,
             rotation: 90.0,
         },
-        FigText { x: 0.47, y: 0.020, label: Label::new("Time [UTC]", 12.0, BLACK), ha: HAlign::Center, va: VAlign::Baseline, rotation: 0.0 },
+        FigText {
+            x: 0.47,
+            y: 0.020,
+            label: Label::new("Time [UTC]", 12.0, BLACK),
+            ha: HAlign::Center,
+            va: VAlign::Baseline,
+            rotation: 0.0,
+        },
     ];
     Figure { width, height, dpi: 100.0, facecolor: WHITE, axes, texts, constrained: None }
 }

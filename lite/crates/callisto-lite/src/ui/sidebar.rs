@@ -524,7 +524,9 @@ fn ruler(ui: &mut Ui, col: &mut Column, _st: &mut SidebarState, cx: &mut Sidebar
     let r = col.next(32.0);
     let copy = Rect::from_min_size(r.min, vec2(117.0, 32.0));
     let clear = Rect::from_min_max(pos2(r.left() + 123.0, r.top()), r.max);
-    if widgets::push_button(ui, copy, Id::new("ruler_copy"), "Copy", ButtonKind::Normal, readout.copy_enabled, p).clicked() {
+    if widgets::push_button(ui, copy, Id::new("ruler_copy"), "Copy", ButtonKind::Normal, readout.copy_enabled, p)
+        .clicked()
+    {
         ui.ctx().copy_text(readout.text.clone());
     }
     if widgets::push_button(ui, clear, Id::new("ruler_clear"), "Clear", ButtonKind::Normal, readout.clear_enabled, p)

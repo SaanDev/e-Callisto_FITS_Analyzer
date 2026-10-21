@@ -5,6 +5,7 @@
 
 pub mod analysis;
 pub mod archive;
+pub mod bug_report;
 pub mod callisto;
 pub mod colormap;
 pub mod dataset;
@@ -14,11 +15,12 @@ pub mod image;
 pub mod mpl;
 pub mod plot;
 pub mod presets;
-pub mod report;
 pub mod project;
 pub mod pyjson;
 pub mod radio;
 pub mod render;
+pub mod report;
+pub mod updates;
 pub mod util;
 pub mod view_config;
 pub mod xlsx;

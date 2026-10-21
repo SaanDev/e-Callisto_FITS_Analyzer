@@ -84,15 +84,25 @@ pub struct Question {
 /// Shows a Yes/No question; returns `Some(answer)` once answered.
 pub fn question_box(ctx: &egui::Context, q: &Question, p: &Palette) -> Option<bool> {
     let text_w = 420.0;
-    let probe = ctx.fonts_mut(|f| f.layout(q.text.clone(), crate::fonts::ui_font(12.0, crate::fonts::Weight::Regular), p.text, text_w));
+    let probe = ctx.fonts_mut(|f| {
+        f.layout(q.text.clone(), crate::fonts::ui_font(12.0, crate::fonts::Weight::Regular), p.text, text_w)
+    });
     let size = vec2(24.0 + 48.0 + text_w, 36.0 + probe.size().y.max(32.0) + 46.0);
     let mut answer = None;
     crate::ui::dialogs::dialog_window(ctx, &format!("question:{}", q.title), &q.title, size, p, false, |ui| {
         let full = ui.max_rect();
         let icon = Rect::from_min_size(full.min + vec2(12.0, 12.0), vec2(32.0, 32.0));
         ui.painter().circle_filled(icon.center(), 16.0, egui::Color32::from_rgb(0x1f, 0x6f, 0xeb));
-        ui.painter().text(icon.center(), egui::Align2::CENTER_CENTER, "?", crate::fonts::ui_font(20.0, crate::fonts::Weight::Bold), egui::Color32::WHITE);
-        let galley = ctx.fonts_mut(|f| f.layout(q.text.clone(), crate::fonts::ui_font(12.0, crate::fonts::Weight::Regular), p.text, text_w));
+        ui.painter().text(
+            icon.center(),
+            egui::Align2::CENTER_CENTER,
+            "?",
+            crate::fonts::ui_font(20.0, crate::fonts::Weight::Bold),
+            egui::Color32::WHITE,
+        );
+        let galley = ctx.fonts_mut(|f| {
+            f.layout(q.text.clone(), crate::fonts::ui_font(12.0, crate::fonts::Weight::Regular), p.text, text_w)
+        });
         ui.painter().galley(pos2(icon.right() + 16.0, full.top() + 12.0), galley, p.text);
         let by = full.bottom() - 12.0 - 34.0;
         let no = Rect::from_min_size(pos2(full.right() - 12.0 - 88.0, by), vec2(88.0, 34.0));
@@ -100,7 +110,9 @@ pub fn question_box(ctx: &egui::Context, q: &Question, p: &Palette) -> Option<bo
         if qt::button(ui, yes, Id::new("q_yes"), "Yes", false, true, p).clicked() {
             answer = Some(true);
         }
-        if qt::button(ui, no, Id::new("q_no"), "No", false, true, p).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if qt::button(ui, no, Id::new("q_no"), "No", false, true, p).clicked()
+            || ui.input(|i| i.key_pressed(egui::Key::Escape))
+        {
             answer = Some(false);
         }
         answer
@@ -304,7 +316,13 @@ impl DownloaderDialog {
 
     /// Takes in what a frame produced: message boxes, questions, previews
     /// (shown when `windows`), and the action for the main window.
-    pub fn finish(&mut self, ctx: &egui::Context, mut out: Outbox, p: &Palette, windows: bool) -> Option<DownloaderAction> {
+    pub fn finish(
+        &mut self,
+        ctx: &egui::Context,
+        mut out: Outbox,
+        p: &Palette,
+        windows: bool,
+    ) -> Option<DownloaderAction> {
         let mut action = None;
         // Message boxes and questions belong to the dialog.
         self.notices.append(&mut out.notices);
@@ -402,7 +420,12 @@ impl DownloaderDialog {
             .stretch(1)
             .widget(qt::button_spec(ui, "open_cache", "Open Cache Folder", false))
             .widget(qt::button_spec(ui, "clear_cache", "Clear Cache", false));
-        let tabs = crate::ui::qlayout::WidgetSpec::new("tabs", Size::new(844, 997), crate::ui::qlayout::Policy::Expanding, crate::ui::qlayout::Policy::Expanding);
+        let tabs = crate::ui::qlayout::WidgetSpec::new(
+            "tabs",
+            Size::new(844, 997),
+            crate::ui::qlayout::Policy::Expanding,
+            crate::ui::qlayout::Policy::Expanding,
+        );
         let root: Layout = BoxLayout::v([14; 4], 8).widget(tabs).add(footer.into_item()).into();
         let (g, o) = lay_out(&root, full);
         let tabs_rect = at(&g, o, "tabs");
@@ -433,19 +456,27 @@ impl DownloaderDialog {
         }
 
         qt::status(ui, at(&g, o, "cache_label"), &self.cache_label, p);
-        if qt::button(ui, at(&g, o, "open_cache"), Id::new("open_cache"), "Open Cache Folder", false, true, p).clicked() {
+        if qt::button(ui, at(&g, o, "open_cache"), Id::new("open_cache"), "Open Cache Folder", false, true, p).clicked()
+        {
             let _ = std::fs::create_dir_all(&self.cache_root);
             let _ = open::that_detached(&self.cache_root);
         }
         if qt::button(ui, at(&g, o, "clear_cache"), Id::new("clear_cache"), "Clear Cache", false, true, p).clicked() {
             if self.cache_busy() {
-                sh.out.notice(NoticeKind::Information, "Cache Busy", "Cannot clear the cache while a download or preview is running.");
+                sh.out.notice(
+                    NoticeKind::Information,
+                    "Cache Busy",
+                    "Cannot clear the cache while a download or preview is running.",
+                );
             } else {
                 let size = cache::format_size(cache::cache_size_bytes(&self.cache_root));
                 sh.out.question = Some((
                     Question {
                         title: "Clear Cache".into(),
-                        text: format!("Delete all cached e-CALLISTO FITS files?\n\n{}\n({size})", self.cache_root.display()),
+                        text: format!(
+                            "Delete all cached e-CALLISTO FITS files?\n\n{}\n({size})",
+                            self.cache_root.display()
+                        ),
                     },
                     QuestionPurpose::ClearCache,
                 ));

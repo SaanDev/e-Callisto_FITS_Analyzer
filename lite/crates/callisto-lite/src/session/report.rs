@@ -104,8 +104,9 @@ impl Session {
     /// `_project_report_source_paths`.
     pub fn project_report_source_paths(&self) -> Vec<String> {
         let d = self.data.as_ref();
-        let sources: Vec<String> =
-            d.map(|d| d.combined_sources.iter().filter(|s| !s.trim().is_empty()).cloned().collect()).unwrap_or_default();
+        let sources: Vec<String> = d
+            .map(|d| d.combined_sources.iter().filter(|s| !s.trim().is_empty()).cloned().collect())
+            .unwrap_or_default();
         if !sources.is_empty() {
             return sources;
         }
@@ -117,7 +118,12 @@ impl Session {
 
     /// `_project_report_source_label`.
     pub fn project_report_source_label(&self) -> String {
-        let names: Vec<String> = self.project_report_source_paths().iter().map(|p| basename(p).to_owned()).filter(|n| !n.is_empty()).collect();
+        let names: Vec<String> = self
+            .project_report_source_paths()
+            .iter()
+            .map(|p| basename(p).to_owned())
+            .filter(|n| !n.is_empty())
+            .collect();
         if names.is_empty() { self.filename().to_owned() } else { names.join(", ") }
     }
 
@@ -130,7 +136,8 @@ impl Session {
                 _ => base.to_owned(),
             }
         };
-        let mut stems: Vec<String> = self.project_report_source_paths().iter().map(|p| stem_of(p)).filter(|s| !s.is_empty()).collect();
+        let mut stems: Vec<String> =
+            self.project_report_source_paths().iter().map(|p| stem_of(p)).filter(|s| !s.is_empty()).collect();
         if stems.is_empty()
             && let Some(p) = project
         {
@@ -159,9 +166,12 @@ impl Session {
 
     /// `_project_report_default_path`.
     pub fn project_report_default_path(&self, project: Option<&Path>) -> PathBuf {
-        let dir = project
-            .and_then(|p| p.parent().map(Path::to_path_buf))
-            .or_else(|| self.data.as_ref().and_then(|d| d.source_path.as_ref()).and_then(|p| Path::new(p).parent().map(Path::to_path_buf)));
+        let dir = project.and_then(|p| p.parent().map(Path::to_path_buf)).or_else(|| {
+            self.data
+                .as_ref()
+                .and_then(|d| d.source_path.as_ref())
+                .and_then(|p| Path::new(p).parent().map(Path::to_path_buf))
+        });
         let name = format!("{}_project_report.pdf", self.project_report_default_stem(project));
         match dir {
             Some(d) if !d.as_os_str().is_empty() => d.join(name),
@@ -170,7 +180,13 @@ impl Session {
     }
 
     /// `_project_report_figure`.
-    fn report_figure(&self, title: &str, png: Option<(Vec<u8>, u32, u32)>, caption: &str, unavailable: &str) -> ReportFigure {
+    fn report_figure(
+        &self,
+        title: &str,
+        png: Option<(Vec<u8>, u32, u32)>,
+        caption: &str,
+        unavailable: &str,
+    ) -> ReportFigure {
         let note = if png.is_some() { String::new() } else { unavailable.to_owned() };
         ReportFigure {
             title: title.to_owned(),
@@ -190,7 +206,12 @@ impl Session {
         }
         // `_current_levels_for_report_data`: the canvas's, for the data it shows.
         let shown = self.current_plot_source.as_ref().or(self.current_product().as_ref()).cloned();
-        let same = shown.is_some_and(|s| Arc::ptr_eq(&s, data) || (s.rows == data.rows && s.cols == data.cols && s.data.iter().zip(&data.data).all(|(a, b)| a == b || (a.is_nan() && b.is_nan()))));
+        let same = shown.is_some_and(|s| {
+            Arc::ptr_eq(&s, data)
+                || (s.rows == data.rows
+                    && s.cols == data.cols
+                    && s.data.iter().zip(&data.data).all(|(a, b)| a == b || (a.is_nan() && b.is_nan())))
+        });
         if same {
             let current = valid_levels(self.canvas.levels(), None);
             if let Some(l) = valid_levels(current, Some(&display.data)) {
@@ -201,10 +222,17 @@ impl Session {
     }
 
     /// `_render_original_dynamic_spectrum_export_png`.
-    fn report_spectrum_png(&self, ctx: &egui::Context, data: &Arc<Array2>, plot_type: &str, light_curves: Vec<callisto_core::mpl::spectrum_figures::LightCurve>) -> Option<(Vec<u8>, u32, u32)> {
+    fn report_spectrum_png(
+        &self,
+        ctx: &egui::Context,
+        data: &Arc<Array2>,
+        plot_type: &str,
+        light_curves: Vec<callisto_core::mpl::spectrum_figures::LightCurve>,
+    ) -> Option<(Vec<u8>, u32, u32)> {
         let display = self.intensity_for_display(data);
         let levels = self.report_levels(data, &display, plot_type);
-        let graph = self.origin_spectrum_graph(data, plot_type, self.canvas.view(), levels, light_curves, Vec::new(), None)?;
+        let graph =
+            self.origin_spectrum_graph(data, plot_type, self.canvas.view(), levels, light_curves, Vec::new(), None)?;
         let fig = callisto_core::mpl::spectrum_figures::dynamic_spectrum_figure(&graph);
         let (png, w, h, rgba) = crate::figure_export::png_bytes(ctx, &fig, REPORT_FIGURE_DPI, 0.08).ok()?;
         (!blank_or_black(&rgba)).then_some((png, w, h))
@@ -222,13 +250,23 @@ impl Session {
         let (x, y) = (as_floats(times), as_floats(max.get("freqs")));
         let n = x.len().min(y.len());
         if n == 0 {
-            return self.report_figure("Maximum Intensity Fit", None, "", "Maximum-intensity analysis is not available.");
+            return self.report_figure(
+                "Maximum Intensity Fit",
+                None,
+                "",
+                "Maximum-intensity analysis is not available.",
+            );
         }
         let (x, y) = (&x[..n], &y[..n]);
         let mut caption = Vec::new();
         let (mut fit_x, mut fit_y, mut label) = (Vec::new(), Vec::new(), String::new());
         if let (Some(a), Some(b)) = (fit.get("a").as_f64(), fit.get("b").as_f64().map(f64::abs)) {
-            let ok: Vec<f64> = x.iter().zip(y).filter(|(t, f)| t.is_finite() && f.is_finite() && **t > 0.0 && **f > 0.0).map(|(t, _)| *t).collect();
+            let ok: Vec<f64> = x
+                .iter()
+                .zip(y)
+                .filter(|(t, f)| t.is_finite() && f.is_finite() && **t > 0.0 && **f > 0.0)
+                .map(|(t, _)| *t)
+                .collect();
             if ok.len() >= 2 {
                 let lo = ok.iter().copied().fold(f64::INFINITY, f64::min);
                 let hi = ok.iter().copied().fold(f64::NEG_INFINITY, f64::max);
@@ -250,7 +288,8 @@ impl Session {
             y_label: "Frequency [MHz]",
         };
         let fig = fit_graph_figure(&graph, self.origin_graph_text());
-        let png = crate::figure_export::png_bytes(ctx, &fig, REPORT_FIGURE_DPI, 0.08).ok().map(|(p, w, h, _)| (p, w, h));
+        let png =
+            crate::figure_export::png_bytes(ctx, &fig, REPORT_FIGURE_DPI, 0.08).ok().map(|(p, w, h, _)| (p, w, h));
         if let Some(r2) = fit.get("r2").as_f64() {
             caption.push(format!("R2: {}", format_g(r2, 4)));
         }
@@ -267,17 +306,37 @@ impl Session {
         let t = session.get("type_ii");
         let has_points = |b: &Val| as_floats(b.get("time_seconds")).len().min(as_floats(b.get("freqs")).len()) > 0;
         if !(has_points(t.get("upper")) || has_points(t.get("lower"))) {
-            return self.report_figure("Type II Band Splitting", None, "", "Type II band-splitting analysis is not available.");
+            return self.report_figure(
+                "Type II Band Splitting",
+                None,
+                "",
+                "Type II band-splitting analysis is not available.",
+            );
         }
         let made;
         let window = match window {
             Some(w) => w,
             None => {
                 let Some(d) = &self.data else {
-                    return self.report_figure("Type II Band Splitting", None, "", "Type II band-splitting plot data is not available.");
+                    return self.report_figure(
+                        "Type II Band Splitting",
+                        None,
+                        "",
+                        "Type II band-splitting plot data is not available.",
+                    );
                 };
-                let Some(spectrum) = self.noise_reduced_original.clone().or_else(|| self.noise_reduced.clone()).or_else(|| Some(d.raw.clone())) else {
-                    return self.report_figure("Type II Band Splitting", None, "", "Type II band-splitting plot data is not available.");
+                let Some(spectrum) = self
+                    .noise_reduced_original
+                    .clone()
+                    .or_else(|| self.noise_reduced.clone())
+                    .or_else(|| Some(d.raw.clone()))
+                else {
+                    return self.report_figure(
+                        "Type II Band Splitting",
+                        None,
+                        "",
+                        "Type II band-splitting plot data is not available.",
+                    );
                 };
                 let spectrum = Spectrum {
                     display: self.intensity_for_display(&spectrum),
@@ -297,9 +356,17 @@ impl Session {
                 &made
             }
         };
-        let png = window.origin_figure().ok().and_then(|fig| crate::figure_export::png_bytes(ctx, &fig, REPORT_FIGURE_DPI, 0.08).ok());
+        let png = window
+            .origin_figure()
+            .ok()
+            .and_then(|fig| crate::figure_export::png_bytes(ctx, &fig, REPORT_FIGURE_DPI, 0.08).ok());
         let png = png.filter(|(_, _, _, rgba)| !blank_or_black(rgba)).map(|(p, w, h, _)| (p, w, h));
-        self.report_figure("Type II Band Splitting", png, "Drawn from the Type II band-splitting view.", "Type II band-splitting plot could not be drawn.")
+        self.report_figure(
+            "Type II Band Splitting",
+            png,
+            "Drawn from the Type II band-splitting view.",
+            "Type II band-splitting plot could not be drawn.",
+        )
     }
 
     /// `_build_project_report_figures` (no SWAVES, GOES or geomagnetic
@@ -311,7 +378,13 @@ impl Session {
             let png = data.and_then(|a| self.report_spectrum_png(ctx, &a, plot_type, curves));
             self.report_figure(title, png, "", unavailable)
         };
-        figures.push(spectrum("Raw Dynamic Spectrum", d.map(|d| d.raw.clone()), "Raw dynamic spectrum data is not available.", "Raw", Vec::new()));
+        figures.push(spectrum(
+            "Raw Dynamic Spectrum",
+            d.map(|d| d.raw.clone()),
+            "Raw dynamic spectrum data is not available.",
+            "Raw",
+            Vec::new(),
+        ));
         let background = self.noise_reduced_original.clone().or_else(|| self.noise_reduced.clone());
         figures.push(spectrum(
             "Background Subtracted Dynamic Spectrum",
@@ -321,12 +394,23 @@ impl Session {
             Vec::new(),
         ));
         if self.tools.light_curves.is_empty() {
-            figures.push(self.report_figure("Light Curves With Dynamic Spectrum", None, "", "Light-curve graph is not available."));
+            figures.push(self.report_figure(
+                "Light Curves With Dynamic Spectrum",
+                None,
+                "",
+                "Light-curve graph is not available.",
+            ));
         } else {
             let curves = self.origin_light_curves();
             let source = if curves.is_empty() { None } else { self.current_light_curve_source() };
             let plot_type = self.current_plot_type.clone();
-            figures.push(spectrum("Light Curves With Dynamic Spectrum", source, "Light-curve graph is not available.", &plot_type, curves));
+            figures.push(spectrum(
+                "Light Curves With Dynamic Spectrum",
+                source,
+                "Light-curve graph is not available.",
+                &plot_type,
+                curves,
+            ));
         }
         figures.push(self.max_intensity_fit_figure(ctx, session));
         figures.push(self.type_ii_figure(ctx, session, type_ii));
@@ -351,7 +435,11 @@ impl Session {
         for (k, v) in &mut m {
             match (k.as_str(), v) {
                 ("max_intensity", Val::Map(max)) => {
-                    for (key, array) in [("time_channels", "analysis_time_channels"), ("time_seconds", "analysis_time_seconds"), ("freqs", "analysis_freqs")] {
+                    for (key, array) in [
+                        ("time_channels", "analysis_time_channels"),
+                        ("time_seconds", "analysis_time_seconds"),
+                        ("freqs", "analysis_freqs"),
+                    ] {
                         max.retain(|(k, _)| k != key);
                         max.push((key.into(), arr(array)));
                     }
@@ -380,8 +468,8 @@ impl Session {
     fn report_header(&self) -> (Vec<(String, Val)>, String) {
         let Some(h) = self.data.as_ref().and_then(|d| d.header0.as_ref()) else { return (Vec::new(), String::new()) };
         const KEYS: [&str; 16] = [
-            "SIMPLE", "BITPIX", "NAXIS", "DATE-OBS", "TIME-OBS", "DATE", "INSTRUME", "TELESCOP", "OBSERVAT", "OBJECT", "ORIGIN", "CONTENT", "BZERO",
-            "BSCALE", "DATAMIN", "DATAMAX",
+            "SIMPLE", "BITPIX", "NAXIS", "DATE-OBS", "TIME-OBS", "DATE", "INSTRUME", "TELESCOP", "OBSERVAT", "OBJECT",
+            "ORIGIN", "CONTENT", "BZERO", "BSCALE", "DATAMIN", "DATAMAX",
         ];
         let mut selected = Vec::new();
         for key in KEYS {
@@ -408,7 +496,12 @@ impl Session {
     }
 
     /// `_build_project_report_input` (without the event story).
-    pub fn project_report_input(&self, ctx: &egui::Context, project: Option<&Path>, type_ii: Option<&TypeIIWindow>) -> ReportInput {
+    pub fn project_report_input(
+        &self,
+        ctx: &egui::Context,
+        project: Option<&Path>,
+        type_ii: Option<&TypeIIWindow>,
+    ) -> ReportInput {
         let payload = self.provenance_payload();
         let section = |k: &str| payload.get(k).cloned().unwrap_or(Json::Null);
         let app = section("app");
@@ -433,7 +526,23 @@ impl Session {
             Json::Array(a) => a
                 .iter()
                 .map(|x| {
-                    ordered(x, &["id", "kind", "points", "text", "color", "line_width", "font_family", "font_size", "font_bold", "font_italic", "visible", "created_at"])
+                    ordered(
+                        x,
+                        &[
+                            "id",
+                            "kind",
+                            "points",
+                            "text",
+                            "color",
+                            "line_width",
+                            "font_family",
+                            "font_size",
+                            "font_bold",
+                            "font_italic",
+                            "visible",
+                            "created_at",
+                        ],
+                    )
                 })
                 .collect(),
             _ => Vec::new(),
@@ -442,7 +551,12 @@ impl Session {
             self.tools
                 .light_curves
                 .iter()
-                .map(|r| Val::Map(vec![("frequency_mhz".into(), Val::Float(r.frequency_mhz)), ("requested_mhz".into(), Val::Float(r.requested_mhz))]))
+                .map(|r| {
+                    Val::Map(vec![
+                        ("frequency_mhz".into(), Val::Float(r.frequency_mhz)),
+                        ("requested_mhz".into(), Val::Float(r.requested_mhz)),
+                    ])
+                })
                 .collect(),
         );
         let l = &self.tools.light_curve_settings;

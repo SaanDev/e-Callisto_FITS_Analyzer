@@ -6,7 +6,10 @@
 
 use std::path::{Path, PathBuf};
 
-use callisto_core::radio::batch::{OutputMode, background_method_label, batch_figure_spec, list_fit_files, locked_view_overlaps_data, unique_output_png_path};
+use callisto_core::radio::batch::{
+    OutputMode, background_method_label, batch_figure_spec, list_fit_files, locked_view_overlaps_data,
+    unique_output_png_path,
+};
 use callisto_core::radio::fits_io::load_callisto_fits;
 use callisto_core::radio::processing::BackgroundMethod;
 use callisto_core::view_config::{DisplayRange, ViewConfig, VisualConfig};
@@ -21,9 +24,13 @@ use crate::ui::qlayout::{BoxLayout, Container, GridLayout, Item, Layout, Policy,
 use crate::ui::{qt, widgets};
 
 /// `_COLORMAP_OPTIONS`.
-pub const COLORMAPS: [&str; 11] = ["Custom", "viridis", "plasma", "inferno", "magma", "cividis", "turbo", "RdYlBu", "jet", "cubehelix", "bone_r"];
-const METHODS: [(&str, BackgroundMethod); 3] =
-    [("Mean", BackgroundMethod::Mean), ("Median", BackgroundMethod::Median), ("Plotutil Median (dB)", BackgroundMethod::PlotutilMedianDb)];
+pub const COLORMAPS: [&str; 11] =
+    ["Custom", "viridis", "plasma", "inferno", "magma", "cividis", "turbo", "RdYlBu", "jet", "cubehelix", "bone_r"];
+const METHODS: [(&str, BackgroundMethod); 3] = [
+    ("Mean", BackgroundMethod::Mean),
+    ("Median", BackgroundMethod::Median),
+    ("Plotutil Median (dB)", BackgroundMethod::PlotutilMedianDb),
+];
 
 /// What the main window lends the dialog (its providers): the colormap,
 /// the cold digits, and what a view config from it would hold.
@@ -276,12 +283,19 @@ impl BatchDialog {
         match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| ViewConfig::parse(&t)) {
             Ok(cfg) => {
                 self.loaded_config = Some(cfg);
-                self.loaded_label = format!("Loaded: {}", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+                self.loaded_label = format!(
+                    "Loaded: {}",
+                    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+                );
             }
             Err(e) => {
                 self.loaded_config = None;
                 self.loaded_label = "No view config loaded.".into();
-                self.notice(NoticeKind::Warning, "Load View Config Failed", format!("Could not load view config:\n{e}"));
+                self.notice(
+                    NoticeKind::Warning,
+                    "Load View Config Failed",
+                    format!("Could not load view config:\n{e}"),
+                );
             }
         }
     }
@@ -313,14 +327,22 @@ impl BatchDialog {
             return self.notice(NoticeKind::Warning, "Missing Output Folder", "Please select an output folder.");
         }
         if let Err(e) = std::fs::create_dir_all(&output) {
-            return self.notice(NoticeKind::Critical, "Output Folder Error", format!("Could not create output folder:\n{e}"));
+            return self.notice(
+                NoticeKind::Critical,
+                "Output Folder Error",
+                format!("Could not create output folder:\n{e}"),
+            );
         }
         self.last_summary = None;
         self.progress = qt::Progress { min: 0, max: 1, value: 0, format: "%p%".into() };
         self.status = "Preparing batch processing...".into();
         let view_config = self.selected_view_config(env);
         if (self.use_range || self.use_visual) && self.loaded_config.is_none() && view_config.is_none() {
-            return self.notice(NoticeKind::Warning, "Batch Processing", "The current display/view settings are unavailable.");
+            return self.notice(
+                NoticeKind::Warning,
+                "Batch Processing",
+                "The current display/view settings are unavailable.",
+            );
         }
         let opts = RunOptions {
             input_dir: input.into(),
@@ -379,7 +401,12 @@ impl BatchDialog {
 
     fn layout(&self, ui: &Ui) -> Layout {
         let check = |id: &'static str, text: &str| {
-            WidgetSpec::new(id, Size::new(widgets::text_width(ui, text, qt::FONT_PX, Weight::Regular).ceil() as i32 + 24, 17), Policy::Minimum, Policy::Fixed)
+            WidgetSpec::new(
+                id,
+                Size::new(widgets::text_width(ui, text, qt::FONT_PX, Weight::Regular).ceil() as i32 + 24, 17),
+                Policy::Minimum,
+                Policy::Fixed,
+            )
         };
         let form = GridLayout::new([0; 4], 8, 10)
             .widget(qt::label_spec(ui, "in_label", "Input Folder"), 0, 0)
@@ -388,7 +415,8 @@ impl BatchDialog {
             .widget(qt::label_spec(ui, "out_label", "Output Folder"), 1, 0)
             .widget(qt::line_edit_spec("output"), 1, 1)
             .widget(qt::button_spec(ui, "out_browse", "Browse...", false), 1, 2);
-        let output = BoxLayout::h([9; 4], 6).widget(check("raw", "Raw")).widget(check("bg", "Background Subtracted")).stretch(1);
+        let output =
+            BoxLayout::h([9; 4], 6).widget(check("raw", "Raw")).widget(check("bg", "Background Subtracted")).stretch(1);
         let process = GridLayout::new([9; 4], 8, 8)
             .widget(qt::label_spec(ui, "method_label", "Background Method"), 0, 0)
             .widget(qt::combo_spec(ui, "method", &METHODS.map(|m| m.0)), 0, 1)
@@ -451,9 +479,27 @@ impl BatchDialog {
             ui.memory_mut(|m| m.request_focus(Id::new("batch_input")));
             ui.data_mut(|d| d.insert_temp(opened, true));
         }
-        qt::line_edit(ui, r("input"), Id::new("batch_input"), &mut self.input_dir, "Select folder containing FIT files", idle, p);
-        qt::line_edit(ui, r("output"), Id::new("batch_output"), &mut self.output_dir, "Select folder for output PNG files", idle, p);
-        for (id, out, title) in [("in_browse", true, "Select Input Folder"), ("out_browse", false, "Select Output Folder")] {
+        qt::line_edit(
+            ui,
+            r("input"),
+            Id::new("batch_input"),
+            &mut self.input_dir,
+            "Select folder containing FIT files",
+            idle,
+            p,
+        );
+        qt::line_edit(
+            ui,
+            r("output"),
+            Id::new("batch_output"),
+            &mut self.output_dir,
+            "Select folder for output PNG files",
+            idle,
+            p,
+        );
+        for (id, out, title) in
+            [("in_browse", true, "Select Input Folder"), ("out_browse", false, "Select Output Folder")]
+        {
             if qt::button(ui, r(id), Id::new(("batch", id)), "Browse...", false, idle, p).clicked() {
                 let current = if out { &self.input_dir } else { &self.output_dir };
                 let start = if current.trim().is_empty() { dirs_home() } else { PathBuf::from(current.trim()) };
@@ -473,7 +519,9 @@ impl BatchDialog {
         let method_on = idle && !self.raw;
         qt::label(ui, r("method_label"), "Background Method", qt::text_color(method_on, p));
         let methods: Vec<String> = METHODS.iter().map(|m| m.0.to_owned()).collect();
-        if let Some(i) = qt::combo(ui, r("method"), Id::new("batch_method"), &methods, Some(self.method), "", method_on, p) {
+        if let Some(i) =
+            qt::combo(ui, r("method"), Id::new("batch_method"), &methods, Some(self.method), "", method_on, p)
+        {
             self.method = i;
         }
         qt::label(ui, r("cmap_label"), "Colormap", p.text);
@@ -481,9 +529,27 @@ impl BatchDialog {
         if let Some(i) = qt::combo(ui, r("cmap"), Id::new("batch_cmap"), &cmaps, Some(self.cmap), "", idle, p) {
             self.cmap = i;
         }
-        qt::check_box(ui, r("use_range"), Id::new("batch_use_range"), "Use current display range", &mut self.use_range, idle, p);
-        qt::check_box(ui, r("use_visual"), Id::new("batch_use_visual"), "Use current visual settings", &mut self.use_visual, idle, p);
-        if qt::button(ui, r("load_config"), Id::new("batch_load_config"), "Load View Config...", false, idle, p).clicked() {
+        qt::check_box(
+            ui,
+            r("use_range"),
+            Id::new("batch_use_range"),
+            "Use current display range",
+            &mut self.use_range,
+            idle,
+            p,
+        );
+        qt::check_box(
+            ui,
+            r("use_visual"),
+            Id::new("batch_use_visual"),
+            "Use current visual settings",
+            &mut self.use_visual,
+            idle,
+            p,
+        );
+        if qt::button(ui, r("load_config"), Id::new("batch_load_config"), "Load View Config...", false, idle, p)
+            .clicked()
+        {
             self.load_view_config();
         }
         qt::wrapped(ui, r("loaded"), &self.loaded_label, p.text, false);
@@ -522,23 +588,31 @@ impl BatchDialog {
     pub fn show(&mut self, ctx: &egui::Context, env: &BatchEnv, p: &Palette) -> Option<BatchAction> {
         let mut action = None;
         let size = self.size.unwrap_or(vec2(760.0, 626.0));
-        crate::downloads::window(ctx, "batch_processing", "Batch FIT Processing", size, vec2(401.0, 360.0), p, |ui, close| {
-            if self.size.is_none() {
-                let want = self.window_size(ui);
-                self.size = Some(want);
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(want));
-            }
-            action = self.frame(ui, env, p);
-            if close {
-                match &self.job {
-                    Some(job) if !job.is_finished() => {
-                        self.close_after_finish = true;
-                        job.request_cancel();
-                    }
-                    _ => action = Some(BatchAction::Close),
+        crate::downloads::window(
+            ctx,
+            "batch_processing",
+            "Batch FIT Processing",
+            size,
+            vec2(401.0, 360.0),
+            p,
+            |ui, close| {
+                if self.size.is_none() {
+                    let want = self.window_size(ui);
+                    self.size = Some(want);
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(want));
                 }
-            }
-        });
+                action = self.frame(ui, env, p);
+                if close {
+                    match &self.job {
+                        Some(job) if !job.is_finished() => {
+                            self.close_after_finish = true;
+                            job.request_cancel();
+                        }
+                        _ => action = Some(BatchAction::Close),
+                    }
+                }
+            },
+        );
         action
     }
 }

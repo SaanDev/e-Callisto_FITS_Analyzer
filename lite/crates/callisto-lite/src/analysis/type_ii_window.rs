@@ -12,7 +12,9 @@ use callisto_core::analysis::fit::{fit_power_law, power_law};
 use callisto_core::analysis::session::{
     AnalysisSession, BandFitState, BandPoints, FitParams, TypeIIBlock, TypeIIInputs, TypeIIPlotStyle, UiBlock,
 };
-use callisto_core::analysis::type_ii::{BandFit, BvrProfile, TypeIIResults, calculate_b_vs_r_profile, calculate_type_ii_parameters};
+use callisto_core::analysis::type_ii::{
+    BandFit, BvrProfile, TypeIIResults, calculate_b_vs_r_profile, calculate_type_ii_parameters,
+};
 use callisto_core::plot::Colormap;
 use callisto_core::plot::qt_raster::{Pen, parse_color};
 use callisto_core::radio::array::Array2;
@@ -190,9 +192,19 @@ impl TypeIIWindow {
     /// `TypeIIBandSplittingDialog(spectrum, freqs, time, filename, session=…)`;
     /// `normalized` when the session went through `normalize_analysis_session`
     /// (every one but the main window's fresh, empty candidate).
-    pub fn new(spectrum: Spectrum, filename: &str, session: &AnalysisSession, normalized: bool, ui_family: &str, families: Vec<String>) -> Self {
+    pub fn new(
+        spectrum: Spectrum,
+        filename: &str,
+        session: &AnalysisSession,
+        normalized: bool,
+        ui_family: &str,
+        families: Vec<String>,
+    ) -> Self {
         // `os.path.splitext(os.path.basename(filename))[0]`: one suffix only.
-        let base = std::path::Path::new(filename.trim()).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let base = std::path::Path::new(filename.trim())
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let base = if base.is_empty() { "dynamic_spectrum".to_owned() } else { base };
         let stem = match base.rfind('.') {
             Some(i) if i > 0 => base[..i].to_owned(),
@@ -296,9 +308,15 @@ impl TypeIIWindow {
 
     /// `_analysis_inputs_ready`.
     fn inputs_ready(i: &TypeIIInputs) -> bool {
-        [i.initial_shock_speed_km_s, i.avg_shock_speed_km_s, i.initial_shock_height_rs, i.avg_shock_height_rs, i.start_freq_mhz]
-            .iter()
-            .all(|v| v.is_some_and(f64::is_finite))
+        [
+            i.initial_shock_speed_km_s,
+            i.avg_shock_speed_km_s,
+            i.initial_shock_height_rs,
+            i.avg_shock_height_rs,
+            i.start_freq_mhz,
+        ]
+        .iter()
+        .all(|v| v.is_some_and(f64::is_finite))
     }
 
     /// `_selected_analysis_shock_speed`.
@@ -405,7 +423,9 @@ impl TypeIIWindow {
         }
         self.speed = usize::from(t.analysis_inputs.average_speed);
         let current = self.inputs();
-        if (self.results.is_some() || self.blank_results) && !Self::inputs_match(&Self::saved_inputs(s, normalized), &current) {
+        if (self.results.is_some() || self.blank_results)
+            && !Self::inputs_match(&Self::saved_inputs(s, normalized), &current)
+        {
             self.invalidate_results();
         }
         self.refresh_due = true;
@@ -548,7 +568,15 @@ impl TypeIIWindow {
         let (ut, uf_) = arrays(&self.upper);
         let (lt, lf_) = arrays(&self.lower);
         let time = self.spectrum.time.clone();
-        match calculate_type_ii_parameters((&ut, &uf_), (&lt, &lf_), uf, lf, inputs.start_freq_mhz.unwrap_or(f64::NAN), speed, Some(&time)) {
+        match calculate_type_ii_parameters(
+            (&ut, &uf_),
+            (&lt, &lf_),
+            uf,
+            lf,
+            inputs.start_freq_mhz.unwrap_or(f64::NAN),
+            speed,
+            Some(&time),
+        ) {
             Ok(r) => {
                 let warning = r.warning.clone();
                 self.results = Some(r);
@@ -575,7 +603,9 @@ impl TypeIIWindow {
         };
         let inputs = self.inputs();
         if !Self::inputs_ready(&inputs) {
-            return Err("Run the usual Analyzer window first so the shock-speed and height references are available.".into());
+            return Err(
+                "Run the usual Analyzer window first so the shock-speed and height references are available.".into()
+            );
         }
         let speed = self.selected_speed(&inputs).ok_or("The selected analyzer shock speed is unavailable.")?;
         let (ut, uf_) = arrays(&self.upper);
@@ -634,7 +664,12 @@ impl TypeIIWindow {
         match &mut self.settings {
             Some(d) => d.focus(),
             None => {
-                self.settings = Some(TypeIISettingsDialog::new(&self.plot_style, &TypeIIPlotStyle::default(), &self.ui_family, self.families.clone()));
+                self.settings = Some(TypeIISettingsDialog::new(
+                    &self.plot_style,
+                    &TypeIIPlotStyle::default(),
+                    &self.ui_family,
+                    self.families.clone(),
+                ));
             }
         }
     }
@@ -661,7 +696,10 @@ impl TypeIIWindow {
         if times.len() < 2 {
             return None;
         }
-        let (lo, hi) = (times.iter().copied().fold(f64::INFINITY, f64::min), times.iter().copied().fold(f64::NEG_INFINITY, f64::max));
+        let (lo, hi) = (
+            times.iter().copied().fold(f64::INFINITY, f64::min),
+            times.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        );
         let xs = linspace(lo, hi, 400);
         let ys = xs.iter().map(|&x| power_law(x, fit.fit.a, fit.fit.b)).collect();
         Some((xs, ys))
@@ -739,7 +777,11 @@ impl TypeIIWindow {
                     scatter(none(), &s.upper_marker_color, s.upper_marker_size),
                     scatter(none(), &s.lower_marker_color, s.lower_marker_size),
                     curve(Some(bvr_fit_curve(p)), &s.bvr_line_color, s.bvr_line_width),
-                    scatter(Some((p.heights_rs.clone(), p.magnetic_field_g.clone())), &s.bvr_marker_color, s.bvr_marker_size),
+                    scatter(
+                        Some((p.heights_rs.clone(), p.magnetic_field_g.clone())),
+                        &s.bvr_marker_color,
+                        s.bvr_marker_size,
+                    ),
                 ]
             }
         }
@@ -799,7 +841,11 @@ impl TypeIIWindow {
                 detail_block("Selected points", &self.band_points(band).len().to_string(), false),
             ),
             Some(f) => (
-                detail_block(name, &format!("f<sub>{symbol}</sub>(t) = {:.2} t<sup>-{:.2}</sup>", f.fit.a, f.fit.b), false),
+                detail_block(
+                    name,
+                    &format!("f<sub>{symbol}</sub>(t) = {:.2} t<sup>-{:.2}</sup>", f.fit.a, f.fit.b),
+                    false,
+                ),
                 detail_block("R<sup>2</sup>", &or_dash(fmt(f.fit.r2, 4, "")), false)
                     + &detail_block("RMSE", &or_dash(fmt(f.fit.rmse, 4, "")), false)
                     + &detail_block("Selected points", &f.point_count.unwrap_or(0).to_string(), false),
@@ -818,11 +864,19 @@ impl TypeIIWindow {
             status,
             detail_block("Newkirk model", &format!("{}-fold", i.fold), false),
             detail_block("f<sub>start</sub>", &or_dash(fmt(i.start_freq_mhz, 4, " MHz")), false),
-            detail_block("\u{27e8}df/dt\u{27e9}", &fmt_pm(i.avg_drift_mhz_s, i.avg_drift_err_mhz_s, 4, " MHz/s"), false),
+            detail_block(
+                "\u{27e8}df/dt\u{27e9}",
+                &fmt_pm(i.avg_drift_mhz_s, i.avg_drift_err_mhz_s, 4, " MHz/s"),
+                false,
+            ),
             detail_block("V<sub>s,0</sub>", &or_dash(fmt(i.initial_shock_speed_km_s, 2, " km/s")), false),
             detail_block("\u{27e8}V<sub>s</sub>\u{27e9}", &or_dash(fmt(i.avg_shock_speed_km_s, 2, " km/s")), false),
             detail_block("R<sub>p,0</sub>", &or_dash(fmt(i.initial_shock_height_rs, 4, " R<sub>s</sub>")), false),
-            detail_block("\u{27e8}R<sub>p</sub>\u{27e9}", &or_dash(fmt(i.avg_shock_height_rs, 4, " R<sub>s</sub>")), false),
+            detail_block(
+                "\u{27e8}R<sub>p</sub>\u{27e9}",
+                &or_dash(fmt(i.avg_shock_height_rs, 4, " R<sub>s</sub>")),
+                false,
+            ),
         ]
     }
 
@@ -855,16 +909,31 @@ impl TypeIIWindow {
         let warning = r.warning.trim();
         (
             vec![
-                b("Averaging interval", format!("[{}, {}]", fmt(Some(r.start_time_s), 4, " s"), fmt(Some(r.end_time_s), 4, " s"))),
+                b(
+                    "Averaging interval",
+                    format!("[{}, {}]", fmt(Some(r.start_time_s), 4, " s"), fmt(Some(r.end_time_s), 4, " s")),
+                ),
                 b("t<sub>start</sub>", s(r.start_time_s, 4, " s")),
-                b("f<sub>u</sub>(t<sub>start</sub>)", s(r.upper_start_freq_mhz, 4, " MHz")) + &b("f<sub>l</sub>(t<sub>start</sub>)", s(r.lower_start_freq_mhz, 4, " MHz")),
-                b("\u{27e8}f<sub>u</sub>\u{27e9}", s(r.avg_upper_freq_mhz, 4, " MHz")) + &b("\u{27e8}f<sub>l</sub>\u{27e9}", s(r.avg_lower_freq_mhz, 4, " MHz")),
-                b("\u{27e8}\u{394}f\u{27e9} = \u{27e8}f<sub>u</sub> - f<sub>l</sub>\u{27e9}", s(r.bandwidth_mhz, 4, " MHz")),
+                b("f<sub>u</sub>(t<sub>start</sub>)", s(r.upper_start_freq_mhz, 4, " MHz"))
+                    + &b("f<sub>l</sub>(t<sub>start</sub>)", s(r.lower_start_freq_mhz, 4, " MHz")),
+                b("\u{27e8}f<sub>u</sub>\u{27e9}", s(r.avg_upper_freq_mhz, 4, " MHz"))
+                    + &b("\u{27e8}f<sub>l</sub>\u{27e9}", s(r.avg_lower_freq_mhz, 4, " MHz")),
+                b(
+                    "\u{27e8}\u{394}f\u{27e9} = \u{27e8}f<sub>u</sub> - f<sub>l</sub>\u{27e9}",
+                    s(r.bandwidth_mhz, 4, " MHz"),
+                ),
                 b("\u{27e8}df<sub>u</sub>/dt\u{27e9}", s(r.upper_avg_drift_mhz_s, 4, " MHz/s")),
-                if warning.is_empty() { String::new() } else { format!("<span style='color:#b26a00;'><b>Warning:</b> {warning}</span>") },
+                if warning.is_empty() {
+                    String::new()
+                } else {
+                    format!("<span style='color:#b26a00;'><b>Warning:</b> {warning}</span>")
+                },
             ],
             vec![
-                b("X = (\u{27e8}f<sub>u</sub>\u{27e9} / \u{27e8}f<sub>l</sub>\u{27e9})<sup>2</sup>", s(r.compression_ratio, 4, "")),
+                b(
+                    "X = (\u{27e8}f<sub>u</sub>\u{27e9} / \u{27e8}f<sub>l</sub>\u{27e9})<sup>2</sup>",
+                    s(r.compression_ratio, 4, ""),
+                ),
                 b("M<sub>A</sub>", s(r.alfven_mach_number, 4, "")),
                 b("V<sub>A</sub>", s(r.alfven_speed_km_s, 2, " km/s")),
                 b("B", s(r.magnetic_field_g, 4, " G")),
@@ -908,14 +977,25 @@ impl TypeIIWindow {
     fn main_layout() -> Layout {
         let mut tools = BoxLayout::h([0; 4], 6);
         for icon in BandIcon::ALL {
-            tools = tools.widget(WidgetSpec::new(icon_id(icon), Size::new(BUTTON as i32, BUTTON as i32), Policy::Fixed, Policy::Fixed));
+            tools = tools.widget(WidgetSpec::new(
+                icon_id(icon),
+                Size::new(BUTTON as i32, BUTTON as i32),
+                Policy::Fixed,
+                Policy::Fixed,
+            ));
         }
-        let left = BoxLayout::v([0; 4], 6)
-            .add(tools.stretch(1).into_item())
-            .widget(WidgetSpec::new("plot", Size::new(912, 652), Policy::Expanding, Policy::Expanding).min_hint(Size::new(54, 54)));
-        let content = BoxLayout::h([0; 4], 6)
-            .add_stretched(left.into_item(), 3)
-            .add_stretched(Item::Widget(WidgetSpec::new("panel", Size::new(242, 384), Policy::Expanding, Policy::Expanding).min_hint(Size::new(56, 56)).min_width(340)), 1);
+        let left = BoxLayout::v([0; 4], 6).add(tools.stretch(1).into_item()).widget(
+            WidgetSpec::new("plot", Size::new(912, 652), Policy::Expanding, Policy::Expanding)
+                .min_hint(Size::new(54, 54)),
+        );
+        let content = BoxLayout::h([0; 4], 6).add_stretched(left.into_item(), 3).add_stretched(
+            Item::Widget(
+                WidgetSpec::new("panel", Size::new(242, 384), Policy::Expanding, Policy::Expanding)
+                    .min_hint(Size::new(56, 56))
+                    .min_width(340),
+            ),
+            1,
+        );
         BoxLayout::v([11; 4], 6)
             .add_stretched(content.into_item(), 1)
             .widget(WidgetSpec::new("status", Size::new(20, 22), Policy::Preferred, Policy::Fixed))
@@ -931,7 +1011,11 @@ impl TypeIIWindow {
             ["p_x", "p_mach", "p_va", "p_b", "", "", "", ""],
         ];
         let group = |id: &'static str, l: Layout| {
-            Item::Container(Container { spec: WidgetSpec::new(id, Size::new(0, 0), Policy::Preferred, Policy::Preferred), margins: [13, 27, 13, 13], layout: Box::new(l) })
+            Item::Container(Container {
+                spec: WidgetSpec::new(id, Size::new(0, 0), Policy::Preferred, Policy::Preferred),
+                margins: [13, 27, 13, 13],
+                layout: Box::new(l),
+            })
         };
         let controls = BoxLayout::v([0; 4], 8)
             .widget(qt::label_spec(ui, "band_label", "Active Band:"))
@@ -1029,7 +1113,11 @@ impl TypeIIWindow {
     /// A `QToolButton` with an icon: transparent, a hover frame, the icon
     /// greyed when disabled. Returns true when clicked.
     fn tool_button(&mut self, ui: &Ui, rect: Rect, icon: BandIcon, enabled: bool, p: &Palette) -> bool {
-        let resp = ui.interact(rect, Id::new(("t2_tool", icon_id(icon))), if enabled { Sense::click() } else { Sense::hover() });
+        let resp = ui.interact(
+            rect,
+            Id::new(("t2_tool", icon_id(icon))),
+            if enabled { Sense::click() } else { Sense::hover() },
+        );
         if enabled && resp.is_pointer_button_down_on() {
             crate::ui::widgets::qt_box(ui, rect, 10.0, p.pressed, p.border);
         } else if enabled && resp.hovered() {
@@ -1043,12 +1131,21 @@ impl TypeIIWindow {
         if let std::collections::hash_map::Entry::Vacant(e) = self.icons.entry(key)
             && let Some(img) = band_icons::render(icon, p.dark, side, disabled)
         {
-            e.insert(ui.ctx().load_texture(format!("band-icon-{}-{}-{}", icon_id(icon), p.dark, !enabled), img, TextureOptions::NEAREST));
+            e.insert(ui.ctx().load_texture(
+                format!("band-icon-{}-{}-{}", icon_id(icon), p.dark, !enabled),
+                img,
+                TextureOptions::NEAREST,
+            ));
         }
         if let Some(tex) = self.icons.get(&key) {
             let off = ((BUTTON - ICON) / 2.0).floor();
             let at = pos2(((rect.left() + off) * ppp).round() / ppp, ((rect.top() + off) * ppp).round() / ppp);
-            ui.painter().image(tex.id(), Rect::from_min_size(at, vec2(side as f32 / ppp, side as f32 / ppp)), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            ui.painter().image(
+                tex.id(),
+                Rect::from_min_size(at, vec2(side as f32 / ppp, side as f32 / ppp)),
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
         }
         resp.on_hover_text(icon.label()).clicked()
     }
@@ -1060,7 +1157,8 @@ impl TypeIIWindow {
         ui.painter().rect_filled(area, 0.0, frame);
         let viewport = Rect::from_min_max(area.min + vec2(1.0, 1.0), area.max - vec2(11.0, 1.0));
         ui.painter().rect_filled(viewport, 0.0, p.qt.window);
-        let bar = Rect::from_min_max(pos2(viewport.right(), viewport.top()), pos2(area.right() - 1.0, viewport.bottom()));
+        let bar =
+            Rect::from_min_max(pos2(viewport.right(), viewport.top()), pos2(area.right() - 1.0, viewport.bottom()));
         ui.painter().rect_filled(bar, 0.0, p.page_bg);
         let width = viewport.width().round() as i32;
         let layout = self.panel_layout(ui);
@@ -1115,13 +1213,16 @@ impl TypeIIWindow {
         qt::label(ui, rect("speed_label"), "Shock Speed:", p.text);
         let inputs_ready = Self::inputs_ready(&self.inputs());
         let speeds: Vec<String> = SPEEDS.iter().map(|s| (*s).to_owned()).collect();
-        if let Some(i) = qt::combo(ui, rect("speed"), Id::new("t2_speed"), &speeds, Some(self.speed), "", inputs_ready, p)
+        if let Some(i) =
+            qt::combo(ui, rect("speed"), Id::new("t2_speed"), &speeds, Some(self.speed), "", inputs_ready, p)
             && i != self.speed
         {
             self.set_speed(i);
         }
         let fits = self.upper_fit.is_some() && self.lower_fit.is_some();
-        if qt::button(ui, rect("calculate"), Id::new("t2_calculate"), "Calculate", false, fits && inputs_ready, p).clicked() {
+        if qt::button(ui, rect("calculate"), Id::new("t2_calculate"), "Calculate", false, fits && inputs_ready, p)
+            .clicked()
+        {
             self.calculate();
         }
         const IDS: [[&str; 8]; 4] = [
@@ -1142,7 +1243,9 @@ impl TypeIIWindow {
 
     /// `origin_figure` + `_save_plot`.
     fn save_plot(&mut self, ctx: &egui::Context) {
-        let Some(path) = super::max_window::export_dialog(&format!("{}_Type_II_Band_Splitting", self.filename)) else { return };
+        let Some(path) = super::max_window::export_dialog(&format!("{}_Type_II_Band_Splitting", self.filename)) else {
+            return;
+        };
         if cfg!(windows) && path.to_string_lossy().to_lowercase().starts_with("c:\\program files") {
             return self.notices.push(Notice {
                 kind: NoticeKind::Warning,
@@ -1152,11 +1255,19 @@ impl TypeIIWindow {
         }
         match self.save_figure(ctx, &path) {
             Ok(()) => {
-                self.notices.push(Notice { kind: NoticeKind::Information, title: "Export Complete".into(), text: format!("Plot saved:\n{}", path.display()) });
+                self.notices.push(Notice {
+                    kind: NoticeKind::Information,
+                    title: "Export Complete".into(),
+                    text: format!("Plot saved:\n{}", path.display()),
+                });
                 self.status.show("Export successful!", 3000);
             }
             Err(e) => {
-                self.notices.push(Notice { kind: NoticeKind::Critical, title: "Export Failed".into(), text: format!("Could not save file:\n{e}") });
+                self.notices.push(Notice {
+                    kind: NoticeKind::Critical,
+                    title: "Export Failed".into(),
+                    text: format!("Could not save file:\n{e}"),
+                });
                 self.status.show("Export failed!", 3000);
             }
         }
@@ -1248,7 +1359,8 @@ impl TypeIIWindow {
 }
 
 const GROUP_IDS: [&str; 4] = ["analyzer_group", "fits_group", "averaging_group", "plasma_group"];
-const GROUP_TITLES: [&str; 4] = ["Analyzer Reference", "Fitted Bands", "Averaged Band-Splitting Quantities", "Plasma Parameters"];
+const GROUP_TITLES: [&str; 4] =
+    ["Analyzer Reference", "Fitted Bands", "Averaged Band-Splitting Quantities", "Plasma Parameters"];
 
 fn icon_id(icon: BandIcon) -> &'static str {
     match icon {

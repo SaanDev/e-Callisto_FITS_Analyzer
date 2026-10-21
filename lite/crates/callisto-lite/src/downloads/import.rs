@@ -52,7 +52,15 @@ impl ImportDialog {
 
     /// `ensureSizeIsAtLeastSizeHint`: wide enough for the label, never narrower.
     fn fit(&mut self, ctx: &egui::Context) {
-        let w = ctx.fonts_mut(|f| f.layout_no_wrap(self.label.clone(), crate::fonts::ui_font(12.0, crate::fonts::Weight::Regular), egui::Color32::WHITE).size().x);
+        let w = ctx.fonts_mut(|f| {
+            f.layout_no_wrap(
+                self.label.clone(),
+                crate::fonts::ui_font(12.0, crate::fonts::Weight::Regular),
+                egui::Color32::WHITE,
+            )
+            .size()
+            .x
+        });
         self.width = self.width.max((w.ceil() + 22.0).max(200.0));
     }
 
@@ -108,7 +116,9 @@ impl ImportDialog {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
-            egui::CentralPanel::default().frame(egui::Frame::NONE.fill(bg)).show(ctx, |ui| body(ui, &label, &progress, p));
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(bg))
+                .show(ctx, |ui| body(ui, &label, &progress, p));
         });
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
         None

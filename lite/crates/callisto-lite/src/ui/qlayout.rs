@@ -217,7 +217,11 @@ pub enum Item {
     Container(Container),
     Layout(Box<Layout>),
     /// `QSpacerItem`: `addStretch` / `addSpacing`.
-    Spacer { size: Size, hpolicy: Policy, vpolicy: Policy },
+    Spacer {
+        size: Size,
+        hpolicy: Policy,
+        vpolicy: Policy,
+    },
     Splitter(Splitter),
 }
 
@@ -955,7 +959,8 @@ impl Splitter {
         geom_calc(&mut a, 0, n, pos, space, 0);
         for (i, c) in self.children.iter().enumerate() {
             let d = a[2 * i + 1];
-            let rect = if horizontal { IRect::new(d.pos, r.y, d.size, r.h) } else { IRect::new(r.x, d.pos, r.w, d.size) };
+            let rect =
+                if horizontal { IRect::new(d.pos, r.y, d.size, r.h) } else { IRect::new(r.x, d.pos, r.w, d.size) };
             c.set_geometry(rect, out);
             if i > 0 {
                 let h = a[2 * i];
@@ -1301,7 +1306,14 @@ impl GridLayout {
                     }
                     d.size_hint = d.size_hint.max(info.hint.h);
                     d.minimum_size = d.minimum_size.max(info.min.h);
-                    max_exp_calc(&mut d.maximum_size, &mut d.expansive, &mut d.empty, info.max.h, info.exp_v, info.empty);
+                    max_exp_calc(
+                        &mut d.maximum_size,
+                        &mut d.expansive,
+                        &mut d.empty,
+                        info.max.h,
+                        info.exp_v,
+                        info.empty,
+                    );
                 }
             } else {
                 init_empty_multi(&mut rows, *r, r + rs - 1);
@@ -1315,7 +1327,14 @@ impl GridLayout {
                     }
                     d.size_hint = d.size_hint.max(info.hint.w);
                     d.minimum_size = d.minimum_size.max(info.min.w);
-                    max_exp_calc(&mut d.maximum_size, &mut d.expansive, &mut d.empty, info.max.w, info.exp_h, info.empty);
+                    max_exp_calc(
+                        &mut d.maximum_size,
+                        &mut d.expansive,
+                        &mut d.empty,
+                        info.max.w,
+                        info.exp_h,
+                        info.empty,
+                    );
                 }
             } else {
                 init_empty_multi(&mut cols, *c, c + cs - 1);
@@ -1333,10 +1352,26 @@ impl GridLayout {
             for (i, (_, r, c, rs, cs, _)) in self.items.iter().enumerate() {
                 let info = &infos[i];
                 if *rs > 1 {
-                    distribute_multi_box(&mut rows, *r, r + rs - 1, info.min.h, info.hint.h, &self.row_stretch, info.vstretch);
+                    distribute_multi_box(
+                        &mut rows,
+                        *r,
+                        r + rs - 1,
+                        info.min.h,
+                        info.hint.h,
+                        &self.row_stretch,
+                        info.vstretch,
+                    );
                 }
                 if *cs > 1 {
-                    distribute_multi_box(&mut cols, *c, c + cs - 1, info.min.w, info.hint.w, &self.col_stretch, info.hstretch);
+                    distribute_multi_box(
+                        &mut cols,
+                        *c,
+                        c + cs - 1,
+                        info.min.w,
+                        info.hint.w,
+                        &self.col_stretch,
+                        info.hstretch,
+                    );
                 }
             }
         }
@@ -1658,12 +1693,16 @@ mod tests {
     fn box_layout_shares_like_qt() {
         let row = BoxLayout::h([0; 4], 8)
             .widget(label("date_label", 28))
-            .widget(WidgetSpec::new("date", Size::new(140, 45), Policy::Minimum, Policy::Fixed).min_size(Size::new(140, 42)))
+            .widget(
+                WidgetSpec::new("date", Size::new(140, 45), Policy::Minimum, Policy::Fixed)
+                    .min_size(Size::new(140, 42)),
+            )
             .widget(label("station_label", 40))
             .widget(WidgetSpec::new("combo", Size::new(247, 42), Policy::Preferred, Policy::Fixed).min_height(42))
             .widget(button("show", 137));
         let g = Layout::from(row).layout_window(Size::new(1468, 46));
-        let widths: Vec<i32> = ["date_label", "date", "station_label", "combo", "show"].iter().map(|k| g.rect(k).w).collect();
+        let widths: Vec<i32> =
+            ["date_label", "date", "station_label", "combo", "show"].iter().map(|k| g.rect(k).w).collect();
         assert_eq!(widths, [287, 287, 288, 287, 287]);
         assert_eq!(g.rect("combo"), IRect::new(922 - 36, 2, 287, 42));
         assert_eq!(g.rect("date").h, 45);
@@ -1686,9 +1725,10 @@ mod tests {
     /// The preview window's page: a word-wrapped caption and a canvas.
     #[test]
     fn hint_bound_items_keep_their_hints() {
-        let page = BoxLayout::v([0; 4], 4)
-            .widget(label("caption", 179).hfw(std::rc::Rc::new(|_| 20)))
-            .widget(WidgetSpec::new("canvas", Size::new(640, 480), Policy::Preferred, Policy::Preferred).min_hint(Size::new(10, 10)));
+        let page = BoxLayout::v([0; 4], 4).widget(label("caption", 179).hfw(std::rc::Rc::new(|_| 20))).widget(
+            WidgetSpec::new("canvas", Size::new(640, 480), Policy::Preferred, Policy::Preferred)
+                .min_hint(Size::new(10, 10)),
+        );
         let g = Layout::from(page).layout_window(Size::new(874, 574));
         assert_eq!(g.rect("caption"), IRect::new(0, 0, 874, 90));
         assert_eq!(g.rect("canvas"), IRect::new(0, 94, 874, 480));
@@ -1721,10 +1761,22 @@ mod tests {
             .widget(date("d0"), 1, 0)
             .widget(date("d1"), 1, 1)
             .widget(WidgetSpec::new("type", Size::new(117, 42), Policy::Preferred, Policy::Fixed).min_height(42), 1, 2)
-            .widget(WidgetSpec::new("station", Size::new(128, 42), Policy::Expanding, Policy::Fixed).min_hint(Size::new(50, 42)), 1, 3)
+            .widget(
+                WidgetSpec::new("station", Size::new(128, 42), Policy::Expanding, Policy::Fixed)
+                    .min_hint(Size::new(50, 42)),
+                1,
+                3,
+            )
             .widget(WidgetSpec::new("min", Size::new(118, 45), Policy::Minimum, Policy::Fixed).min_height(42), 1, 4)
             .widget(button("load", 93), 1, 5)
-            .widget_span(WidgetSpec::new("text", Size::new(128, 42), Policy::Expanding, Policy::Fixed).min_hint(Size::new(50, 42)), 2, 0, 1, 5)
+            .widget_span(
+                WidgetSpec::new("text", Size::new(128, 42), Policy::Expanding, Policy::Fixed)
+                    .min_hint(Size::new(50, 42)),
+                2,
+                0,
+                1,
+                5,
+            )
             .widget(button("reset", 92), 2, 5);
         let g = Layout::from(grid).layout_window(Size::new(1474, 16 + 6 + 46 + 6 + 46));
         let w: Vec<i32> = ["d0", "d1", "type", "station", "min", "load"].iter().map(|k| g.rect(k).w).collect();

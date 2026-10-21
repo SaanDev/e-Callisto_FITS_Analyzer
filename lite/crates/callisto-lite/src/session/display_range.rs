@@ -238,7 +238,12 @@ impl Session {
             use_utc: self.use_utc,
             noise_clip_low: self.noise_clip_low,
             noise_clip_high: self.noise_clip_high,
-            noise_clip_scale: if self.noise_clip_scale == super::ClipScale::SignedLog { "signed_log" } else { "linear" }.into(),
+            noise_clip_scale: if self.noise_clip_scale == super::ClipScale::SignedLog {
+                "signed_log"
+            } else {
+                "linear"
+            }
+            .into(),
             cmap: if g.cmap.is_empty() { "Custom".into() } else { g.cmap.clone() },
             graph: match graph {
                 Value::Object(m) => m,
@@ -248,7 +253,9 @@ impl Session {
         crate::tools::batch::BatchEnv {
             cmap: if g.cmap.trim().is_empty() { "Custom".into() } else { g.cmap.clone() },
             cold_digits: cold,
-            display_range: self.display_range_defaults().and_then(|[t0, t1, f0, f1]| DisplayRange::normalized(t0, t1, f0, f1).ok()),
+            display_range: self
+                .display_range_defaults()
+                .and_then(|[t0, t1, f0, f1]| DisplayRange::normalized(t0, t1, f0, f1).ok()),
             visual,
             use_utc: self.use_utc,
         }

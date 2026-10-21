@@ -385,7 +385,11 @@ impl Parser<'_> {
     }
 
     fn hex4(&mut self) -> Result<u32, String> {
-        let h = self.s.get(self.i..self.i + 4).and_then(|b| std::str::from_utf8(b).ok()).and_then(|t| u32::from_str_radix(t, 16).ok());
+        let h = self
+            .s
+            .get(self.i..self.i + 4)
+            .and_then(|b| std::str::from_utf8(b).ok())
+            .and_then(|t| u32::from_str_radix(t, 16).ok());
         let Some(h) = h else { return self.err("Invalid \\uXXXX escape") };
         self.i += 4;
         Ok(h)
@@ -505,7 +509,9 @@ pub fn from_serde(v: &serde_json::Value) -> Json {
     match v {
         serde_json::Value::Null => Json::Null,
         serde_json::Value::Bool(b) => Json::Bool(*b),
-        serde_json::Value::Number(n) => n.as_i64().map(Json::Int).unwrap_or_else(|| Json::Float(n.as_f64().unwrap_or(f64::NAN))),
+        serde_json::Value::Number(n) => {
+            n.as_i64().map(Json::Int).unwrap_or_else(|| Json::Float(n.as_f64().unwrap_or(f64::NAN)))
+        }
         serde_json::Value::String(s) => Json::Str(s.clone()),
         serde_json::Value::Array(a) => Json::Array(a.iter().map(from_serde).collect()),
         serde_json::Value::Object(m) => Json::Object(m.iter().map(|(k, v)| (k.clone(), from_serde(v))).collect()),
@@ -551,7 +557,8 @@ mod tests {
 
     #[test]
     fn dumps_like_python() {
-        let v = loads(r#"{"b": [1, 2.5, NaN, -Infinity], "a": {}, "c": [], "d": {"x": "é\n\u0001"}, "e": null}"#).unwrap();
+        let v =
+            loads(r#"{"b": [1, 2.5, NaN, -Infinity], "a": {}, "c": [], "d": {"x": "é\n\u0001"}, "e": null}"#).unwrap();
         // json.dumps(json.loads(...), indent=2, sort_keys=True, ensure_ascii=False)
         let want = "{\n  \"a\": {},\n  \"b\": [\n    1,\n    2.5,\n    NaN,\n    -Infinity\n  ],\n  \"c\": [],\n  \"d\": {\n    \"x\": \"é\\n\\u0001\"\n  },\n  \"e\": null\n}";
         assert_eq!(dumps(&v), want);

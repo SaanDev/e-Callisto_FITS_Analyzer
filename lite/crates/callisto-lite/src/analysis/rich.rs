@@ -92,7 +92,11 @@ pub fn draw(ui: &Ui, x: f32, baseline: f32, html: &str, px: f32, color: Color32)
     for run in parse(html) {
         let f = font(px, run.bold, run.sup);
         let galley = ui.ctx().fonts_mut(|fonts| fonts.layout_no_wrap(run.text.clone(), f.clone(), color));
-        let ascent = galley.rows.first().and_then(|r| r.row.glyphs.first().map(|g| r.pos.y + g.pos.y)).unwrap_or(galley.size().y * 0.8);
+        let ascent = galley
+            .rows
+            .first()
+            .and_then(|r| r.row.glyphs.first().map(|g| r.pos.y + g.pos.y))
+            .unwrap_or(galley.size().y * 0.8);
         let mut base = baseline;
         if run.sup {
             // itemBaseLine -= (ascent + descent) / 2 of the superscript's font.
@@ -112,7 +116,9 @@ pub fn draw(ui: &Ui, x: f32, baseline: f32, html: &str, px: f32, color: Color32)
 pub fn width(ui: &Ui, html: &str, px: f32) -> f32 {
     parse(html)
         .into_iter()
-        .map(|run| ui.ctx().fonts_mut(|f| f.layout_no_wrap(run.text, font(px, run.bold, run.sup), Color32::WHITE).size().x))
+        .map(|run| {
+            ui.ctx().fonts_mut(|f| f.layout_no_wrap(run.text, font(px, run.bold, run.sup), Color32::WHITE).size().x)
+        })
         .sum()
 }
 

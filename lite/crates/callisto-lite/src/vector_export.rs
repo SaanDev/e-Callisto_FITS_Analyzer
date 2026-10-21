@@ -13,7 +13,7 @@ use std::io::Write as _;
 use anyhow::Result;
 use callisto_core::mpl::{Figure, MarkerKind, Prim, PxRect, image_pixels};
 
-use crate::figure_export::{tight_bbox, text_path};
+use crate::figure_export::{text_path, tight_bbox};
 use crate::fonts::MplMeasure;
 
 /// Bézier control-point factor for a quarter circle.
@@ -239,7 +239,12 @@ fn lay_out(ctx: &egui::Context, fig: &Figure, fmt: Format, dpi: f64) -> Result<(
             }
             Prim::Image { axes, image, dest, clip, log_y } => {
                 let Some(im) = fig.axes.get(*axes).and_then(|a| a.images.get(*image)) else { continue };
-                let d = [dest.x0.min(dest.x1) * sc, dest.y0.min(dest.y1) * sc, dest.x0.max(dest.x1) * sc, dest.y0.max(dest.y1) * sc];
+                let d = [
+                    dest.x0.min(dest.x1) * sc,
+                    dest.y0.min(dest.y1) * sc,
+                    dest.x0.max(dest.x1) * sc,
+                    dest.y0.max(dest.y1) * sc,
+                ];
                 let c = [clip.x0 * sc, clip.y0 * sc, clip.x1 * sc, clip.y1 * sc];
                 let Some((out, w, h, px)) = image_pixels(im, d, c, *log_y) else { continue };
                 let (mut rgb, mut alpha) = (Vec::with_capacity(w * h * 3), Vec::with_capacity(w * h));
@@ -247,7 +252,12 @@ fn lay_out(ctx: &egui::Context, fig: &Figure, fmt: Format, dpi: f64) -> Result<(
                     rgb.extend_from_slice(&c[..3]);
                     alpha.push(c[3]);
                 }
-                let r = [p.x(out[0] as f64 / sc), p.y(out[3] as f64 / sc), (out[2] - out[0]) as f64 / sc * k, (out[3] - out[1]) as f64 / sc * k];
+                let r = [
+                    p.x(out[0] as f64 / sc),
+                    p.y(out[3] as f64 / sc),
+                    (out[2] - out[0]) as f64 / sc * k,
+                    (out[3] - out[1]) as f64 / sc * k,
+                ];
                 let i = p.images.len();
                 p.images.push(PageImage { w: w as u32, h: h as u32, rgb, alpha });
                 match fmt {
@@ -282,7 +292,9 @@ fn lay_out(ctx: &egui::Context, fig: &Figure, fmt: Format, dpi: f64) -> Result<(
                     let kind = *kind;
                     paint(&mut p, Some(*face), Some((*edge, *edge_width, 0, join, None)), move |p| match kind {
                         MarkerKind::Circle => p.circle(x, y, half),
-                        MarkerKind::Square => p.rect(&PxRect { x0: x - half, y0: y - half, x1: x + half, y1: y + half }),
+                        MarkerKind::Square => {
+                            p.rect(&PxRect { x0: x - half, y0: y - half, x1: x + half, y1: y + half })
+                        }
                         MarkerKind::Star => {
                             for i in 0..10 {
                                 let t = std::f64::consts::PI / 5.0 * i as f64 + std::f64::consts::FRAC_PI_2;
@@ -325,7 +337,10 @@ fn lay_out(ctx: &egui::Context, fig: &Figure, fmt: Format, dpi: f64) -> Result<(
                 }
                 p.clip_rect(rect);
                 paint(&mut p, Some(*face), None, |p| p.rect(rect));
-                let (k0, k1) = (((rect.x0 + rect.y0) / spacing).floor() as i64 - 1, ((rect.x1 + rect.y1) / spacing).ceil() as i64 + 1);
+                let (k0, k1) = (
+                    ((rect.x0 + rect.y0) / spacing).floor() as i64 - 1,
+                    ((rect.x1 + rect.y1) / spacing).ceil() as i64 + 1,
+                );
                 let (r, sp) = (rect.clone(), *spacing);
                 paint(&mut p, None, Some((*hatch, *hatch_width, 0, 0, None)), move |p| {
                     for k in k0..=k1 {
@@ -340,7 +355,9 @@ fn lay_out(ctx: &egui::Context, fig: &Figure, fmt: Format, dpi: f64) -> Result<(
                 let Some(path) = text_path(ctx, text, *size_px, *face, glyphs) else { continue };
                 let (s, c) = (-rotation.to_radians()).sin_cos();
                 let (ox, oy) = *pos;
-                let at = move |q: tiny_skia::Point| (ox + q.x as f64 * c - q.y as f64 * s, oy + q.x as f64 * s + q.y as f64 * c);
+                let at = move |q: tiny_skia::Point| {
+                    (ox + q.x as f64 * c - q.y as f64 * s, oy + q.x as f64 * s + q.y as f64 * c)
+                };
                 paint(&mut p, Some(*color), None, move |p| {
                     let mut last = (0.0, 0.0);
                     for seg in path.segments() {
@@ -421,7 +438,9 @@ pub fn pdf(ctx: &egui::Context, fig: &Figure, dpi: f64) -> Result<Vec<u8>> {
         .alphas
         .iter()
         .enumerate()
-        .map(|(i, (fa, sa))| format!(" /A{i} << /Type /ExtGState /ca {:.4} /CA {:.4} >>", *fa as f64 / 255.0, *sa as f64 / 255.0))
+        .map(|(i, (fa, sa))| {
+            format!(" /A{i} << /Type /ExtGState /ca {:.4} /CA {:.4} >>", *fa as f64 / 255.0, *sa as f64 / 255.0)
+        })
         .collect();
     objects.push(b"<< /Type /Catalog /Pages 2 0 R >>".to_vec());
     objects.push(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec());
@@ -448,7 +467,9 @@ pub fn pdf(ctx: &egui::Context, fig: &Figure, dpi: f64) -> Result<Vec<u8>> {
     for o in &offsets {
         out.extend(format!("{o:010} 00000 n \n").as_bytes());
     }
-    out.extend(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", offsets.len() + 1).as_bytes());
+    out.extend(
+        format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", offsets.len() + 1).as_bytes(),
+    );
     Ok(out)
 }
 

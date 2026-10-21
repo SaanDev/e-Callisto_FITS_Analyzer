@@ -230,7 +230,19 @@ fn step_size_to_bound(x: &[f64], s: &[f64], lb: &[f64], ub: &[f64]) -> (f64, Vec
         .collect();
     let min_step = steps.iter().copied().fold(f64::INFINITY, f64::min);
     let hits = (0..x.len())
-        .map(|i| if steps[i] == min_step { if s[i] > 0.0 { 1 } else if s[i] < 0.0 { -1 } else { 0 } } else { 0 })
+        .map(|i| {
+            if steps[i] == min_step {
+                if s[i] > 0.0 {
+                    1
+                } else if s[i] < 0.0 {
+                    -1
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        })
         .collect();
     (min_step, hits)
 }
@@ -295,7 +307,15 @@ fn minimize_quadratic_1d(a: f64, b: f64, lb: f64, ub: f64, c: f64) -> (f64, f64)
 }
 
 /// `solve_lsq_trust_region`, with `uf = Uᵀ f`.
-fn solve_lsq_trust_region(n: usize, m: usize, uf: &[f64], s: &[f64], v: &Mat, delta: f64, initial_alpha: f64) -> (Vec<f64>, f64) {
+fn solve_lsq_trust_region(
+    n: usize,
+    m: usize,
+    uf: &[f64],
+    s: &[f64],
+    v: &Mat,
+    delta: f64,
+    initial_alpha: f64,
+) -> (Vec<f64>, f64) {
     let phi_and_derivative = |alpha: f64, suf: &[f64]| -> (f64, f64) {
         let denom: Vec<f64> = s.iter().map(|x| x * x + alpha).collect();
         let p: Vec<f64> = suf.iter().zip(&denom).map(|(a, d)| a / d).collect();
@@ -512,7 +532,13 @@ pub struct LsqResult {
 
 /// `least_squares(fun, x0, bounds=(lb, ub), method="trf")` with SciPy's
 /// defaults. `x0` must lie within the bounds.
-pub fn least_squares_trf(fun: &dyn Fn(&[f64]) -> Vec<f64>, x0: &[f64], lb: &[f64], ub: &[f64], max_nfev: usize) -> Result<LsqResult, String> {
+pub fn least_squares_trf(
+    fun: &dyn Fn(&[f64]) -> Vec<f64>,
+    x0: &[f64],
+    lb: &[f64],
+    ub: &[f64],
+    max_nfev: usize,
+) -> Result<LsqResult, String> {
     let (ftol, xtol, gtol) = (1e-8, 1e-8, 1e-8);
     if lb.iter().zip(ub).any(|(l, u)| l >= u) {
         return Err("Each lower bound must be strictly less than each upper bound.".into());

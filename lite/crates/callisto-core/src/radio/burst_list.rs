@@ -484,8 +484,10 @@ fn matches_type(value: &str, requested: &str) -> bool {
     if requested.contains('/') {
         return value == requested;
     }
-    let families: Vec<&str> =
-        value.split(['+', ',']).map(|p| p.split('/').next().unwrap_or("").trim_matches(|c| c == '?' || c == ' ')).collect();
+    let families: Vec<&str> = value
+        .split(['+', ','])
+        .map(|p| p.split('/').next().unwrap_or("").trim_matches(|c| c == '?' || c == ' '))
+        .collect();
     if requested == "III" {
         return families.iter().any(|f| ["III", "IIIG", "IIIGG"].contains(f));
     }
@@ -633,9 +635,7 @@ pub fn fetch_burst_events(
             return Ok(None);
         }
         if status != 200 {
-            return Err(BurstListError::Failed(format!(
-                "Could not retrieve burst catalog (HTTP {status}): {url}"
-            )));
+            return Err(BurstListError::Failed(format!("Could not retrieve burst catalog (HTTP {status}): {url}")));
         }
         let bytes = resp
             .into_body()
@@ -667,9 +667,7 @@ pub fn fetch_burst_events(
         }
     }
     if years.is_empty() {
-        return Err(BurstListError::Failed(
-            "The burst catalog index contains no recognized year directories.".into(),
-        ));
+        return Err(BurstListError::Failed("The burst catalog index contains no recognized year directories.".into()));
     }
     type Period = (NaiveDate, NaiveDate, Option<u32>);
     let mut sources: Vec<(String, Period)> = Vec::new();
@@ -772,12 +770,12 @@ pub fn fetch_burst_events(
                  higher-threshold lists are omitted."
             ));
         }
-        result.events.extend(parsed.events.into_iter().filter(|e| (start_date..=end_date).contains(&e.start_utc.date())));
+        result
+            .events
+            .extend(parsed.events.into_iter().filter(|e| (start_date..=end_date).contains(&e.start_utc.date())));
         report(index + 1, total, format!("Loaded {filename}"))?;
     }
-    result
-        .events
-        .sort_by(|a, b| (a.start_utc, a.end_utc, &a.burst_type).cmp(&(b.start_utc, b.end_utc, &b.burst_type)));
+    result.events.sort_by(|a, b| (a.start_utc, a.end_utc, &a.burst_type).cmp(&(b.start_utc, b.end_utc, &b.burst_type)));
     check()?;
     Ok(result)
 }
@@ -1045,7 +1043,14 @@ mod tests {
         assert_eq!(observation_stop("A_20230105_235000_001500_01.fit.gz", start), Some(dt("2023-01-06 00:15:00")));
         assert_eq!(observation_stop("A_20230105_235000_01.fit.gz", start), Some(dt("2023-01-06 00:05:00")));
         let hrefs = vec!["BIR_20230105_101000_01.fit.gz".to_string(), "BIR_20230105_103000_01.fit.gz".to_string()];
-        let found = filter_burst_candidates(&hrefs, "https://a/", &["BIR".into()], dt("2023-01-05 10:15:00"), dt("2023-01-05 10:17:00")).unwrap();
+        let found = filter_burst_candidates(
+            &hrefs,
+            "https://a/",
+            &["BIR".into()],
+            dt("2023-01-05 10:15:00"),
+            dt("2023-01-05 10:17:00"),
+        )
+        .unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].filename, "BIR_20230105_101000_01.fit.gz");
     }

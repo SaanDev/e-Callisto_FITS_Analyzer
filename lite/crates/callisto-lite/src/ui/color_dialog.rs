@@ -33,7 +33,8 @@ const SHOW: Rect = Rect { min: Pos2 { x: 247.0, y: 243.0 }, max: Pos2 { x: 307.0
 
 /// `QColor::setHsv(h, s, v).rgb()`: Qt's float conversion through 16 bits.
 pub fn hsv_to_rgb(h: i32, s: i32, v: i32) -> [u8; 3] {
-    let (hue, sat, val) = ((h.clamp(0, 359) * 100) as u32, (s.clamp(0, 255) * 257) as u32, (v.clamp(0, 255) * 257) as u32);
+    let (hue, sat, val) =
+        ((h.clamp(0, 359) * 100) as u32, (s.clamp(0, 255) * 257) as u32, (v.clamp(0, 255) * 257) as u32);
     let div = |x: u32| ((x - (x >> 8) + 0x80) >> 8) as u8;
     if sat == 0 {
         let c = div(val);
@@ -228,14 +229,28 @@ impl ColorDialog {
 
         // The spin boxes: hue, saturation, value; red, green, blue.
         let rows = [243.0, 294.0, 345.0];
-        let labels = [("Hu&e:", "Hue"), ("&Sat:", "Sat"), ("&Val:", "Val"), ("&Red:", "Red"), ("&Green:", "Green"), ("Bl&ue:", "Blue")];
+        let labels = [
+            ("Hu&e:", "Hue"),
+            ("&Sat:", "Sat"),
+            ("&Val:", "Val"),
+            ("&Red:", "Red"),
+            ("&Green:", "Green"),
+            ("Bl&ue:", "Blue"),
+        ];
         let mut hsv = [self.hue, self.sat, self.val];
         let mut rgb = self.rgb.map(i32::from);
         let (mut hsv_changed, mut rgb_changed) = (false, false);
         for (i, (label, key)) in labels.iter().enumerate() {
             let (lx, sx) = if i < 3 { (313.0, 353.0) } else { (477.0, 518.0) };
             let y = rows[i % 3];
-            mnemonic_text(ui, o.x + lx + if i < 3 { 34.0 } else { 35.0 }, o.y + y + 22.5, egui::Align::Max, label, p.text);
+            mnemonic_text(
+                ui,
+                o.x + lx + if i < 3 { 34.0 } else { 35.0 },
+                o.y + y + 22.5,
+                egui::Align::Max,
+                label,
+                p.text,
+            );
             let rect = at(sx, y, 118.0, 45.0);
             let max = if i == 0 { 359 } else { 255 };
             if i < 3 {
@@ -307,7 +322,8 @@ impl ColorDialog {
         let mut picked = None;
         for col in 0..8 {
             for row in 0..rows {
-                let cell = Rect::from_min_size(origin + vec2(WELL_W * col as f32, WELL_H * row as f32), vec2(WELL_W, WELL_H));
+                let cell =
+                    Rect::from_min_size(origin + vec2(WELL_W * col as f32, WELL_H * row as f32), vec2(WELL_W, WELL_H));
                 let resp = ui.interact(cell, Id::new(("well", which as u8, row, col)), Sense::click());
                 let current = if which == Focus::Basic { self.basic_current } else { self.custom_current };
                 if self.focus == which && current == (row, col) {
@@ -335,7 +351,10 @@ impl ColorDialog {
     fn picker(&mut self, ui: &Ui, o: Pos2, ppp: f32, p: &Palette) {
         let frame = PICKER.translate(o.to_vec2());
         let tex = self.picker.get_or_insert_with(|| {
-            let mut img = ColorImage::new([PICKER_W as usize, PICKER_H as usize], vec![Color32::BLACK; (PICKER_W * PICKER_H) as usize]);
+            let mut img = ColorImage::new(
+                [PICKER_W as usize, PICKER_H as usize],
+                vec![Color32::BLACK; (PICKER_W * PICKER_H) as usize],
+            );
             for y in 0..PICKER_H {
                 for x in 0..PICKER_W {
                     let (h, s) = (hue_at(x), sat_at(y));
@@ -347,7 +366,12 @@ impl ColorDialog {
         });
         let contents = Rect::from_min_size(frame.min + vec2(1.0, 1.0), vec2(PICKER_W as f32, PICKER_H as f32));
         shade_panel(ui, frame, ppp, p, true);
-        ui.painter().image(tex.id(), snap_image(contents, ppp), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        ui.painter().image(
+            tex.id(),
+            snap_image(contents, ppp),
+            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
         let resp = ui.interact(contents, Id::new("cd_picker"), Sense::click_and_drag());
         if (resp.clicked() || resp.dragged() || resp.drag_started())
             && let Some(pos) = resp.interact_pointer_pos()
@@ -390,7 +414,12 @@ impl ColorDialog {
         }
         if let Some((tex, _)) = &self.strip {
             let dest = Rect::from_min_size(r.min + vec2(1.0, coff), vec2(wi as f32, hi as f32));
-            ui.painter().image(tex.id(), snap_image(dest, ppp), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            ui.painter().image(
+                tex.id(),
+                snap_image(dest, ppp),
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
         }
         let w = r.width() - 5.0;
         shade_panel(ui, Rect::from_min_size(r.min + vec2(0.0, foff), vec2(w, h - 2.0 * foff)), ppp, p, true);
@@ -494,7 +523,14 @@ impl WellColors {
 /// band 1.5 device pixels wide from the frame's edge, its outer corners
 /// rounded by a device pixel — then the colour filling the frame's inside
 /// (aliased). Returns the image and its device origin.
-fn wells_image(origin: Pos2, rows: usize, colors: &[[u8; 3]], wc: &WellColors, page: Color32, ppp: f32) -> (ColorImage, (i32, i32)) {
+fn wells_image(
+    origin: Pos2,
+    rows: usize,
+    colors: &[[u8; 3]],
+    wc: &WellColors,
+    page: Color32,
+    ppp: f32,
+) -> (ColorImage, (i32, i32)) {
     let ox = (origin.x * ppp).floor() as i32;
     let oy = (origin.y * ppp).floor() as i32;
     let w = (8.0 * WELL_W * ppp).ceil() as i32 + 2;
@@ -513,8 +549,20 @@ fn wells_image(origin: Pos2, rows: usize, colors: &[[u8; 3]], wc: &WellColors, p
                 if x < fx0 || x > fx1 || y < fy0 || y > fy1 {
                     return false;
                 }
-                let cx = if x < fx0 + radius { fx0 + radius } else if x > fx1 - radius { fx1 - radius } else { x };
-                let cy = if y < fy0 + radius { fy0 + radius } else if y > fy1 - radius { fy1 - radius } else { y };
+                let cx = if x < fx0 + radius {
+                    fx0 + radius
+                } else if x > fx1 - radius {
+                    fx1 - radius
+                } else {
+                    x
+                };
+                let cy = if y < fy0 + radius {
+                    fy0 + radius
+                } else if y > fy1 - radius {
+                    fy1 - radius
+                } else {
+                    y
+                };
                 if (x - cx).powi(2) + (y - cy).powi(2) > radius * radius {
                     return false;
                 }
@@ -549,7 +597,11 @@ fn wells_image(origin: Pos2, rows: usize, colors: &[[u8; 3]], wc: &WellColors, p
                     if hits > 0 {
                         let a = hits as f32 / (N * N) as f32;
                         let mix = |f: u8, b: u8| (f as f32 * a + b as f32 * (1.0 - a)).round() as u8;
-                        img.pixels[i] = Color32::from_rgb(mix(wc.outer.r(), page.r()), mix(wc.outer.g(), page.g()), mix(wc.outer.b(), page.b()));
+                        img.pixels[i] = Color32::from_rgb(
+                            mix(wc.outer.r(), page.r()),
+                            mix(wc.outer.g(), page.g()),
+                            mix(wc.outer.b(), page.b()),
+                        );
                     }
                 }
             }
@@ -573,10 +625,17 @@ fn focus_rect(ui: &Ui, cell: Rect, p: &Palette, ppp: f32) {
     let y0 = (cell.top() * ppp).ceil() as i32;
     let xr = (cell.right() * ppp).floor() as i32 - 1;
     let yb = (cell.bottom() * ppp).floor() as i32 - 1;
-    let dev = |a: i32, b: i32, c: i32, d: i32| Rect::from_min_max(pos2(a as f32 / ppp, b as f32 / ppp), pos2((c + 1) as f32 / ppp, (d + 1) as f32 / ppp));
+    let dev = |a: i32, b: i32, c: i32, d: i32| {
+        Rect::from_min_max(pos2(a as f32 / ppp, b as f32 / ppp), pos2((c + 1) as f32 / ppp, (d + 1) as f32 / ppp))
+    };
     let inside = dev(x0 + 1, y0 + 1, xr - 1, yb - 1);
     let mut mesh = Mesh::default();
-    for (pos, c) in [(inside.left_top(), top), (inside.right_top(), top), (inside.right_bottom(), bottom), (inside.left_bottom(), bottom)] {
+    for (pos, c) in [
+        (inside.left_top(), top),
+        (inside.right_top(), top),
+        (inside.right_bottom(), bottom),
+        (inside.left_bottom(), bottom),
+    ] {
         mesh.vertices.push(Vertex { pos, uv: egui::epaint::WHITE_UV, color: c });
     }
     mesh.indices.extend([0, 1, 2, 0, 2, 3]);

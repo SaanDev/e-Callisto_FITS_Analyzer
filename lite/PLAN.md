@@ -373,6 +373,29 @@ Found in the full app while porting (Lite reproduces them):
 - Installers for the three platforms, side by side with the full app.
 - Full review of the checklist and parity results with you; Lite 1.0.0 released.
 
+**Status (2026-10-21), on `master`:** everything but the review and the release.
+
+| Item | State |
+|---|---|
+| User guide (Help → User Guide, F1) | Done. `tools/make_user_guide.py` writes `assets/user_guide.html` from the full guide: the solar imaging, PFSS, GCS, SWAVES, event context, geomagnetic response, event figure and SunPy chapters dropped, the rest renumbered, every sentence about removed features cut or reworded; each edit must apply exactly once, so a change to the full guide stops the script. Lite lays the HTML out as `QTextDocument` does: `help_windows` compares all 159 blocks with the full app's `QTextBrowser` showing Lite's guide (same positions, heights and line breaks; same document height). Home, Back, links, Find Next with wrap-around and "was not found.", selection and copy. Window 2.3 % of pixels apart, 6–8 % scrolled (text rendering) |
+| Cite this Software | Done; 6.2 % (two text fields of text) |
+| Report a Bug | Done: issue text, prefilled GitHub issue, diagnostics zip (`bug_report.json`/`.md`, issue notes, provenance JSON/Markdown) as `bug_report.py` writes them. The environment names egui where the full app names Python and Qt. 1.4–1.7 % |
+| About | Done (`QMessageBox.about`: the application icon at 64 px). 5.7–5.9 % |
+| Message boxes | Every Lite notice is now a `QMessageBox` laid out as Qt lays it out (`setupLayout`, `updateSize` with its 500 px soft limit, `adjustSize` for wrapped informative text, the platform's button order, Show/Hide Details). Sizes of eight captured boxes equal Qt's to 1 px (DirectWrite advances run a fraction of a pixel under egui's). Icons are drawn after Windows 11's: 2.8–5.9 % |
+| Update check | Done: Lite's own releases (`lite-` tags; the full app skips them), the status-bar label, the startup check 1.5 s after start (not with `CALLISTO_LITE_OFFLINE`), Update Available with release notes behind Show Details, Up to Date, Check Failed, the download with its progress dialog (3.7–6.3 %), Cancel, Update Downloaded with Open File / Open Folder |
+| Startup splash | Done: the window opens as the 540 × 300 splash (the four loading steps), then becomes the maximised main window; 2.8 % apart. `CALLISTO_LITE_NO_SPLASH` skips it |
+| First-start settings import | Done: with no Lite settings yet, Lite reads the full app's (registry, plist or INI) and takes over theme, sidebar sections, frequency axis scale, auto-clean, processing and display range presets, the default preset, light-curve settings and recent files and projects. The INI reader is checked against a file Qt wrote (`parity/make_settings_reference.py`); the registry and plist readers are not yet tried on real stores |
+| Installers | Windows: `packaging/windows/build_windows_installer.ps1` (Inno Setup, after the full app's script): own AppId, "e-CALLISTO FITS Analyzer Lite" folder and Start menu group; the executable carries the icon and version. Built and checked here. macOS: `packaging/macos/build_macos_dmg.sh` (universal app, bundle id `…fitsanalyzer.lite`, Developer ID signing and notarisation when configured). Linux: `packaging/linux/build_deb_linux.sh` (`e-callisto-fits-analyzer-lite`, its own command and desktop entry). The macOS and Linux scripts are not yet run; the Lite workflow builds all three on demand (Run workflow) |
+| Version 1.0.0 | Not yet: Lite is still 0.1.0 until the review |
+
+Found in the full app while porting (Lite reproduces it):
+
+- The user guide's stylesheet sizes do not apply: `QTextBrowser` keeps its
+  default sizes (body 12 px, `h1` 24 px, `h2` 18 px, single line spacing),
+  so `build_default_stylesheet`'s 10.5 pt body, 20 pt and 15 pt headings and
+  140 % line height never show. Only the class rules (`.lead` at 11 pt) and
+  the colours take effect.
+
 ## 6. Risks
 
 | Risk | Mitigation |

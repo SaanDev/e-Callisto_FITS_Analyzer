@@ -58,7 +58,10 @@ impl FigureView {
     pub fn axes_rect(&self, axes: usize) -> Option<Rect> {
         let c = self.cache.as_ref()?;
         let r = c.list.axes_rects.get(axes)?;
-        Some(Rect::from_min_max(pos2(c.origin.x + r.x0 as f32, c.origin.y + r.y0 as f32), pos2(c.origin.x + r.x1 as f32, c.origin.y + r.y1 as f32)))
+        Some(Rect::from_min_max(
+            pos2(c.origin.x + r.x0 as f32, c.origin.y + r.y0 as f32),
+            pos2(c.origin.x + r.x1 as f32, c.origin.y + r.y1 as f32),
+        ))
     }
 
     /// The data coordinates of screen position `pos` in axes `axes`
@@ -97,7 +100,10 @@ impl FigureView {
                 render::draw(p, &mut pix.as_mut(), ppp as f64, (b[0] as f64, b[1] as f64));
                 let img = egui::ColorImage::from_rgba_premultiplied([w as usize, h as usize], pix.data());
                 let tex = ui.ctx().load_texture(format!("figure-prim-{i}"), img, TextureOptions::NEAREST);
-                let r = Rect::from_min_max(pos2(b[0] as f32 / ppp, b[1] as f32 / ppp), pos2(b[2] as f32 / ppp, b[3] as f32 / ppp));
+                let r = Rect::from_min_max(
+                    pos2(b[0] as f32 / ppp, b[1] as f32 / ppp),
+                    pos2(b[2] as f32 / ppp, b[3] as f32 / ppp),
+                );
                 images.push(Some((r, tex)));
                 continue;
             }
@@ -110,7 +116,12 @@ impl FigureView {
                 continue;
             };
             let s = ppp as f64;
-            let d = [dest.x0.min(dest.x1) * s, dest.y0.min(dest.y1) * s, dest.x0.max(dest.x1) * s, dest.y0.max(dest.y1) * s];
+            let d = [
+                dest.x0.min(dest.x1) * s,
+                dest.y0.min(dest.y1) * s,
+                dest.x0.max(dest.x1) * s,
+                dest.y0.max(dest.y1) * s,
+            ];
             let c = [clip.x0 * s, clip.y0 * s, clip.x1 * s, clip.y1 * s];
             let Some((out, w, h, px)) = image_pixels(im, d, c, *log_y) else {
                 images.push(None);
@@ -178,7 +189,11 @@ impl FigureView {
                     }
                     painter.line_segment([p0, p1], Stroke::new(w, color(*c)));
                 }
-                Prim::Image { .. } | Prim::Markers { .. } | Prim::Path { .. } | Prim::Frame { .. } | Prim::Hatch { .. } => {
+                Prim::Image { .. }
+                | Prim::Markers { .. }
+                | Prim::Path { .. }
+                | Prim::Frame { .. }
+                | Prim::Hatch { .. } => {
                     if let Some(Some((r, tex))) = cache.images.get(i) {
                         let r = r.translate(origin.to_vec2());
                         painter.image(tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
@@ -188,7 +203,9 @@ impl FigureView {
                     // A math label: each glyph where mathtext placed it.
                     let pen = at(pos.0, pos.1);
                     for g in glyphs {
-                        let galley = ui.ctx().fonts_mut(|f| f.layout_no_wrap(g.c.to_string(), mpl_font(*face, g.size_px as f32), color(*c)));
+                        let galley = ui.ctx().fonts_mut(|f| {
+                            f.layout_no_wrap(g.c.to_string(), mpl_font(*face, g.size_px as f32), color(*c))
+                        });
                         let baseline = galley
                             .rows
                             .first()
@@ -204,9 +221,9 @@ impl FigureView {
                     }
                 }
                 Prim::Text { pos, text, size_px, color: c, rotation, face, .. } => {
-                    let galley = ui.ctx().fonts_mut(|f| {
-                        f.layout_no_wrap(text.clone(), mpl_font(*face, *size_px as f32), color(*c))
-                    });
+                    let galley = ui
+                        .ctx()
+                        .fonts_mut(|f| f.layout_no_wrap(text.clone(), mpl_font(*face, *size_px as f32), color(*c)));
                     let baseline = galley
                         .rows
                         .first()
@@ -222,7 +239,8 @@ impl FigureView {
                         // pen sits (0, baseline) down the unrotated text.
                         let rad = rotation.to_radians() as f32;
                         let (dx, dy) = agg_rotated_text_offset(*rotation);
-                        let top_left = pen - vec2(baseline * rad.sin(), baseline * rad.cos()) + vec2(dx as f32, dy as f32) / ppp;
+                        let top_left =
+                            pen - vec2(baseline * rad.sin(), baseline * rad.cos()) + vec2(dx as f32, dy as f32) / ppp;
                         egui::epaint::TextShape::new(top_left, galley, color(*c)).with_angle(-rad)
                     };
                     painter.add(shape);
@@ -233,5 +251,8 @@ impl FigureView {
 }
 
 fn px_rect(origin: Pos2, r: &PxRect) -> Rect {
-    Rect::from_min_max(pos2(origin.x + r.x0 as f32, origin.y + r.y0 as f32), pos2(origin.x + r.x1 as f32, origin.y + r.y1 as f32))
+    Rect::from_min_max(
+        pos2(origin.x + r.x0 as f32, origin.y + r.y0 as f32),
+        pos2(origin.x + r.x1 as f32, origin.y + r.y1 as f32),
+    )
 }

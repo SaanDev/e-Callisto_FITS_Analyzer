@@ -47,9 +47,21 @@ impl DownloadBatch {
                     let msg = match result {
                         Ok(cached) => {
                             let _ = tx.send(TaskMsg::Progress(name.clone(), 1.0, format!("Ready: {name}")));
-                            TaskMsg::Done { filename: name, out_path: out.to_string_lossy().into_owned(), success: true, cached, error: String::new() }
+                            TaskMsg::Done {
+                                filename: name,
+                                out_path: out.to_string_lossy().into_owned(),
+                                success: true,
+                                cached,
+                                error: String::new(),
+                            }
                         }
-                        Err(e) => TaskMsg::Done { filename: name, out_path: out.to_string_lossy().into_owned(), success: false, cached: false, error: e.to_string() },
+                        Err(e) => TaskMsg::Done {
+                            filename: name,
+                            out_path: out.to_string_lossy().into_owned(),
+                            success: false,
+                            cached: false,
+                            error: e.to_string(),
+                        },
                     };
                     let _ = tx.send(msg);
                     ctx.request_repaint();

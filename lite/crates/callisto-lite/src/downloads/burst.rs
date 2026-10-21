@@ -196,7 +196,8 @@ impl BurstTab {
         self.progress.max = total as i64;
         self.progress.value = current as i64;
         self.progress.format = "%p%".into();
-        self.detail = (100 * current).checked_div(total).map_or_else(|| "\u{2026}".into(), |v| format!("{}%", v.min(100)));
+        self.detail =
+            (100 * current).checked_div(total).map_or_else(|| "\u{2026}".into(), |v| format!("{}%", v.min(100)));
         if !self.cancel_requested {
             self.activity = message;
         }
@@ -211,7 +212,11 @@ impl BurstTab {
             self.progress.value = 0;
             self.progress.format = text.into();
             self.detail = text.into();
-            self.activity = if self.kind == Some(JobKind::Catalog) { self.catalog_status.clone() } else { self.fits_status.clone() };
+            self.activity = if self.kind == Some(JobKind::Catalog) {
+                self.catalog_status.clone()
+            } else {
+                self.fits_status.clone()
+            };
         } else {
             self.progress.value = 100;
             self.progress.format = "%p%".into();
@@ -275,7 +280,9 @@ impl BurstTab {
             let done = batch.done;
             let last = msgs.iter().next_back().map(|m| match m {
                 super::batch::TaskMsg::Progress(_, _, msg) => msg.clone(),
-                super::batch::TaskMsg::Done { filename, success, .. } => format!("{} {filename}", if *success { "Saved" } else { "Failed" }),
+                super::batch::TaskMsg::Done { filename, success, .. } => {
+                    format!("{} {filename}", if *success { "Saved" } else { "Failed" })
+                }
             });
             self.progress.value = (1000.0 * sum).round() as i64;
             self.detail = format!("{}%", (100.0 * sum / total as f64) as i64);
@@ -297,7 +304,11 @@ impl BurstTab {
                 self.fits_tip = lines.join("\n");
                 sh.out.cache_changed = true;
                 if failed > 0 {
-                    sh.out.notice(NoticeKind::Warning, "Download Complete", format!("{status}\n\n{}", lines.iter().take(8).cloned().collect::<Vec<_>>().join("\n")));
+                    sh.out.notice(
+                        NoticeKind::Warning,
+                        "Download Complete",
+                        format!("{status}\n\n{}", lines.iter().take(8).cloned().collect::<Vec<_>>().join("\n")),
+                    );
                 }
             }
         }
@@ -326,11 +337,21 @@ impl BurstTab {
 
     /// `apply_filters`.
     fn apply_filters(&mut self) {
-        let filtered = burst_list::filter_burst_events(&self.events, &self.types[self.type_current].1, &self.station_filter, &self.text_filter, None, None)
-            .unwrap_or_default();
+        let filtered = burst_list::filter_burst_events(
+            &self.events,
+            &self.types[self.type_current].1,
+            &self.station_filter,
+            &self.text_filter,
+            None,
+            None,
+        )
+        .unwrap_or_default();
         let min = self.min_stations.max(0) as usize;
-        let keys: Vec<String> = filtered.iter().filter(|e| e.stations.len() >= min).map(|e| e.raw_line.clone() + &e.source_url).collect();
-        self.shown = (0..self.events.len()).filter(|&i| keys.contains(&(self.events[i].raw_line.clone() + &self.events[i].source_url))).collect();
+        let keys: Vec<String> =
+            filtered.iter().filter(|e| e.stations.len() >= min).map(|e| e.raw_line.clone() + &e.source_url).collect();
+        self.shown = (0..self.events.len())
+            .filter(|&i| keys.contains(&(self.events[i].raw_line.clone() + &self.events[i].source_url)))
+            .collect();
         self.catalog_view = ViewState { sort: Some((0, true)), ..Default::default() };
         self.sort_catalog();
         let mut status = format!("{} of {} events match the filters.", self.shown.len(), self.events.len());
@@ -419,7 +440,8 @@ impl BurstTab {
     fn request_burst_stations(&mut self, svc: &super::stations::StationService) {
         let Some(e) = self.selected_event() else { return };
         let (first, last) = (e.start_utc.date(), e.end_utc.date());
-        let days: Vec<NaiveDate> = (0..=(last - first).num_days().max(0)).map(|k| first + chrono::Duration::days(k)).collect();
+        let days: Vec<NaiveDate> =
+            (0..=(last - first).num_days().max(0)).map(|k| first + chrono::Duration::days(k)).collect();
         if let Some(ev) = self.loader.request(svc, &days) {
             self.add_archive_stations(ev);
         }
@@ -481,7 +503,8 @@ impl BurstTab {
             Ok(res) => {
                 let (n, cached, errors) = (res.panels.len(), res.cached_count, res.errors.clone());
                 sh.out.previews.push(super::preview::PreviewWindow::new(&sh.ctx, res.panels));
-                let mut status = format!("Preview opened \u{b7} {n} panel(s) \u{b7} {cached} file(s) reused from cache.");
+                let mut status =
+                    format!("Preview opened \u{b7} {n} panel(s) \u{b7} {cached} file(s) reused from cache.");
                 if !errors.is_empty() {
                     status.push_str(&format!(" {} warning(s); hover for details.", errors.len()));
                 }
@@ -516,12 +539,25 @@ impl BurstTab {
         let filters = super::single::section("filters", grid);
         let progress_row = BoxLayout::h([0; 4], 3)
             .add_stretched(Item::Widget(qt::progress_spec("progress").min_height(18)), 1)
-            .widget(WidgetSpec::new("detail", Size::new(qt::text_w_hint(ui, &self.detail), 16), Policy::Preferred, Policy::Preferred).min_width(45))
+            .widget(
+                WidgetSpec::new(
+                    "detail",
+                    Size::new(qt::text_w_hint(ui, &self.detail), 16),
+                    Policy::Preferred,
+                    Policy::Preferred,
+                )
+                .min_width(45),
+            )
             .widget(qt::button_spec(ui, "cancel", "Cancel", false));
         let activity = Item::Container(Container {
             spec: WidgetSpec::new("activity", Size::new(0, 0), Policy::Preferred, Policy::Preferred),
             margins: [0; 4],
-            layout: Box::new(BoxLayout::v([4, 0, 4, 0], 3).widget(qt::wrap_label_spec(ui, "activity_label", &self.activity, false)).add(progress_row.into_item()).into()),
+            layout: Box::new(
+                BoxLayout::v([4, 0, 4, 0], 3)
+                    .widget(qt::wrap_label_spec(ui, "activity_label", &self.activity, false))
+                    .add(progress_row.into_item())
+                    .into(),
+            ),
         });
         let catalog = BoxLayout::v([6; 4], 6)
             .widget(qt::view_spec("catalog").min_height(80))
@@ -561,7 +597,12 @@ impl BurstTab {
             children: vec![panel("catalog_panel", catalog), panel("fits_panel", fits)],
             sizes: self.split.clone(),
         });
-        BoxLayout::v([2, 10, 2, 2], 8).add(header.into_item()).add(filters).add(activity).add_stretched(splitter, 1).into()
+        BoxLayout::v([2, 10, 2, 2], 8)
+            .add(header.into_item())
+            .add(filters)
+            .add(activity)
+            .add_stretched(splitter, 1)
+            .into()
     }
 
     pub fn show(&mut self, ui: &mut Ui, page: Rect, sh: &mut Shared) {
@@ -593,15 +634,42 @@ impl BurstTab {
         }
         let type_labels: Vec<String> = self.types.iter().map(|t| t.0.clone()).collect();
         let mut filters_changed = false;
-        if let Some(i) = qt::combo(ui, r("type"), Id::new("burst_type"), &type_labels, Some(self.type_current), "", !busy, p)
+        if let Some(i) =
+            qt::combo(ui, r("type"), Id::new("burst_type"), &type_labels, Some(self.type_current), "", !busy, p)
             && i != self.type_current
         {
             self.type_current = i;
             filters_changed = true;
         }
-        filters_changed |= qt::line_edit(ui, r("station_filter"), Id::new("burst_station_filter"), &mut self.station_filter, "Any reporting station", !busy, p);
-        filters_changed |= qt::spin_box(ui, r("min_stations"), Id::new("burst_min"), &mut self.min_stations, (0, 200), "", "Any", !busy, p);
-        filters_changed |= qt::line_edit(ui, r("text_filter"), Id::new("burst_text_filter"), &mut self.text_filter, "Search type, stations or remarks", !busy, p);
+        filters_changed |= qt::line_edit(
+            ui,
+            r("station_filter"),
+            Id::new("burst_station_filter"),
+            &mut self.station_filter,
+            "Any reporting station",
+            !busy,
+            p,
+        );
+        filters_changed |= qt::spin_box(
+            ui,
+            r("min_stations"),
+            Id::new("burst_min"),
+            &mut self.min_stations,
+            (0, 200),
+            "",
+            "Any",
+            !busy,
+            p,
+        );
+        filters_changed |= qt::line_edit(
+            ui,
+            r("text_filter"),
+            Id::new("burst_text_filter"),
+            &mut self.text_filter,
+            "Search type, stations or remarks",
+            !busy,
+            p,
+        );
         if qt::button(ui, r("load"), Id::new("burst_load"), "Load Events", true, !busy, p).clicked() {
             self.load_events(sh);
         }
@@ -620,7 +688,15 @@ impl BurstTab {
         qt::wrapped(ui, r("activity_label"), &self.activity, p.text, false);
         qt::progress_bar(ui, r("progress"), &self.progress, p);
         let detail = r("detail");
-        crate::ui::widgets::text_right(ui, detail.right(), detail.center().y, &self.detail, qt::FONT_PX, crate::fonts::Weight::Regular, p.text);
+        crate::ui::widgets::text_right(
+            ui,
+            detail.right(),
+            detail.center().y,
+            &self.detail,
+            qt::FONT_PX,
+            crate::fonts::Weight::Regular,
+            p.text,
+        );
         let can_cancel = self.work.is_some() && !self.cancel_requested;
         if qt::button(ui, r("cancel"), Id::new("burst_cancel"), "Cancel", false, can_cancel, p).clicked() {
             self.request_cancel();
@@ -653,7 +729,19 @@ impl BurstTab {
             .collect();
         let headers = ["Start (UTC)", "End (UTC)", "Type", "Stations", "Observatories / remarks"];
         let widths = self.widths(ui, catalog, &style, &headers, &rows, &self.shown, false);
-        let events = itemview::item_view(ui, catalog, Id::new("burst_catalog"), &headers, &widths, &rows, &self.shown, &style, &mut self.catalog_view, !busy, p);
+        let events = itemview::item_view(
+            ui,
+            catalog,
+            Id::new("burst_catalog"),
+            &headers,
+            &widths,
+            &rows,
+            &self.shown,
+            &style,
+            &mut self.catalog_view,
+            !busy,
+            p,
+        );
         let mut selected_now = false;
         for e in events {
             match e {
@@ -705,7 +793,14 @@ impl BurstTab {
             .fits
             .iter()
             .map(|(c, on)| {
-                let mut row = Row::new(vec![String::new(), c.station.clone(), c.utc_text(), c.receiver_id.clone(), c.filename.clone()]).checked(Check::from_bool(*on));
+                let mut row = Row::new(vec![
+                    String::new(),
+                    c.station.clone(),
+                    c.utc_text(),
+                    c.receiver_id.clone(),
+                    c.filename.clone(),
+                ])
+                .checked(Check::from_bool(*on));
                 row.tooltip = Some(c.url.clone());
                 row
             })
@@ -713,7 +808,19 @@ impl BurstTab {
         let fheaders = ["", "Station", "Start (UTC)", "Focus", "Filename"];
         let visible: Vec<usize> = (0..frows.len()).collect();
         let fwidths = self.widths(ui, fits_rect, &fstyle, &fheaders, &frows, &visible, true);
-        for e in itemview::item_view(ui, fits_rect, Id::new("burst_fits"), &fheaders, &fwidths, &frows, &visible, &fstyle, &mut self.fits_view, !busy, p) {
+        for e in itemview::item_view(
+            ui,
+            fits_rect,
+            Id::new("burst_fits"),
+            &fheaders,
+            &fwidths,
+            &frows,
+            &visible,
+            &fstyle,
+            &mut self.fits_view,
+            !busy,
+            p,
+        ) {
             if let Event::Toggled(i) = e {
                 self.fits[i].1 ^= true;
             }
@@ -725,7 +832,8 @@ impl BurstTab {
                 f.1 = true;
             }
         }
-        if qt::button(ui, r("clear"), Id::new("burst_clear"), "Clear Selection", false, !busy && has_files, p).clicked() {
+        if qt::button(ui, r("clear"), Id::new("burst_clear"), "Clear Selection", false, !busy && has_files, p).clicked()
+        {
             for f in &mut self.fits {
                 f.1 = false;
             }
@@ -746,18 +854,39 @@ impl BurstTab {
 
     /// Column widths: every column to its contents, the last stretched.
     #[allow(clippy::too_many_arguments)]
-    fn widths(&self, ui: &Ui, rect: Rect, style: &Style, headers: &[&str], rows: &[Row], visible: &[usize], check_first: bool) -> Vec<f32> {
+    fn widths(
+        &self,
+        ui: &Ui,
+        rect: Rect,
+        style: &Style,
+        headers: &[&str],
+        rows: &[Row],
+        visible: &[usize],
+        check_first: bool,
+    ) -> Vec<f32> {
         let vp = itemview::viewport(rect, style);
         let total = vp.width() - if itemview::needs_scrollbar(rect, style, visible.len()) { 10.0 } else { 0.0 };
         let n = headers.len();
         let mut w: Vec<f32> = (0..n - 1)
             .map(|i| {
                 let checkable = check_first && i == 0 && !rows.is_empty();
-                itemview::content_width(ui, headers[i], rows.iter().map(|r| r.cells[i].clone()), checkable, style.sortable)
+                itemview::content_width(
+                    ui,
+                    headers[i],
+                    rows.iter().map(|r| r.cells[i].clone()),
+                    checkable,
+                    style.sortable,
+                )
             })
             .collect();
         let used: f32 = w.iter().sum();
-        let last = itemview::content_width(ui, headers[n - 1], rows.iter().map(|r| r.cells[n - 1].clone()), false, style.sortable);
+        let last = itemview::content_width(
+            ui,
+            headers[n - 1],
+            rows.iter().map(|r| r.cells[n - 1].clone()),
+            false,
+            style.sortable,
+        );
         w.push((total - used).max(last));
         w
     }
@@ -783,7 +912,11 @@ impl BurstTab {
             return;
         }
         if self.end < self.start {
-            return sh.out.notice(NoticeKind::Warning, "Invalid Date Range", "The end date must be on or after the start date.");
+            return sh.out.notice(
+                NoticeKind::Warning,
+                "Invalid Date Range",
+                "The end date must be on or after the start date.",
+            );
         }
         self.events.clear();
         self.warnings.clear();
@@ -793,7 +926,12 @@ impl BurstTab {
         let (start, end) = (self.start, self.end);
         let job = Job::spawn(&sh.ctx, move |r| {
             let flag = r.cancel_flag();
-            burst_list::fetch_burst_events(start, end, |a, b, m| r.send((a, b, m)), move || flag.load(Ordering::Relaxed))
+            burst_list::fetch_burst_events(
+                start,
+                end,
+                |a, b, m| r.send((a, b, m)),
+                move || flag.load(Ordering::Relaxed),
+            )
         });
         self.start_work(JobKind::Catalog, Work::Catalog(job));
     }
@@ -814,14 +952,24 @@ impl BurstTab {
             vec![value]
         };
         if stations.is_empty() {
-            return sh.out.notice(NoticeKind::Warning, "No Station", "Choose or enter a station to search for this burst.");
+            return sh.out.notice(
+                NoticeKind::Warning,
+                "No Station",
+                "Choose or enter a station to search for this burst.",
+            );
         }
         self.clear_fits();
         self.fits_status = "Searching archive listings for files covering the burst\u{2026}".into();
         let padding = self.padding as i64;
         let job = Job::spawn(&sh.ctx, move |r| {
             let flag = r.cancel_flag();
-            burst_list::find_burst_fits(&event, &stations, padding, |a, b, m| r.send((a, b, m)), move || flag.load(Ordering::Relaxed))
+            burst_list::find_burst_fits(
+                &event,
+                &stations,
+                padding,
+                |a, b, m| r.send((a, b, m)),
+                move || flag.load(Ordering::Relaxed),
+            )
         });
         self.start_work(JobKind::Fits, Work::Fits(job));
     }
@@ -837,7 +985,12 @@ impl BurstTab {
                 let root = sh.cache_root.to_path_buf();
                 let job = Job::spawn(&sh.ctx, move |r| {
                     let flag = r.cancel_flag();
-                    downloader::prepare_preview(&root, &selected, |a, b, m| r.send((a, b, m)), move || flag.load(Ordering::Relaxed))
+                    downloader::prepare_preview(
+                        &root,
+                        &selected,
+                        |a, b, m| r.send((a, b, m)),
+                        move || flag.load(Ordering::Relaxed),
+                    )
                 });
                 self.start_work(JobKind::Preview, Work::Preview(job));
             }
@@ -848,7 +1001,8 @@ impl BurstTab {
                 self.kind = Some(JobKind::Download);
                 self.outcome = "";
                 self.cancel_requested = false;
-                self.progress = qt::Progress { min: 0, max: selected.len() as i64 * 1000, value: 0, format: "%p%".into() };
+                self.progress =
+                    qt::Progress { min: 0, max: selected.len() as i64 * 1000, value: 0, format: "%p%".into() };
                 self.detail = "0%".into();
                 self.activity = format!("Downloading {} FITS file(s)\u{2026}", selected.len());
                 self.fits_status = "Downloading selected FITS files\u{2026}".into();
@@ -868,4 +1022,5 @@ const FILTER_LABELS: [(&str, &str); 5] = [
     ("l_station", "Reporting station"),
     ("l_min", "Min. stations"),
 ];
-const FILE_ACTIONS: [(&str, &str); 4] = [("preview", "Preview"), ("download", "Download"), ("import", "Import"), ("compare", "Compare")];
+const FILE_ACTIONS: [(&str, &str); 4] =
+    [("preview", "Preview"), ("download", "Download"), ("import", "Import"), ("compare", "Compare")];

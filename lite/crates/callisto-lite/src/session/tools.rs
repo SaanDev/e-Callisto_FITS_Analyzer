@@ -126,7 +126,8 @@ impl Session {
             (true, Some(start)) => {
                 // int(round(...)): Python rounds half to even.
                 let total = (start + t).round_ties_even() as i64;
-                let (h, m, s) = (total.div_euclid(3600).rem_euclid(24), total.rem_euclid(3600) / 60, total.rem_euclid(60));
+                let (h, m, s) =
+                    (total.div_euclid(3600).rem_euclid(24), total.rem_euclid(3600) / 60, total.rem_euclid(60));
                 format!("{h:02}:{m:02}:{s:02} UT ({} s)", pyf(t, 3))
             }
             _ => format!("{} s", pyf(t, 3)),
@@ -358,8 +359,9 @@ impl Session {
 
     /// `_build_light_curve_overlay`.
     fn build_light_curve_overlay(&self, requested: f64, curve_index: usize) -> Result<LightCurveOverlay, String> {
-        let source =
-            self.current_light_curve_source().ok_or_else(|| "Load a FITS file before plotting a light curve.".to_owned())?;
+        let source = self
+            .current_light_curve_source()
+            .ok_or_else(|| "Load a FITS file before plotting a light curve.".to_owned())?;
         let d = self.data.as_ref().ok_or_else(|| "Load a FITS file before plotting a light curve.".to_owned())?;
         let (row, actual) = light_curve::nearest_frequency(&d.freqs, requested)
             .ok_or_else(|| "No valid frequency axis is available.".to_owned())?;
@@ -746,7 +748,8 @@ impl Session {
     fn commit_shape(&mut self, kind: AnnotationKind, points: &[(f64, f64)]) {
         let pts: Vec<[f64; 2]> = points.iter().map(|p| [p.0, p.1]).collect();
         let s = &self.tools.annotation_style;
-        let ann = annotations::make_annotation(kind, &pts, "", &s.color, s.line_width, None, self.tools.annotations_visible);
+        let ann =
+            annotations::make_annotation(kind, &pts, "", &s.color, s.line_width, None, self.tools.annotations_visible);
         self.add_annotation(ann);
         self.reset_annotation_mode();
     }

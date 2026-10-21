@@ -148,7 +148,8 @@ impl Doc {
             let raw = rest[i + 1..i + j].trim();
             rest = &rest[i + j + 1..];
             let lower = raw.to_lowercase();
-            let name = lower.trim_start_matches('/').split_whitespace().next().unwrap_or("").trim_end_matches('/').to_owned();
+            let name =
+                lower.trim_start_matches('/').split_whitespace().next().unwrap_or("").trim_end_matches('/').to_owned();
             let closing = lower.starts_with('/');
             match (name.as_str(), closing) {
                 ("br", _) => {
@@ -339,14 +340,19 @@ pub fn draw(ui: &Ui, rect: Rect, doc: &Doc, color: Color32) {
             let font = f.font();
             let c = f.color.unwrap_or(color);
             let galley = ui.ctx().fonts_mut(|fonts| fonts.layout_no_wrap(text.clone(), font.clone(), c));
-            let in_galley = galley.rows.first().and_then(|r| r.row.glyphs.first().map(|g| r.pos.y + g.pos.y)).unwrap_or(galley.size().y * 0.8);
+            let in_galley = galley
+                .rows
+                .first()
+                .and_then(|r| r.row.glyphs.first().map(|g| r.pos.y + g.pos.y))
+                .unwrap_or(galley.size().y * 0.8);
             let (_, a, d) = measure(ui.ctx(), "", &f);
             let shift = match f.script {
                 -1 => (a + d) / 6.0,
                 1 => -(a + d) / 2.0,
                 _ => 0.0,
             };
-            let at = pos2(((inner.left() + x) * ppp).round() / ppp, ((baseline + shift - in_galley) * ppp).round() / ppp);
+            let at =
+                pos2(((inner.left() + x) * ppp).round() / ppp, ((baseline + shift - in_galley) * ppp).round() / ppp);
             painter.galley(at, galley, c);
         }
     }
@@ -359,7 +365,10 @@ pub fn label_spec(ui: &Ui, id: &'static str, html: &str, base_px: i32) -> Widget
     let ctx = ui.ctx().clone();
     let doc = Doc::parse(html, base_px);
     let line_width = |lines: &[(f32, Line)]| {
-        lines.iter().map(|(_, l)| l.pieces.last().map(|(x, t, f)| x + measure(&ctx, t, f).0).unwrap_or(0.0)).fold(0.0, f32::max)
+        lines
+            .iter()
+            .map(|(_, l)| l.pieces.last().map(|(x, t, f)| x + measure(&ctx, t, f).0).unwrap_or(0.0))
+            .fold(0.0, f32::max)
     };
     let (one, h1) = layout(&ctx, &doc, f32::INFINITY);
     let natural = line_width(&one);
@@ -367,9 +376,14 @@ pub fn label_spec(ui: &Ui, id: &'static str, html: &str, base_px: i32) -> Widget
     let longest = line_width(&narrow);
     let m = 2 * LABEL_MARGIN as i32;
     let hfw: crate::ui::qlayout::Hfw = Rc::new(move |w: i32| height_for_width(&ctx, &doc, w as f32).round() as i32);
-    WidgetSpec::new(id, Size::new(natural.ceil() as i32 + m, h1.ceil() as i32 + m), Policy::Preferred, Policy::Preferred)
-        .min_hint(Size::new(longest.ceil() as i32 + m, h1.ceil() as i32 + m))
-        .hfw(hfw)
+    WidgetSpec::new(
+        id,
+        Size::new(natural.ceil() as i32 + m, h1.ceil() as i32 + m),
+        Policy::Preferred,
+        Policy::Preferred,
+    )
+    .min_hint(Size::new(longest.ceil() as i32 + m, h1.ceil() as i32 + m))
+    .hfw(hfw)
 }
 
 #[cfg(test)]
@@ -392,7 +406,10 @@ mod tests {
         assert_eq!(b.lines[1].0[0].text, "1.3741 R");
         let two = Doc::parse(&format!("{html}{html}"), 12);
         assert_eq!(two.blocks.len(), 2);
-        let status = Doc::parse("<span style='color:#b26a00;'><b>Analyzer input missing.</b></span><br>Run the usual Analyzer window first.", 12);
+        let status = Doc::parse(
+            "<span style='color:#b26a00;'><b>Analyzer input missing.</b></span><br>Run the usual Analyzer window first.",
+            12,
+        );
         assert_eq!(status.blocks.len(), 1);
         assert_eq!(status.blocks[0].lines.len(), 2);
         assert_eq!(status.blocks[0].lines[0].0[0].f.color, Some(Color32::from_rgb(0xb2, 0x6a, 0x00)));

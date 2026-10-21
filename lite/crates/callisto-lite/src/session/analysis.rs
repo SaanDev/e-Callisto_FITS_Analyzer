@@ -6,7 +6,9 @@
 use std::sync::Arc;
 
 use callisto_core::analysis::maxima::analysis_seed;
-use callisto_core::analysis::session::{AnalysisSession, AnalyzerBlock, MaxIntensityBlock, SessionSource, TypeIIBlock, UiBlock};
+use callisto_core::analysis::session::{
+    AnalysisSession, AnalyzerBlock, MaxIntensityBlock, SessionSource, TypeIIBlock, UiBlock,
+};
 use callisto_core::radio::array::Array2;
 
 use super::{Session, normalize_plot_type};
@@ -129,7 +131,11 @@ impl Session {
     }
 
     /// `_merge_seed_with_existing_analysis`.
-    pub fn merge_seed_with_existing(&self, seed: Option<AnalysisSession>, existing: Option<&AnalysisSession>) -> Option<AnalysisSession> {
+    pub fn merge_seed_with_existing(
+        &self,
+        seed: Option<AnalysisSession>,
+        existing: Option<&AnalysisSession>,
+    ) -> Option<AnalysisSession> {
         let existing = self.with_analysis_context(existing);
         match seed {
             None => existing,

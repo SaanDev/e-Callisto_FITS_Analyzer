@@ -65,11 +65,14 @@ impl Checker {
         if got.len() != want.len() {
             return self.failures.push(format!("{case}: {what}: length {} vs {}", got.len(), want.len()));
         }
-        let bad = got
-            .iter()
-            .zip(want)
-            .enumerate()
-            .find(|(_, (g, w))| if w.is_nan() { !g.is_nan() } else { let d = (*g - *w).abs(); d.is_nan() || d > tol * (1.0 + w.abs()) });
+        let bad = got.iter().zip(want).enumerate().find(|(_, (g, w))| {
+            if w.is_nan() {
+                !g.is_nan()
+            } else {
+                let d = (*g - *w).abs();
+                d.is_nan() || d > tol * (1.0 + w.abs())
+            }
+        });
         if let Some((i, (g, w))) = bad {
             self.failures.push(format!("{case}: {what}: first difference at {i}: got {g} want {w}"));
         }
@@ -135,12 +138,15 @@ fn run_case(c: &mut Checker, case: &Value, cases: &[Value], out: &Path) {
             c.eq(n, "fit names", names, strings(&case["fit_names"]));
             let dir = std::env::temp_dir().join(format!("lite_lm_parity_{}", std::process::id()));
             for (k, want) in chunks.iter().zip(strings(&case["fits"])) {
-                let path = learmonth::write_learmonth_chunk_fit(&srs, k, &dir.join(format!("{}.fit", k.index))).unwrap();
+                let path =
+                    learmonth::write_learmonth_chunk_fit(&srs, k, &dir.join(format!("{}.fit", k.index))).unwrap();
                 let got = std::fs::read(path).unwrap();
                 let want = std::fs::read(out.join(&want)).unwrap();
                 if got != want {
                     let at = got.iter().zip(&want).position(|(a, b)| a != b).unwrap_or(got.len().min(want.len()));
-                    let line = |b: &[u8]| String::from_utf8_lossy(&b[at / 80 * 80..(at / 80 * 80 + 80).min(b.len())]).into_owned();
+                    let line = |b: &[u8]| {
+                        String::from_utf8_lossy(&b[at / 80 * 80..(at / 80 * 80 + 80).min(b.len())]).into_owned()
+                    };
                     c.failures.push(format!(
                         "{n}: chunk {} FIT differs at byte {at} ({} vs {} bytes): {:?} vs {:?}",
                         k.index,
@@ -273,7 +279,8 @@ fn run_case(c: &mut Checker, case: &Value, cases: &[Value], out: &Path) {
             }
         }
         "preview" => {
-            let files: Vec<(String, String)> = strings(&case["files"]).iter().map(|f| (fixture(f), f.clone())).collect();
+            let files: Vec<(String, String)> =
+                strings(&case["files"]).iter().map(|f| (fixture(f), f.clone())).collect();
             let (panels, errors) = downloader::build_preview_panels(&files);
             c.eq(n, "errors", errors, strings(&case["errors"]));
             let want = case["panels"].as_array().unwrap();

@@ -27,7 +27,13 @@ pub struct RidgeSettingsDialog {
 
 impl RidgeSettingsDialog {
     pub fn new(s: &RidgeSettings) -> Self {
-        Self { search: s.search_channels as i32, threshold: s.threshold_sigma, gap: s.max_gap as i32, falling: s.falling_only, first_frame: true }
+        Self {
+            search: s.search_channels as i32,
+            threshold: s.threshold_sigma,
+            gap: s.max_gap as i32,
+            falling: s.falling_only,
+            first_frame: true,
+        }
     }
 
     fn settings(&self) -> RidgeSettings {
@@ -72,10 +78,24 @@ impl RidgeSettingsDialog {
             ui.memory_mut(|m| m.request_focus(Id::new("ridge_search").with("edit")));
         }
         qt::spin_box(ui, rect("search"), Id::new("ridge_search"), &mut self.search, (1, 100), "", "", true, p);
-        qt::double_spin_box(ui, rect("threshold"), Id::new("ridge_threshold"), &mut self.threshold, (0.0, 50.0), 0.5, 1, "", false, true, p);
+        qt::double_spin_box(
+            ui,
+            rect("threshold"),
+            Id::new("ridge_threshold"),
+            &mut self.threshold,
+            (0.0, 50.0),
+            0.5,
+            1,
+            "",
+            false,
+            true,
+            p,
+        );
         qt::spin_box(ui, rect("gap"), Id::new("ridge_gap"), &mut self.gap, (0, 1000), "", "", true, p);
         qt::check_box(ui, rect("falling"), Id::new("ridge_falling"), FALLING, &mut self.falling, true, p);
-        if qt::button(ui, rect("ok"), Id::new("ridge_ok"), "OK", false, true, p).clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        if qt::button(ui, rect("ok"), Id::new("ridge_ok"), "OK", false, true, p).clicked()
+            || ui.input(|i| i.key_pressed(egui::Key::Enter))
+        {
             return Some(Some(self.settings()));
         }
         if qt::button(ui, rect("cancel"), Id::new("ridge_cancel"), "Cancel", false, true, p).clicked()
@@ -89,6 +109,8 @@ impl RidgeSettingsDialog {
     /// Opens at the form's size hint (291 × 244 in the full app).
     pub fn show(&mut self, ctx: &egui::Context, p: &Palette) -> Option<Option<RidgeSettings>> {
         let size = vec2(291.0, 244.0);
-        crate::ui::dialogs::dialog_window(ctx, "ridge_settings", "Ridge Tracking Settings", size, p, None, |ui| self.frame(ui, p))
+        crate::ui::dialogs::dialog_window(ctx, "ridge_settings", "Ridge Tracking Settings", size, p, None, |ui| {
+            self.frame(ui, p)
+        })
     }
 }

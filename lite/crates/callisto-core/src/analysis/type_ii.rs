@@ -63,13 +63,16 @@ fn sampling_times(t_start: f64, t_end: f64, upper_fit_times: &[f64], available: 
         v
     };
     if let Some(samples) = available {
-        let inside: Vec<f64> = samples.iter().copied().filter(|v| v.is_finite() && *v >= t_start && *v <= t_end).collect();
+        let inside: Vec<f64> =
+            samples.iter().copied().filter(|v| v.is_finite() && *v >= t_start && *v <= t_end).collect();
         if inside.len() >= 2 {
             return unique(inside);
         }
     }
-    let samples: Vec<f64> =
-        unique(upper_fit_times.to_vec()).into_iter().filter(|v| v.is_finite() && *v >= t_start && *v <= t_end).collect();
+    let samples: Vec<f64> = unique(upper_fit_times.to_vec())
+        .into_iter()
+        .filter(|v| v.is_finite() && *v >= t_start && *v <= t_end)
+        .collect();
     if samples.len() >= 2 {
         return samples;
     }
@@ -112,15 +115,29 @@ fn sample_fits(
     let sample_times = sampling_times(t_start, t_end, &fit_upper, available);
     let upper_curve: Vec<f64> = sample_times.iter().map(|&t| power_law(t, upper_fit.a, upper_fit.b)).collect();
     let lower_curve: Vec<f64> = sample_times.iter().map(|&t| power_law(t, lower_fit.a, lower_fit.b)).collect();
-    let upper_drift: Vec<f64> = sample_times.iter().map(|&t| power_law_drift_rate(t, upper_fit.a, upper_fit.b)).collect();
+    let upper_drift: Vec<f64> =
+        sample_times.iter().map(|&t| power_law_drift_rate(t, upper_fit.a, upper_fit.b)).collect();
     let compression: Vec<f64> = upper_curve.iter().zip(&lower_curve).map(|(u, l)| (u / l).powi(2)).collect();
     if compression.iter().any(|x| !x.is_finite() || *x <= 0.0 || *x >= 4.0) {
         return Err("Compression ratio X must stay between 0 and 4 over the selected interval.".into());
     }
     let lower_extrapolated = t_start < min(&fit_lower) || t_end > max(&fit_lower);
-    let warning =
-        if lower_extrapolated { "Lower-band fit was extrapolated over part of the averaging interval.".to_owned() } else { String::new() };
-    Ok(Sampled { t_start, t_end, sample_times, upper_curve, lower_curve, upper_drift, compression, lower_extrapolated, warning })
+    let warning = if lower_extrapolated {
+        "Lower-band fit was extrapolated over part of the averaging interval.".to_owned()
+    } else {
+        String::new()
+    };
+    Ok(Sampled {
+        t_start,
+        t_end,
+        sample_times,
+        upper_curve,
+        lower_curve,
+        upper_drift,
+        compression,
+        lower_extrapolated,
+        warning,
+    })
 }
 
 /// `calculate_type_ii_parameters`.
@@ -228,7 +245,8 @@ pub fn calculate_b_vs_r_profile(
     }
     let alfven: Vec<f64> = mach.iter().map(|m| analysis_shock_speed_km_s / m).collect();
     let densities: Vec<f64> = s.upper_curve.iter().map(|f| (f / PLASMA_FREQ_COEFF_MHZ).powi(2)).collect();
-    let field = alfven.iter().zip(&densities).map(|(va, ne)| magnetic_field_gauss(*va, *ne)).collect::<Result<Vec<_>, _>>()?;
+    let field =
+        alfven.iter().zip(&densities).map(|(va, ne)| magnetic_field_gauss(*va, *ne)).collect::<Result<Vec<_>, _>>()?;
     let heights = newkirk_heights_rs(&s.upper_curve, fold)?;
     // np.argsort (quicksort): ties keep no particular order; heights are distinct here.
     let mut order: Vec<usize> = (0..heights.len()).collect();

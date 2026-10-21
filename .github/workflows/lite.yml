@@ -68,6 +68,45 @@ jobs:
           name: lite-screenshots
           path: lite/reference/compare/
 
+  # Installers for review, run by hand (Actions → Lite (Rust) → Run
+  # workflow). Nothing is published; the macOS image is signed ad hoc
+  # unless CODESIGN_IDENTITY and NOTARY_PROFILE are set up on the runner.
+  package:
+    name: Installer (${{ matrix.os }})
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: lite
+      - name: Linux libraries for the window toolkit
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev imagemagick
+      - name: Windows installer
+        if: runner.os == 'Windows'
+        run: powershell -ExecutionPolicy Bypass -File lite/packaging/windows/build_windows_installer.ps1
+      - name: macOS disk image
+        if: runner.os == 'macOS'
+        run: bash lite/packaging/macos/build_macos_dmg.sh
+      - name: Debian package
+        if: runner.os == 'Linux'
+        run: bash lite/packaging/linux/build_deb_linux.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lite-installer-${{ runner.os }}
+          path: |
+            lite/dist/*.exe
+            lite/dist/*.dmg
+            lite/dist/*.deb
+
   parity:
     name: Results match the full app
     runs-on: ubuntu-latest

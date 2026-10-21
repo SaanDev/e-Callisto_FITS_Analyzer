@@ -147,7 +147,14 @@ struct Item {
 }
 
 /// The legend's frame, handles and texts, in drawing order.
-pub(super) fn layout(fig: &Figure, ax: &Axes, r: &PxRect, leg: &Legend, m: &dyn TextMeasure, avoid: &Avoid) -> Vec<Prim> {
+pub(super) fn layout(
+    fig: &Figure,
+    ax: &Axes,
+    r: &PxRect,
+    leg: &Legend,
+    m: &dyn TextMeasure,
+    avoid: &Avoid,
+) -> Vec<Prim> {
     let entries: Vec<usize> = ax
         .lines
         .iter()
@@ -170,7 +177,8 @@ pub(super) fn layout(fig: &Figure, ax: &Axes, r: &PxRect, leg: &Legend, m: &dyn 
     let items: Vec<Item> = entries
         .iter()
         .map(|&i| {
-            let label = Label::new(ax.lines[i].label.clone().unwrap_or_default(), fs, leg.text_color).with_face(leg.face);
+            let label =
+                Label::new(ax.lines[i].label.clone().unwrap_or_default(), fs, leg.text_color).with_face(leg.face);
             // TextArea.get_bbox for one line.
             let (_, h, d, _) = line_metrics(m, &label.text, fs_px, leg.face);
             let text_h = (lp.height - lp.descent).max(h - d) + d;
@@ -207,7 +215,12 @@ pub(super) fn layout(fig: &Figure, ax: &Axes, r: &PxRect, leg: &Legend, m: &dyn 
     let parent = (r.x0, hfig - r.y1, r.x1, hfig - r.y0);
     let border = leg.borderaxespad * fs_px;
     let anchored = |loc: Loc| {
-        let (l, b, w, h) = (parent.0 + border, parent.1 + border, parent.2 - parent.0 - 2.0 * border, parent.3 - parent.1 - 2.0 * border);
+        let (l, b, w, h) = (
+            parent.0 + border,
+            parent.1 + border,
+            parent.2 - parent.0 - 2.0 * border,
+            parent.3 - parent.1 - 2.0 * border,
+        );
         let (cx, cy) = loc.coefs();
         (l + cx * (w - bw), b + cy * (h - bh))
     };

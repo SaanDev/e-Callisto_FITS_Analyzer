@@ -25,26 +25,38 @@ fn reference(state: &str) -> Option<Value> {
 
 #[test]
 fn panels_match_full_app() {
-    let four = ["GERMANY-DLR_20261007_050000_01.fit.gz", "TRIEST_20261007_050000_57.fit.gz", "INDIA-GAURI_20261007_050000_02.fit.gz", "AUSTRIA-OE3FLB_20261007_051500_55.fit.gz"];
+    let four = [
+        "GERMANY-DLR_20261007_050000_01.fit.gz",
+        "TRIEST_20261007_050000_57.fit.gz",
+        "INDIA-GAURI_20261007_050000_02.fit.gz",
+        "AUSTRIA-OE3FLB_20261007_051500_55.fit.gz",
+    ];
     let mut six: Vec<String> = four.iter().map(|f| fixture(f)).collect();
     six.push(fixture("GERMANY-DLR_20261007_050000_02.fit.gz"));
     six.push(fixture("TRIEST_20261007_050000_59.fit.gz"));
     let clip = NoiseSettings { method: NoiseMethod::Clip, clip_low: -10.0, clip_high: 30.0, log_scale: false };
     let after_clip = NoiseSettings { method: NoiseMethod::None, ..clip };
-    let digits = PanelOptions { alignment: Alignment::Ut, use_db: false, color_scale: ColorScale::Shared, manual_limits: None };
+    let digits =
+        PanelOptions { alignment: Alignment::Ut, use_db: false, color_scale: ColorScale::Shared, manual_limits: None };
     let states: Vec<(&str, Vec<String>, NoiseSettings, PanelOptions)> = vec![
         ("one", vec![fixture("INDIA-GAURI_20261007_041500_02.fit.gz")], NoiseSettings::default(), digits.clone()),
         ("four", four.iter().map(|f| fixture(f)).collect(), NoiseSettings::default(), digits.clone()),
         ("combined", six.clone(), NoiseSettings::default(), digits.clone()),
         ("clip", six.clone(), clip, digits.clone()),
-        ("per_station", six.clone(), after_clip, PanelOptions { use_db: true, color_scale: ColorScale::PerStation, ..digits.clone() }),
+        (
+            "per_station",
+            six.clone(),
+            after_clip,
+            PanelOptions { use_db: true, color_scale: ColorScale::PerStation, ..digits.clone() },
+        ),
     ];
     let mut failures = Vec::new();
     let mut checked = 0;
     for (state, paths, noise, options) in states {
         let Some(r) = reference(state) else { continue };
         let datasets = datasets_from_paths(&paths).unwrap();
-        let processed: Vec<_> = datasets.iter().map(|d| Arc::new(apply_noise(&d.data, noise, d.gap_row_mask.as_deref()))).collect();
+        let processed: Vec<_> =
+            datasets.iter().map(|d| Arc::new(apply_noise(&d.data, noise, d.gap_row_mask.as_deref()))).collect();
         let cold: Vec<f64> = datasets.iter().map(|_| noise.clip_low).collect();
         let (payloads, mode, _) = panel_payloads(&datasets, &processed, &cold, &options);
         assert_eq!(mode, Alignment::Ut, "{state}");

@@ -93,10 +93,16 @@ struct HList {
 #[derive(Clone, Debug)]
 enum Node {
     Char(CharNode),
-    Kern { width: f64, level: u32 },
+    Kern {
+        width: f64,
+        level: u32,
+    },
     List(HList),
     /// `Hbox(width)`: an empty box.
-    Box { width: f64, level: u32 },
+    Box {
+        width: f64,
+        level: u32,
+    },
 }
 
 /// `get_unicode_index`: mathtext draws `-` as the minus sign.
@@ -369,7 +375,10 @@ impl Parser<'_, '_> {
         let nucleus = match nucleus {
             Node::List(mut l) => {
                 let n = l.children.len();
-                if n >= 2 && matches!(l.children[n - 1], Node::Kern { .. }) && matches!(l.children[n - 2], Node::Char(_)) {
+                if n >= 2
+                    && matches!(l.children[n - 1], Node::Kern { .. })
+                    && matches!(l.children[n - 2], Node::Char(_))
+                {
                     l.children.pop();
                 }
                 if let Some(Node::Char(c)) = l.children.last_mut() {
@@ -419,7 +428,8 @@ impl Parser<'_, '_> {
                 // member is pulled back by the first's width.
                 let back = -sx.width;
                 let width = sx.width.max(sy.width);
-                let mut l = ctx.hlist(vec![Node::List(sx), Node::Kern { width: back, level: 0 }, Node::List(sy)], false);
+                let mut l =
+                    ctx.hlist(vec![Node::List(sx), Node::Kern { width: back, level: 0 }, Node::List(sy)], false);
                 l.width = width;
                 l
             }

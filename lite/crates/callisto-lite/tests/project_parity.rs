@@ -110,7 +110,8 @@ fn projects_round_trip_like_the_full_app() {
         let pending = s.take_pending_analysis_restore();
         let status = s.status_message().map(|(t, _)| t.to_owned()).unwrap_or_default();
         let opened: Json =
-            callisto_core::pyjson::loads(&std::fs::read_to_string(dir.join(format!("{name}.open.json"))).unwrap()).unwrap();
+            callisto_core::pyjson::loads(&std::fs::read_to_string(dir.join(format!("{name}.open.json"))).unwrap())
+                .unwrap();
         if opened.get("status").and_then(Json::as_str) != Some(status.as_str()) {
             failures.push(format!("{name}: status {status:?}, the full app {:?}", opened.get("status")));
         }
@@ -132,7 +133,12 @@ fn projects_round_trip_like_the_full_app() {
         let full = read_project(&dir.join(format!("{name}.roundtrip.efaproj")), None).unwrap();
         let new_run_id = name == "legacy";
         let mut d = Vec::new();
-        diff(&Json::Object(comparable(lite.meta.clone(), new_run_id)), &Json::Object(comparable(full.meta.clone(), new_run_id)), "", &mut d);
+        diff(
+            &Json::Object(comparable(lite.meta.clone(), new_run_id)),
+            &Json::Object(comparable(full.meta.clone(), new_run_id)),
+            "",
+            &mut d,
+        );
         array_diffs(&lite.arrays, &full.arrays, &mut d);
         if !d.is_empty() {
             failures.extend(d.into_iter().map(|x| format!("{name}: {x}")));
@@ -140,14 +146,16 @@ fn projects_round_trip_like_the_full_app() {
     }
 
     // Presets: the processed state's preset, and that preset applied to the raw project.
-    let full_preset = callisto_core::pyjson::loads(&std::fs::read_to_string(dir.join("processed.preset.json")).unwrap()).unwrap();
+    let full_preset =
+        callisto_core::pyjson::loads(&std::fs::read_to_string(dir.join("processed.preset.json")).unwrap()).unwrap();
     let mut s = Session::new();
     let mut p = ProjectState::new(scratch("preset_cache"));
     p.open(&mut s, &dir.join("processed.efaproj")).unwrap();
     let lite_preset = callisto_core::presets::build("Processed look", s.preset_settings_payload()).unwrap();
     // The view config Export View Config writes for this state.
     let lite_view = callisto_core::pyjson::loads(&s.view_config_text().unwrap()).unwrap();
-    let full_view = callisto_core::pyjson::loads(&std::fs::read_to_string(dir.join("processed.efaview.json")).unwrap()).unwrap();
+    let full_view =
+        callisto_core::pyjson::loads(&std::fs::read_to_string(dir.join("processed.efaview.json")).unwrap()).unwrap();
     let strip = |mut v: Json| {
         v.as_object_mut().unwrap().remove("created_at");
         v
@@ -166,7 +174,12 @@ fn projects_round_trip_like_the_full_app() {
     p.save(&mut s, &out, p.storage).unwrap();
     let lite = read_project(&out, None).unwrap();
     let full = read_project(&dir.join("raw_with_preset.efaproj"), None).unwrap();
-    diff(&Json::Object(comparable(lite.meta, false)), &Json::Object(comparable(full.meta, false)), "raw_with_preset", &mut d);
+    diff(
+        &Json::Object(comparable(lite.meta, false)),
+        &Json::Object(comparable(full.meta, false)),
+        "raw_with_preset",
+        &mut d,
+    );
     array_diffs(&lite.arrays, &full.arrays, &mut d);
     failures.extend(d);
 
@@ -191,9 +204,20 @@ fn projects_round_trip_like_the_full_app() {
         let same_line = |a: &str, b: &str| {
             let base = |t: &str| t.rsplit(['\\', '/']).next().unwrap_or(t).to_owned();
             a == b
-                || ["Analysis Log Entry UTC:", "Analysis Run ID:", "Generated at:", "- Name:", "- Version:", "- Platform:"].iter().any(|p| a.starts_with(p) && b.starts_with(p))
+                || [
+                    "Analysis Log Entry UTC:",
+                    "Analysis Run ID:",
+                    "Generated at:",
+                    "- Name:",
+                    "- Version:",
+                    "- Platform:",
+                ]
+                .iter()
+                .any(|p| a.starts_with(p) && b.starts_with(p))
                 || (a.starts_with("Project:") && base(a) == base(b))
-                || (a.starts_with("- `") && b.starts_with("- `") && a.split_once("` ").map(|x| x.1) == b.split_once("` ").map(|x| x.1))
+                || (a.starts_with("- `")
+                    && b.starts_with("- `")
+                    && a.split_once("` ").map(|x| x.1) == b.split_once("` ").map(|x| x.1))
         };
         for suffix in ["_analysis_log.txt", "_provenance.md"] {
             let (l, f) = (read(&lite_dir, suffix), read(&dir, suffix));
@@ -229,7 +253,12 @@ fn projects_round_trip_like_the_full_app() {
             v
         };
         let mut d = Vec::new();
-        diff(&strip(read(&lite_dir, "_provenance.json")), &strip(read(&dir, "_provenance.json")), &format!("{name} provenance"), &mut d);
+        diff(
+            &strip(read(&lite_dir, "_provenance.json")),
+            &strip(read(&dir, "_provenance.json")),
+            &format!("{name} provenance"),
+            &mut d,
+        );
         failures.extend(d);
     }
 
@@ -243,11 +272,20 @@ fn projects_round_trip_like_the_full_app() {
         let bitpix = callisto_core::radio::fits_export::recommend_bitpix(&data.data);
         let out = scratch(&format!("{name}_export.fit"));
         s.export_fits(&out, bitpix).unwrap();
-        let (lite, full) = (std::fs::read(&out).unwrap(), std::fs::read(dir.join(format!("{name}_export.fit"))).unwrap());
+        let (lite, full) =
+            (std::fs::read(&out).unwrap(), std::fs::read(dir.join(format!("{name}_export.fit"))).unwrap());
         if lite != full {
             let first = lite.iter().zip(&full).position(|(a, b)| a != b).unwrap_or(lite.len().min(full.len()));
-            let card = |b: &[u8]| String::from_utf8_lossy(&b[first / 80 * 80..(first / 80 * 80 + 80).min(b.len())]).into_owned();
-            failures.push(format!("{name}_export.fit: {} vs {} bytes, first difference at {first}: {:?} vs {:?}", lite.len(), full.len(), card(&lite), card(&full)));
+            let card = |b: &[u8]| {
+                String::from_utf8_lossy(&b[first / 80 * 80..(first / 80 * 80 + 80).min(b.len())]).into_owned()
+            };
+            failures.push(format!(
+                "{name}_export.fit: {} vs {} bytes, first difference at {first}: {:?} vs {:?}",
+                lite.len(),
+                full.len(),
+                card(&lite),
+                card(&full)
+            ));
         }
     }
 
@@ -276,6 +314,8 @@ fn projects_round_trip_like_the_full_app() {
             failures.push(format!("passthrough: embedded {member} changed"));
         }
     }
-    let _ = std::fs::remove_dir_all(scratch("").parent().unwrap().join(format!("callisto_project_parity_{}", std::process::id())));
+    let _ = std::fs::remove_dir_all(
+        scratch("").parent().unwrap().join(format!("callisto_project_parity_{}", std::process::id())),
+    );
     assert!(failures.is_empty(), "{} differences:\n{}", failures.len(), failures.join("\n"));
 }

@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 use super::analyzer::{ShockSummary, T0Mode};
 use super::density::DensityModel;
 use super::session::{
-    AnalysisSession, AnalyzerBlock, BandFitState, BandPoints, FitParams, MaxIntensityBlock, SessionIdentity, SessionSource,
-    TypeIIBlock, TypeIIInputs, TypeIIPlotStyle, UiBlock,
+    AnalysisSession, AnalyzerBlock, BandFitState, BandPoints, FitParams, MaxIntensityBlock, SessionIdentity,
+    SessionSource, TypeIIBlock, TypeIIInputs, TypeIIPlotStyle, UiBlock,
 };
 use super::type_ii::TypeIIResults;
 use crate::pyjson::{Json, Object};
@@ -68,7 +68,11 @@ fn shape_from(v: Option<&Json>) -> Option<[usize; 2]> {
 fn safe_color(v: Option<&Json>, default: &str) -> String {
     let text = v.map(Json::py_str).unwrap_or_default();
     let text = text.trim();
-    if text.starts_with('#') && matches!(text.chars().count(), 4 | 7) { text.to_lowercase() } else { default.to_owned() }
+    if text.starts_with('#') && matches!(text.chars().count(), 4 | 7) {
+        text.to_lowercase()
+    } else {
+        default.to_owned()
+    }
 }
 
 // ------------------------------------------------------------- the blocks
@@ -360,7 +364,13 @@ fn plot_style(raw: Option<&Json>) -> TypeIIPlotStyle {
     let flag = |k: &str, def: bool| safe_bool(src.get(k).or(Some(&Json::Bool(def))), def);
     let color = |k: &str, def: &str| safe_color(src.get(k), def);
     TypeIIPlotStyle {
-        font_family: src.get("font_family").filter(|v| v.truthy()).map(Json::py_str).unwrap_or_default().trim().to_owned(),
+        font_family: src
+            .get("font_family")
+            .filter(|v| v.truthy())
+            .map(Json::py_str)
+            .unwrap_or_default()
+            .trim()
+            .to_owned(),
         title_font_px: num("title_font_px", d.title_font_px),
         axis_label_font_px: num("axis_label_font_px", d.axis_label_font_px),
         tick_font_px: num("tick_font_px", d.tick_font_px),
@@ -475,7 +485,9 @@ pub fn normalize(session: &Json, arrays: &Arrays) -> Option<AnalysisSession> {
         return None;
     }
     let max_intensity = match (time_channels.take(), freqs) {
-        (Some(tc), Some(f)) => Some(MaxIntensityBlock { time_channels: tc, time_seconds, freqs: f, fundamental, harmonic }),
+        (Some(tc), Some(f)) => {
+            Some(MaxIntensityBlock { time_channels: tc, time_seconds, freqs: f, fundamental, harmonic })
+        }
         _ => None,
     };
     let ui = obj(get(session, "ui"));
@@ -484,7 +496,9 @@ pub fn normalize(session: &Json, arrays: &Arrays) -> Option<AnalysisSession> {
         fold,
         shock_summary: shock,
         density_model: DensityModel::parse(&analyzer_raw.get("density_model").map(Json::py_str).unwrap_or_default()),
-        t0_mode: T0Mode::parse(&analyzer_raw.get("t0_mode").filter(|v| v.truthy()).map(Json::py_str).unwrap_or_default()),
+        t0_mode: T0Mode::parse(
+            &analyzer_raw.get("t0_mode").filter(|v| v.truthy()).map(Json::py_str).unwrap_or_default(),
+        ),
         t0_s: safe_float(analyzer_raw.get("t0_s")).filter(|v| v.is_finite()).unwrap_or(0.0),
     };
     Some(AnalysisSession {
@@ -492,7 +506,11 @@ pub fn normalize(session: &Json, arrays: &Arrays) -> Option<AnalysisSession> {
             filename: source.get("filename").filter(|v| v.truthy()).map(Json::py_str).unwrap_or_default(),
             is_combined: safe_bool(source.get("is_combined"), false),
             combined_mode: source.get("combined_mode").filter(|v| !v.is_null()).map(Json::py_str),
-            combined_sources: source.get("combined_sources").and_then(Json::as_array).map(|a| a.iter().map(Json::py_str).collect()).unwrap_or_default(),
+            combined_sources: source
+                .get("combined_sources")
+                .and_then(Json::as_array)
+                .map(|a| a.iter().map(Json::py_str).collect())
+                .unwrap_or_default(),
             shape: shape_from(source.get("shape")),
         },
         max_intensity,
@@ -500,13 +518,22 @@ pub fn normalize(session: &Json, arrays: &Arrays) -> Option<AnalysisSession> {
         type_ii,
         ui: UiBlock {
             restore_max_window: safe_bool(ui.get("restore_max_window").or(Some(&Json::Bool(has_max))), has_max),
-            restore_analyzer_window: safe_bool(ui.get("restore_analyzer_window").or(Some(&Json::Bool(has_analyzer))), has_analyzer),
-            restore_type_ii_window: safe_bool(ui.get("restore_type_ii_window").or(Some(&Json::Bool(has_type_ii))), has_type_ii),
+            restore_analyzer_window: safe_bool(
+                ui.get("restore_analyzer_window").or(Some(&Json::Bool(has_analyzer))),
+                has_analyzer,
+            ),
+            restore_type_ii_window: safe_bool(
+                ui.get("restore_type_ii_window").or(Some(&Json::Bool(has_type_ii))),
+                has_type_ii,
+            ),
             auto_outlier_cleaned: safe_bool(ui.get("auto_outlier_cleaned"), false),
             auto_removed_count: safe_int(ui.get("auto_removed_count").or(Some(&Json::Int(0))), 0).max(0) as usize,
         },
         identity: SessionIdentity {
-            version: safe_int(session.get("version").or(Some(&Json::Int(SESSION_SCHEMA_VERSION))), SESSION_SCHEMA_VERSION),
+            version: safe_int(
+                session.get("version").or(Some(&Json::Int(SESSION_SCHEMA_VERSION))),
+                SESSION_SCHEMA_VERSION,
+            ),
             run_id: session.get("analysis_run_id").filter(|v| v.truthy()).map(Json::py_str).unwrap_or_default(),
             updated_at: session.get("updated_at").filter(|v| v.truthy()).map(Json::py_str).unwrap_or_default(),
         }
@@ -646,12 +673,16 @@ pub fn from_legacy(meta: &Object, arrays: &Arrays) -> Option<AnalysisSession> {
     }
     let analyzer = obj(legacy.get("analyzer"));
     let fold = safe_int(analyzer.get("fold").or(Some(&Json::Int(1))), 1).clamp(1, 4);
-    let fundamental = safe_bool(legacy.get("fundamental").or(analyzer.get("fundamental")).or(Some(&Json::Bool(true))), true);
+    let fundamental =
+        safe_bool(legacy.get("fundamental").or(analyzer.get("fundamental")).or(Some(&Json::Bool(true))), true);
     let harmonic = safe_bool(legacy.get("harmonic").or(analyzer.get("harmonic")).or(Some(&Json::Bool(false))), false);
     let analyzer_present = analyzer.as_object().is_some_and(|o| !o.is_empty());
     let mut session_obj = Object::new();
     let mut source = Object::new();
-    source.insert("filename".into(), meta.get("filename").filter(|v| v.truthy()).map(Json::py_str).unwrap_or_default().into());
+    source.insert(
+        "filename".into(),
+        meta.get("filename").filter(|v| v.truthy()).map(Json::py_str).unwrap_or_default().into(),
+    );
     source.insert("is_combined".into(), Json::Bool(safe_bool(meta.get("is_combined"), false)));
     source.insert("combined_mode".into(), meta.get("combined_mode").cloned().unwrap_or(Json::Null));
     source.insert("combined_sources".into(), meta.get("combined_sources").cloned().unwrap_or(Json::Array(Vec::new())));
@@ -666,7 +697,10 @@ pub fn from_legacy(meta: &Object, arrays: &Arrays) -> Option<AnalysisSession> {
         a.insert("fit_params".into(), Json::Object(fit_params_json(&f)));
     }
     a.insert("fold".into(), Json::Int(fold));
-    a.insert("shock_summary".into(), Json::Object(shock_json(&shock_summary(analyzer.get("shock_summary"), fold, fundamental, harmonic))));
+    a.insert(
+        "shock_summary".into(),
+        Json::Object(shock_json(&shock_summary(analyzer.get("shock_summary"), fold, fundamental, harmonic))),
+    );
     session_obj.insert("analyzer".into(), Json::Object(a));
     let mut ui = Object::new();
     ui.insert("restore_max_window".into(), Json::Bool(true));

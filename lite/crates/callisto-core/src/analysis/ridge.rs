@@ -165,7 +165,12 @@ fn follow(
 }
 
 /// `track_ridge`. `seed` is an optional (row, column) to start from.
-pub fn track_ridge(data: &Array2, freqs: &[f64], seed: Option<(usize, usize)>, settings: &RidgeSettings) -> Result<RidgeResult, String> {
+pub fn track_ridge(
+    data: &Array2,
+    freqs: &[f64],
+    seed: Option<(usize, usize)>,
+    settings: &RidgeSettings,
+) -> Result<RidgeResult, String> {
     let (rows, cols) = data.shape();
     if rows != freqs.len() {
         return Err("Ridge tracking needs (frequency, time) data matching the frequency axis.".into());
@@ -207,16 +212,19 @@ pub fn track_ridge(data: &Array2, freqs: &[f64], seed: Option<(usize, usize)>, s
     let freq_descending = freqs.len() >= 2 && freqs[0] > freqs[freqs.len() - 1];
     let backward = follow(&arr, rows, cols, row, col, -1, settings, threshold, freq_descending);
     let forward = follow(&arr, rows, cols, row, col, 1, settings, threshold, freq_descending);
-    let path: Vec<(usize, usize)> = backward.into_iter().rev().chain(std::iter::once((row, col))).chain(forward).collect();
+    let path: Vec<(usize, usize)> =
+        backward.into_iter().rev().chain(std::iter::once((row, col))).chain(forward).collect();
 
     let column = |c: usize| -> Vec<f64> { (0..rows).map(|r| arr[r * cols + c]).collect() };
     let time_indices: Vec<usize> = path.iter().map(|&(_, c)| c).collect();
-    let freqs_mhz: Vec<f64> = path.iter().map(|&(r, c)| channel_frequency(freqs, refined_peak(&column(c), r))).collect();
+    let freqs_mhz: Vec<f64> =
+        path.iter().map(|&(r, c)| channel_frequency(freqs, refined_peak(&column(c), r))).collect();
     let peak_values: Vec<f64> = path.iter().map(|&(r, c)| arr[r * cols + c]).collect();
     let mut warnings = Vec::new();
     if time_indices.len() < 3 {
         warnings.push(
-            "The ridge could only be followed for a few columns; try a larger search window or a lower threshold.".to_owned(),
+            "The ridge could only be followed for a few columns; try a larger search window or a lower threshold."
+                .to_owned(),
         );
     }
     Ok(RidgeResult { time_indices, freqs_mhz, peak_values, seed_index: (row, col), threshold, warnings })

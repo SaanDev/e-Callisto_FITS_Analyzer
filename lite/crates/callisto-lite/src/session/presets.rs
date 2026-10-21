@@ -39,11 +39,17 @@ impl Session {
             "noise_clip_scale".into(),
             Json::Str(if self.noise_clip_scale == ClipScale::SignedLog { "signed_log" } else { "linear" }.into()),
         );
-        o.insert("background_method".into(), Json::Str(self.background_applied.unwrap_or(self.background_method).key().into()));
+        o.insert(
+            "background_method".into(),
+            Json::Str(self.background_applied.unwrap_or(self.background_method).key().into()),
+        );
         o.insert("background_subtracted".into(), Json::Bool(self.background_applied.is_some()));
         o.insert("use_db".into(), Json::Bool(self.use_db));
         o.insert("use_utc".into(), Json::Bool(self.use_utc));
-        o.insert("cmap".into(), Json::Str(if self.graph.cmap.is_empty() { "Custom".into() } else { self.graph.cmap.clone() }));
+        o.insert(
+            "cmap".into(),
+            Json::Str(if self.graph.cmap.is_empty() { "Custom".into() } else { self.graph.cmap.clone() }),
+        );
         o.insert("graph".into(), Json::Object(graph));
         o.insert("rfi".into(), rfi_json(&self.rfi));
         o.insert("annotation_style_defaults".into(), style_defaults_json(&self.tools.annotation_style));
@@ -56,8 +62,15 @@ impl Session {
     }
 
     /// `_apply_preset_payload`; the full app's message when its version is unknown.
-    pub fn apply_preset_payload(&mut self, preset: &Json, replot: bool, mark_dirty: bool, log: bool) -> Result<(), String> {
-        let version = preset.get("version").map_or(Some(PRESET_SCHEMA_VERSION), Json::as_i64).unwrap_or(PRESET_SCHEMA_VERSION);
+    pub fn apply_preset_payload(
+        &mut self,
+        preset: &Json,
+        replot: bool,
+        mark_dirty: bool,
+        log: bool,
+    ) -> Result<(), String> {
+        let version =
+            preset.get("version").map_or(Some(PRESET_SCHEMA_VERSION), Json::as_i64).unwrap_or(PRESET_SCHEMA_VERSION);
         if version != PRESET_SCHEMA_VERSION {
             return Err(format!("Preset version {version} is not supported by this build."));
         }
@@ -69,8 +82,16 @@ impl Session {
         self.apply_preset_background(&settings, replot);
 
         // `_noise_thresholds_from_mapping`.
-        let low = settings.get("noise_clip_low").or(settings.get("lower_slider")).and_then(Json::as_f64).unwrap_or(self.noise_clip_low);
-        let high = settings.get("noise_clip_high").or(settings.get("upper_slider")).and_then(Json::as_f64).unwrap_or(self.noise_clip_high);
+        let low = settings
+            .get("noise_clip_low")
+            .or(settings.get("lower_slider"))
+            .and_then(Json::as_f64)
+            .unwrap_or(self.noise_clip_low);
+        let high = settings
+            .get("noise_clip_high")
+            .or(settings.get("upper_slider"))
+            .and_then(Json::as_f64)
+            .unwrap_or(self.noise_clip_high);
         let scale = match settings.get("noise_clip_scale") {
             Some(v) if v.py_str().trim().to_lowercase() == "signed_log" => ClipScale::SignedLog,
             Some(_) => ClipScale::Linear,
@@ -84,7 +105,8 @@ impl Session {
         self.set_noise_clip_state(Some(lo), Some(hi), Some(scale));
         self.use_db = settings.get("use_db").is_some_and(Json::truthy);
         self.use_utc = settings.get("use_utc").is_some_and(Json::truthy);
-        self.graph.cmap = settings.get("cmap").filter(|v| v.truthy()).map(Json::py_str).unwrap_or_else(|| "Custom".into());
+        self.graph.cmap =
+            settings.get("cmap").filter(|v| v.truthy()).map(Json::py_str).unwrap_or_else(|| "Custom".into());
         if let Some(r) = settings.get("rfi").filter(|r| r.truthy()) {
             self.rfi = rfi_from(r);
         }
@@ -105,9 +127,12 @@ impl Session {
         if let Some(t) = graph.get("title_override") {
             g.title_override = t.py_str();
         }
-        g.font_family = crate::fonts::normalize_font_family(&graph.get("font_family").map(Json::py_str).unwrap_or_default());
-        let size = |k: &str, current: u32| graph.get(k).and_then(Json::as_i64).map_or(current, |v| v.clamp(1, 200) as u32);
-        let sizes = (size("tick_font_px", g.tick_px), size("axis_label_font_px", g.axis_px), size("title_font_px", g.title_px));
+        g.font_family =
+            crate::fonts::normalize_font_family(&graph.get("font_family").map(Json::py_str).unwrap_or_default());
+        let size =
+            |k: &str, current: u32| graph.get(k).and_then(Json::as_i64).map_or(current, |v| v.clamp(1, 200) as u32);
+        let sizes =
+            (size("tick_font_px", g.tick_px), size("axis_label_font_px", g.axis_px), size("title_font_px", g.title_px));
         if replot && sizes != (g.tick_px, g.axis_px, g.title_px) {
             // A spin box set to another value ends the hardware default sizes
             // (the preset applied on load sets them with signals blocked).
@@ -195,7 +220,8 @@ impl Session {
         let v = &cfg.visual;
         let scale = if v.noise_clip_scale == "signed_log" { ClipScale::SignedLog } else { ClipScale::Linear };
         self.expand_noise_clip_bounds_for_values(&[v.noise_clip_low, v.noise_clip_high]);
-        let (mut lo, mut hi) = (self.clamp_noise_threshold(v.noise_clip_low), self.clamp_noise_threshold(v.noise_clip_high));
+        let (mut lo, mut hi) =
+            (self.clamp_noise_threshold(v.noise_clip_low), self.clamp_noise_threshold(v.noise_clip_high));
         if lo > hi {
             std::mem::swap(&mut lo, &mut hi);
         }
@@ -216,9 +242,12 @@ impl Session {
         if let Some(t) = graph.get("title_override") {
             g.title_override = t.py_str();
         }
-        g.font_family = crate::fonts::normalize_font_family(&graph.get("font_family").map(Json::py_str).unwrap_or_default());
-        let size = |k: &str, current: u32| graph.get(k).and_then(Json::as_i64).map_or(current, |x| x.clamp(1, 200) as u32);
-        (g.tick_px, g.axis_px, g.title_px) = (size("tick_font_px", g.tick_px), size("axis_label_font_px", g.axis_px), size("title_font_px", g.title_px));
+        g.font_family =
+            crate::fonts::normalize_font_family(&graph.get("font_family").map(Json::py_str).unwrap_or_default());
+        let size =
+            |k: &str, current: u32| graph.get(k).and_then(Json::as_i64).map_or(current, |x| x.clamp(1, 200) as u32);
+        (g.tick_px, g.axis_px, g.title_px) =
+            (size("tick_font_px", g.tick_px), size("axis_label_font_px", g.axis_px), size("title_font_px", g.title_px));
         self.mark_project_dirty();
         if self.has_data() {
             let title = self.current_plot_type.clone();

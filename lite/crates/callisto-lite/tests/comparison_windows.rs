@@ -33,7 +33,13 @@ fn compare_images(name: &str, reference: &RgbaImage, lite: &RgbaImage) -> f64 {
     std::fs::create_dir_all(&out).unwrap();
     lite.save(out.join(format!("lite_{name}.png"))).unwrap();
     if (reference.width(), reference.height()) != (lite.width(), lite.height()) {
-        println!("{name}: size {}x{}, full app {}x{}", lite.width(), lite.height(), reference.width(), reference.height());
+        println!(
+            "{name}: size {}x{}, full app {}x{}",
+            lite.width(),
+            lite.height(),
+            reference.width(),
+            reference.height()
+        );
     }
     let (w, h) = (reference.width().min(lite.width()), reference.height().min(lite.height()));
     let mut side = RgbaImage::from_pixel(w * 2 + 8, h, Rgba([255, 0, 255, 255]));
@@ -63,7 +69,10 @@ fn compare(name: &str, lite: &RgbaImage) -> Option<f64> {
 }
 
 fn reference_json(name: &str) -> serde_json::Value {
-    serde_json::from_str(&std::fs::read_to_string(lite_dir().join(format!("reference/windows/tools/{name}.json"))).unwrap()).unwrap()
+    serde_json::from_str(
+        &std::fs::read_to_string(lite_dir().join(format!("reference/windows/tools/{name}.json"))).unwrap(),
+    )
+    .unwrap()
 }
 
 type Draw = Box<dyn FnMut(&mut egui::Ui)>;
@@ -170,7 +179,11 @@ fn comparison_windows_match_full_app() {
     for (theme, name, dark) in [(ThemeMode::Light, "light", false), (ThemeMode::Dark, "dark", true)] {
         let p = Palette::new(dark, true);
         let visual = main_window_visual(theme);
-        let w = Rc::new(RefCell::new(ComparisonWindow::new(&[fixture("INDIA-GAURI_20261007_041500_02.fit.gz")], Some(&visual), dark)));
+        let w = Rc::new(RefCell::new(ComparisonWindow::new(
+            &[fixture("INDIA-GAURI_20261007_041500_02.fit.gz")],
+            Some(&visual),
+            dark,
+        )));
         let mut shots = Shots::new(p.clone(), w.clone());
         let mut check = |shots: &mut Shots, state: &str, w: &Rc<RefCell<ComparisonWindow>>| {
             let n = format!("window_comparison_{state}_{name}");
@@ -183,19 +196,28 @@ fn comparison_windows_match_full_app() {
             if got.readout_text() != r["readout"].as_str().unwrap() {
                 failures.push(format!("{n}: readout {:?}, full app {}", got.readout_text(), r["readout"]));
             }
-            let labels: Vec<String> = r["panels"].as_array().unwrap().iter().map(|p| p["label"].as_str().unwrap().to_owned()).collect();
+            let labels: Vec<String> =
+                r["panels"].as_array().unwrap().iter().map(|p| p["label"].as_str().unwrap().to_owned()).collect();
             if got.panel_labels() != labels {
                 failures.push(format!("{n}: panels {:?}, full app {labels:?}", got.panel_labels()));
             }
         };
         check(&mut shots, "one", &w);
 
-        let four = ["GERMANY-DLR_20261007_050000_01.fit.gz", "TRIEST_20261007_050000_57.fit.gz", "INDIA-GAURI_20261007_050000_02.fit.gz", "AUSTRIA-OE3FLB_20261007_051500_55.fit.gz"];
+        let four = [
+            "GERMANY-DLR_20261007_050000_01.fit.gz",
+            "TRIEST_20261007_050000_57.fit.gz",
+            "INDIA-GAURI_20261007_050000_02.fit.gz",
+            "AUSTRIA-OE3FLB_20261007_051500_55.fit.gz",
+        ];
         w.borrow_mut().clear();
         w.borrow_mut().add_files(&four.map(fixture));
         check(&mut shots, "four", &w);
 
-        w.borrow_mut().add_files(&[fixture("GERMANY-DLR_20261007_050000_02.fit.gz"), fixture("TRIEST_20261007_050000_59.fit.gz")]);
+        w.borrow_mut().add_files(&[
+            fixture("GERMANY-DLR_20261007_050000_02.fit.gz"),
+            fixture("TRIEST_20261007_050000_59.fit.gz"),
+        ]);
         check(&mut shots, "combined", &w);
 
         {
@@ -238,14 +260,22 @@ fn comparison_windows_match_full_app() {
         let notes = w.borrow_mut().take_notices();
         assert!(notes.iter().any(|n| n.title == "Export Comparison"), "visible export: {notes:?}");
         let lite = image::open(&visible).unwrap().to_rgba8();
-        let full = image::open(lite_dir().join(format!("reference/windows/tools/comparison_export_{name}_visible.png"))).unwrap().to_rgba8();
+        let full =
+            image::open(lite_dir().join(format!("reference/windows/tools/comparison_export_{name}_visible.png")))
+                .unwrap()
+                .to_rgba8();
         let label = format!("comparison_export_{name}_visible");
         results.push((label.clone(), Some(compare_images(&label, &full, &lite))));
         let _ = std::fs::remove_file(&visible);
 
         // The grid export of the combined comparison, at the capture's settings.
         let meta = reference_json(&format!("comparison_export_{name}"));
-        let options = ExportOptions { grid: true, columns: None, title: meta["title"].as_str().unwrap().to_owned(), dpi: meta["dpi"].as_i64().unwrap() as i32 };
+        let options = ExportOptions {
+            grid: true,
+            columns: None,
+            title: meta["title"].as_str().unwrap().to_owned(),
+            dpi: meta["dpi"].as_i64().unwrap() as i32,
+        };
         w.borrow_mut().clear_ruler();
         let out = std::env::temp_dir().join(format!("callisto_lite_grid_{name}_{}.png", std::process::id()));
         {
@@ -263,7 +293,9 @@ fn comparison_windows_match_full_app() {
             h.step();
         }
         let lite = image::open(&out).unwrap().to_rgba8();
-        let full = image::open(lite_dir().join(format!("reference/windows/tools/comparison_export_{name}_grid.png"))).unwrap().to_rgba8();
+        let full = image::open(lite_dir().join(format!("reference/windows/tools/comparison_export_{name}_grid.png")))
+            .unwrap()
+            .to_rgba8();
         let label = format!("comparison_export_{name}_grid");
         results.push((label.clone(), Some(compare_images(&label, &full, &lite))));
         let _ = std::fs::remove_file(&out);
@@ -301,7 +333,8 @@ fn comparison_windows_match_full_app() {
     // Text is most of the export dialog: ClearType against Lite's grey
     // anti-aliasing weighs more there (as in `analysis_dialogs`); the grid
     // PNG's text boxes come from FreeType's autohinter (see `tools_windows`).
-    let limit = |name: &str| if name.starts_with("comparison_export_") || name.starts_with("dialog_") { 6.0 } else { 3.0 };
+    let limit =
+        |name: &str| if name.starts_with("comparison_export_") || name.starts_with("dialog_") { 6.0 } else { 3.0 };
     let failing: Vec<_> = results.iter().filter(|(n, r)| r.is_some_and(|d| d >= limit(n))).collect();
     assert!(failing.is_empty(), "windows no longer match the full app: {failing:?}");
 }

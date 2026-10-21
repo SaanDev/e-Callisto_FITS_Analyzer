@@ -30,8 +30,16 @@ macro_rules! svg {
 
 impl BandIcon {
     /// The toolbar's order (`controls.addWidget`).
-    pub const ALL: [BandIcon; 8] =
-        [BandIcon::AddPoints, BandIcon::Undo, BandIcon::Clear, BandIcon::FitActive, BandIcon::FitBoth, BandIcon::SavePlot, BandIcon::Bvr, BandIcon::Settings];
+    pub const ALL: [BandIcon; 8] = [
+        BandIcon::AddPoints,
+        BandIcon::Undo,
+        BandIcon::Clear,
+        BandIcon::FitActive,
+        BandIcon::FitBoth,
+        BandIcon::SavePlot,
+        BandIcon::Bvr,
+        BandIcon::Settings,
+    ];
 
     /// The button's tool tip and accessible name.
     pub fn label(self) -> &'static str {
@@ -91,8 +99,16 @@ fn disable(pixels: &mut [[u8; 4]], bg: Color32) {
     let (r, g, b) = (bg.r() as i32, bg.g() as i32, bg.b() as i32);
     let mut table = [[0u8; 3]; 256];
     for i in 0..128 {
-        table[i] = [((r * ((i as i32) << 1)) >> 8) as u8, ((g * ((i as i32) << 1)) >> 8) as u8, ((b * ((i as i32) << 1)) >> 8) as u8];
-        table[i + 128] = [(r + ((i as i32) << 1)).min(255) as u8, (g + ((i as i32) << 1)).min(255) as u8, (b + ((i as i32) << 1)).min(255) as u8];
+        table[i] = [
+            ((r * ((i as i32) << 1)) >> 8) as u8,
+            ((g * ((i as i32) << 1)) >> 8) as u8,
+            ((b * ((i as i32) << 1)) >> 8) as u8,
+        ];
+        table[i + 128] = [
+            (r + ((i as i32) << 1)).min(255) as u8,
+            (g + ((i as i32) << 1)).min(255) as u8,
+            (b + ((i as i32) << 1)).min(255) as u8,
+        ];
     }
     // `qt_intensity`: 30 % red, 59 % green, 11 % blue.
     let mut intensity = (77 * r + 150 * g + 28 * b) / 255;

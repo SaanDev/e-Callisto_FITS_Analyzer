@@ -126,7 +126,11 @@ pub fn design_width(text: &str, px: f32, weight: Weight) -> Option<f32> {
     let (data, index) = slot.read().ok()?.clone().or_else(|| UI_FACE.read().ok()?.clone())?;
     let face = ttf_parser::Face::parse(&data, index).ok()?;
     let scale = px / face.units_per_em() as f32;
-    Some(text.chars().map(|c| face.glyph_index(c).and_then(|g| face.glyph_hor_advance(g)).unwrap_or(0) as f32 * scale).sum())
+    Some(
+        text.chars()
+            .map(|c| face.glyph_index(c).and_then(|g| face.glyph_hor_advance(g)).unwrap_or(0) as f32 * scale)
+            .sum(),
+    )
 }
 
 /// The Origin graphs' face (Arial or a metric-compatible stand-in), for
@@ -159,10 +163,8 @@ pub fn normalize_font_family(value: &str) -> String {
         i -= 1;
     }
     let number = &text[i..];
-    let valid_number = !number.is_empty()
-        && !number.starts_with('.')
-        && !number.ends_with('.')
-        && number.matches('.').count() <= 1;
+    let valid_number =
+        !number.is_empty() && !number.starts_with('.') && !number.ends_with('.') && number.matches('.').count() <= 1;
     let head = text[..i].trim_end();
     if valid_number && head.len() < text[..i].len() && !head.is_empty() {
         return head.to_owned();
@@ -220,7 +222,9 @@ fn styled_faces(family: u16, bold: bool, italic: bool) -> std::sync::Arc<Vec<Fac
             .or_else(|| db_face(db, name, weight, false))
             .or_else(|| db_face(db, name, 400, false));
         if let Some(f) = face
-            && !faces.iter().any(|g| std::sync::Arc::ptr_eq(&g.0, &f.0) || (g.0.len() == f.0.len() && g.1 == f.1 && g.0 == f.0))
+            && !faces
+                .iter()
+                .any(|g| std::sync::Arc::ptr_eq(&g.0, &f.0) || (g.0.len() == f.0.len() && g.1 == f.1 && g.0 == f.0))
         {
             faces.push(f);
         }
@@ -237,7 +241,12 @@ fn styled_faces(family: u16, bold: bool, italic: bool) -> std::sync::Arc<Vec<Fac
 /// pen advancing by its advance, kerned against the previous glyph when
 /// both come from the same font. Calls `f` with each glyph's font, glyph
 /// and pen position; returns the pen's final advance. None for other faces.
-pub fn styled_layout(face: Face, text: &str, size_px: f64, mut f: impl FnMut(&ttf_parser::Face, ttf_parser::GlyphId, f64)) -> Option<f64> {
+pub fn styled_layout(
+    face: Face,
+    text: &str,
+    size_px: f64,
+    mut f: impl FnMut(&ttf_parser::Face, ttf_parser::GlyphId, f64),
+) -> Option<f64> {
     let Face::Styled { family, bold, italic } = face else { return None };
     let data = styled_faces(family, bold, italic);
     let fonts: Vec<ttf_parser::Face> = data.iter().filter_map(|(d, i)| ttf_parser::Face::parse(d, *i).ok()).collect();
@@ -335,7 +344,16 @@ impl callisto_core::mpl::TextMeasure for MplMeasure<'_> {
             let (ymin, ymax) = (bb.y_min as f64 * scale, bb.y_max as f64 * scale);
             // FreeType's hinted metrics: the vertical extent grid-fitted.
             let (top, bottom) = (ymax.ceil(), ymin.floor());
-            Some(GlyphMetrics { advance, width: xmax - xmin, height: top - bottom, xmin, xmax, ymin, ymax, iceberg: top })
+            Some(GlyphMetrics {
+                advance,
+                width: xmax - xmin,
+                height: top - bottom,
+                xmin,
+                xmax,
+                ymin,
+                ymax,
+                iceberg: top,
+            })
         })
         .flatten()
     }
@@ -372,9 +390,9 @@ impl callisto_core::mpl::TextMeasure for MplMeasure<'_> {
             }
             return callisto_core::mpl::TextExtent { width, height: y1 - y0, descent: -y0 };
         }
-        let galley = self.ctx.fonts_mut(|f| {
-            f.layout_no_wrap(text.to_owned(), mpl_font(mpl_face, size_px as f32), egui::Color32::WHITE)
-        });
+        let galley = self
+            .ctx
+            .fonts_mut(|f| f.layout_no_wrap(text.to_owned(), mpl_font(mpl_face, size_px as f32), egui::Color32::WHITE));
         let data = mpl_face_data(mpl_face);
         let face = data.as_ref().and_then(|(d, i)| ttf_parser::Face::parse(d, *i).ok());
         let Some(face) = face else {
@@ -420,6 +438,23 @@ fn face_metrics(data: &[u8], index: u32) -> Option<(f32, f32)> {
         _ => (face.ascender() as f32, -(face.descender() as f32)),
     };
     Some((asc / upem, desc.abs() / upem))
+}
+
+/// The monospace family for code text (`preferred_monospace_font_family`).
+fn mono_candidates() -> &'static [&'static str] {
+    if cfg!(target_os = "windows") {
+        &["Consolas", "Cascadia Mono", "Courier New"]
+    } else if cfg!(target_os = "macos") {
+        &["Menlo", "SF Mono", "Monaco", "Courier New"]
+    } else {
+        &["DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono", "Courier New"]
+    }
+}
+
+/// Code text (`<code>` in the user guide): the platform's monospace family
+/// at `px`, falling back to the UI face for glyphs it lacks.
+pub fn mono_font(px: f32) -> FontId {
+    FontId::monospace(px)
 }
 
 fn candidates() -> &'static [&'static str] {
@@ -571,6 +606,17 @@ impl SystemFonts {
                 }
             }
         }
+        // Code text: the monospace family, then the UI face, as Qt falls back.
+        let mono = mono_candidates().iter().copied().find_map(|name| Some((name, self.face(name, 400)?)));
+        let mut chain = Vec::new();
+        if let Some((name, font)) = &mono {
+            let key = format!("mono-{name}");
+            defs.font_data.insert(key.clone(), font.clone().into());
+            chain.push(key);
+        }
+        chain.extend(defs.families.get(&FontFamily::Proportional).cloned().unwrap_or_default());
+        chain.extend(defs.families.get(&FontFamily::Monospace).cloned().unwrap_or_default());
+        defs.families.insert(FontFamily::Monospace, chain);
         // Italic faces for the plot text; a family without them falls back to upright.
         for (name, weight) in [(ITALIC, 400u16), (BOLD_ITALIC, 700)] {
             let mut chain = Vec::new();
@@ -637,11 +683,7 @@ impl SystemFonts {
             }
             for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
                 let weight = if bold { 700 } else { 400 };
-                let ui_chain = defs
-                    .families
-                    .get(&plot_font(1.0, bold, italic).family)
-                    .cloned()
-                    .unwrap_or_default();
+                let ui_chain = defs.families.get(&plot_font(1.0, bold, italic).family).cloned().unwrap_or_default();
                 let mut chain = Vec::new();
                 let face = self
                     .styled_face(name, weight, italic)
@@ -653,7 +695,8 @@ impl SystemFonts {
                     let key = format!("{family_name}-face");
                     defs.font_data.insert(key.clone(), font.into());
                     chain.push(key);
-                    if let Some(m) = self.metrics_of(name, weight, italic).or_else(|| self.metrics_of(name, 400, false)) {
+                    if let Some(m) = self.metrics_of(name, weight, italic).or_else(|| self.metrics_of(name, 400, false))
+                    {
                         graph_metrics.push((FontFamily::Name(family_name.clone().into()), m));
                     }
                 }
@@ -692,6 +735,9 @@ impl SystemFonts {
                 if let Some(m) = map.get(&ui_family).copied() {
                     map.entry(FontFamily::Name(GRAPH[i].into())).or_insert(m);
                 }
+            }
+            if let Some(m) = mono.and_then(|(name, _)| self.metrics_of(name, 400, false)) {
+                map.insert(FontFamily::Monospace, m);
             }
             if let Ok(mut guard) = METRICS.write() {
                 *guard = Some(map);

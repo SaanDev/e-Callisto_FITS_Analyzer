@@ -27,7 +27,11 @@ fn scratch(name: &str) -> PathBuf {
 
 /// The share of pixels where a channel differs by more than `tol`.
 fn differing(a: &image::RgbaImage, b: &image::RgbaImage, tol: u8) -> f64 {
-    let n = a.pixels().zip(b.pixels()).filter(|(p, q)| p.0.iter().zip(q.0.iter()).any(|(x, y)| x.abs_diff(*y) > tol)).count();
+    let n = a
+        .pixels()
+        .zip(b.pixels())
+        .filter(|(p, q)| p.0.iter().zip(q.0.iter()).any(|(x, y)| x.abs_diff(*y) > tol))
+        .count();
     n as f64 / (a.width() * a.height()) as f64
 }
 
@@ -57,7 +61,8 @@ fn export_figure_matches_the_full_app() {
     });
     out.textures_delta.clear();
     let mut failures = Vec::new();
-    let cases = [("raw", false), ("processed", false), ("processed_log", true), ("analysis", false), ("combined", false)];
+    let cases =
+        [("raw", false), ("processed", false), ("processed_log", true), ("analysis", false), ("combined", false)];
     let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
         let ctx = ui.ctx();
         for (name, log) in cases {
@@ -86,9 +91,15 @@ fn export_figure_matches_the_full_app() {
                         "pdf" => {
                             // Offsets are bytes: search the raw file.
                             let find = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).rposition(|w| w == needle);
-                            let tail = find(&bytes, b"startxref
-").unwrap() + 10;
-                            let start: usize = String::from_utf8_lossy(&bytes[tail..]).lines().next().unwrap().parse().unwrap();
+                            let tail = find(
+                                &bytes,
+                                b"startxref
+",
+                            )
+                            .unwrap()
+                                + 10;
+                            let start: usize =
+                                String::from_utf8_lossy(&bytes[tail..]).lines().next().unwrap().parse().unwrap();
                             let table = String::from_utf8_lossy(&bytes[start..]).into_owned();
                             table.starts_with("xref")
                                 && table.lines().skip(3).take_while(|l| l.ends_with(" n ")).enumerate().all(|(i, l)| {
@@ -96,7 +107,7 @@ fn export_figure_matches_the_full_app() {
                                     bytes[at..].starts_with(format!("{} 0 obj", i + 1).as_bytes())
                                 })
                         }
-                        "eps" => text.starts_with("%!PS-Adobe-3.0 EPSF-3.0") &&text.ends_with("%%EOF\n"),
+                        "eps" => text.starts_with("%!PS-Adobe-3.0 EPSF-3.0") && text.ends_with("%%EOF\n"),
                         _ => text.contains("<svg"),
                     };
                     if !ok {

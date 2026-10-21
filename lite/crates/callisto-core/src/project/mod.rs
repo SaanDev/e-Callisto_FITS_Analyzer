@@ -183,7 +183,10 @@ pub fn read_project_meta(path: &Path) -> Result<Object, ProjectError> {
 
 /// `read_project`: the meta, the arrays, and the embedded files extracted
 /// into `extract_dir(meta)` when given. Unsafe member names refuse the file.
-pub fn read_project(path: &Path, extract_dir: Option<&dyn Fn(&Object) -> PathBuf>) -> Result<ProjectPayload, ProjectError> {
+pub fn read_project(
+    path: &Path,
+    extract_dir: Option<&dyn Fn(&Object) -> PathBuf>,
+) -> Result<ProjectPayload, ProjectError> {
     let mut zip = open_zip(path)?;
     let Some(meta_raw) = read_member(&mut zip, META_FILENAME)? else { return format_err(missing(META_FILENAME)) };
     let meta = load_meta(&meta_raw)?;
@@ -192,7 +195,8 @@ pub fn read_project(path: &Path, extract_dir: Option<&dyn Fn(&Object) -> PathBuf
         let Ok(f) = zip.by_index_raw(i) else { return format_err("Not a valid project file (bad zip).") };
         names.push(f.name().map(|n| n.into_owned()).unwrap_or_default());
     }
-    let arrays_raw = if names.iter().any(|n| n == ARRAYS_FILENAME) { read_member(&mut zip, ARRAYS_FILENAME)? } else { None };
+    let arrays_raw =
+        if names.iter().any(|n| n == ARRAYS_FILENAME) { read_member(&mut zip, ARRAYS_FILENAME)? } else { None };
     if arrays_raw.is_none() && meta.get("schema_version").and_then(Json::as_i64).unwrap_or(0) < 2 {
         return format_err(format!("Missing required file in project: '{ARRAYS_FILENAME}'"));
     }
@@ -224,7 +228,11 @@ fn py_repr_str(s: &str) -> String {
 }
 
 /// `extract_members`: streams `members` into `root`, keeping their paths.
-fn extract_members(zip: &mut zip::ZipArchive<File>, members: &[String], root: &Path) -> Result<BTreeMap<String, PathBuf>, ProjectError> {
+fn extract_members(
+    zip: &mut zip::ZipArchive<File>,
+    members: &[String],
+    root: &Path,
+) -> Result<BTreeMap<String, PathBuf>, ProjectError> {
     std::fs::create_dir_all(root)?;
     let mut out = BTreeMap::new();
     for name in members {
@@ -263,8 +271,15 @@ fn zip_time(path: &Path) -> zip::DateTime {
 fn now_zip_time() -> zip::DateTime {
     use chrono::{Datelike, Timelike};
     let n = chrono::Local::now();
-    zip::DateTime::from_date_and_time(n.year() as u16, n.month() as u8, n.day() as u8, n.hour() as u8, n.minute() as u8, n.second() as u8)
-        .unwrap_or_default()
+    zip::DateTime::from_date_and_time(
+        n.year() as u16,
+        n.month() as u8,
+        n.day() as u8,
+        n.hour() as u8,
+        n.minute() as u8,
+        n.second() as u8,
+    )
+    .unwrap_or_default()
 }
 
 /// Progress of a save: bytes done, bytes in all, a line of text.
@@ -327,7 +342,8 @@ pub fn write_project(
                 let err = std::io::Error::last_os_error();
                 return format_err(format!("Could not read a file to embed:\n{}\n{err}", src.display()));
             };
-            let method = if stored(arcname) { zip::CompressionMethod::Stored } else { zip::CompressionMethod::Deflated };
+            let method =
+                if stored(arcname) { zip::CompressionMethod::Stored } else { zip::CompressionMethod::Deflated };
             let opts = zip::write::SimpleFileOptions::default()
                 .compression_method(method)
                 .last_modified_time(zip_time(src))

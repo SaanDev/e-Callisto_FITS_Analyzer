@@ -64,7 +64,12 @@ impl ExportDialog {
 
     fn layout(&self, ui: &Ui) -> Layout {
         let radio = |id: &'static str, text: &str| {
-            WidgetSpec::new(id, Size::new(widgets::text_width(ui, text, qt::FONT_PX, Weight::Regular).ceil() as i32 + 24, 17), Policy::Minimum, Policy::Fixed)
+            WidgetSpec::new(
+                id,
+                Size::new(widgets::text_width(ui, text, qt::FONT_PX, Weight::Regular).ceil() as i32 + 24, 17),
+                Policy::Minimum,
+                Policy::Fixed,
+            )
         };
         let group = |id: &'static str, l: Layout| {
             Item::Container(Container {
@@ -73,11 +78,19 @@ impl ExportDialog {
                 layout: Box::new(l),
             })
         };
-        let layout_box = BoxLayout::v([9; 4], 6).widget(radio("visible", "Visible View")).widget(radio("grid", "Grid / Table Layout"));
+        let layout_box = BoxLayout::v([9; 4], 6)
+            .widget(radio("visible", "Visible View"))
+            .widget(radio("grid", "Grid / Table Layout"));
         let form = FormLayout::new([9; 4], 6, 6)
-            .row(qt::label_spec(ui, "columns_label", "Columns"), Item::Widget(qt::combo_spec(ui, "columns", &["Auto", "2", "3", "4"])))
+            .row(
+                qt::label_spec(ui, "columns_label", "Columns"),
+                Item::Widget(qt::combo_spec(ui, "columns", &["Auto", "2", "3", "4"])),
+            )
             .row(qt::label_spec(ui, "title_label", "Overall title"), Item::Widget(qt::line_edit_spec("title")))
-            .row(qt::label_spec(ui, "dpi_label", "Raster resolution"), Item::Widget(qt::spin_spec(ui, "dpi", "1200 DPI")));
+            .row(
+                qt::label_spec(ui, "dpi_label", "Raster resolution"),
+                Item::Widget(qt::spin_spec(ui, "dpi", "1200 DPI")),
+            );
         let buttons = BoxLayout::h([0; 4], 6)
             .stretch(1)
             .widget(qt::button_spec(ui, "ok", "OK", false))
@@ -122,15 +135,19 @@ impl ExportDialog {
         let r = |id: &str| at(&g, o, id);
         qt::group_box(ui, r("layout_group"), "Layout", p);
         qt::group_box(ui, r("grid_group"), "Grid / Table Options", p);
-        if crate::analysis::radio(ui, r("visible"), Id::new("cmp_export_visible"), "Visible View", !self.grid, true, p) {
+        if crate::analysis::radio(ui, r("visible"), Id::new("cmp_export_visible"), "Visible View", !self.grid, true, p)
+        {
             self.grid = false;
         }
-        if crate::analysis::radio(ui, r("grid"), Id::new("cmp_export_grid"), "Grid / Table Layout", self.grid, true, p) {
+        if crate::analysis::radio(ui, r("grid"), Id::new("cmp_export_grid"), "Grid / Table Layout", self.grid, true, p)
+        {
             self.grid = true;
         }
         // `grid_group.setEnabled(grid)`: the stylesheet keeps label and field text colours.
         let on = self.grid;
-        for (id, text) in [("columns_label", "Columns"), ("title_label", "Overall title"), ("dpi_label", "Raster resolution")] {
+        for (id, text) in
+            [("columns_label", "Columns"), ("title_label", "Overall title"), ("dpi_label", "Raster resolution")]
+        {
             let lr = r(id);
             // QFormLayout gives the label the row's height less the field's
             // padding; the text sits centred in the label's own box.
@@ -138,7 +155,9 @@ impl ExportDialog {
             qt::label(ui, label, text, qt::text_color(on, p));
         }
         let items: Vec<String> = ["Auto", "2", "3", "4"].iter().map(|s| (*s).to_owned()).collect();
-        if let Some(i) = qt::combo(ui, r("columns"), Id::new("cmp_export_columns"), &items, Some(self.columns), "", on, p) {
+        if let Some(i) =
+            qt::combo(ui, r("columns"), Id::new("cmp_export_columns"), &items, Some(self.columns), "", on, p)
+        {
             self.columns = i;
         }
         line_edit_at_end(ui, r("title"), Id::new("cmp_export_title"), &mut self.title, on, p);
@@ -195,5 +214,14 @@ fn line_edit_at_end(ui: &mut Ui, rect: Rect, id: Id, text: &mut String, enabled:
     let left = rect.left() + 13.0 + 2.0;
     let clip = Rect::from_min_max(pos2(left, rect.top() + 1.0), pos2(left + visible + 1.0, rect.bottom() - 1.0));
     let x = left + visible - width;
-    widgets::text_left_clipped(ui, clip, x, rect.center().y, text, qt::FONT_PX, Weight::Regular, qt::text_color(enabled, p));
+    widgets::text_left_clipped(
+        ui,
+        clip,
+        x,
+        rect.center().y,
+        text,
+        qt::FONT_PX,
+        Weight::Regular,
+        qt::text_color(enabled, p),
+    );
 }

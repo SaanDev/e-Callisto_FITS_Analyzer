@@ -54,7 +54,16 @@ fn learmonth_day(day: NaiveDate) -> Vec<u8> {
     for i in 0..1200i64 {
         let t = start + chrono::Duration::seconds(3 * i);
         use chrono::{Datelike, Timelike};
-        buf.extend([(t.year() - 2000) as u8, t.month() as u8, t.day() as u8, t.hour() as u8, t.minute() as u8, t.second() as u8, 3, 0]);
+        buf.extend([
+            (t.year() - 2000) as u8,
+            t.month() as u8,
+            t.day() as u8,
+            t.hour() as u8,
+            t.minute() as u8,
+            t.second() as u8,
+            3,
+            0,
+        ]);
         buf.extend([0, 25, 0, 75, 0, 0, 0, 0, 0, 75, 0, 180, 0, 0, 0, 0]);
         buf.extend((0..802).map(|k| ((i * 7 + k) % 256) as u8));
     }
@@ -167,7 +176,11 @@ impl<S: 'static> eframe::App for TestApp<S> {
     }
 }
 
-fn harness<S: 'static>(size: [f32; 2], state: S, ui_fn: impl FnMut(&mut egui::Ui, &mut S) + 'static) -> Harness<'static, TestApp<S>> {
+fn harness<S: 'static>(
+    size: [f32; 2],
+    state: S,
+    ui_fn: impl FnMut(&mut egui::Ui, &mut S) + 'static,
+) -> Harness<'static, TestApp<S>> {
     let app = TestApp { state, draw: Box::new(ui_fn) };
     Harness::builder()
         .with_size(size)
@@ -334,7 +347,14 @@ fn previews_match_full_app() {
     for (theme, dark) in [("light", false), ("dark", true)] {
         for (name, files) in [
             ("preview_single", vec!["BIR_20261007_101459_01.fit.gz"]),
-            ("preview_multi", vec!["INDIA-GAURI_20261007_041500_02.fit.gz", "INDIA-GAURI_20261007_043000_02.fit.gz", "BIR_20261007_101459_01.fit.gz"]),
+            (
+                "preview_multi",
+                vec![
+                    "INDIA-GAURI_20261007_041500_02.fit.gz",
+                    "INDIA-GAURI_20261007_043000_02.fit.gz",
+                    "BIR_20261007_101459_01.fit.gz",
+                ],
+            ),
         ] {
             let p = Palette::new(dark, true);
             let local: Vec<(String, String)> =

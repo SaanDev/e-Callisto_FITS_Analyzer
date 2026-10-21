@@ -152,7 +152,17 @@ fn hexc(v: u32) -> [u8; 3] {
 impl Styles {
     pub fn new() -> Styles {
         let st = |name, font, size, leading, before, after, align, cjk, color: u32| {
-            Arc::new(Style { name, font, size, leading, space_before: before, space_after: after, align, cjk, color: hexc(color) })
+            Arc::new(Style {
+                name,
+                font,
+                size,
+                leading,
+                space_before: before,
+                space_after: after,
+                align,
+                cjk,
+                color: hexc(color),
+            })
         };
         Styles {
             normal: st("Normal", FontId::Regular, 10.0, 12.0, 0.0, 0.0, Align::Left, true, 0x000000),
@@ -180,8 +190,10 @@ pub fn report_doc() -> Doc {
 
 /// `_pair_table`.
 fn pair_table(s: &Styles, pairs: &[(String, Val)], width: f64) -> Flow {
-    let mut rows: Vec<[Para; 2]> =
-        pairs.iter().map(|(k, v)| [Para::new(safe(&Val::str(k.clone())), &s.key), Para::new(safe(v), &s.small)]).collect();
+    let mut rows: Vec<[Para; 2]> = pairs
+        .iter()
+        .map(|(k, v)| [Para::new(safe(&Val::str(k.clone())), &s.key), Para::new(safe(v), &s.small)])
+        .collect();
     if rows.is_empty() {
         rows.push([Para::new("Status", &s.key), Para::new("Not available", &s.small)]);
     }
@@ -224,7 +236,10 @@ fn analysis_pairs(r: &ReportInput) -> Vec<(String, Val)> {
         p("Harmonic", max.get_or("harmonic", row.get("harmonic")).clone()),
         p("Average frequency (MHz)", shock.get_or("avg_freq_mhz", row.get("avg_freq_mhz")).clone()),
         p("Average drift (MHz/s)", shock.get_or("avg_drift_mhz_s", row.get("avg_drift_mhz_s")).clone()),
-        p("Initial shock speed (km/s)", shock.get_or("initial_shock_speed_km_s", row.get("initial_shock_speed_km_s")).clone()),
+        p(
+            "Initial shock speed (km/s)",
+            shock.get_or("initial_shock_speed_km_s", row.get("initial_shock_speed_km_s")).clone(),
+        ),
         p("Average shock speed (km/s)", shock.get_or("avg_shock_speed_km_s", row.get("avg_shock_speed_km_s")).clone()),
         p("Average shock height (Rs)", shock.get_or("avg_shock_height_rs", row.get("avg_shock_height_rs")).clone()),
     ]
@@ -296,7 +311,9 @@ pub fn story(r: &ReportInput, s: &Styles, doc: &Doc) -> (Vec<Flow>, usize) {
     f.push(Flow::PageBreak);
 
     let section = |f: &mut Vec<Flow>, t: &str| f.push(Flow::Para(Para::new(escape(t), &s.heading2)));
-    let available = |m: &Val, keys: &[(&str, &str)]| -> Vec<(String, Val)> { keys.iter().map(|(l, k)| (l.to_string(), m.get(k).clone())).collect() };
+    let available = |m: &Val, keys: &[(&str, &str)]| -> Vec<(String, Val)> {
+        keys.iter().map(|(l, k)| (l.to_string(), m.get(k).clone())).collect()
+    };
 
     section(&mut f, "Data Source");
     let mut pairs = available(
@@ -413,13 +430,34 @@ fn header_footer(laid: &mut Laid, doc: &Doc, title: &str) {
     let short: String = title.chars().take(90).collect();
     for (i, page) in laid.pages.iter_mut().enumerate() {
         let n = i + 1;
-        let mut deco = vec![platypus::Draw::Line { x0: doc.left, y0: 0.55 * INCH, x1: pw - doc.right, y1: 0.55 * INCH, width: 0.4, color: grey }];
+        let mut deco = vec![platypus::Draw::Line {
+            x0: doc.left,
+            y0: 0.55 * INCH,
+            x1: pw - doc.right,
+            y1: 0.55 * INCH,
+            width: 0.4,
+            color: grey,
+        }];
         if n > 1 {
-            deco.push(platypus::Draw::Text { x: doc.left, y: ph - 0.45 * INCH, text: short.clone(), font: FontId::Helvetica, size: 8.0, color: ink });
+            deco.push(platypus::Draw::Text {
+                x: doc.left,
+                y: ph - 0.45 * INCH,
+                text: short.clone(),
+                font: FontId::Helvetica,
+                size: 8.0,
+                color: ink,
+            });
         }
         let label = format!("Page {n}");
         let w = platypus::string_width(&label, FontId::Helvetica, 8.0);
-        deco.push(platypus::Draw::Text { x: pw - doc.right - w, y: 0.35 * INCH, text: label, font: FontId::Helvetica, size: 8.0, color: ink });
+        deco.push(platypus::Draw::Text {
+            x: pw - doc.right - w,
+            y: 0.35 * INCH,
+            text: label,
+            font: FontId::Helvetica,
+            size: 8.0,
+            color: ink,
+        });
         // Drawn when the page begins, under its content.
         deco.append(page);
         *page = deco;
@@ -510,7 +548,10 @@ mod tests {
         assert_eq!(fmt_value(&Val::Float(899.75)), "899.75");
         assert_eq!(fmt_value(&Val::Float(-2.686712)), "-2.6867");
         assert_eq!(fmt_value(&Val::List(vec![Val::Int(200), Val::Int(3600)])), "200, 3600");
-        assert_eq!(fmt_value(&Val::Map(vec![("a".into(), Val::Bool(true)), ("b".into(), Val::None)])), "a: Yes; b: Not available");
+        assert_eq!(
+            fmt_value(&Val::Map(vec![("a".into(), Val::Bool(true)), ("b".into(), Val::None)])),
+            "a: Yes; b: Not available"
+        );
         let many = Val::List((0..10).map(Val::Int).collect());
         assert_eq!(fmt_value(&many), "0, 1, 2, 3, 4, 5, 6, 7, ... (10 total)");
     }

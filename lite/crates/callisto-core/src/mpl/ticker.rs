@@ -163,10 +163,7 @@ pub fn auto_minor_ticks(majors: &[f64], view: (f64, f64)) -> Vec<f64> {
     let tmin = py_round((vmin - t0) / minorstep) as i64;
     let tmax = py_round((vmax - t0) / minorstep) as i64 + 1;
     let tol = (vmax - vmin) * 1e-5;
-    (tmin..tmax)
-        .map(|k| k as f64 * minorstep + t0)
-        .filter(|m| !majors.iter().any(|j| (m - j).abs() <= tol))
-        .collect()
+    (tmin..tmax).map(|k| k as f64 * minorstep + t0).filter(|m| !majors.iter().any(|j| (m - j).abs() <= tol)).collect()
 }
 
 /// `ScalarFormatter` (default settings): labels for `locs` on an axis with

@@ -190,6 +190,8 @@ pub struct MenuState {
     pub has_noise: bool,
     pub has_light_curves: bool,
     pub has_ruler_measurement: bool,
+    /// An update check is running (Check for Updates... is disabled).
+    pub checking_updates: bool,
 }
 
 /// `_rebuild_recent_menu`: the selections, then Clear; or a disabled placeholder.
@@ -373,7 +375,7 @@ pub fn menu_bar(s: &MenuState) -> Vec<Menu> {
         Menu {
             title: "About",
             items: vec![
-                a("Check for Updates...", C::CheckForUpdates),
+                a("Check for Updates...", C::CheckForUpdates).enabled(!s.checking_updates),
                 a("Report a Bug...", C::ReportBug),
                 Item::Separator,
                 a("About", C::About),

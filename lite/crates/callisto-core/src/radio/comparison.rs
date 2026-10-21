@@ -132,7 +132,10 @@ fn date_label_from_sources(sources: &[String]) -> String {
 /// else the name's first part.
 pub fn station_label_from_header(path: &str, header: Option<&Header>) -> String {
     for key in ["STATION", "OBSERVAT", "INSTRUME", "TELESCOP"] {
-        let text = header.and_then(|h| h.get_str(key)).map(|v| v.split_whitespace().collect::<Vec<_>>().join(" ")).unwrap_or_default();
+        let text = header
+            .and_then(|h| h.get_str(key))
+            .map(|v| v.split_whitespace().collect::<Vec<_>>().join(" "))
+            .unwrap_or_default();
         if !text.is_empty() {
             return text;
         }
@@ -279,7 +282,11 @@ pub fn aligned_time_axes(datasets: &[ComparisonDataset], mode: Alignment) -> (Ve
         return (plain(), Alignment::Seconds, Vec::new());
     }
     if datasets.iter().any(|d| d.ut_start_sec.is_none()) {
-        return (plain(), Alignment::Seconds, vec!["UT alignment unavailable because one or more files are missing TIME-OBS.".into()]);
+        return (
+            plain(),
+            Alignment::Seconds,
+            vec!["UT alignment unavailable because one or more files are missing TIME-OBS.".into()],
+        );
     }
     let starts = unwrap_seconds_of_day(&datasets.iter().map(|d| d.ut_start_sec.unwrap_or(0.0)).collect::<Vec<_>>());
     let axes = datasets.iter().zip(starts).map(|(d, s)| d.time.iter().map(|t| t + s).collect()).collect();
@@ -299,7 +306,8 @@ pub type SharedExtent = ((f64, f64), (f64, f64), Alignment, Vec<String>);
 pub fn seconds_of_day_range_to_unwrapped(start_sod: f64, stop_sod: f64, full: (f64, f64)) -> Option<(f64, f64)> {
     let (start_sod, stop_sod) = (start_sod.rem_euclid(86400.0), stop_sod.rem_euclid(86400.0));
     let (lo, hi) = (full.0.min(full.1), full.0.max(full.1));
-    if ![start_sod, stop_sod, lo, hi].iter().all(|v| v.is_finite()) || hi <= lo || (stop_sod - start_sod).abs() <= 1e-9 {
+    if ![start_sod, stop_sod, lo, hi].iter().all(|v| v.is_finite()) || hi <= lo || (stop_sod - start_sod).abs() <= 1e-9
+    {
         return None;
     }
     let nominal = if stop_sod > start_sod { stop_sod - start_sod } else { stop_sod + 86400.0 - start_sod };
@@ -317,10 +325,13 @@ pub fn seconds_of_day_range_to_unwrapped(start_sod: f64, stop_sod: f64, full: (f
             if overlap <= 0.0 {
                 continue;
             }
-            let score = ((lo - start).max(0.0) + (stop - hi).max(0.0), ((stop - start) - nominal).abs(), (start - lo).abs());
+            let score =
+                ((lo - start).max(0.0) + (stop - hi).max(0.0), ((stop - start) - nominal).abs(), (start - lo).abs());
             let better = match &best {
                 None => true,
-                Some((b, _)) => score.0 < b.0 || (score.0 == b.0 && (score.1 < b.1 || (score.1 == b.1 && score.2 < b.2))),
+                Some((b, _)) => {
+                    score.0 < b.0 || (score.0 == b.0 && (score.1 < b.1 || (score.1 == b.1 && score.2 < b.2)))
+                }
             };
             if better {
                 best = Some((score, (start, stop)));
@@ -332,7 +343,9 @@ pub fn seconds_of_day_range_to_unwrapped(start_sod: f64, stop_sod: f64, full: (f
 
 /// `dataset_extent`: `(x0, x1, y0, y1)`, each pair ascending.
 pub fn dataset_extent(d: &ComparisonDataset, time_axis: &[f64]) -> [f64; 4] {
-    let Some([x0, x1, y0, y1]) = matplotlib_extent(&d.freqs, time_axis, d.frequency_step_mhz) else { return [0.0, 1.0, 0.0, 1.0] };
+    let Some([x0, x1, y0, y1]) = matplotlib_extent(&d.freqs, time_axis, d.frequency_step_mhz) else {
+        return [0.0, 1.0, 0.0, 1.0];
+    };
     [x0.min(x1), x0.max(x1), y0.min(y1), y0.max(y1)]
 }
 
@@ -371,7 +384,11 @@ pub fn apply_noise(data: &Array2, settings: NoiseSettings, gap_row_mask: Option<
         NoiseMethod::Median => Baseline::Median,
         NoiseMethod::Robust | NoiseMethod::Clip => Baseline::Robust,
     };
-    let mut out = subtract_background_rows(data, gap_row_mask, SubtractOptions { mode, equalize_noise: false, ..Default::default() });
+    let mut out = subtract_background_rows(
+        data,
+        gap_row_mask,
+        SubtractOptions { mode, equalize_noise: false, ..Default::default() },
+    );
     if s.method == NoiseMethod::Clip {
         clip_in_place(&mut out, s.clip_low, s.clip_high);
     }
@@ -462,7 +479,13 @@ pub fn panel_payloads(
     let display: Vec<Arc<Array2>> = processed
         .iter()
         .enumerate()
-        .map(|(i, d)| if o.use_db { Arc::new(display_data(d, true, cold_digits.get(i).copied().unwrap_or(0.0))) } else { d.clone() })
+        .map(|(i, d)| {
+            if o.use_db {
+                Arc::new(display_data(d, true, cold_digits.get(i).copied().unwrap_or(0.0)))
+            } else {
+                d.clone()
+            }
+        })
         .collect();
     let refs: Vec<&Array2> = display.iter().map(|d| d.as_ref()).collect();
     let limits = color_limits(&refs, o.color_scale, o.manual_limits);
@@ -505,7 +528,11 @@ pub fn default_grid_title(labels: &[String]) -> String {
             let s = &b[i..i + 10];
             let digits = |r: std::ops::Range<usize>| r.into_iter().all(|k| s[k].is_ascii_digit());
             let word = |c: Option<&u8>| c.is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_');
-            if digits(0..4) && s[4] == b'-' && digits(5..7) && s[7] == b'-' && digits(8..10)
+            if digits(0..4)
+                && s[4] == b'-'
+                && digits(5..7)
+                && s[7] == b'-'
+                && digits(8..10)
                 && !word(i.checked_sub(1).and_then(|j| b.get(j)))
                 && !word(b.get(i + 10))
             {

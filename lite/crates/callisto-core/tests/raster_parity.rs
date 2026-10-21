@@ -86,7 +86,8 @@ fn overlay_lines_match_qt() {
             e.1 += 1;
         }
         if bad > allowed {
-            failures.push(format!("{name} (width {width}, {style:?}, alpha {}): {bad} of {covered} pixels differ", c[3]));
+            failures
+                .push(format!("{name} (width {width}, {style:?}, alpha {}): {bad} of {covered} pixels differ", c[3]));
         }
     }
     for (k, (n, f)) in &by_kind {

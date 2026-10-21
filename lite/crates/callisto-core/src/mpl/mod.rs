@@ -57,7 +57,11 @@ pub enum Face {
     Origin,
     /// A graph's `font.family` list ([`family_chain`]; 0 is the Origin
     /// families alone) in a weight and slant, as `GraphText` sets them.
-    Styled { family: u16, bold: bool, italic: bool },
+    Styled {
+        family: u16,
+        bold: bool,
+        italic: bool,
+    },
 }
 
 impl Face {
@@ -113,7 +117,12 @@ pub trait TextMeasure {
 
 /// A text's extent as `Text._get_layout` measures it: mathtext's for math
 /// strings, with their layout.
-fn text_extent(m: &dyn TextMeasure, text: &str, size_px: f64, face: Face) -> (TextExtent, Option<mathtext::MathLayout>) {
+fn text_extent(
+    m: &dyn TextMeasure,
+    text: &str,
+    size_px: f64,
+    face: Face,
+) -> (TextExtent, Option<mathtext::MathLayout>) {
     if mathtext::is_math_text(text) {
         let l = mathtext::layout(text, size_px, face, m);
         (TextExtent { width: l.width, height: l.height, descent: l.descent }, Some(l))
@@ -525,30 +534,81 @@ pub struct GlyphRun {
 
 #[derive(Clone)]
 pub enum Prim {
-    Fill { rect: PxRect, color: Rgba },
-    Line { a: (f64, f64), b: (f64, f64), color: Rgba, width: f64, square_caps: bool },
+    Fill {
+        rect: PxRect,
+        color: Rgba,
+    },
+    Line {
+        a: (f64, f64),
+        b: (f64, f64),
+        color: Rgba,
+        width: f64,
+        square_caps: bool,
+    },
     /// An image in its extent's pixel rectangle, clipped to `clip`; on a
     /// log axis, `log_y` is the extent's `(bottom, top)` to resample by.
-    Image { axes: usize, image: usize, dest: PxRect, clip: PxRect, log_y: Option<(f64, f64)> },
+    Image {
+        axes: usize,
+        image: usize,
+        dest: PxRect,
+        clip: PxRect,
+        log_y: Option<(f64, f64)>,
+    },
     /// Text with its pen origin on the baseline at `pos`, rotated
     /// counter-clockwise by `rotation` degrees about that point; `bbox` is
     /// its window extent as matplotlib computes it. A math label carries
     /// its glyphs as mathtext placed them (plain text has none).
-    Text { pos: (f64, f64), text: String, size_px: f64, color: Rgba, rotation: f64, bbox: PxRect, face: Face, glyphs: Vec<GlyphRun> },
+    Text {
+        pos: (f64, f64),
+        text: String,
+        size_px: f64,
+        color: Rgba,
+        rotation: f64,
+        bbox: PxRect,
+        face: Face,
+        glyphs: Vec<GlyphRun>,
+    },
     /// Markers centred at `centers`, `size` across (a square's side, a
     /// circle's diameter), as Agg draws them: `draw_markers` (`snapped`:
     /// each marker stamped at a whole device pixel, its path snapped when
     /// it can be) or a path collection (exact positions).
-    Markers { kind: MarkerKind, centers: Arc<Vec<(f64, f64)>>, size: f64, face: Rgba, edge: Rgba, edge_width: f64, snapped: bool, clip: Option<PxRect> },
+    Markers {
+        kind: MarkerKind,
+        centers: Arc<Vec<(f64, f64)>>,
+        size: f64,
+        face: Rgba,
+        edge: Rgba,
+        edge_width: f64,
+        snapped: bool,
+        clip: Option<PxRect>,
+    },
     /// A polyline, round joins: solid with projecting caps, or dashed
     /// (`dash` on and off, in pixels) with butt caps.
-    Path { points: Arc<Vec<(f64, f64)>>, color: Rgba, width: f64, clip: Option<PxRect>, dash: Option<(f64, f64)> },
+    Path {
+        points: Arc<Vec<(f64, f64)>>,
+        color: Rgba,
+        width: f64,
+        clip: Option<PxRect>,
+        dash: Option<(f64, f64)>,
+    },
     /// A rectangle patch, filled and edged, snapped as Agg snaps it.
-    Frame { rect: PxRect, face: Rgba, edge: Rgba, width: f64 },
+    Frame {
+        rect: PxRect,
+        face: Rgba,
+        edge: Rgba,
+        width: f64,
+    },
     /// An edgeless rectangle patch, snapped, filled and hatched as Agg
     /// hatches: lines `x + y = k · spacing` in device pixels from the
     /// canvas's top-left corner (the hatch tile repeats from there).
-    Hatch { rect: PxRect, face: Rgba, hatch: Rgba, hatch_width: f64, spacing: f64, clip: Option<PxRect> },
+    Hatch {
+        rect: PxRect,
+        face: Rgba,
+        hatch: Rgba,
+        hatch_width: f64,
+        spacing: f64,
+        clip: Option<PxRect>,
+    },
 }
 
 pub struct DrawList {
@@ -611,7 +671,12 @@ fn pt(f: &Figure, points: f64) -> f64 {
 
 /// The line metrics matplotlib aligns text with: the larger of the text's
 /// ink and that of "lp".
-fn line_metrics(m: &dyn TextMeasure, text: &str, size_px: f64, face: Face) -> (TextExtent, f64, f64, Option<mathtext::MathLayout>) {
+fn line_metrics(
+    m: &dyn TextMeasure,
+    text: &str,
+    size_px: f64,
+    face: Face,
+) -> (TextExtent, f64, f64, Option<mathtext::MathLayout>) {
     let lp = m.measure("lp", size_px, face);
     let (e, math) = if text.is_empty() { (TextExtent::default(), None) } else { text_extent(m, text, size_px, face) };
     (e, e.height.max(lp.height), e.descent.max(lp.descent), math)
@@ -709,7 +774,16 @@ fn place_text(
                 .collect()
         })
         .unwrap_or_default();
-    let prim = Prim::Text { pos, text: label.text.clone(), size_px, color: label.color, rotation, bbox: bbox.clone(), face: label.face, glyphs };
+    let prim = Prim::Text {
+        pos,
+        text: label.text.clone(),
+        size_px,
+        color: label.color,
+        rotation,
+        bbox: bbox.clone(),
+        face: label.face,
+        glyphs,
+    };
     (prim, bbox)
 }
 
@@ -720,7 +794,14 @@ const LINESPACING: f64 = 1.2;
 /// lines `linespacing` apart (never closer than "lp" allows), each aligned
 /// within the block as `ha` aligns the block. One primitive per line; the
 /// block's window extent.
-fn place_lines(m: &dyn TextMeasure, anchor: (f64, f64), label: &Label, size_px: f64, ha: HAlign, va: VAlign) -> (Vec<Prim>, PxRect) {
+fn place_lines(
+    m: &dyn TextMeasure,
+    anchor: (f64, f64),
+    label: &Label,
+    size_px: f64,
+    ha: HAlign,
+    va: VAlign,
+) -> (Vec<Prim>, PxRect) {
     if !label.text.contains('\n') {
         let (p, bb) = place_text(m, anchor, label, size_px, ha, va, 0.0, false);
         return (vec![p], bb);
@@ -880,7 +961,11 @@ fn axis_ticks(spec: &AxisSpec, lim: (f64, f64), length_pt: f64, x_axis: bool, lo
         };
         let tol = (thi - tlo) * 1e-5;
         let minor: Vec<f64> = match &spec.minor {
-            Ticks::Fixed(v) => v.iter().copied().filter(|m| m.is_finite() && *m > 0.0 && !majors.iter().any(|j| (tr(*m) - tr(*j)).abs() <= tol)).collect(),
+            Ticks::Fixed(v) => v
+                .iter()
+                .copied()
+                .filter(|m| m.is_finite() && *m > 0.0 && !majors.iter().any(|j| (tr(*m) - tr(*j)).abs() <= tol))
+                .collect(),
             _ => Vec::new(),
         };
         let visible = |v: f64| v > 0.0 && ticker::interval_contains_close(tlo, thi, tr(v));
@@ -946,8 +1031,7 @@ impl Figure {
         }
         for t in &self.texts {
             let anchor = (t.x * self.width, self.height - t.y * self.height);
-            let (prim, _) =
-                place_text(m, anchor, &t.label, pt(self, t.label.size_pt), t.ha, t.va, t.rotation, false);
+            let (prim, _) = place_text(m, anchor, &t.label, pt(self, t.label.size_pt), t.ha, t.va, t.rotation, false);
             prims.push(prim);
         }
         DrawList { width: self.width, height: self.height, prims, axes_rects }
@@ -956,7 +1040,15 @@ impl Figure {
     /// Lays out one axes: its patch, then its artists in z-order as
     /// `Axes.draw` sorts them (stable, children before spines, axes,
     /// title and legend at equal z-order).
-    fn layout_axes(&self, ai: usize, ax: &Axes, r: &PxRect, m: &dyn TextMeasure, out: &mut Vec<Prim>, ext: &mut Vec<PxRect>) {
+    fn layout_axes(
+        &self,
+        ai: usize,
+        ax: &Axes,
+        r: &PxRect,
+        m: &dyn TextMeasure,
+        out: &mut Vec<Prim>,
+        ext: &mut Vec<PxRect>,
+    ) {
         let to_x = |v: f64| r.x0 + (v - ax.xlim.0) / (ax.xlim.1 - ax.xlim.0) * (r.x1 - r.x0);
         let to_y = |v: f64| r.y1 - ax.y_frac(v) * (r.y1 - r.y0);
         if let Some(face) = ax.facecolor {
@@ -976,19 +1068,25 @@ impl Figure {
             // lines across it, `x + y` two tile widths apart over them all.
             let lines = (6 * s.hatch_count).max(1) as f64;
             let spacing = 2.0 * self.dpi.floor() / lines;
-            let prim = Prim::Hatch { rect, face: s.face, hatch: s.hatch, hatch_width: pt(self, s.hatch_width_pt), spacing, clip: Some(r.clone()) };
+            let prim = Prim::Hatch {
+                rect,
+                face: s.face,
+                hatch: s.hatch,
+                hatch_width: pt(self, s.hatch_width_pt),
+                spacing,
+                clip: Some(r.clone()),
+            };
             groups.push((s.zorder, vec![prim]));
         }
         // What a "best" legend avoids: line vertices and scatter offsets.
         let mut avoid = legend::Avoid::default();
         for s in &ax.scatters {
-            let centers: Vec<(f64, f64)> = s
-                .x
-                .iter()
-                .zip(s.y.iter())
-                .filter(|(x, y)| x.is_finite() && y.is_finite())
-                .map(|(&x, &y)| (to_x(x), to_y(y)))
-                .collect();
+            let centers: Vec<(f64, f64)> =
+                s.x.iter()
+                    .zip(s.y.iter())
+                    .filter(|(x, y)| x.is_finite() && y.is_finite())
+                    .map(|(&x, &y)| (to_x(x), to_y(y)))
+                    .collect();
             avoid.offsets.extend(centers.iter().copied());
             let prim = Prim::Markers {
                 kind: MarkerKind::Circle,
@@ -1005,19 +1103,24 @@ impl Figure {
             groups.push((s.zorder, vec![prim]));
         }
         for l in &ax.lines {
-            let points: Vec<(f64, f64)> = l
-                .x
-                .iter()
-                .zip(l.y.iter())
-                .filter(|(x, y)| x.is_finite() && y.is_finite())
-                .map(|(&x, &y)| (to_x(x), to_y(y)))
-                .collect();
+            let points: Vec<(f64, f64)> =
+                l.x.iter()
+                    .zip(l.y.iter())
+                    .filter(|(x, y)| x.is_finite() && y.is_finite())
+                    .map(|(&x, &y)| (to_x(x), to_y(y)))
+                    .collect();
             let points = Arc::new(points);
             avoid.lines.push(points.clone());
             let mut g = Vec::new();
             if let Some(w) = l.width_pt {
                 let dash = l.dash.map(|(on, off)| (pt(self, on), pt(self, off)));
-                g.push(Prim::Path { points: points.clone(), color: l.color, width: pt(self, w), clip: Some(r.clone()), dash });
+                g.push(Prim::Path {
+                    points: points.clone(),
+                    color: l.color,
+                    width: pt(self, w),
+                    clip: Some(r.clone()),
+                    dash,
+                });
             }
             if let Some(mk) = &l.marker {
                 g.push(self.markers(mk, points, Some(r.clone())));
@@ -1085,7 +1188,8 @@ impl Figure {
     fn title(&self, ax: &Axes, title: &Label, r: &PxRect, top: f64, m: &dyn TextMeasure) -> Prim {
         let size = pt(self, title.size_pt);
         let pad = pt(self, ax.title_pad_pt);
-        let place = |y: f64| place_text(m, ((r.x0 + r.x1) / 2.0, y), title, size, HAlign::Center, VAlign::Baseline, 0.0, false);
+        let place =
+            |y: f64| place_text(m, ((r.x0 + r.x1) / 2.0, y), title, size, HAlign::Center, VAlign::Baseline, 0.0, false);
         let (mut p, bb) = place(r.y0 - pad);
         if bb.y1 > top {
             let (p2, bb2) = place(top - pad);
@@ -1099,7 +1203,15 @@ impl Figure {
 
     /// The axis artists (grid, ticks, tick and axis labels) and spines.
     /// Returns the top of what sits above the axes, for the title.
-    fn layout_axis(&self, ax: &Axes, r: &PxRect, m: &dyn TextMeasure, prims: &mut Vec<Prim>, spines: &mut Vec<Prim>, ext: &mut Vec<PxRect>) -> f64 {
+    fn layout_axis(
+        &self,
+        ax: &Axes,
+        r: &PxRect,
+        m: &dyn TextMeasure,
+        prims: &mut Vec<Prim>,
+        spines: &mut Vec<Prim>,
+        ext: &mut Vec<PxRect>,
+    ) -> f64 {
         let to_x = |v: f64| r.x0 + (v - ax.xlim.0) / (ax.xlim.1 - ax.xlim.0) * (r.x1 - r.x0);
         let to_y = |v: f64| r.y1 - ax.y_frac(v) * (r.y1 - r.y0);
         let (wpx, hpx) = (r.x1 - r.x0, r.y1 - r.y0);
@@ -1128,18 +1240,42 @@ impl Figure {
             if x_axis {
                 let x = to_x(at);
                 if spec.ticks_low {
-                    prims.push(Prim::Line { a: (x, r.y1), b: (x, r.y1 - sign * len), color: spec.tick_color, width, square_caps: false });
+                    prims.push(Prim::Line {
+                        a: (x, r.y1),
+                        b: (x, r.y1 - sign * len),
+                        color: spec.tick_color,
+                        width,
+                        square_caps: false,
+                    });
                 }
                 if spec.ticks_high {
-                    prims.push(Prim::Line { a: (x, r.y0), b: (x, r.y0 + sign * len), color: spec.tick_color, width, square_caps: false });
+                    prims.push(Prim::Line {
+                        a: (x, r.y0),
+                        b: (x, r.y0 + sign * len),
+                        color: spec.tick_color,
+                        width,
+                        square_caps: false,
+                    });
                 }
             } else {
                 let y = to_y(at);
                 if spec.ticks_low {
-                    prims.push(Prim::Line { a: (r.x0, y), b: (r.x0 + sign * len, y), color: spec.tick_color, width, square_caps: false });
+                    prims.push(Prim::Line {
+                        a: (r.x0, y),
+                        b: (r.x0 + sign * len, y),
+                        color: spec.tick_color,
+                        width,
+                        square_caps: false,
+                    });
                 }
                 if spec.ticks_high {
-                    prims.push(Prim::Line { a: (r.x1, y), b: (r.x1 - sign * len, y), color: spec.tick_color, width, square_caps: false });
+                    prims.push(Prim::Line {
+                        a: (r.x1, y),
+                        b: (r.x1 - sign * len, y),
+                        color: spec.tick_color,
+                        width,
+                        square_caps: false,
+                    });
                 }
             }
         };
@@ -1158,7 +1294,12 @@ impl Figure {
 
         // Spines (square caps, centred on the axes edges).
         let sw = pt(self, ax.spine_width_pt);
-        for (a, b) in [((r.x0, r.y1), (r.x1, r.y1)), ((r.x0, r.y0), (r.x1, r.y0)), ((r.x0, r.y0), (r.x0, r.y1)), ((r.x1, r.y0), (r.x1, r.y1))] {
+        for (a, b) in [
+            ((r.x0, r.y1), (r.x1, r.y1)),
+            ((r.x0, r.y0), (r.x1, r.y0)),
+            ((r.x0, r.y0), (r.x0, r.y1)),
+            ((r.x1, r.y0), (r.x1, r.y1)),
+        ] {
             spines.push(Prim::Line { a, b, color: ax.spine_color, width: sw, square_caps: true });
         }
 
@@ -1170,13 +1311,31 @@ impl Figure {
                 let label = Label::new(text.clone(), ax.x.tick_label_pt, ax.x.label_color).with_face(ax.x.face);
                 let size = pt(self, label.size_pt);
                 if ax.x.labels_low {
-                    let (p, bb) = place_text(m, (to_x(*v), r.y1 + pad(&ax.x)), &label, size, HAlign::Center, VAlign::Top, 0.0, false);
+                    let (p, bb) = place_text(
+                        m,
+                        (to_x(*v), r.y1 + pad(&ax.x)),
+                        &label,
+                        size,
+                        HAlign::Center,
+                        VAlign::Top,
+                        0.0,
+                        false,
+                    );
                     x_low = x_low.max(bb.y1);
                     ext.push(bb.clone());
                     prims.push(p);
                 }
                 if ax.x.labels_high {
-                    let (p, bb) = place_text(m, (to_x(*v), r.y0 - pad(&ax.x)), &label, size, HAlign::Center, VAlign::Bottom, 0.0, false);
+                    let (p, bb) = place_text(
+                        m,
+                        (to_x(*v), r.y0 - pad(&ax.x)),
+                        &label,
+                        size,
+                        HAlign::Center,
+                        VAlign::Bottom,
+                        0.0,
+                        false,
+                    );
                     x_high = x_high.min(bb.y0);
                     ext.push(bb.clone());
                     prims.push(p);
@@ -1189,13 +1348,31 @@ impl Figure {
                 let label = Label::new(text.clone(), ax.y.tick_label_pt, ax.y.label_color).with_face(ax.y.face);
                 let size = pt(self, label.size_pt);
                 if ax.y.labels_low {
-                    let (p, bb) = place_text(m, (r.x0 - pad(&ax.y), to_y(*v)), &label, size, HAlign::Right, VAlign::CenterBaseline, 0.0, false);
+                    let (p, bb) = place_text(
+                        m,
+                        (r.x0 - pad(&ax.y), to_y(*v)),
+                        &label,
+                        size,
+                        HAlign::Right,
+                        VAlign::CenterBaseline,
+                        0.0,
+                        false,
+                    );
                     y_low = y_low.min(bb.x0);
                     ext.push(bb.clone());
                     prims.push(p);
                 }
                 if ax.y.labels_high {
-                    let (p, bb) = place_text(m, (r.x1 + pad(&ax.y), to_y(*v)), &label, size, HAlign::Left, VAlign::CenterBaseline, 0.0, false);
+                    let (p, bb) = place_text(
+                        m,
+                        (r.x1 + pad(&ax.y), to_y(*v)),
+                        &label,
+                        size,
+                        HAlign::Left,
+                        VAlign::CenterBaseline,
+                        0.0,
+                        false,
+                    );
                     y_high = y_high.max(bb.x1);
                     ext.push(bb.clone());
                     prims.push(p);
@@ -1207,8 +1384,26 @@ impl Figure {
             let size = pt(self, label.size_pt);
             let labelpad = pt(self, ax.x.labelpad_pt);
             let (p, bb) = match ax.x.label_side {
-                Side::Low => place_text(m, ((r.x0 + r.x1) / 2.0, x_low + labelpad), label, size, HAlign::Center, VAlign::Top, 0.0, false),
-                Side::High => place_text(m, ((r.x0 + r.x1) / 2.0, x_high - labelpad), label, size, HAlign::Center, VAlign::Bottom, 0.0, false),
+                Side::Low => place_text(
+                    m,
+                    ((r.x0 + r.x1) / 2.0, x_low + labelpad),
+                    label,
+                    size,
+                    HAlign::Center,
+                    VAlign::Top,
+                    0.0,
+                    false,
+                ),
+                Side::High => place_text(
+                    m,
+                    ((r.x0 + r.x1) / 2.0, x_high - labelpad),
+                    label,
+                    size,
+                    HAlign::Center,
+                    VAlign::Bottom,
+                    0.0,
+                    false,
+                ),
             };
             if ax.x.label_side == Side::High {
                 x_top = x_top.min(bb.y0);
@@ -1221,8 +1416,12 @@ impl Figure {
             let labelpad = pt(self, ax.y.labelpad_pt);
             let cy = (r.y0 + r.y1) / 2.0;
             let (p, ybb) = match ax.y.label_side {
-                Side::Low => place_text(m, (y_low - labelpad, cy), label, size, HAlign::Center, VAlign::Bottom, 90.0, true),
-                Side::High => place_text(m, (y_high + labelpad, cy), label, size, HAlign::Center, VAlign::Top, 90.0, true),
+                Side::Low => {
+                    place_text(m, (y_low - labelpad, cy), label, size, HAlign::Center, VAlign::Bottom, 90.0, true)
+                }
+                Side::High => {
+                    place_text(m, (y_high + labelpad, cy), label, size, HAlign::Center, VAlign::Top, 90.0, true)
+                }
             };
             ext.push(collapsed(&ybb, false));
             prims.push(p);
@@ -1230,7 +1429,6 @@ impl Figure {
         x_top
     }
 }
-
 
 /// `layout="constrained"` for the figures that use it: one subplot, and
 /// optionally a colour bar beside it from `fig.colorbar(im, ax=ax,
@@ -1491,7 +1689,13 @@ fn resample_rows(im: &Image, cols: &[Vec<(usize, f32)>], rows: &[Vec<(usize, f32
             if xa == n {
                 xa = n - 1.0;
             }
-            let i = if xa < 0.0 { 0 } else if xa >= n { lut.len() - 1 } else { xa as usize };
+            let i = if xa < 0.0 {
+                0
+            } else if xa >= n {
+                lut.len() - 1
+            } else {
+                xa as usize
+            };
             let c = lut[i];
             [c[0] as f32, c[1] as f32, c[2] as f32, c[3] as f32]
         })
@@ -1567,7 +1771,12 @@ pub fn image_placement(dest: [f64; 4], clip: [f64; 4]) -> Option<([i64; 4], [f64
 /// the filter samples. `dest` is the extent's rectangle, `clip` the axes
 /// box, `log_y` the extent's `(bottom, top)`. Returns the pixel rectangle
 /// and its RGBA8 rows.
-pub fn rasterize_image_mesh(im: &Image, dest: [f64; 4], clip: [f64; 4], log_y: (f64, f64)) -> Option<([i64; 4], usize, usize, Vec<u8>)> {
+pub fn rasterize_image_mesh(
+    im: &Image,
+    dest: [f64; 4],
+    clip: [f64; 4],
+    log_y: (f64, f64),
+) -> Option<([i64; 4], usize, usize, Vec<u8>)> {
     let (cx0, cx1) = (dest[0].max(clip[0]), dest[2].min(clip[2]));
     let (cy0, cy1) = (dest[1].max(clip[1]), dest[3].min(clip[3]));
     let (ow, oh) = ((cx1 - cx0).max(0.0) as usize, (cy1 - cy0).max(0.0) as usize);
@@ -1620,7 +1829,12 @@ pub fn rasterize_image_mesh(im: &Image, dest: [f64; 4], clip: [f64; 4], log_y: (
 /// An image primitive's device pixels: where they go and their RGBA8 rows,
 /// through [`image_placement`] and [`rasterize_image`], or on a log axis
 /// [`rasterize_image_mesh`]. `dest` and `clip` are device rectangles.
-pub fn image_pixels(im: &Image, dest: [f64; 4], clip: [f64; 4], log_y: Option<(f64, f64)>) -> Option<([i64; 4], usize, usize, Vec<u8>)> {
+pub fn image_pixels(
+    im: &Image,
+    dest: [f64; 4],
+    clip: [f64; 4],
+    log_y: Option<(f64, f64)>,
+) -> Option<([i64; 4], usize, usize, Vec<u8>)> {
     if let Some(log) = log_y {
         return rasterize_image_mesh(im, dest, clip, log);
     }
@@ -1681,14 +1895,32 @@ mod tests {
     #[test]
     fn ylabel_sits_left_of_tick_labels() {
         let (main, _, _) = subplot_with_colorbar();
-        let mut ax = Axes { xlim: (0.0, 1797.0), ylim: (10.0, 110.0), ..Axes::new(main, AxisSpec::origin(BLACK), AxisSpec::origin(BLACK)) };
+        let mut ax = Axes {
+            xlim: (0.0, 1797.0),
+            ylim: (10.0, 110.0),
+            ..Axes::new(main, AxisSpec::origin(BLACK), AxisSpec::origin(BLACK))
+        };
         ax.y.label = Some(Label::new("Frequency [MHz]", 12.0, BLACK));
-        let fig = Figure { width: 874.0, height: 480.0, dpi: 100.0, facecolor: WHITE, axes: vec![ax], texts: Vec::new(), constrained: None };
+        let fig = Figure {
+            width: 874.0,
+            height: 480.0,
+            dpi: 100.0,
+            facecolor: WHITE,
+            axes: vec![ax],
+            texts: Vec::new(),
+            constrained: None,
+        };
         let list = fig.layout(&Fixed);
         let texts: Vec<_> = list
             .prims
             .iter()
-            .filter_map(|p| if let Prim::Text { pos, text, rotation, .. } = p { Some((pos.0, text.clone(), *rotation)) } else { None })
+            .filter_map(|p| {
+                if let Prim::Text { pos, text, rotation, .. } = p {
+                    Some((pos.0, text.clone(), *rotation))
+                } else {
+                    None
+                }
+            })
             .collect();
         let label_x = texts.iter().find(|t| t.1 == "Frequency [MHz]").unwrap().0;
         let tick_x = texts.iter().filter(|t| t.2 == 0.0 && t.1 == "100").map(|t| t.0).next().unwrap();

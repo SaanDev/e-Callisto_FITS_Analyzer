@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 
 use callisto_core::analysis::annotations::new_id;
 use callisto_core::project::{
-    Npy, PART_KEYS, ProjectError, STORAGE_EMBED, STORAGE_LINK, project_parts, project_storage, read_project, write_project,
+    Npy, PART_KEYS, ProjectError, STORAGE_EMBED, STORAGE_LINK, project_parts, project_storage, read_project,
+    write_project,
 };
 use callisto_core::pyjson::{Json, Object};
 
@@ -75,7 +76,15 @@ pub struct ProjectState {
 
 impl ProjectState {
     pub fn new(cache_root: PathBuf) -> Self {
-        Self { path: None, storage: STORAGE_LINK, project_id: new_id(), passthrough: PassThrough::default(), clean_at: 0, cache_root, last_meta: Object::new() }
+        Self {
+            path: None,
+            storage: STORAGE_LINK,
+            project_id: new_id(),
+            passthrough: PassThrough::default(),
+            clean_at: 0,
+            cache_root,
+            last_meta: Object::new(),
+        }
     }
 
     /// `ECALLISTO_PROJECTS_CACHE`, else `<data dir>/projects`.
@@ -117,11 +126,16 @@ impl ProjectState {
     }
 
     /// `ProjectCoordinator.capture`: `(meta, arrays, files)`; files only when embedding.
-    pub fn capture(&self, s: &Session, storage: &'static str) -> (Object, BTreeMap<String, Npy>, BTreeMap<String, PathBuf>) {
+    pub fn capture(
+        &self,
+        s: &Session,
+        storage: &'static str,
+    ) -> (Object, BTreeMap<String, Npy>, BTreeMap<String, PathBuf>) {
         let mut meta = Object::new();
         let mut arrays = BTreeMap::new();
         let mut files = BTreeMap::new();
-        let mut flags: BTreeMap<String, Json> = PART_KEYS.iter().map(|k| ((*k).to_owned(), Json::Bool(false))).collect();
+        let mut flags: BTreeMap<String, Json> =
+            PART_KEYS.iter().map(|k| ((*k).to_owned(), Json::Bool(false))).collect();
         if let Some((radio, radio_arrays)) = s.project_capture() {
             meta.extend(radio);
             arrays.extend(radio_arrays);
@@ -144,7 +158,13 @@ impl ProjectState {
 
     /// `extract_dir_for`: a clean folder named after the project's id.
     fn extract_dir_for(&self, meta: &Object) -> PathBuf {
-        let id: String = meta.get("project_id").map(Json::py_str).unwrap_or_default().chars().filter(|c| c.is_alphanumeric()).collect();
+        let id: String = meta
+            .get("project_id")
+            .map(Json::py_str)
+            .unwrap_or_default()
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect();
         let target = self.cache_root.join(if id.is_empty() { "legacy".to_owned() } else { id });
         if target.exists() {
             let _ = std::fs::remove_dir_all(&target);
@@ -267,4 +287,3 @@ pub fn open_error_text(e: &ProjectError) -> String {
         other => format!("Could not open project:\n{other}"),
     }
 }
-

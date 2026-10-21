@@ -12,12 +12,12 @@ use callisto_core::analysis::measure::{Measurement, two_point};
 use callisto_core::image::RgbaImage;
 use callisto_core::mpl::figures::{GridOptions, comparison_grid_figure};
 use callisto_core::radio::array::Array2;
+use callisto_core::radio::combine::CombineType;
 use callisto_core::radio::comparison::{
     Alignment, ColorScale, ComparisonDataset, DEFAULT_DB_SCALE, NoiseMethod, NoiseSettings, PanelOptions, PanelPayload,
     apply_noise, clip_in_place, comparison_colormap, datasets_from_paths, default_grid_title, load_comparison_dataset,
     panel_payloads, seconds_of_day_range_to_unwrapped, shared_extent,
 };
-use callisto_core::radio::combine::CombineType;
 use callisto_core::view_config::{DisplayRange, ViewConfig, VisualConfig};
 use egui::{Color32, CornerRadius, Id, Pos2, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 
@@ -31,11 +31,28 @@ use crate::ui::qlayout::{BoxLayout, Container, Geometry, IRect, Item, Layout, Po
 use crate::ui::{qt, widgets};
 
 /// `_COLORMAP_NAMES`.
-pub const COLORMAPS: [&str; 12] = ["Custom", "viridis", "plasma", "inferno", "magma", "cividis", "turbo", "RdYlBu", "jet", "cubehelix", "gray", "bone_r"];
-const ALIGNMENTS: [(&str, Alignment); 2] = [("UT clock", Alignment::Ut), ("Seconds from file start", Alignment::Seconds)];
+pub const COLORMAPS: [&str; 12] = [
+    "Custom",
+    "viridis",
+    "plasma",
+    "inferno",
+    "magma",
+    "cividis",
+    "turbo",
+    "RdYlBu",
+    "jet",
+    "cubehelix",
+    "gray",
+    "bone_r",
+];
+const ALIGNMENTS: [(&str, Alignment); 2] =
+    [("UT clock", Alignment::Ut), ("Seconds from file start", Alignment::Seconds)];
 const UNITS: [&str; 2] = ["Digits", "dB"];
-const SCALES: [(&str, ColorScale); 3] =
-    [("Shared scale", ColorScale::Shared), ("Per-station auto scale", ColorScale::PerStation), ("Manual scale", ColorScale::Manual)];
+const SCALES: [(&str, ColorScale); 3] = [
+    ("Shared scale", ColorScale::Shared),
+    ("Per-station auto scale", ColorScale::PerStation),
+    ("Manual scale", ColorScale::Manual),
+];
 const METHODS: [(&str, NoiseMethod); 5] = [
     ("None", NoiseMethod::None),
     ("Mean background", NoiseMethod::Mean),
@@ -263,7 +280,11 @@ impl ComparisonWindow {
         self.schedule_redraw(false);
         if !errors.is_empty() {
             errors.truncate(8);
-            self.notice(NoticeKind::Warning, "Add FITS Files", format!("Some files could not be loaded:\n{}", errors.join("\n")));
+            self.notice(
+                NoticeKind::Warning,
+                "Add FITS Files",
+                format!("Some files could not be loaded:\n{}", errors.join("\n")),
+            );
         } else if added > 0 {
             self.status = format!("Added {added} FITS file(s).");
         }
@@ -493,7 +514,12 @@ impl ComparisonWindow {
             }
         }
         let current = self.settings_for(key.as_ref());
-        self.set_target_settings(NoiseSettings { method: METHODS[self.method_index()].1, clip_low: low, clip_high: high, log_scale: current.log_scale });
+        self.set_target_settings(NoiseSettings {
+            method: METHODS[self.method_index()].1,
+            clip_low: low,
+            clip_high: high,
+            log_scale: current.log_scale,
+        });
         self.redraw_for_target(key, ctx);
     }
 
@@ -523,7 +549,8 @@ impl ComparisonWindow {
         if let Some(b) = self.noise_base.get(&key) {
             return b.clone();
         }
-        let base = Arc::new(apply_noise(&d.data, NoiseSettings { method, ..Default::default() }, d.gap_row_mask.as_deref()));
+        let base =
+            Arc::new(apply_noise(&d.data, NoiseSettings { method, ..Default::default() }, d.gap_row_mask.as_deref()));
         self.noise_base.insert(key, base.clone());
         base
     }
@@ -545,7 +572,12 @@ impl ComparisonWindow {
     // ----------------------------------------------------------- render
 
     fn panel_options(&self, alignment: Alignment) -> PanelOptions {
-        PanelOptions { alignment, use_db: self.units == 1, color_scale: SCALES[self.scale].1, manual_limits: self.manual_limits() }
+        PanelOptions {
+            alignment,
+            use_db: self.units == 1,
+            color_scale: SCALES[self.scale].1,
+            manual_limits: self.manual_limits(),
+        }
     }
 
     /// `_manual_limits`.
@@ -618,7 +650,8 @@ impl ComparisonWindow {
         let settings = self.effective_settings();
         let processed: Vec<Arc<Array2>> = display.iter().zip(&settings).map(|(d, s)| self.processed(d, *s)).collect();
         let cold: Vec<f64> = settings.iter().map(|s| s.clip_low).collect();
-        let (payloads, effective, warnings) = panel_payloads(&display, &processed, &cold, &self.panel_options(requested));
+        let (payloads, effective, warnings) =
+            panel_payloads(&display, &processed, &cold, &self.panel_options(requested));
         let mut all_warnings = warnings;
         for p in &payloads {
             all_warnings.extend(p.dataset.warnings.iter().cloned());
@@ -647,7 +680,8 @@ impl ComparisonWindow {
         self.render_measurement_overlays();
         self.last_warnings = all_warnings;
 
-        let mut parts = vec![format!("{} rendered panel(s) from {} selected file(s).", self.display.len(), self.datasets.len())];
+        let mut parts =
+            vec![format!("{} rendered panel(s) from {} selected file(s).", self.display.len(), self.datasets.len())];
         if let Some(mode) = &self.combined_mode {
             parts.push(format!("Combined {} view.", if mode == "time_frequency" { "time + frequency" } else { mode }));
         }
@@ -666,7 +700,8 @@ impl ComparisonWindow {
     }
 
     fn view(&self) -> Option<View> {
-        self.display_range.map(|r| View { xlim: (r.time_start_s, r.time_stop_s), ylim: (r.freq_min_mhz, r.freq_max_mhz) })
+        self.display_range
+            .map(|r| View { xlim: (r.time_start_s, r.time_stop_s), ylim: (r.freq_min_mhz, r.freq_max_mhz) })
     }
 
     /// `widget.update_image(...)` and `set_time_mode` for panel `i`.
@@ -711,11 +746,18 @@ impl ComparisonWindow {
         let Some(dataset) = self.display.iter().find(|d| panel_key(d) == key).cloned() else { return false };
         let s = self.settings_for(Some(&key));
         let processed = self.processed(&dataset, s);
-        let (payloads, _, _) = panel_payloads(std::slice::from_ref(&dataset), &[processed], &[s.clip_low], &self.panel_options(self.effective_alignment));
+        let (payloads, _, _) = panel_payloads(
+            std::slice::from_ref(&dataset),
+            &[processed],
+            &[s.clip_low],
+            &self.panel_options(self.effective_alignment),
+        );
         let Some(payload) = payloads.into_iter().next() else { return false };
         self.panels[index].payload = payload;
         self.update_canvas(index);
-        if self.effective_settings().iter().any(|s| s.method != NoiseMethod::None) && !self.status.contains("Noise reduction active.") {
+        if self.effective_settings().iter().any(|s| s.method != NoiseMethod::None)
+            && !self.status.contains("Noise reduction active.")
+        {
             self.status = format!("{} Noise reduction active.", self.status).trim().to_owned();
         }
         true
@@ -890,7 +932,8 @@ impl ComparisonWindow {
             if self.alignment() == Alignment::Seconds {
                 self.display_range = Some(r);
             } else if show_status {
-                self.status = "View config visual settings loaded. Set UT bounds from the comparison range dialog.".into();
+                self.status =
+                    "View config visual settings loaded. Set UT bounds from the comparison range dialog.".into();
             }
         }
         self.schedule_redraw(false);
@@ -920,7 +963,11 @@ impl ComparisonWindow {
     /// `open_display_range_dialog`.
     fn open_range_dialog(&mut self) {
         let Some((xlim, ylim, effective, warnings)) = shared_extent(&self.display, self.alignment()) else {
-            return self.notice(NoticeKind::Information, "Set Comparison Range", "Add at least one FITS file before setting the range.");
+            return self.notice(
+                NoticeKind::Information,
+                "Set Comparison Range",
+                "Add at least one FITS file before setting the range.",
+            );
         };
         if !warnings.is_empty() && effective == Alignment::Seconds && self.alignment() == Alignment::Ut {
             self.set_alignment(Alignment::Seconds);
@@ -930,18 +977,25 @@ impl ComparisonWindow {
             None => [xlim.0, xlim.1, ylim.0, ylim.1],
         };
         let ut = effective == Alignment::Ut;
-        let req = DisplayRangeRequest { full: View { xlim, ylim }, initial, ut_start_sec: ut.then_some(0.0), ut_mode: ut };
+        let req =
+            DisplayRangeRequest { full: View { xlim, ylim }, initial, ut_start_sec: ut.then_some(0.0), ut_mode: ut };
         self.range_dialog = Some((DisplayRangeDialog::new(req), xlim));
     }
 
     fn finish_range_dialog(&mut self, result: DisplayRangeResult, full_x: (f64, f64)) {
         let (time, freq) = match result {
-            DisplayRangeResult::Ut { seconds_of_day: (a, b), freq } => match seconds_of_day_range_to_unwrapped(a as f64, b as f64, full_x) {
-                Some(t) => (t, freq),
-                None => {
-                    return self.notice(NoticeKind::Warning, "Set Comparison Range", "Enter a valid UT start and stop time for this comparison.");
+            DisplayRangeResult::Ut { seconds_of_day: (a, b), freq } => {
+                match seconds_of_day_range_to_unwrapped(a as f64, b as f64, full_x) {
+                    Some(t) => (t, freq),
+                    None => {
+                        return self.notice(
+                            NoticeKind::Warning,
+                            "Set Comparison Range",
+                            "Enter a valid UT start and stop time for this comparison.",
+                        );
+                    }
                 }
-            },
+            }
             DisplayRangeResult::Seconds { time, freq } => (time, freq),
         };
         match DisplayRange::normalized(time.0, time.1, freq.0, freq.1) {
@@ -966,7 +1020,11 @@ impl ComparisonWindow {
     /// `export_comparison`.
     fn export(&mut self) {
         if self.datasets.len() < 2 {
-            return self.notice(NoticeKind::Information, "Export Comparison", "Add at least two FITS files before exporting.");
+            return self.notice(
+                NoticeKind::Information,
+                "Export Comparison",
+                "Add at least two FITS files before exporting.",
+            );
         }
         let mut initial = self.export_options.clone();
         if initial.title == DEFAULT_TITLE {
@@ -1031,8 +1089,16 @@ impl ComparisonWindow {
 
     fn export_finished(&mut self, path: &Path, result: Result<(), String>) {
         match result {
-            Ok(()) => self.notice(NoticeKind::Information, "Export Comparison", format!("Comparison image saved:\n{}", path.display())),
-            Err(e) => self.notice(NoticeKind::Critical, "Export Comparison Failed", format!("Could not export comparison image:\n{e}")),
+            Ok(()) => self.notice(
+                NoticeKind::Information,
+                "Export Comparison",
+                format!("Comparison image saved:\n{}", path.display()),
+            ),
+            Err(e) => self.notice(
+                NoticeKind::Critical,
+                "Export Comparison Failed",
+                format!("Could not export comparison image:\n{e}"),
+            ),
         }
     }
 
@@ -1041,7 +1107,15 @@ impl ComparisonWindow {
         if self.panels.is_empty() {
             return self.export_finished(&path, Err("Could not capture the visible comparison plot.".into()));
         }
-        self.visible_capture = Some(VisibleCapture { path, ext, next: 0, scrolled: false, asked: false, images: Vec::new(), scroll_before: self.plot_scroll });
+        self.visible_capture = Some(VisibleCapture {
+            path,
+            ext,
+            next: 0,
+            scrolled: false,
+            asked: false,
+            images: Vec::new(),
+            scroll_before: self.plot_scroll,
+        });
     }
 
     pub fn visible_capture_running(&self) -> bool {
@@ -1148,14 +1222,22 @@ impl ComparisonWindow {
     fn left_layout(ui: &Ui) -> Layout {
         BoxLayout::v([9; 4], 10)
             .add(group("files_group", Self::files_layout(ui)))
-            .add_stretched(Item::Widget(WidgetSpec::new("controls", Size::new(508, 384), Policy::Expanding, Policy::Expanding).min_hint(Size::new(54, 54))), 1)
+            .add_stretched(
+                Item::Widget(
+                    WidgetSpec::new("controls", Size::new(508, 384), Policy::Expanding, Policy::Expanding)
+                        .min_hint(Size::new(54, 54)),
+                ),
+                1,
+            )
             .into()
     }
 
     fn controls_layout(&self, ui: &Ui) -> Controls {
         let label = |id: &'static str, text: &str| qt::label_spec(ui, id, text);
         let combo = |id: &'static str, items: &[&str]| qt::combo_spec(ui, id, items);
-        let view = BoxLayout::v([9; 4], 6).widget(label("align_label", "Time alignment")).widget(combo("align", &ALIGNMENTS.map(|a| a.0)));
+        let view = BoxLayout::v([9; 4], 6)
+            .widget(label("align_label", "Time alignment"))
+            .widget(combo("align", &ALIGNMENTS.map(|a| a.0)));
         let manual = BoxLayout::h([0; 4], 6)
             .widget(label("low_label", "Low"))
             .widget(qt::spin_spec(ui, "manual_low", "-1000000000.000"))
@@ -1177,10 +1259,21 @@ impl ComparisonWindow {
             BoxLayout::v([0; 4], 0).widget(label(a, text)).widget(label(b, "0.00 dB").hidden(!use_db)).into_item()
         };
         let s = self.settings_for(self.target_key().as_ref());
-        let low_row = BoxLayout::h([0; 4], 6).widget(label("low_thr_label", "Lower threshold")).add(value_col("low_value", "low_sub", &format!("{:.2} Digits", s.clip_low)));
-        let high_row = BoxLayout::h([0; 4], 6).widget(label("high_thr_label", "Upper threshold")).add(value_col("high_value", "high_sub", &format!("{:.2} Digits", s.clip_high)));
-        let slider = |id: &'static str| WidgetSpec::new(id, Size::new(84, 15), Policy::Expanding, Policy::Fixed).min_hint(Size::new(15, 15));
-        let check_w = widgets::text_width(ui, "Logarithmic Threshold Scale", qt::FONT_PX, Weight::Regular).ceil() as i32 + 24;
+        let low_row = BoxLayout::h([0; 4], 6).widget(label("low_thr_label", "Lower threshold")).add(value_col(
+            "low_value",
+            "low_sub",
+            &format!("{:.2} Digits", s.clip_low),
+        ));
+        let high_row = BoxLayout::h([0; 4], 6).widget(label("high_thr_label", "Upper threshold")).add(value_col(
+            "high_value",
+            "high_sub",
+            &format!("{:.2} Digits", s.clip_high),
+        ));
+        let slider = |id: &'static str| {
+            WidgetSpec::new(id, Size::new(84, 15), Policy::Expanding, Policy::Fixed).min_hint(Size::new(15, 15))
+        };
+        let check_w =
+            widgets::text_width(ui, "Logarithmic Threshold Scale", qt::FONT_PX, Weight::Regular).ceil() as i32 + 24;
         let clip = BoxLayout::v([0; 4], 6)
             .add(low_row.into_item())
             .widget(slider("low_slider"))
@@ -1188,7 +1281,8 @@ impl ComparisonWindow {
             .widget(slider("high_slider"))
             .widget(WidgetSpec::new("log_scale", Size::new(check_w, 17), Policy::Minimum, Policy::Fixed));
         let clip_panel = Item::Container(Container {
-            spec: WidgetSpec::new("clip_panel", Size::new(0, 0), Policy::Preferred, Policy::Preferred).hidden(s.method != NoiseMethod::Clip),
+            spec: WidgetSpec::new("clip_panel", Size::new(0, 0), Policy::Preferred, Policy::Preferred)
+                .hidden(s.method != NoiseMethod::Clip),
             margins: [0; 4],
             layout: Box::new(clip.into()),
         });
@@ -1200,14 +1294,28 @@ impl ComparisonWindow {
             .widget(label("ncmap_label", "Colormap"))
             .widget(combo("ncmap", &cmaps))
             .add(clip_panel);
-        let readout = BoxLayout::v([10; 4], 6)
-            .widget(qt::wrap_label_spec(ui, "readout_text", &self.readout.text, false))
-            .add(BoxLayout::h([0; 4], 6).widget(qt::button_spec(ui, "copy", "Copy", false)).widget(qt::button_spec(ui, "readout_clear", "Clear", false)).into_item());
+        let readout =
+            BoxLayout::v([10; 4], 6).widget(qt::wrap_label_spec(ui, "readout_text", &self.readout.text, false)).add(
+                BoxLayout::h([0; 4], 6)
+                    .widget(qt::button_spec(ui, "copy", "Copy", false))
+                    .widget(qt::button_spec(ui, "readout_clear", "Clear", false))
+                    .into_item(),
+            );
         let measurement = BoxLayout::v([9; 4], 6)
-            .add(BoxLayout::h([0; 4], 6).widget(qt::button_spec(ui, "ruler", "Start Ruler", false)).widget(qt::button_spec(ui, "ruler_clear", "Clear", false)).into_item())
+            .add(
+                BoxLayout::h([0; 4], 6)
+                    .widget(qt::button_spec(ui, "ruler", "Start Ruler", false))
+                    .widget(qt::button_spec(ui, "ruler_clear", "Clear", false))
+                    .into_item(),
+            )
             .add(group("readout_group", readout.into()));
         let actions = BoxLayout::v([9; 4], 6)
-            .add(BoxLayout::h([0; 4], 6).widget(qt::button_spec(ui, "set_range", "Set Range...", false)).widget(qt::button_spec(ui, "reset_range", "Reset Range", false)).into_item())
+            .add(
+                BoxLayout::h([0; 4], 6)
+                    .widget(qt::button_spec(ui, "set_range", "Set Range...", false))
+                    .widget(qt::button_spec(ui, "reset_range", "Reset Range", false))
+                    .into_item(),
+            )
             .widget(qt::button_spec(ui, "load_config", "Load View Config...", false))
             .widget(qt::button_spec(ui, "export", "Export...", false))
             .widget(qt::wrap_label_spec(ui, "status", &self.status, false));
@@ -1298,7 +1406,10 @@ impl ComparisonWindow {
         if qt::button(ui, r("add"), Id::new("cmp_add"), "Add Files...", false, true, p).clicked()
             && let Some(paths) = rfd::FileDialog::new()
                 .set_title("Add FITS Files")
-                .add_filter("FITS files (*.fit *.fits *.fit.gz *.fits.gz *.FIT *.FITS *.FIT.gz *.FITS.gz)", &["fit", "fits", "gz", "FIT", "FITS"])
+                .add_filter(
+                    "FITS files (*.fit *.fits *.fit.gz *.fits.gz *.FIT *.FITS *.FIT.gz *.FITS.gz)",
+                    &["fit", "fits", "gz", "FIT", "FITS"],
+                )
                 .pick_files()
         {
             let paths: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
@@ -1323,9 +1434,12 @@ impl ComparisonWindow {
         }
         let focused = ui.memory(|m| m.has_focus(id));
         qt::qt_box(ui, rect, 10.0, p.input_bg, if focused { p.accent } else { p.border });
-        let rows: Vec<String> = self.datasets.iter().map(|d| format!("{}  -  {}", d.label, file_name(&d.path))).collect();
+        let rows: Vec<String> =
+            self.datasets.iter().map(|d| format!("{}  -  {}", d.label, file_name(&d.path))).collect();
         let mut vp = Rect::from_min_max(rect.min + vec2(9.0, 7.0), rect.max - vec2(9.0, 7.0));
-        let content_w = rows.iter().map(|t| widgets::text_width(ui, t, qt::FONT_PX, Weight::Regular)).fold(0.0, f32::max).ceil() + 2.0 * ITEM_MARGIN;
+        let content_w =
+            rows.iter().map(|t| widgets::text_width(ui, t, qt::FONT_PX, Weight::Regular)).fold(0.0, f32::max).ceil()
+                + 2.0 * ITEM_MARGIN;
         let mut hbar = content_w > vp.width();
         if hbar {
             vp.max.y -= BAR;
@@ -1349,7 +1463,9 @@ impl ComparisonWindow {
                 let row = self.list_first + ((pos.y - vp.top()) / ROW_H).floor() as usize;
                 let mods = ui.input(|i| i.modifiers);
                 if row < rows.len() {
-                    if mods.shift && let Some(a) = self.anchor {
+                    if mods.shift
+                        && let Some(a) = self.anchor
+                    {
                         self.selected = (a.min(row)..=a.max(row)).collect();
                     } else if mods.command {
                         if !self.selected.remove(&row) {
@@ -1375,11 +1491,27 @@ impl ComparisonWindow {
                 painter.rect_filled(row, CornerRadius::ZERO, p.accent);
             }
             let color = if selected { Color32::WHITE } else { p.text };
-            widgets::text_left_clipped(ui, vp, vp.left() + ITEM_MARGIN - self.list_x, row.center().y, text, qt::FONT_PX, Weight::Regular, color);
+            widgets::text_left_clipped(
+                ui,
+                vp,
+                vp.left() + ITEM_MARGIN - self.list_x,
+                row.center().y,
+                text,
+                qt::FONT_PX,
+                Weight::Regular,
+                color,
+            );
             if let Some(tip) = self.datasets.get(k).filter(|d| !d.warnings.is_empty()).map(|d| d.warnings.join("\n"))
                 && ui.rect_contains_pointer(row)
             {
-                egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), id.with(("tip", k)), egui::PopupAnchor::Pointer).gap(12.0).show(|ui| {
+                egui::Tooltip::always_open(
+                    ui.ctx().clone(),
+                    ui.layer_id(),
+                    id.with(("tip", k)),
+                    egui::PopupAnchor::Pointer,
+                )
+                .gap(12.0)
+                .show(|ui| {
                     ui.label(tip);
                 });
             }
@@ -1387,13 +1519,22 @@ impl ComparisonWindow {
         if hbar {
             let bar = Rect::from_min_max(pos2(vp.left(), vp.bottom()), pos2(vp.right(), vp.bottom() + BAR));
             let mut x = self.list_x;
-            scrollbar(ui, bar, id.with("hbar"), false, &mut x, content_w, vp.width(), p);
+            qt::scroll_bar(ui, bar, id.with("hbar"), false, &mut x, content_w, vp.width(), p);
             self.list_x = x;
         }
         if vbar {
             let bar = Rect::from_min_max(pos2(vp.right(), vp.top()), pos2(vp.right() + BAR, vp.bottom()));
             let mut y = self.list_first as f32 * ROW_H;
-            scrollbar(ui, bar, id.with("vbar"), true, &mut y, rows.len() as f32 * ROW_H, per_page as f32 * ROW_H, p);
+            qt::scroll_bar(
+                ui,
+                bar,
+                id.with("vbar"),
+                true,
+                &mut y,
+                rows.len() as f32 * ROW_H,
+                per_page as f32 * ROW_H,
+                p,
+            );
             self.list_first = (y / ROW_H).round() as usize;
         }
     }
@@ -1447,14 +1588,14 @@ impl ComparisonWindow {
             ui.painter().rect_filled(Rect::from_min_max(pos2(vp.right(), vp.bottom()), area.max), 0.0, p.qt.window);
         }
         let (mut sx, mut sy) = self.controls_scroll;
-        wheel_scroll(ui, area, &mut sy, (content_h - vp.height()).max(0.0));
+        qt::wheel_scroll(ui, area, &mut sy, (content_h - vp.height()).max(0.0));
         if vbar {
             let bar = Rect::from_min_max(pos2(vp.right(), vp.top()), pos2(area.right(), vp.bottom()));
-            scrollbar(ui, bar, Id::new("cmp_controls_vbar"), true, &mut sy, content_h, vp.height(), p);
+            qt::scroll_bar(ui, bar, Id::new("cmp_controls_vbar"), true, &mut sy, content_h, vp.height(), p);
         }
         if hbar {
             let bar = Rect::from_min_max(pos2(vp.left(), vp.bottom()), pos2(vp.right(), area.bottom()));
-            scrollbar(ui, bar, Id::new("cmp_controls_hbar"), false, &mut sx, content_w, vp.width(), p);
+            qt::scroll_bar(ui, bar, Id::new("cmp_controls_hbar"), false, &mut sx, content_w, vp.width(), p);
         }
         sx = sx.clamp(0.0, (content_w - vp.width()).max(0.0));
         sy = sy.clamp(0.0, (content_h - vp.height()).max(0.0));
@@ -1471,15 +1612,39 @@ impl ComparisonWindow {
         let r = |id: &str| g.rect(id).to_egui(o);
         let has = !self.datasets.is_empty();
         let text = p.text;
-        for (id, title) in [("view_group", "View"), ("appearance_group", "Appearance"), ("noise_group", "Noise Reduction"), ("measure_group", "Measurement"), ("actions_group", "Actions")] {
+        for (id, title) in [
+            ("view_group", "View"),
+            ("appearance_group", "Appearance"),
+            ("noise_group", "Noise Reduction"),
+            ("measure_group", "Measurement"),
+            ("actions_group", "Actions"),
+        ] {
             qt::group_box(ui, r(id), title, p);
         }
-        for (id, t) in [("align_label", "Time alignment"), ("units_label", "Units"), ("cmap_label", "Colormap"), ("scale_label", "Color scale"), ("low_label", "Low"), ("high_label", "High"), ("target_label", "Target"), ("method_label", "Method"), ("ncmap_label", "Colormap")] {
+        for (id, t) in [
+            ("align_label", "Time alignment"),
+            ("units_label", "Units"),
+            ("cmap_label", "Colormap"),
+            ("scale_label", "Color scale"),
+            ("low_label", "Low"),
+            ("high_label", "High"),
+            ("target_label", "Target"),
+            ("method_label", "Method"),
+            ("ncmap_label", "Colormap"),
+        ] {
             qt::label(ui, r(id), t, text);
         }
         let items = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-        if let Some(i) = qt::combo(ui, r("align"), Id::new("cmp_align"), &items(&ALIGNMENTS.map(|a| a.0)), Some(self.alignment), "", true, p)
-            && i != self.alignment
+        if let Some(i) = qt::combo(
+            ui,
+            r("align"),
+            Id::new("cmp_align"),
+            &items(&ALIGNMENTS.map(|a| a.0)),
+            Some(self.alignment),
+            "",
+            true,
+            p,
+        ) && i != self.alignment
         {
             // `_on_alignment_changed`.
             self.alignment = i;
@@ -1507,7 +1672,8 @@ impl ComparisonWindow {
             self.schedule_redraw(true);
             self.render_now(ctx);
         }
-        if let Some(i) = qt::combo(ui, r("scale"), Id::new("cmp_scale"), &items(&SCALES.map(|s| s.0)), Some(self.scale), "", true, p)
+        if let Some(i) =
+            qt::combo(ui, r("scale"), Id::new("cmp_scale"), &items(&SCALES.map(|s| s.0)), Some(self.scale), "", true, p)
             && i != self.scale
         {
             self.scale = i;
@@ -1515,23 +1681,49 @@ impl ComparisonWindow {
         }
         let manual = SCALES[self.scale].1 == ColorScale::Manual;
         let range = (-1_000_000_000.0, 1_000_000_000.0);
-        if qt::double_spin_box(ui, r("manual_low"), Id::new("cmp_manual_low"), &mut self.manual_low, range, 1.0, 3, "", false, manual, p) {
+        if qt::double_spin_box(
+            ui,
+            r("manual_low"),
+            Id::new("cmp_manual_low"),
+            &mut self.manual_low,
+            range,
+            1.0,
+            3,
+            "",
+            false,
+            manual,
+            p,
+        ) {
             self.schedule_redraw(false);
         }
-        if qt::double_spin_box(ui, r("manual_high"), Id::new("cmp_manual_high"), &mut self.manual_high, range, 1.0, 3, "", false, manual, p) {
+        if qt::double_spin_box(
+            ui,
+            r("manual_high"),
+            Id::new("cmp_manual_high"),
+            &mut self.manual_high,
+            range,
+            1.0,
+            3,
+            "",
+            false,
+            manual,
+            p,
+        ) {
             self.schedule_redraw(false);
         }
 
         // Noise reduction.
         let targets = self.target_items();
-        if let Some(i) = qt::combo(ui, r("target"), Id::new("cmp_target"), &targets, Some(self.noise_target), "", has, p)
+        if let Some(i) =
+            qt::combo(ui, r("target"), Id::new("cmp_target"), &targets, Some(self.noise_target), "", has, p)
             && i != self.noise_target
         {
             self.noise_target = i;
             self.sync_noise_controls();
         }
         let method = self.method_index();
-        if let Some(i) = qt::combo(ui, r("method"), Id::new("cmp_method"), &items(&METHODS.map(|m| m.0)), Some(method), "", has, p)
+        if let Some(i) =
+            qt::combo(ui, r("method"), Id::new("cmp_method"), &items(&METHODS.map(|m| m.0)), Some(method), "", has, p)
             && i != method
         {
             self.on_method(i, ctx);
@@ -1555,16 +1747,28 @@ impl ComparisonWindow {
                 qt::label(ui, r("low_sub"), &format!("{:.2} dB", 0.0), text);
                 qt::label(ui, r("high_sub"), &format!("{:.2} dB", (s.clip_high - s.clip_low) * DEFAULT_DB_SCALE), text);
             }
-            if let Some(v) = app_slider(ui, r("low_slider"), Id::new("cmp_low_slider"), self.low_pos, SLIDER_STEPS, clip_on, p) {
+            if let Some(v) =
+                app_slider(ui, r("low_slider"), Id::new("cmp_low_slider"), self.low_pos, SLIDER_STEPS, clip_on, p)
+            {
                 self.low_pos = v;
                 self.on_slider(true, ctx);
             }
-            if let Some(v) = app_slider(ui, r("high_slider"), Id::new("cmp_high_slider"), self.high_pos, SLIDER_STEPS, clip_on, p) {
+            if let Some(v) =
+                app_slider(ui, r("high_slider"), Id::new("cmp_high_slider"), self.high_pos, SLIDER_STEPS, clip_on, p)
+            {
                 self.high_pos = v;
                 self.on_slider(false, ctx);
             }
             let mut log = s.log_scale;
-            if qt::check_box(ui, r("log_scale"), Id::new("cmp_log_scale"), "Logarithmic Threshold Scale", &mut log, clip_on, p) {
+            if qt::check_box(
+                ui,
+                r("log_scale"),
+                Id::new("cmp_log_scale"),
+                "Logarithmic Threshold Scale",
+                &mut log,
+                clip_on,
+                p,
+            ) {
                 self.on_log_scale(log);
             }
         }
@@ -1582,7 +1786,9 @@ impl ComparisonWindow {
         if qt::button(ui, r("copy"), Id::new("cmp_copy"), "Copy", false, self.readout.copy, p).clicked() {
             ui.ctx().copy_text(self.readout.text.clone());
         }
-        if qt::button(ui, r("readout_clear"), Id::new("cmp_readout_clear"), "Clear", false, self.readout.clear, p).clicked() {
+        if qt::button(ui, r("readout_clear"), Id::new("cmp_readout_clear"), "Clear", false, self.readout.clear, p)
+            .clicked()
+        {
             self.clear_measurements(true);
         }
 
@@ -1590,14 +1796,26 @@ impl ComparisonWindow {
         if qt::button(ui, r("set_range"), Id::new("cmp_set_range"), "Set Range...", false, has, p).clicked() {
             self.open_range_dialog();
         }
-        if qt::button(ui, r("reset_range"), Id::new("cmp_reset_range"), "Reset Range", false, has && self.display_range.is_some(), p).clicked() {
+        if qt::button(
+            ui,
+            r("reset_range"),
+            Id::new("cmp_reset_range"),
+            "Reset Range",
+            false,
+            has && self.display_range.is_some(),
+            p,
+        )
+        .clicked()
+        {
             self.display_range = None;
             self.schedule_redraw(false);
         }
-        if qt::button(ui, r("load_config"), Id::new("cmp_load_config"), "Load View Config...", false, true, p).clicked() {
+        if qt::button(ui, r("load_config"), Id::new("cmp_load_config"), "Load View Config...", false, true, p).clicked()
+        {
             self.load_view_config();
         }
-        if qt::button(ui, r("export"), Id::new("cmp_export"), "Export...", false, self.datasets.len() >= 2, p).clicked() {
+        if qt::button(ui, r("export"), Id::new("cmp_export"), "Export...", false, self.datasets.len() >= 2, p).clicked()
+        {
             self.export();
         }
         qt::wrapped(ui, r("status"), &self.status.clone(), text, false);
@@ -1622,11 +1840,11 @@ impl ComparisonWindow {
         let content_h = needed.max(vp.height());
         let mut sy = self.plot_scroll;
         if self.visible_capture.is_none() {
-            wheel_scroll(ui, vp, &mut sy, (content_h - vp.height()).max(0.0));
+            qt::wheel_scroll(ui, vp, &mut sy, (content_h - vp.height()).max(0.0));
         }
         if vbar {
             let bar = Rect::from_min_max(pos2(vp.right(), vp.top()), pos2(area.right() - 1.0, vp.bottom()));
-            scrollbar(ui, bar, Id::new("cmp_plot_vbar"), true, &mut sy, content_h, vp.height(), p);
+            qt::scroll_bar(ui, bar, Id::new("cmp_plot_vbar"), true, &mut sy, content_h, vp.height(), p);
         }
         self.plot_scroll = sy.clamp(0.0, (content_h - vp.height()).max(0.0));
         // QBoxLayout: the spare height shared out, the first panels a pixel taller.
@@ -1769,7 +1987,11 @@ impl ComparisonWindow {
 }
 
 fn group(id: &'static str, l: Layout) -> Item {
-    Item::Container(Container { spec: WidgetSpec::new(id, Size::new(0, 0), Policy::Preferred, Policy::Preferred), margins: [13, 27, 13, 13], layout: Box::new(l) })
+    Item::Container(Container {
+        spec: WidgetSpec::new(id, Size::new(0, 0), Policy::Preferred, Policy::Preferred),
+        margins: [13, 27, 13, 13],
+        layout: Box::new(l),
+    })
 }
 
 /// A `QSplitter` handle between side-by-side panes: Fusion's grips down its middle.
@@ -1779,65 +2001,30 @@ fn splitter_handle_vertical(ui: &Ui, rect: Rect, id: Id) -> egui::Response {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
     }
     let ppp = ui.ctx().pixels_per_point();
-    let snap = |r: Rect| Rect::from_min_max(pos2((r.min.x * ppp).round() / ppp, (r.min.y * ppp).round() / ppp), pos2((r.max.x * ppp).round() / ppp, (r.max.y * ppp).round() / ppp));
+    let snap = |r: Rect| {
+        Rect::from_min_max(
+            pos2((r.min.x * ppp).round() / ppp, (r.min.y * ppp).round() / ppp),
+            pos2((r.max.x * ppp).round() / ppp, (r.max.y * ppp).round() / ppp),
+        )
+    };
     let cx = rect.left() + ((rect.width() - 1.0) / 2.0).floor();
     let cy = rect.top() + ((rect.height() - 1.0) / 2.0).floor();
     for i in (-6..12).step_by(3) {
         let at = pos2(cx, cy + i as f32);
-        qt::fill_exact(ui.painter(), snap(Rect::from_min_size(at, vec2(2.0, 2.0))), CornerRadius::ZERO, Color32::from_rgba_unmultiplied(255, 255, 255, 90));
-        qt::fill_exact(ui.painter(), snap(Rect::from_min_size(at, vec2(1.0, 1.0))), CornerRadius::ZERO, Color32::from_rgba_unmultiplied(0, 0, 0, 60));
+        qt::fill_exact(
+            ui.painter(),
+            snap(Rect::from_min_size(at, vec2(2.0, 2.0))),
+            CornerRadius::ZERO,
+            Color32::from_rgba_unmultiplied(255, 255, 255, 90),
+        );
+        qt::fill_exact(
+            ui.painter(),
+            snap(Rect::from_min_size(at, vec2(1.0, 1.0))),
+            CornerRadius::ZERO,
+            Color32::from_rgba_unmultiplied(0, 0, 0, 60),
+        );
     }
     resp
-}
-
-/// The wheel over `area`: three 20 px lines a notch (`QScrollArea`).
-fn wheel_scroll(ui: &Ui, area: Rect, offset: &mut f32, max: f32) {
-    if !ui.rect_contains_pointer(area) || max <= 0.0 {
-        return;
-    }
-    let wheel: f32 = ui.input(|i| {
-        i.events
-            .iter()
-            .filter_map(|e| match e {
-                egui::Event::MouseWheel { unit, delta, .. } => Some(match unit {
-                    egui::MouseWheelUnit::Line => delta.y * 60.0,
-                    egui::MouseWheelUnit::Page => delta.y * area.height(),
-                    egui::MouseWheelUnit::Point => delta.y,
-                }),
-                _ => None,
-            })
-            .sum()
-    });
-    *offset = (*offset - wheel).clamp(0.0, max);
-}
-
-/// The app's `QScrollBar` (10 px, transparent, a rounded handle in the
-/// border colour, 4 px end margins, at least 24 px long).
-#[allow(clippy::too_many_arguments)]
-fn scrollbar(ui: &Ui, bar: Rect, id: Id, vertical: bool, offset: &mut f32, content: f32, view: f32, p: &Palette) {
-    let max = (content - view).max(0.0);
-    if max <= 0.0 {
-        return;
-    }
-    let groove = if vertical {
-        Rect::from_min_max(pos2(bar.left(), bar.top() + 4.0), pos2(bar.right(), bar.bottom() - 4.0))
-    } else {
-        Rect::from_min_max(pos2(bar.left() + 4.0, bar.top()), pos2(bar.right() - 4.0, bar.bottom()))
-    };
-    let track = if vertical { groove.height() } else { groove.width() };
-    let len = (track * view / content).max(24.0).min(track);
-    let start = (track - len) * (*offset / max).clamp(0.0, 1.0);
-    let handle = if vertical {
-        Rect::from_min_size(pos2(groove.left(), groove.top() + start), vec2(groove.width(), len))
-    } else {
-        Rect::from_min_size(pos2(groove.left() + start, groove.top()), vec2(len, groove.height()))
-    };
-    let resp = ui.interact(handle, id, Sense::drag());
-    if resp.dragged() {
-        let d = if vertical { resp.drag_delta().y } else { resp.drag_delta().x };
-        *offset = (*offset + d * max / (track - len).max(1.0)).clamp(0.0, max);
-    }
-    ui.painter().rect_filled(handle, 5.0, p.border);
 }
 
 /// The app's `QSlider`: a 6 px groove in the border colour, a 14 px accent
@@ -1871,7 +2058,15 @@ fn app_slider(ui: &Ui, rect: Rect, id: Id, value: i32, max: i32, enabled: bool, 
         }
     }
     if enabled && resp.hovered() {
-        let wheel: f32 = ui.input(|i| i.events.iter().filter_map(|e| match e { egui::Event::MouseWheel { delta, .. } => Some(delta.y), _ => None }).sum());
+        let wheel: f32 = ui.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::MouseWheel { delta, .. } => Some(delta.y),
+                    _ => None,
+                })
+                .sum()
+        });
         if wheel != 0.0 {
             let v = (value + wheel.signum() as i32 * 3).clamp(0, max);
             if v != value {
@@ -1901,7 +2096,8 @@ fn crop(image: &egui::ColorImage, r: Rect, ppp: f32) -> RgbaImage {
 
 /// The capture at the exporter's size.
 fn resize(im: &RgbaImage, width: u32, height: u32) -> RgbaImage {
-    let src = image::RgbaImage::from_raw(im.size[0] as u32, im.size[1] as u32, im.as_bytes().to_vec()).unwrap_or_default();
+    let src =
+        image::RgbaImage::from_raw(im.size[0] as u32, im.size[1] as u32, im.as_bytes().to_vec()).unwrap_or_default();
     let out = image::imageops::resize(&src, width, height, image::imageops::FilterType::CatmullRom);
     let pixels = out.pixels().map(|p| callisto_core::image::Rgba(p.0)).collect();
     RgbaImage::new([width as usize, height as usize], pixels)

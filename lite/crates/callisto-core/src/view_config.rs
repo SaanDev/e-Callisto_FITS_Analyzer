@@ -64,7 +64,12 @@ impl DisplayRange {
             let Some(raw) = raw else { return Err("Invalid numeric value: None".into()) };
             json_float(raw).ok_or_else(|| format!("Invalid numeric value: {raw}"))
         };
-        Self::normalized(num(&["time_start_s"])?, num(&["time_stop_s"])?, num(&["freq_min_mhz", "freq_start_mhz"])?, num(&["freq_max_mhz", "freq_stop_mhz"])?)
+        Self::normalized(
+            num(&["time_start_s"])?,
+            num(&["time_stop_s"])?,
+            num(&["freq_min_mhz", "freq_start_mhz"])?,
+            num(&["freq_max_mhz", "freq_stop_mhz"])?,
+        )
     }
 
     pub fn to_json(&self) -> Value {
@@ -275,7 +280,10 @@ mod tests {
         assert!(ViewConfig::parse("[]").is_err());
         assert_eq!(ViewConfig::parse("{\"version\": 2}").unwrap_err(), "Unsupported view config version: 2");
         // Legacy frequency keys and the default visual block.
-        let v = ViewConfig::parse("{\"range\": {\"time_start_s\": 0, \"time_stop_s\": 5, \"freq_start_mhz\": 10, \"freq_stop_mhz\": 20}}").unwrap();
+        let v = ViewConfig::parse(
+            "{\"range\": {\"time_start_s\": 0, \"time_stop_s\": 5, \"freq_start_mhz\": 10, \"freq_stop_mhz\": 20}}",
+        )
+        .unwrap();
         assert_eq!(v.range.unwrap().freq_max_mhz, 20.0);
         assert_eq!(v.visual.cmap, "Custom");
     }

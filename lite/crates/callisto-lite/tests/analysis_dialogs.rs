@@ -98,23 +98,55 @@ fn analysis_dialogs_match_full_app() {
         let ui_family = SystemFonts::load().ui_family().unwrap_or("Segoe UI").to_owned();
         let mut d = FrequencyDialog::new(30.0, 89.93800354003906, None);
         let pp = p.clone();
-        results.push(("dialog_lc_frequency", theme, shot(&format!("dialog_lc_frequency_{theme}"), [252.0, 141.0], p.clone(), move |ui| {
-            d.frame(ui, &pp);
-        })));
+        results.push((
+            "dialog_lc_frequency",
+            theme,
+            shot(&format!("dialog_lc_frequency_{theme}"), [252.0, 141.0], p.clone(), move |ui| {
+                d.frame(ui, &pp);
+            }),
+        ));
         let mut d = LightCurveSettingsDialog::new(&LightCurveSettings::default());
         let pp = p.clone();
-        results.push(("dialog_lc_settings", theme, shot(&format!("dialog_lc_settings_{theme}"), [420.0, 376.0], p.clone(), move |ui| {
-            d.frame(ui, &pp);
-        })));
+        results.push((
+            "dialog_lc_settings",
+            theme,
+            shot(&format!("dialog_lc_settings_{theme}"), [420.0, 376.0], p.clone(), move |ui| {
+                d.frame(ui, &pp);
+            }),
+        ));
         // The capture added a label before: the dialog starts from its style.
-        let remembered = TextStyle { color: "#ffcc00".into(), font_family: String::new(), font_size: 16, font_bold: true, font_italic: false };
-        let mut d = TextAnnotationDialog::new("Add Text Annotation", TextPurpose::Add, "", &remembered, &ui_family, Vec::new());
+        let remembered = TextStyle {
+            color: "#ffcc00".into(),
+            font_family: String::new(),
+            font_size: 16,
+            font_bold: true,
+            font_italic: false,
+        };
+        let mut d =
+            TextAnnotationDialog::new("Add Text Annotation", TextPurpose::Add, "", &remembered, &ui_family, Vec::new());
         let pp = p.clone();
-        results.push(("dialog_text_annotation", theme, shot(&format!("dialog_text_annotation_{theme}"), [420.0, 305.0], p.clone(), move |ui| {
-            d.frame(ui, &pp);
-        })));
-        let style = TextStyle { color: "#ffcc00".into(), font_family: String::new(), font_size: 16, font_bold: true, font_italic: false };
-        let mut d = TextAnnotationDialog::new("Edit Text Label", TextPurpose::Edit(0), "Type III burst", &style, &ui_family, Vec::new());
+        results.push((
+            "dialog_text_annotation",
+            theme,
+            shot(&format!("dialog_text_annotation_{theme}"), [420.0, 305.0], p.clone(), move |ui| {
+                d.frame(ui, &pp);
+            }),
+        ));
+        let style = TextStyle {
+            color: "#ffcc00".into(),
+            font_family: String::new(),
+            font_size: 16,
+            font_bold: true,
+            font_italic: false,
+        };
+        let mut d = TextAnnotationDialog::new(
+            "Edit Text Label",
+            TextPurpose::Edit(0),
+            "Type III burst",
+            &style,
+            &ui_family,
+            Vec::new(),
+        );
         let pp = p.clone();
         results.push((
             "dialog_text_annotation_edit",
@@ -125,15 +157,24 @@ fn analysis_dialogs_match_full_app() {
         ));
         let mut d = ColorDialog::new("Choose light curve color", [0x00, 0xe5, 0xff, 255]);
         let pp = p.clone();
-        results.push(("dialog_color", theme, shot(&format!("dialog_color_{theme}"), [653.0, 513.0], p.clone(), move |ui| {
-            d.frame(ui, &pp);
-        })));
-        let labels = vec!["#1 Type III burst @ (600.00, 70.00)".to_owned(), "#3 Second label @ (100.00, 40.00)".to_owned()];
+        results.push((
+            "dialog_color",
+            theme,
+            shot(&format!("dialog_color_{theme}"), [653.0, 513.0], p.clone(), move |ui| {
+                d.frame(ui, &pp);
+            }),
+        ));
+        let labels =
+            vec!["#1 Type III burst @ (600.00, 70.00)".to_owned(), "#3 Second label @ (100.00, 40.00)".to_owned()];
         let mut d = InputDialog::item("Move Text Label", "Choose label:", labels);
         let pp = p.clone();
-        results.push(("dialog_choose_label", theme, shot(&format!("dialog_choose_label_{theme}"), [273.0, 138.0], p.clone(), move |ui| {
-            d.frame(ui, &pp);
-        })));
+        results.push((
+            "dialog_choose_label",
+            theme,
+            shot(&format!("dialog_choose_label_{theme}"), [273.0, 138.0], p.clone(), move |ui| {
+                d.frame(ui, &pp);
+            }),
+        ));
     }
     // Text is most of a small window: ClearType against Lite's grey
     // anti-aliasing weighs more there (the import progress dialog, 200 x 70,

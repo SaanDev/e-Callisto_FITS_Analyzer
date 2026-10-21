@@ -114,7 +114,10 @@ const STATIONS: [&str; 79] = [
 /// The first known station the file name starts with (case-insensitive).
 pub fn station_from_filename(filename: &str) -> String {
     let lower = filename.to_lowercase();
-    STATIONS.iter().find(|s| lower.starts_with(&s.to_lowercase())).map_or_else(|| "UNKNOWN".to_owned(), |s| (*s).to_owned())
+    STATIONS
+        .iter()
+        .find(|s| lower.starts_with(&s.to_lowercase()))
+        .map_or_else(|| "UNKNOWN".to_owned(), |s| (*s).to_owned())
 }
 
 /// `re.search(r'_(\d{4})(\d{2})(\d{2})_', filename)` as `YYYY-MM-DD`.
@@ -165,8 +168,14 @@ mod tests {
         assert_eq!(station_from_filename("INDIA-GAURI_20261007_041500_02"), "INDIA-GAURI");
         assert_eq!(station_from_filename("nowhere_20261007"), "UNKNOWN");
         assert_eq!(date_from_filename("INDIA-GAURI_20261007_041500_02"), "2026-10-07");
-        assert_eq!(value_and_error("Average Drift Rate: -0.0920 \u{b1} 0.0033 MHz/s"), ("-0.0920".into(), "0.0033".into()));
-        assert_eq!(value_and_error("Initial Shock Height: 1.374 \u{b1} 0.061 R\u{209b}"), ("1.374".into(), "0.061".into()));
+        assert_eq!(
+            value_and_error("Average Drift Rate: -0.0920 \u{b1} 0.0033 MHz/s"),
+            ("-0.0920".into(), "0.0033".into())
+        );
+        assert_eq!(
+            value_and_error("Initial Shock Height: 1.374 \u{b1} 0.061 R\u{209b}"),
+            ("1.374".into(), "0.061".into())
+        );
         assert_eq!(value_and_error("Average Frequency:  \u{b1}  MHz"), (String::new(), String::new()));
     }
 }

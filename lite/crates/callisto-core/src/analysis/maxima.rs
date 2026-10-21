@@ -24,7 +24,10 @@ pub fn auto_filter_isolated(source: &Array2) -> Option<Vec<usize>> {
     // np.nanmax(axis=0): NaN for an all-NaN column.
     let vals: Vec<f64> = (0..cols)
         .map(|c| {
-            (0..rows).map(|r| source.get(r, c) as f64).filter(|v| !v.is_nan()).fold(f64::NAN, |m, v| if m.is_nan() || v > m { v } else { m })
+            (0..rows)
+                .map(|r| source.get(r, c) as f64)
+                .filter(|v| !v.is_nan())
+                .fold(f64::NAN, |m, v| if m.is_nan() || v > m { v } else { m })
         })
         .collect();
     let finite: Vec<bool> = vals.iter().map(|v| v.is_finite()).collect();
@@ -96,5 +99,11 @@ pub fn analysis_seed(data: &Array2, freqs: &[f64], time: Option<&[f64]>, isolate
         time_seconds = kept.iter().map(|&i| time_seconds[i]).collect();
         auto_removed = before - time_channels.len();
     }
-    Some(MaximaSeed { time_channels, time_seconds, freqs: max_freqs, auto_removed, auto_outlier_cleaned: auto_removed > 0 })
+    Some(MaximaSeed {
+        time_channels,
+        time_seconds,
+        freqs: max_freqs,
+        auto_removed,
+        auto_outlier_cleaned: auto_removed > 0,
+    })
 }

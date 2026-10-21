@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use super::legend::{Legend, Loc};
-use super::{AxisSpec, Axes, BLACK, Face, Figure, Grid, Label, Line2D, Marker, MarkerKind, Rgba, Scatter, WHITE, hex};
+use super::{Axes, AxisSpec, BLACK, Face, Figure, Grid, Label, Line2D, Marker, MarkerKind, Rgba, Scatter, WHITE, hex};
 
 /// `fig.add_subplot(111)` with matplotlib's default subplot parameters.
 pub const SUBPLOT: [f64; 4] = [0.125, 0.11, 0.775, 0.77];
@@ -56,7 +56,15 @@ pub fn empty_axes_figure(width: f64, height: f64) -> Figure {
 
 /// The Maximum Intensities window's graph: the maxima as small red dots,
 /// and the ridge's start when one was picked.
-pub fn max_intensity_figure(x: &[f64], y: &[f64], title: &str, x_label: &str, seed: Option<(f64, f64)>, width: f64, height: f64) -> Figure {
+pub fn max_intensity_figure(
+    x: &[f64],
+    y: &[f64],
+    title: &str,
+    x_label: &str,
+    seed: Option<(f64, f64)>,
+    width: f64,
+    height: f64,
+) -> Figure {
     let mut ax = ui_axes(title, x_label, "Frequency (MHz)", false);
     ax.scatters.push(Scatter::new(x.to_vec(), y.to_vec(), 5.0, RED));
     if let Some((sx, sy)) = seed {
@@ -66,7 +74,13 @@ pub fn max_intensity_figure(x: &[f64], y: &[f64], title: &str, x_label: &str, se
             y: Arc::new(vec![sy]),
             color: TAB_BLUE,
             width_pt: None,
-            marker: Some(Marker { kind: MarkerKind::Star, size_pt: 14.0, face: TAB_BLUE, edge: BLACK, edge_width_pt: 1.0 }),
+            marker: Some(Marker {
+                kind: MarkerKind::Star,
+                size_pt: 14.0,
+                face: TAB_BLUE,
+                edge: BLACK,
+                edge_width_pt: 1.0,
+            }),
             label: None,
             zorder: 5.0,
             dash: None,
@@ -205,7 +219,13 @@ pub fn fit_figure(g: &FitGraph, text: GraphText, width: f64, height: f64) -> Fig
             y: Arc::new(ys),
             color: BLACK,
             width_pt: None,
-            marker: Some(Marker { kind: MarkerKind::Square, size_pt: 6.0, face: BLACK, edge: BLACK, edge_width_pt: 1.0 }),
+            marker: Some(Marker {
+                kind: MarkerKind::Square,
+                size_pt: 6.0,
+                face: BLACK,
+                edge: BLACK,
+                edge_width_pt: 1.0,
+            }),
             label: Some(g.data_label.to_owned()),
             zorder: 3.0,
             dash: None,
@@ -266,6 +286,9 @@ mod tests {
 
     #[test]
     fn power_law_label_like_the_full_app() {
-        assert_eq!(power_law_label(514.6213, 0.4106, "Best Fit", "x"), "Best Fit: f = 514.62 x$\\mathregular{^{-0.41}}$");
+        assert_eq!(
+            power_law_label(514.6213, 0.4106, "Best Fit", "x"),
+            "Best Fit: f = 514.62 x$\\mathregular{^{-0.41}}$"
+        );
     }
 }

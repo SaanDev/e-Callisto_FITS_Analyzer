@@ -136,7 +136,8 @@ fn type_size(code: char) -> Option<usize> {
 fn updated_axis_table(h: &Header, data: &[u8], freqs: &[f32], times: &[f32]) -> Option<Vec<u8>> {
     let cols = columns(h);
     let rows = h.get_i64("NAXIS2").unwrap_or(0).max(0) as usize;
-    if cols.is_empty() || rows != 1 || !cols.iter().all(|c| matches!(c.code, 'D' | 'E') || type_size(c.code).is_some()) {
+    if cols.is_empty() || rows != 1 || !cols.iter().all(|c| matches!(c.code, 'D' | 'E') || type_size(c.code).is_some())
+    {
         return None;
     }
     let axes: Vec<Option<&[f32]>> = cols

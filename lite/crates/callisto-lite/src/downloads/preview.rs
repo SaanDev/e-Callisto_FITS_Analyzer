@@ -40,7 +40,10 @@ impl PreviewWindow {
         PreviewWindow {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             title: if title.is_empty() { "FITS Preview".into() } else { format!("FITS Preview: {title}") },
-            panels: panels.into_iter().map(|source| Panel { source, view: FigureView::default(), colors: None }).collect(),
+            panels: panels
+                .into_iter()
+                .map(|source| Panel { source, view: FigureView::default(), colors: None })
+                .collect(),
             current: 0,
             size: super::fit_to_screen(ctx, 900.0, 600.0),
         }
@@ -78,8 +81,13 @@ impl PreviewWindow {
         let full = ui.max_rect();
         // QVBoxLayout (11 px margins): the tab widget.
         let tabs = Rect::from_min_max(full.min + vec2(11.0, 11.0), full.max - vec2(11.0, 11.0));
-        let titles: Vec<String> = self.panels.iter().map(|x| if x.source.title.is_empty() { "Preview".into() } else { x.source.title.clone() }).collect();
-        let (page, clicked) = qt::fusion_tab_widget(ui, tabs, Id::new(("preview_tabs", self.id)), &titles, self.current, p);
+        let titles: Vec<String> = self
+            .panels
+            .iter()
+            .map(|x| if x.source.title.is_empty() { "Preview".into() } else { x.source.title.clone() })
+            .collect();
+        let (page, clicked) =
+            qt::fusion_tab_widget(ui, tabs, Id::new(("preview_tabs", self.id)), &titles, self.current, p);
         if let Some(i) = clicked {
             self.current = i;
         }
@@ -89,7 +97,10 @@ impl PreviewWindow {
         if !panel.source.subtitle.is_empty() {
             v = v.widget(qt::wrap_label_spec(ui, "caption", &panel.source.subtitle, true));
         }
-        v = v.widget(WidgetSpec::new("canvas", Size::new(640, 480), Policy::Preferred, Policy::Preferred).min_hint(Size::new(10, 10)));
+        v = v.widget(
+            WidgetSpec::new("canvas", Size::new(640, 480), Policy::Preferred, Policy::Preferred)
+                .min_hint(Size::new(10, 10)),
+        );
         let layout: Layout = v.into();
         let (g, o) = super::lay_out(&layout, page);
         if !panel.source.subtitle.is_empty() {
@@ -98,7 +109,14 @@ impl PreviewWindow {
         let canvas = super::at(&g, o, "canvas");
         if panel.colors != Some(colors) || !panel.view.has_figure() {
             let s = &panel.source;
-            panel.view.set(preview_figure(&s.data, &s.freqs, &s.time, canvas.width() as f64, canvas.height() as f64, colors));
+            panel.view.set(preview_figure(
+                &s.data,
+                &s.freqs,
+                &s.time,
+                canvas.width() as f64,
+                canvas.height() as f64,
+                colors,
+            ));
             panel.colors = Some(colors);
         }
         panel.view.show(ui, canvas);

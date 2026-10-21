@@ -11,8 +11,9 @@ use std::sync::Arc;
 use super::analysis_figures::{GraphText, SUBPLOT};
 use super::type_ii_figures::{SpectrumImage, finite_limits, origin_axis, origin_colorbar};
 use super::{
-    Axes, BLACK, ColorbarSlot, Constrained, DataText, Face, Figure, Formatter, HAlign, HSpan, Image, Interpolation, Label, Line2D,
-    Marker, MarkerKind, Rgba, TextBox, Ticks, VAlign, WHITE, family_chain_id, hex, line_dash, make_axes_right,
+    Axes, BLACK, ColorbarSlot, Constrained, DataText, Face, Figure, Formatter, HAlign, HSpan, Image, Interpolation,
+    Label, Line2D, Marker, MarkerKind, Rgba, TextBox, Ticks, VAlign, WHITE, family_chain_id, hex, line_dash,
+    make_axes_right,
 };
 use crate::radio::frequency_axis::{format_frequency_mhz, log_frequency_ticks_mhz};
 
@@ -23,8 +24,10 @@ const SPECTRUM_SIZE: (f64, f64) = (800.0, 500.0);
 const MEASUREMENT: u32 = 0x18b4ff;
 
 /// `_UT_STEPS`: UT tick spacings in seconds, from one second to six hours.
-const UT_STEPS: [f64; 19] =
-    [1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 60.0, 120.0, 180.0, 300.0, 600.0, 900.0, 1200.0, 1800.0, 3600.0, 7200.0, 10800.0, 21600.0];
+const UT_STEPS: [f64; 19] = [
+    1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 60.0, 120.0, 180.0, 300.0, 600.0, 900.0, 1200.0, 1800.0, 3600.0, 7200.0,
+    10800.0, 21600.0,
+];
 
 /// A light curve over the spectrum, as `_build_light_curve_overlay` gives it.
 #[derive(Clone, Debug)]
@@ -44,8 +47,22 @@ pub struct LightCurve {
 #[derive(Clone, Debug)]
 pub enum SpectrumAnnotation {
     /// A line, or a polygon (closed when drawn).
-    Path { points: Vec<(f64, f64)>, closed: bool, color: String, line_width: f64 },
-    Text { x: f64, y: f64, text: String, color: String, font_size: f64, bold: bool, italic: bool, font_family: String },
+    Path {
+        points: Vec<(f64, f64)>,
+        closed: bool,
+        color: String,
+        line_width: f64,
+    },
+    Text {
+        x: f64,
+        y: f64,
+        text: String,
+        color: String,
+        font_size: f64,
+        bold: bool,
+        italic: bool,
+        font_family: String,
+    },
 }
 
 /// `Measurement`: the ruler's points and the label at the last one.
@@ -101,7 +118,8 @@ pub fn ut_ticks(vmin: f64, vmax: f64, ut_start: f64, max_ticks: usize) -> Vec<f6
     }
     let max = max_ticks as f64;
     let last = UT_STEPS[UT_STEPS.len() - 1];
-    let step = UT_STEPS.iter().copied().find(|s| span / s <= max).unwrap_or_else(|| last * (span / (last * max)).ceil());
+    let step =
+        UT_STEPS.iter().copied().find(|s| span / s <= max).unwrap_or_else(|| last * (span / (last * max)).ceil());
     let first = ((lo + ut_start) / step).ceil() * step - ut_start;
     // `np.arange(first, hi + step * 1e-9, step)`.
     let stop = hi + step * 1e-9;
@@ -160,7 +178,15 @@ pub fn dynamic_spectrum_figure(g: &SpectrumGraph) -> Figure {
         Some((lo, hi)) if lo.is_finite() && hi.is_finite() && hi > lo => (lo, hi),
         _ => finite_limits(&im.data.data),
     };
-    ax.images.push(Image { data: im.data.clone(), extent: im.extent, origin_upper: true, cmap: im.cmap, vmin, vmax, interpolation: Interpolation::Auto });
+    ax.images.push(Image {
+        data: im.data.clone(),
+        extent: im.extent,
+        origin_upper: true,
+        cmap: im.cmap,
+        vmin,
+        vmax,
+        interpolation: Interpolation::Auto,
+    });
     for &(lo, hi) in &g.gap_spans {
         ax.spans.push(HSpan {
             y0: lo,
@@ -189,7 +215,8 @@ pub fn dynamic_spectrum_figure(g: &SpectrumGraph) -> Figure {
 
     // `_draw_light_curves`.
     for c in &g.light_curves {
-        let color = mpl_color(&c.color, Some(c.opacity)).or_else(|| mpl_color("#00e5ff", Some(c.opacity))).unwrap_or(BLACK);
+        let color =
+            mpl_color(&c.color, Some(c.opacity)).or_else(|| mpl_color("#00e5ff", Some(c.opacity))).unwrap_or(BLACK);
         for (x, y) in finite_runs(&c.time, &c.y) {
             ax.lines.push(line(x, y, color, c.line_width, 8.0, line_dash(&c.line_style, c.line_width)));
         }
@@ -217,7 +244,10 @@ pub fn dynamic_spectrum_figure(g: &SpectrumGraph) -> Figure {
                     pts.push(points[0]);
                 }
                 let c = mpl_color(color, Some(0.95)).or_else(|| mpl_color("#00d4ff", Some(0.95))).unwrap_or(BLACK);
-                for (x, y) in finite_runs(&pts.iter().map(|p| p.0).collect::<Vec<_>>(), &pts.iter().map(|p| p.1).collect::<Vec<_>>()) {
+                for (x, y) in finite_runs(
+                    &pts.iter().map(|p| p.0).collect::<Vec<_>>(),
+                    &pts.iter().map(|p| p.1).collect::<Vec<_>>(),
+                ) {
                     ax.lines.push(line(x, y, c, *line_width, 10.0, None));
                 }
             }
@@ -257,7 +287,13 @@ pub fn dynamic_spectrum_figure(g: &SpectrumGraph) -> Figure {
             y: Arc::new(ys.clone()),
             color: edge,
             width_pt: None,
-            marker: Some(Marker { kind: MarkerKind::Circle, size_pt: 46f64.sqrt(), face: WHITE, edge, edge_width_pt: 1.5 }),
+            marker: Some(Marker {
+                kind: MarkerKind::Circle,
+                size_pt: 46f64.sqrt(),
+                face: WHITE,
+                edge,
+                edge_width_pt: 1.5,
+            }),
             label: None,
             zorder: 20.0,
             dash: None,
@@ -272,7 +308,12 @@ pub fn dynamic_spectrum_figure(g: &SpectrumGraph) -> Figure {
                     ha: HAlign::Left,
                     va: VAlign::Bottom,
                     zorder: 21.0,
-                    bbox: Some(TextBox { pad: 0.25, face: hex(0x0f172a, 0.85), edge: hex(MEASUREMENT, 0.85), width_pt: 1.0 }),
+                    bbox: Some(TextBox {
+                        pad: 0.25,
+                        face: hex(0x0f172a, 0.85),
+                        edge: hex(MEASUREMENT, 0.85),
+                        width_pt: 1.0,
+                    }),
                 });
             }
         }
@@ -305,7 +346,10 @@ pub fn dynamic_spectrum_figure(g: &SpectrumGraph) -> Figure {
         facecolor: WHITE,
         axes: vec![ax, cb],
         texts: Vec::new(),
-        constrained: Some(Constrained { axes: 0, colorbar: Some(ColorbarSlot { axes: 1, fraction: 0.05, pad: 0.02, shrink: 1.0, aspect: 20.0 }) }),
+        constrained: Some(Constrained {
+            axes: 0,
+            colorbar: Some(ColorbarSlot { axes: 1, fraction: 0.05, pad: 0.02, shrink: 1.0, aspect: 20.0 }),
+        }),
     }
 }
 

@@ -236,7 +236,9 @@ pub struct AnalysisSession {
 impl AnalysisSession {
     /// Whether `normalize_session` would keep it (anything to restore).
     pub fn is_meaningful(&self) -> bool {
-        self.max_intensity.as_ref().is_some_and(|m| !m.time_channels.is_empty() && m.time_channels.len() == m.freqs.len())
+        self.max_intensity
+            .as_ref()
+            .is_some_and(|m| !m.time_channels.is_empty() && m.time_channels.len() == m.freqs.len())
             || self.analyzer.has_content()
             || self.type_ii.has_content()
     }

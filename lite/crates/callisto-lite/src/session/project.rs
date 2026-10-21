@@ -6,8 +6,8 @@
 use std::collections::BTreeMap;
 
 use callisto_core::analysis::annotations::{
-    Annotation, AnnotationKind, DEFAULT_ANNOTATION_COLOR, DEFAULT_TEXT_FONT_SIZE, TextStyle as AnnotationTextStyle, new_id,
-    now_iso,
+    Annotation, AnnotationKind, DEFAULT_ANNOTATION_COLOR, DEFAULT_TEXT_FONT_SIZE, TextStyle as AnnotationTextStyle,
+    new_id, now_iso,
 };
 use callisto_core::analysis::light_curve::LightCurveSettings;
 use callisto_core::analysis::session_json;
@@ -141,7 +141,9 @@ fn annotations_from(v: Option<&Json>) -> Vec<Annotation> {
         if raw.as_object().is_none() {
             continue;
         }
-        let Some(kind) = AnnotationKind::parse(&raw.get("kind").map(Json::py_str).unwrap_or_default()) else { continue };
+        let Some(kind) = AnnotationKind::parse(&raw.get("kind").map(Json::py_str).unwrap_or_default()) else {
+            continue;
+        };
         let points: Vec<[f64; 2]> = raw
             .get("points")
             .and_then(Json::as_array)
@@ -164,7 +166,11 @@ fn annotations_from(v: Option<&Json>) -> Vec<Annotation> {
             kind,
             points,
             text: raw.get("text").map(Json::py_str).unwrap_or_default(),
-            color: raw.get("color").filter(|v| v.truthy()).map(Json::py_str).unwrap_or_else(|| DEFAULT_ANNOTATION_COLOR.into()),
+            color: raw
+                .get("color")
+                .filter(|v| v.truthy())
+                .map(Json::py_str)
+                .unwrap_or_else(|| DEFAULT_ANNOTATION_COLOR.into()),
             line_width: raw.get("line_width").and_then(Json::as_f64).unwrap_or(1.5),
             font_family: str_of(raw.get("font_family")),
             font_size: raw.get("font_size").and_then(Json::as_i64).map_or(DEFAULT_TEXT_FONT_SIZE, |v| v.max(1)),
@@ -198,8 +204,15 @@ pub(super) fn style_defaults_from(v: Option<&Json>) -> AnnotationStyleDefaults {
         line_width: raw.get("line_width").map_or(Some(d.line_width), Json::as_f64).map_or(d.line_width, |w| w.max(0.5)),
         text: AnnotationTextStyle {
             color: raw.get("text_color").filter(|v| v.truthy()).map(Json::py_str).unwrap_or_else(|| color.clone()),
-            font_family: raw.get("text_font_family").filter(|v| v.truthy()).map(Json::py_str).unwrap_or_else(|| d.text.font_family.clone()),
-            font_size: raw.get("text_font_size").map_or(Some(d.text.font_size), Json::as_i64).map_or(d.text.font_size, |v| v.max(6)),
+            font_family: raw
+                .get("text_font_family")
+                .filter(|v| v.truthy())
+                .map(Json::py_str)
+                .unwrap_or_else(|| d.text.font_family.clone()),
+            font_size: raw
+                .get("text_font_size")
+                .map_or(Some(d.text.font_size), Json::as_i64)
+                .map_or(d.text.font_size, |v| v.max(6)),
             font_bold: bool_of(raw.get("text_bold"), d.text.font_bold),
             font_italic: bool_of(raw.get("text_italic"), d.text.font_italic),
         },
@@ -278,7 +291,10 @@ pub(super) fn rfi_json(r: &RfiConfig) -> Json {
     o.insert("kernel_freq".into(), Json::from(r.settings.kernel_freq));
     o.insert("channel_z_threshold".into(), f(r.settings.channel_z_threshold));
     o.insert("percentile_clip".into(), f(r.settings.percentile_clip));
-    o.insert("masked_channel_indices".into(), Json::Array(r.masked_channel_indices.iter().map(|i| Json::from(*i)).collect()));
+    o.insert(
+        "masked_channel_indices".into(),
+        Json::Array(r.masked_channel_indices.iter().map(|i| Json::from(*i)).collect()),
+    );
     o.insert("applied".into(), Json::Bool(r.applied));
     Json::Object(o)
 }
@@ -331,8 +347,13 @@ impl Session {
         let d = self.data.as_ref()?;
         let mut arrays = BTreeMap::new();
         let (rows, cols) = d.raw.shape();
-        arrays.insert("raw_data".into(), Npy::from_f64(&[rows, cols], &d.raw.data.iter().map(|v| *v as f64).collect::<Vec<_>>()));
-        for (key, a) in [("noise_reduced_data", &self.noise_reduced), ("noise_reduced_original", &self.noise_reduced_original)] {
+        arrays.insert(
+            "raw_data".into(),
+            Npy::from_f64(&[rows, cols], &d.raw.data.iter().map(|v| *v as f64).collect::<Vec<_>>()),
+        );
+        for (key, a) in
+            [("noise_reduced_data", &self.noise_reduced), ("noise_reduced_original", &self.noise_reduced_original)]
+        {
             if let Some(a) = a {
                 let (r, c) = a.shape();
                 arrays.insert(key.into(), Npy::from_f32(&[r, c], &a.data));
@@ -487,8 +508,9 @@ impl Session {
         let raw = arr2(arrays.get("raw_data"));
         self.noise_reduced = arr2(arrays.get("noise_reduced_data")).map(Arc::new);
         self.noise_reduced_original = arr2(arrays.get("noise_reduced_original")).map(Arc::new);
-        self.noise_reduced_original_plot_type =
-            normalize_plot_type(&str_of(meta.get("noise_reduced_original_plot_type")).if_empty("Background Subtracted"));
+        self.noise_reduced_original_plot_type = normalize_plot_type(
+            &str_of(meta.get("noise_reduced_original_plot_type")).if_empty("Background Subtracted"),
+        );
         self.tools.lasso_mask = arrays.get("lasso_mask").and_then(Npy::to_bool);
         let gap_rows = arrays.get("gap_row_mask").and_then(Npy::to_bool);
         let freqs = vec_f64(arrays.get("freqs"));
@@ -496,8 +518,11 @@ impl Session {
 
         // `_restore_swaves_from_project`.
         self.project_extras.swaves = get("swaves").filter(|v| v.as_object().is_some()).and_then(|m| {
-            let a: BTreeMap<String, Npy> = arrays.iter().filter(|(k, _)| k.starts_with("swaves_")).map(|(k, v)| (k.clone(), v.clone())).collect();
-            let complete = ["swaves_x_seconds", "swaves_log_freq", "swaves_intensity"].iter().all(|k| a.get(*k).is_some_and(|n| !n.is_empty()));
+            let a: BTreeMap<String, Npy> =
+                arrays.iter().filter(|(k, _)| k.starts_with("swaves_")).map(|(k, v)| (k.clone(), v.clone())).collect();
+            let complete = ["swaves_x_seconds", "swaves_log_freq", "swaves_intensity"]
+                .iter()
+                .all(|k| a.get(*k).is_some_and(|n| !n.is_empty()));
             complete.then(|| (m.clone(), a))
         });
 
@@ -516,7 +541,9 @@ impl Session {
             self.background_method = BackgroundMethod::normalize(&m.py_str(), true).unwrap_or_default();
         }
         self.background_applied = match get("background_applied_method") {
-            Some(m) if self.noise_reduced.is_some() => Some(BackgroundMethod::normalize(&m.py_str(), true).unwrap_or_default()),
+            Some(m) if self.noise_reduced.is_some() => {
+                Some(BackgroundMethod::normalize(&m.py_str(), true).unwrap_or_default())
+            }
             _ => None,
         };
 
@@ -540,7 +567,10 @@ impl Session {
                 source_path: get("fits_source_path").map(Json::py_str),
                 ut_start_sec,
                 combined_mode,
-                combined_sources: get("combined_sources").and_then(Json::as_array).map(|a| a.iter().map(Json::py_str).collect()).unwrap_or_default(),
+                combined_sources: get("combined_sources")
+                    .and_then(Json::as_array)
+                    .map(|a| a.iter().map(Json::py_str).collect())
+                    .unwrap_or_default(),
                 combined_options,
                 frequency_step_mhz,
             }),
@@ -549,8 +579,13 @@ impl Session {
 
         // `_noise_thresholds_from_mapping`, then the bounds over the product.
         let low = get("noise_clip_low").or(get("lower_slider")).and_then(Json::as_f64).unwrap_or(self.noise_clip_low);
-        let high = get("noise_clip_high").or(get("upper_slider")).and_then(Json::as_f64).unwrap_or(self.noise_clip_high);
-        let scale = if meta.contains_key("noise_clip_scale") { clip_scale(meta.get("noise_clip_scale")) } else { self.noise_clip_scale };
+        let high =
+            get("noise_clip_high").or(get("upper_slider")).and_then(Json::as_f64).unwrap_or(self.noise_clip_high);
+        let scale = if meta.contains_key("noise_clip_scale") {
+            clip_scale(meta.get("noise_clip_scale"))
+        } else {
+            self.noise_clip_scale
+        };
         self.expand_noise_clip_bounds_for_values(&[low, high]);
         let (mut lo, mut hi) = (self.clamp_noise_threshold(low), self.clamp_noise_threshold(high));
         if lo > hi {
@@ -569,7 +604,8 @@ impl Session {
         self.tools.annotations = annotations_from(meta.get("annotations"));
         self.tools.annotation_style = style_defaults_from(get("annotation_style_defaults"));
         let lc = get("light_curve").cloned().unwrap_or_else(Json::object);
-        let settings = light_curve_settings_from(lc.get("settings").filter(|v| !v.is_null()), &self.tools.light_curve_settings);
+        let settings =
+            light_curve_settings_from(lc.get("settings").filter(|v| !v.is_null()), &self.tools.light_curve_settings);
         self.tools.light_curve_settings = settings;
         let mut records: Vec<LightCurveRecord> = match lc.get("records") {
             Some(Json::Array(a)) => a.iter().filter_map(light_curve_record).collect(),
@@ -583,14 +619,16 @@ impl Session {
         }
         self.store_light_curve_records(records);
         self.tools.light_curve_click_mode = bool_of(lc.get("click_mode"), false);
-        self.project_extras.active_preset = Some(get("active_preset").filter(|v| v.truthy()).cloned().unwrap_or_else(Json::object));
+        self.project_extras.active_preset =
+            Some(get("active_preset").filter(|v| v.truthy()).cloned().unwrap_or_else(Json::object));
         self.log = get("processing_log")
             .and_then(Json::as_array)
             .into_iter()
             .flatten()
             .filter_map(|e| Some((e.get("ts").map(Json::py_str).unwrap_or_default(), e.get("msg")?.py_str())))
             .collect();
-        self.project_extras.time_sync = Some(get("time_sync").filter(|v| v.truthy()).cloned().unwrap_or_else(Json::object));
+        self.project_extras.time_sync =
+            Some(get("time_sync").filter(|v| v.truthy()).cloned().unwrap_or_else(Json::object));
         self.refresh_instrument_profile();
 
         // Graph Properties: the file's sizes, not the hardware defaults.
@@ -605,8 +643,10 @@ impl Session {
         g.ticks_bold = bool_of(graph.get("ticks_bold"), false);
         g.ticks_italic = bool_of(graph.get("ticks_italic"), false);
         g.title_override = str_of(graph.get("title_override"));
-        g.font_family = crate::fonts::normalize_font_family(&graph.get("font_family").map(Json::py_str).unwrap_or_default());
-        let size = |k: &str, current: u32| graph.get(k).and_then(Json::as_i64).map_or(current, |v| v.clamp(1, 200) as u32);
+        g.font_family =
+            crate::fonts::normalize_font_family(&graph.get("font_family").map(Json::py_str).unwrap_or_default());
+        let size =
+            |k: &str, current: u32| graph.get(k).and_then(Json::as_i64).map_or(current, |v| v.clamp(1, 200) as u32);
         g.tick_px = size("tick_font_px", g.tick_px);
         g.axis_px = size("axis_label_font_px", g.axis_px);
         g.title_px = size("title_font_px", g.title_px);
@@ -618,7 +658,9 @@ impl Session {
             .filter(|(k, _)| k.starts_with("analysis_") || k.starts_with("type_ii_") || k.starts_with("max_"))
             .filter_map(|(k, v)| Some((k.clone(), v.to_f64()?)))
             .collect();
-        let mut loaded = get("analysis_session").filter(|v| v.as_object().is_some()).and_then(|s| session_json::normalize(s, &vectors));
+        let mut loaded = get("analysis_session")
+            .filter(|v| v.as_object().is_some())
+            .and_then(|s| session_json::normalize(s, &vectors));
         if loaded.is_none() {
             loaded = session_json::from_legacy(meta, &vectors);
         }

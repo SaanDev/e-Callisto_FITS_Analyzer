@@ -151,17 +151,25 @@ impl LearmonthDialog {
         self.tick();
         let mut action = None;
         let modal = !self.notices.is_empty() || self.blocked;
-        super::window(ctx, "learmonth_downloader", "Learmonth Solar Radio Browser", size, vec2(545.0, 424.0), p, |ui, close| {
-            if close {
-                action = Some(LearmonthAction::Close);
-            }
-            if let Some(a) = self.body(ui, ctx, p) {
-                action = Some(a);
-            }
-            if modal {
-                super::block_input(ui, Id::new("learmonth_modal"));
-            }
-        });
+        super::window(
+            ctx,
+            "learmonth_downloader",
+            "Learmonth Solar Radio Browser",
+            size,
+            vec2(545.0, 424.0),
+            p,
+            |ui, close| {
+                if close {
+                    action = Some(LearmonthAction::Close);
+                }
+                if let Some(a) = self.body(ui, ctx, p) {
+                    action = Some(a);
+                }
+                if modal {
+                    super::block_input(ui, Id::new("learmonth_modal"));
+                }
+            },
+        );
         if let Some(n) = self.notices.first()
             && crate::ui::dialogs::message_box(ctx, n, p)
         {
@@ -227,20 +235,34 @@ impl LearmonthDialog {
                     match self.chunks.iter().position(|(c, _)| c.start_dt <= target && target < c.end_dt) {
                         Some(i) => {
                             self.view.current = Some(i);
-                            self.status = format!("Loaded {} Learmonth chunks. Highlighted chunk #{} for the selected time.", self.chunks.len(), i + 1);
+                            self.status = format!(
+                                "Loaded {} Learmonth chunks. Highlighted chunk #{} for the selected time.",
+                                self.chunks.len(),
+                                i + 1
+                            );
                         }
-                        None => self.status = format!("Loaded {} Learmonth chunks for the selected day.", self.chunks.len()),
+                        None => {
+                            self.status = format!("Loaded {} Learmonth chunks for the selected day.", self.chunks.len())
+                        }
                     }
                 }
                 Err(LearmonthError::NotFound(m)) => {
                     self.raw_label = "No Learmonth raw archive file was found for the selected date.".into();
                     self.status.clear();
-                    self.notice(NoticeKind::Information, "No Data Found", if m.is_empty() { "No Learmonth data were found.".into() } else { m });
+                    self.notice(
+                        NoticeKind::Information,
+                        "No Data Found",
+                        if m.is_empty() { "No Learmonth data were found.".into() } else { m },
+                    );
                 }
                 Err(LearmonthError::Archive(m)) => {
                     self.raw_label = "Could not load Learmonth archive metadata.".into();
                     self.status.clear();
-                    self.notice(NoticeKind::Critical, "Learmonth Error", if m.is_empty() { "Unknown Learmonth archive error.".into() } else { m });
+                    self.notice(
+                        NoticeKind::Critical,
+                        "Learmonth Error",
+                        if m.is_empty() { "Unknown Learmonth archive error.".into() } else { m },
+                    );
                 }
             }
         }
@@ -263,7 +285,11 @@ impl LearmonthDialog {
                 self.status.clear();
                 match r {
                     Ok(paths) if self.import_after => self.pending_import = Some(paths),
-                    Ok(paths) => self.notice(NoticeKind::Information, "Conversion Complete", format!("Converted {} Learmonth chunk(s) to FIT format.", paths.len())),
+                    Ok(paths) => self.notice(
+                        NoticeKind::Information,
+                        "Conversion Complete",
+                        format!("Converted {} Learmonth chunk(s) to FIT format.", paths.len()),
+                    ),
                     Err(m) => self.notice(NoticeKind::Critical, "Conversion Failed", m),
                 }
             }
@@ -301,10 +327,23 @@ impl LearmonthDialog {
         }
         let list = r("list");
         let style = Style::plain_list();
-        let rows: Vec<Row> = self.chunks.iter().map(|(c, on)| Row::new(vec![c.label()]).checked(Check::from_bool(*on))).collect();
+        let rows: Vec<Row> =
+            self.chunks.iter().map(|(c, on)| Row::new(vec![c.label()]).checked(Check::from_bool(*on))).collect();
         let visible: Vec<usize> = (0..rows.len()).collect();
         let w = itemview::viewport(list, &style).width();
-        for e in itemview::item_view(ui, list, Id::new("lm_chunks"), &[], &[w], &rows, &visible, &style, &mut self.view, true, p) {
+        for e in itemview::item_view(
+            ui,
+            list,
+            Id::new("lm_chunks"),
+            &[],
+            &[w],
+            &rows,
+            &visible,
+            &style,
+            &mut self.view,
+            true,
+            p,
+        ) {
             if let Event::Toggled(i) = e {
                 self.chunks[i].1 ^= true;
             }
@@ -333,7 +372,11 @@ impl LearmonthDialog {
     /// `show_available_data`.
     fn show_available(&mut self, ctx: &egui::Context) {
         if self.load.is_some() {
-            return self.notice(NoticeKind::Information, "Learmonth Loader", "Learmonth data are already being loaded.");
+            return self.notice(
+                NoticeKind::Information,
+                "Learmonth Loader",
+                "Learmonth data are already being loaded.",
+            );
         }
         self.chunks.clear();
         self.loaded = None;
@@ -359,8 +402,14 @@ impl LearmonthDialog {
         let dest = dir.join(&loaded.filename);
         let _ = (&loaded.url, loaded.size);
         match std::fs::copy(&loaded.path, &dest) {
-            Ok(_) => self.notice(NoticeKind::Information, "Download Complete", format!("Learmonth raw file saved to:\n{}", dest.display())),
-            Err(e) => self.notice(NoticeKind::Critical, "Download Failed", format!("Could not copy the Learmonth file:\n{e}")),
+            Ok(_) => self.notice(
+                NoticeKind::Information,
+                "Download Complete",
+                format!("Learmonth raw file saved to:\n{}", dest.display()),
+            ),
+            Err(e) => {
+                self.notice(NoticeKind::Critical, "Download Failed", format!("Could not copy the Learmonth file:\n{e}"))
+            }
         }
     }
 
@@ -368,7 +417,11 @@ impl LearmonthDialog {
     fn convert_selected(&mut self, ctx: &egui::Context, import_after: bool) {
         let chunks = self.checked();
         if chunks.is_empty() {
-            return self.notice(NoticeKind::Warning, "No Selection", "Please select at least one Learmonth chunk to convert.");
+            return self.notice(
+                NoticeKind::Warning,
+                "No Selection",
+                "Please select at least one Learmonth chunk to convert.",
+            );
         }
         let out_dir = if import_after {
             let root = self.cache_dir.join("converted");
@@ -384,7 +437,11 @@ impl LearmonthDialog {
             }
         };
         if self.convert.is_some() {
-            return self.notice(NoticeKind::Information, "Learmonth Conversion", "A Learmonth conversion is already in progress.");
+            return self.notice(
+                NoticeKind::Information,
+                "Learmonth Conversion",
+                "A Learmonth conversion is already in progress.",
+            );
         }
         let Some(day) = self.loaded.as_ref().map(|l| l.path.clone()).filter(|p| p.is_file()) else {
             return self.notice(NoticeKind::Warning, "No File", "Load a Learmonth day file before converting chunks.");
@@ -396,11 +453,13 @@ impl LearmonthDialog {
             r.send(ConvertMsg::Text("Converting selected Learmonth chunks...".into()));
             r.send(ConvertMsg::Range(0, chunks.len() as i64));
             r.send(ConvertMsg::Value(0));
-            std::fs::create_dir_all(&out_dir).map_err(|e| format!("Could not convert Learmonth chunks to FIT:\n{e}"))?;
+            std::fs::create_dir_all(&out_dir)
+                .map_err(|e| format!("Could not convert Learmonth chunks to FIT:\n{e}"))?;
             let mut written = Vec::new();
             for (i, c) in chunks.iter().enumerate() {
                 let out = out_dir.join(learmonth_fit_filename(c));
-                let path = write_learmonth_chunk_fit(&day, c, &out).map_err(|e| format!("Could not convert Learmonth chunks to FIT:\n{e}"))?;
+                let path = write_learmonth_chunk_fit(&day, c, &out)
+                    .map_err(|e| format!("Could not convert Learmonth chunks to FIT:\n{e}"))?;
                 written.push(path.to_string_lossy().into_owned());
                 r.send(ConvertMsg::Value(i as i64 + 1));
             }
@@ -409,6 +468,11 @@ impl LearmonthDialog {
     }
 }
 
-const BUTTONS: [(&str, &str); 4] = [("all", "Select All"), ("none", "Deselect All"), ("convert", "Convert to FIT"), ("convert_import", "Convert and Import")];
+const BUTTONS: [(&str, &str); 4] = [
+    ("all", "Select All"),
+    ("none", "Deselect All"),
+    ("convert", "Convert to FIT"),
+    ("convert_import", "Convert and Import"),
+];
 
 use chrono::Timelike;

@@ -10,7 +10,10 @@ use std::sync::Arc;
 use super::analysis_figures::{FitGraph, GraphText, SUBPLOT, fit_graph_figure, power_law_label_for};
 use super::figures::colorbar_axes;
 use super::legend::{Legend, Loc};
-use super::{AxisSpec, Axes, BLACK, Figure, Image, Interpolation, Label, Line2D, Marker, MarkerKind, Rgba, WHITE, colorbar_image, make_axes_right, ColorbarSlot, Constrained};
+use super::{
+    Axes, AxisSpec, BLACK, ColorbarSlot, Constrained, Figure, Image, Interpolation, Label, Line2D, Marker, MarkerKind,
+    Rgba, WHITE, colorbar_image, make_axes_right,
+};
 use crate::plot::Colormap;
 use crate::radio::array::Array2;
 
@@ -128,7 +131,15 @@ pub fn spectrum_figure(image: Option<&SpectrumImage>, bands: &[BandTrace], title
             Some((lo, hi)) if lo.is_finite() && hi.is_finite() && hi > lo => (lo, hi),
             _ => finite_limits(&im.data.data),
         };
-        ax.images.push(Image { data: im.data.clone(), extent: im.extent, origin_upper: true, cmap: im.cmap, vmin, vmax, interpolation: Interpolation::Auto });
+        ax.images.push(Image {
+            data: im.data.clone(),
+            extent: im.extent,
+            origin_upper: true,
+            cmap: im.cmap,
+            vmin,
+            vmax,
+            interpolation: Interpolation::Auto,
+        });
         ax.xlim = (x0.min(x1), x0.max(x1));
         ax.ylim = (bottom, top);
         colorbar = Some(origin_colorbar(bar, &im.cmap, vmin, vmax, &im.colorbar_label, text));
@@ -139,7 +150,8 @@ pub fn spectrum_figure(image: Option<&SpectrumImage>, bands: &[BandTrace], title
     if !ax.lines.is_empty() {
         ax.legend = Some(Legend { face: text.face(), ..Legend::origin(Loc::Best, (text.tick_pt - 1.0).max(6.0)) });
     }
-    let slot = colorbar.is_some().then_some(ColorbarSlot { axes: 1, fraction: 0.05, pad: 0.02, shrink: 1.0, aspect: 20.0 });
+    let slot =
+        colorbar.is_some().then_some(ColorbarSlot { axes: 1, fraction: 0.05, pad: 0.02, shrink: 1.0, aspect: 20.0 });
     let axes = std::iter::once(ax).chain(colorbar).collect();
     Figure {
         width: SPECTRUM_SIZE.0,
@@ -155,9 +167,17 @@ pub fn spectrum_figure(image: Option<&SpectrumImage>, bands: &[BandTrace], title
 /// `fig.colorbar(im, ax=ax)` styled by `_style_colorbar`: a thin black
 /// box, inward ticks at the right, the label (when there is one) in
 /// `label_kw`, the tick labels emphasised as the graph's.
-pub(super) fn origin_colorbar(bar: [f64; 4], cmap: &Colormap, vmin: f64, vmax: f64, label: &str, text: GraphText) -> Axes {
+pub(super) fn origin_colorbar(
+    bar: [f64; 4],
+    cmap: &Colormap,
+    vmin: f64,
+    vmax: f64,
+    label: &str,
+    text: GraphText,
+) -> Axes {
     let label = Label::new(label, text.label_pt, BLACK).with_face(text.label_face());
-    let mut cb = colorbar_axes(bar, Some((20.0, (0.0, 0.5))), colorbar_image(cmap, vmin, vmax), BLACK, label, text.tick_pt);
+    let mut cb =
+        colorbar_axes(bar, Some((20.0, (0.0, 0.5))), colorbar_image(cmap, vmin, vmax), BLACK, label, text.tick_pt);
     if cb.y.label.as_ref().is_some_and(|l| l.text.is_empty()) {
         cb.y.label = None;
     }
@@ -175,7 +195,16 @@ pub(super) fn origin_colorbar(bar: [f64; 4], cmap: &Colormap, vmin: f64, vmax: f
 /// The B versus R view: `fit_graph_figure` of the magnetic field and its
 /// power-law fit.
 #[allow(clippy::too_many_arguments)]
-pub fn bvr_figure(heights: &[f64], field: &[f64], fit_x: &[f64], fit_y: &[f64], a: f64, b: f64, title: &str, text: GraphText) -> Figure {
+pub fn bvr_figure(
+    heights: &[f64],
+    field: &[f64],
+    fit_x: &[f64],
+    fit_y: &[f64],
+    a: f64,
+    b: f64,
+    title: &str,
+    text: GraphText,
+) -> Figure {
     let label = power_law_label_for(a, b, "Fit", "B", "R");
     let g = FitGraph {
         x: heights,

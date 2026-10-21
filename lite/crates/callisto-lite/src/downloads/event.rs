@@ -152,7 +152,13 @@ impl EventTab {
                 if failed > 0 {
                     details.push(String::new());
                     details.push("Failures:".into());
-                    details.extend(batch.failures.iter().take(8).map(|(f, e)| format!("{f}: {}", if e.is_empty() { "download failed" } else { e })));
+                    details.extend(
+                        batch
+                            .failures
+                            .iter()
+                            .take(8)
+                            .map(|(f, e)| format!("{f}: {}", if e.is_empty() { "download failed" } else { e })),
+                    );
                     if failed > 8 {
                         details.push("...".into());
                     }
@@ -182,7 +188,10 @@ impl EventTab {
             status.push_str(&format!(" No matches for: {shown}{more}."));
         }
         if !res.warnings.is_empty() {
-            status.push_str(&format!(" Warnings: {}", res.warnings.iter().take(3).cloned().collect::<Vec<_>>().join("; ")));
+            status.push_str(&format!(
+                " Warnings: {}",
+                res.warnings.iter().take(3).cloned().collect::<Vec<_>>().join("; ")
+            ));
         }
         self.status = status;
     }
@@ -192,9 +201,16 @@ impl EventTab {
             .widget(qt::line_edit_spec("filter"))
             .widget(super::status_label(ui, "stations_status", &self.loader.summary))
             .widget(qt::view_spec("station_list").min_height(260))
-            .add(BoxLayout::h([0; 4], 8).widget(qt::button_spec(ui, "st_all", "Select All", false)).widget(qt::button_spec(ui, "st_clear", "Clear", false)).into_item());
+            .add(
+                BoxLayout::h([0; 4], 8)
+                    .widget(qt::button_spec(ui, "st_all", "Select All", false))
+                    .widget(qt::button_spec(ui, "st_clear", "Clear", false))
+                    .into_item(),
+            );
         let station_group = Item::Container(Container {
-            spec: WidgetSpec::new("stations", Size::new(0, 0), Policy::Preferred, Policy::Preferred).min_width(280).max_width(360),
+            spec: WidgetSpec::new("stations", Size::new(0, 0), Policy::Preferred, Policy::Preferred)
+                .min_width(280)
+                .max_width(360),
             margins: [11, 23, 11, 11],
             layout: Box::new(stations.into()),
         });
@@ -247,12 +263,25 @@ impl EventTab {
         } else {
             qt::status(ui, status_rect, &self.loader.summary, p);
         }
-        let rows: Vec<Row> = self.stations.iter().map(|(s, c)| Row::new(vec![s.clone()]).checked(Check::from_bool(*c))).collect();
+        let rows: Vec<Row> =
+            self.stations.iter().map(|(s, c)| Row::new(vec![s.clone()]).checked(Check::from_bool(*c))).collect();
         let visible = self.visible_stations();
         let list = at(&g, o, "station_list");
         let style = Style::station_list();
         let w = itemview::viewport(list, &style).width();
-        for e in itemview::item_view(ui, list, Id::new("event_stations"), &[], &[w], &rows, &visible, &style, &mut self.station_view, true, p) {
+        for e in itemview::item_view(
+            ui,
+            list,
+            Id::new("event_stations"),
+            &[],
+            &[w],
+            &rows,
+            &visible,
+            &style,
+            &mut self.station_view,
+            true,
+            p,
+        ) {
             if let Event::Toggled(i) = e {
                 self.stations[i].1 ^= true;
                 let key = station_key(&self.stations[i].0);
@@ -278,12 +307,38 @@ impl EventTab {
 
         qt::label(ui, at(&g, o, "start_label"), "Start (UTC):", p.text);
         qt::label(ui, at(&g, o, "stop_label"), "Stop (UTC):", p.text);
-        let mut changed = qt::datetime_edit(ui, at(&g, o, "start"), Id::new("event_start"), &mut self.start, "yyyy-MM-dd HH:mm:ss", true, p);
-        changed |= qt::datetime_edit(ui, at(&g, o, "stop"), Id::new("event_stop"), &mut self.stop, "yyyy-MM-dd HH:mm:ss", true, p);
+        let mut changed = qt::datetime_edit(
+            ui,
+            at(&g, o, "start"),
+            Id::new("event_start"),
+            &mut self.start,
+            "yyyy-MM-dd HH:mm:ss",
+            true,
+            p,
+        );
+        changed |= qt::datetime_edit(
+            ui,
+            at(&g, o, "stop"),
+            Id::new("event_stop"),
+            &mut self.stop,
+            "yyyy-MM-dd HH:mm:ss",
+            true,
+            p,
+        );
         if changed {
             self.request_stations(sh.svc);
         }
-        if qt::button(ui, at(&g, o, "search"), Id::new("event_search"), "Search Matching FITS", true, self.search.is_none() && self.downloads.is_none(), p).clicked() {
+        if qt::button(
+            ui,
+            at(&g, o, "search"),
+            Id::new("event_search"),
+            "Search Matching FITS",
+            true,
+            self.search.is_none() && self.downloads.is_none(),
+            p,
+        )
+        .clicked()
+        {
             self.search_fits(sh);
         }
 
@@ -294,19 +349,40 @@ impl EventTab {
             .results
             .iter()
             .map(|(c, on)| {
-                let mut r = Row::new(vec![String::new(), c.station.clone(), c.utc_text(), c.filename.clone(), c.receiver_id.clone()]).checked(Check::from_bool(*on));
+                let mut r = Row::new(vec![
+                    String::new(),
+                    c.station.clone(),
+                    c.utc_text(),
+                    c.filename.clone(),
+                    c.receiver_id.clone(),
+                ])
+                .checked(Check::from_bool(*on));
                 r.tooltip = None;
                 r
             })
             .collect();
         let headers = ["", "Station", "UTC Time", "Filename", "Receiver"];
-        let col = |i: usize, check: bool| itemview::content_width(ui, headers[i], rows.iter().map(|r| r.cells[i].clone()), check, false);
+        let col = |i: usize, check: bool| {
+            itemview::content_width(ui, headers[i], rows.iter().map(|r| r.cells[i].clone()), check, false)
+        };
         let vp = itemview::viewport(table, &style);
         let width = vp.width() - if itemview::needs_scrollbar(table, &style, rows.len()) { 10.0 } else { 0.0 };
         let (w0, w1, w2, w4) = (col(0, !rows.is_empty()), col(1, false), col(2, false), col(4, false));
         let w3 = (width - w0 - w1 - w2 - w4).max(0.0);
         let visible: Vec<usize> = (0..rows.len()).collect();
-        for e in itemview::item_view(ui, table, Id::new("event_results"), &headers, &[w0, w1, w2, w3, w4], &rows, &visible, &style, &mut self.results_view, true, p) {
+        for e in itemview::item_view(
+            ui,
+            table,
+            Id::new("event_results"),
+            &headers,
+            &[w0, w1, w2, w3, w4],
+            &rows,
+            &visible,
+            &style,
+            &mut self.results_view,
+            true,
+            p,
+        ) {
             if let Event::Toggled(i) = e {
                 self.results[i].1 ^= true;
             }
@@ -360,7 +436,8 @@ impl EventTab {
         self.status = "Searching archive listings...".into();
         self.progress = Some(qt::Progress::busy());
         let (start, stop) = (self.start, self.stop);
-        self.search = Some(Job::spawn(&sh.ctx, move |r| downloader::search_event(start, stop, &stations, |v, m| r.send((v, m)))));
+        self.search =
+            Some(Job::spawn(&sh.ctx, move |r| downloader::search_event(start, stop, &stations, |v, m| r.send((v, m)))));
     }
 
     fn action(&mut self, id: &str, sh: &mut Shared) {

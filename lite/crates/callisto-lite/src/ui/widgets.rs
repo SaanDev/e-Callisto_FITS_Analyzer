@@ -74,7 +74,16 @@ fn qt_text_clipped(
 
 /// [`text_left`], clipped to `clip`.
 #[allow(clippy::too_many_arguments)]
-pub fn text_left_clipped(ui: &Ui, clip: Rect, x: f32, center_y: f32, text: &str, px: f32, weight: Weight, color: Color32) -> Rect {
+pub fn text_left_clipped(
+    ui: &Ui,
+    clip: Rect,
+    x: f32,
+    center_y: f32,
+    text: &str,
+    px: f32,
+    weight: Weight,
+    color: Color32,
+) -> Rect {
     qt_text_clipped(ui, Some(clip), x, center_y, egui::Align::Min, text, px, weight, color)
 }
 
@@ -97,7 +106,8 @@ pub fn mnemonic_text(ui: &Ui, x: f32, center_y: f32, align: egui::Align, text: &
         let baseline = ((center_y - height / 2.0 + ascent) * ppp).round();
         let snap = |v: f32| (v * ppp).round() / ppp;
         let line = Rect::from_min_max(pos2(snap(x0), (baseline + 1.0) / ppp), pos2(snap(x1), (baseline + 2.0) / ppp));
-        ui.painter().add(egui::Shape::Rect(egui::epaint::RectShape::filled(line, 0.0, color).with_round_to_pixels(false)));
+        ui.painter()
+            .add(egui::Shape::Rect(egui::epaint::RectShape::filled(line, 0.0, color).with_round_to_pixels(false)));
     }
     rect
 }

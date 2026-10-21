@@ -49,10 +49,16 @@ pub fn normalize(raw: &Json) -> Result<Json, String> {
     s.insert("noise_clip_low".into(), Json::Float(low));
     s.insert("noise_clip_high".into(), Json::Float(high));
     let scale = settings.get("noise_clip_scale").map(Json::py_str).unwrap_or_default();
-    s.insert("noise_clip_scale".into(), Json::Str(if scale.trim().to_lowercase() == "signed_log" { "signed_log" } else { "linear" }.into()));
+    s.insert(
+        "noise_clip_scale".into(),
+        Json::Str(if scale.trim().to_lowercase() == "signed_log" { "signed_log" } else { "linear" }.into()),
+    );
     s.insert("use_db".into(), Json::Bool(settings.get("use_db").is_some_and(Json::truthy)));
     s.insert("use_utc".into(), Json::Bool(settings.get("use_utc").is_some_and(Json::truthy)));
-    s.insert("cmap".into(), Json::Str(settings.get("cmap").filter(|v| v.truthy()).map(Json::py_str).unwrap_or_else(|| "Custom".into())));
+    s.insert(
+        "cmap".into(),
+        Json::Str(settings.get("cmap").filter(|v| v.truthy()).map(Json::py_str).unwrap_or_else(|| "Custom".into())),
+    );
     for key in ["graph", "rfi", "annotation_style_defaults"] {
         s.insert(key.into(), dict(settings.get(key)));
     }
@@ -68,7 +74,9 @@ pub fn normalize(raw: &Json) -> Result<Json, String> {
     out.insert("version".into(), Json::Int(raw.get("version").and_then(Json::as_i64).unwrap_or(PRESET_SCHEMA_VERSION)));
     out.insert(
         "created_at".into(),
-        Json::Str(raw.get("created_at").filter(|v| v.truthy()).map(Json::py_str).unwrap_or_else(crate::project::now_iso)),
+        Json::Str(
+            raw.get("created_at").filter(|v| v.truthy()).map(Json::py_str).unwrap_or_else(crate::project::now_iso),
+        ),
     );
     out.insert("settings".into(), Json::Object(s));
     Ok(Json::Object(out))
@@ -87,7 +95,9 @@ pub fn build(name: &str, settings: Json) -> Result<Json, String> {
 /// `parse_presets_json`: the valid presets of a JSON list.
 pub fn parse(text: &str) -> Vec<Json> {
     match pyjson::loads(text) {
-        Ok(Json::Array(items)) => items.iter().filter(|i| i.as_object().is_some()).filter_map(|i| normalize(i).ok()).collect(),
+        Ok(Json::Array(items)) => {
+            items.iter().filter(|i| i.as_object().is_some()).filter_map(|i| normalize(i).ok()).collect()
+        }
         _ => Vec::new(),
     }
 }
@@ -150,7 +160,8 @@ mod tests {
 
     #[test]
     fn presets_like_the_full_app() {
-        let settings = pyjson::loads(r#"{"noise_clip_low": 5.5, "noise_clip_high": -2.5, "use_db": 1, "cmap": ""}"#).unwrap();
+        let settings =
+            pyjson::loads(r#"{"noise_clip_low": 5.5, "noise_clip_high": -2.5, "use_db": 1, "cmap": ""}"#).unwrap();
         let p = build("  My   preset ", settings).unwrap();
         assert_eq!(name_of(&p), "My preset");
         let s = p.get("settings").unwrap();

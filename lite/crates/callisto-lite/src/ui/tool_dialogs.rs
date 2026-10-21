@@ -109,7 +109,8 @@ impl FrequencyDialog {
     fn layout(&self, ui: &Ui) -> Layout {
         let range = format!("Available range: {:.3} to {:.3} MHz", self.lo, self.hi);
         let spin = qt::spin_spec(ui, "frequency", &spin_sample((self.lo, self.hi), 3, " MHz"));
-        let form = FormLayout::new([0; 4], 6, 6).row(qt::label_spec(ui, "frequency_label", "Frequency"), Item::Widget(spin));
+        let form =
+            FormLayout::new([0; 4], 6, 6).row(qt::label_spec(ui, "frequency_label", "Frequency"), Item::Widget(spin));
         let buttons = BoxLayout::h([0; 4], 6)
             .stretch(1)
             .widget(qt::button_spec(ui, "plot", "Plot", false))
@@ -135,7 +136,19 @@ impl FrequencyDialog {
         let step = ((self.hi - self.lo) / 100.0).max(0.001);
         let first = std::mem::take(&mut self.first_frame);
         let id = Id::new("lc_frequency");
-        qt::double_spin_box(ui, rect(&g, o, "frequency"), id, &mut self.value, (self.lo, self.hi), step, 3, " MHz", first, true, p);
+        qt::double_spin_box(
+            ui,
+            rect(&g, o, "frequency"),
+            id,
+            &mut self.value,
+            (self.lo, self.hi),
+            step,
+            3,
+            " MHz",
+            first,
+            true,
+            p,
+        );
         let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
         if qt::button(ui, rect(&g, o, "plot"), Id::new("lc_plot"), "Plot", false, true, p).clicked() || enter {
             return Some(Some(self.value));
@@ -199,7 +212,10 @@ impl LightCurveSettingsDialog {
                 qt::label_spec(ui, "mode_label", "Mode"),
                 check_row(
                     "mode",
-                    vec![check_spec(ui, "single", "Single light curve"), check_spec(ui, "multiple", "Multiple light curves")],
+                    vec![
+                        check_spec(ui, "single", "Single light curve"),
+                        check_spec(ui, "multiple", "Multiple light curves"),
+                    ],
                 ),
             )
             .row(qt::label_spec(ui, "color_label", "Color"), Item::Widget(color_spec))
@@ -245,7 +261,15 @@ impl LightCurveSettingsDialog {
         if qt::check_box(ui, rect(&g, o, "single"), Id::new("lcs_single"), "Single light curve", &mut single, true, p) {
             s.multiple = false;
         }
-        if qt::check_box(ui, rect(&g, o, "multiple"), Id::new("lcs_multiple"), "Multiple light curves", &mut multiple, true, p) {
+        if qt::check_box(
+            ui,
+            rect(&g, o, "multiple"),
+            Id::new("lcs_multiple"),
+            "Multiple light curves",
+            &mut multiple,
+            true,
+            p,
+        ) {
             s.multiple = true;
         }
         if color_button(ui, rect(&g, o, "color"), Id::new("lcs_color"), &s.line_color, p) {
@@ -253,16 +277,60 @@ impl LightCurveSettingsDialog {
             self.color = Some(ColorDialog::new("Choose light curve color", c));
         }
         let s = &mut self.settings;
-        qt::double_spin_box(ui, rect(&g, o, "width"), Id::new("lcs_width"), &mut s.line_width, (0.5, 12.0), 0.5, 1, "", false, true, p);
-        qt::double_spin_box(ui, rect(&g, o, "scale"), Id::new("lcs_scale"), &mut s.vertical_scale, (0.1, 5.0), 0.1, 1, "", false, true, p);
-        qt::double_spin_box(ui, rect(&g, o, "opacity"), Id::new("lcs_opacity"), &mut s.opacity, (0.1, 1.0), 0.05, 2, "", false, true, p);
+        qt::double_spin_box(
+            ui,
+            rect(&g, o, "width"),
+            Id::new("lcs_width"),
+            &mut s.line_width,
+            (0.5, 12.0),
+            0.5,
+            1,
+            "",
+            false,
+            true,
+            p,
+        );
+        qt::double_spin_box(
+            ui,
+            rect(&g, o, "scale"),
+            Id::new("lcs_scale"),
+            &mut s.vertical_scale,
+            (0.1, 5.0),
+            0.1,
+            1,
+            "",
+            false,
+            true,
+            p,
+        );
+        qt::double_spin_box(
+            ui,
+            rect(&g, o, "opacity"),
+            Id::new("lcs_opacity"),
+            &mut s.opacity,
+            (0.1, 1.0),
+            0.05,
+            2,
+            "",
+            false,
+            true,
+            p,
+        );
         let items: Vec<String> = STYLES.iter().map(|s| (*s).to_owned()).collect();
         let current = STYLES.iter().position(|st| *st == s.line_style);
         if let Some(i) = qt::combo(ui, rect(&g, o, "style"), Id::new("lcs_style"), &items, current, "", true, p) {
             s.line_style = STYLES[i].into();
         }
         let mut labels = s.show_frequency_label;
-        if qt::check_box(ui, rect(&g, o, "labels"), Id::new("lcs_labels"), "Show frequency labels", &mut labels, true, p) {
+        if qt::check_box(
+            ui,
+            rect(&g, o, "labels"),
+            Id::new("lcs_labels"),
+            "Show frequency labels",
+            &mut labels,
+            true,
+            p,
+        ) {
             s.show_frequency_label = labels;
         }
         let mut action = None;
@@ -293,12 +361,20 @@ impl LightCurveSettingsDialog {
 
     pub fn show(&mut self, ctx: &egui::Context, p: &Palette) -> Option<SettingsAction> {
         let mut action = None;
-        crate::downloads::window(ctx, "lc_settings", "Light Curve Settings", vec2(420.0, 376.0), vec2(364.0, 376.0), p, |ui, close| {
-            action = self.frame(ui, p);
-            if close {
-                action = Some(SettingsAction::Close);
-            }
-        });
+        crate::downloads::window(
+            ctx,
+            "lc_settings",
+            "Light Curve Settings",
+            vec2(420.0, 376.0),
+            vec2(364.0, 376.0),
+            p,
+            |ui, close| {
+                action = self.frame(ui, p);
+                if close {
+                    action = Some(SettingsAction::Close);
+                }
+            },
+        );
         action
     }
 }
@@ -308,7 +384,8 @@ impl LightCurveSettingsDialog {
 fn color_button(ui: &Ui, r: Rect, id: Id, name: &str, p: &Palette) -> bool {
     let c = parse_color(name).unwrap_or([0x00, 0xe5, 0xff, 255]);
     let fill = Color32::from_rgb(c[0], c[1], c[2]);
-    let fg = if hsl_lightness(c) > 150 { Color32::from_rgb(0x10, 0x10, 0x10) } else { Color32::from_rgb(0xf5, 0xf5, 0xf5) };
+    let fg =
+        if hsl_lightness(c) > 150 { Color32::from_rgb(0x10, 0x10, 0x10) } else { Color32::from_rgb(0xf5, 0xf5, 0xf5) };
     let resp = ui.interact(r, id, egui::Sense::click());
     widgets::qt_box(ui, r, 10.0, fill, Color32::from_rgb(0x80, 0x80, 0x80));
     widgets::text_center(ui, r.center(), name, qt::FONT_PX, Weight::Regular, fg);
@@ -349,8 +426,19 @@ pub struct TextAnnotationDialog {
 }
 
 impl TextAnnotationDialog {
-    pub fn new(title: &str, purpose: TextPurpose, text: &str, style: &TextStyle, ui_family: &str, families: Vec<String>) -> Self {
-        let family = if style.font_family.trim().is_empty() { ui_family.to_owned() } else { style.font_family.trim().to_owned() };
+    pub fn new(
+        title: &str,
+        purpose: TextPurpose,
+        text: &str,
+        style: &TextStyle,
+        ui_family: &str,
+        families: Vec<String>,
+    ) -> Self {
+        let family = if style.font_family.trim().is_empty() {
+            ui_family.to_owned()
+        } else {
+            style.font_family.trim().to_owned()
+        };
         let color = parse_color(&style.color).map_or_else(|| DEFAULT_ANNOTATION_COLOR.to_owned(), color_name);
         Self {
             title: title.into(),
@@ -384,10 +472,17 @@ impl TextAnnotationDialog {
         let code_w = text_width(ui, &self.color, qt::FONT_PX, Weight::Regular).ceil() as i32;
         let color_row = BoxLayout::h([0; 4], 8)
             .add_stretched(
-                Item::Widget(WidgetSpec::new("preview", Size::new(54, 24), Policy::Preferred, Policy::Preferred).min_size(Size::new(54, 24)).max_width(54)),
+                Item::Widget(
+                    WidgetSpec::new("preview", Size::new(54, 24), Policy::Preferred, Policy::Preferred)
+                        .min_size(Size::new(54, 24))
+                        .max_width(54),
+                ),
                 0,
             )
-            .add_stretched(Item::Widget(WidgetSpec::new("code", Size::new(code_w, 16), Policy::Preferred, Policy::Preferred)), 1)
+            .add_stretched(
+                Item::Widget(WidgetSpec::new("code", Size::new(code_w, 16), Policy::Preferred, Policy::Preferred)),
+                1,
+            )
             .add_stretched(Item::Widget(qt::button_spec(ui, "choose", "Choose...", false)), 0);
         let hint = Layout::from(color_row.clone()).size_hint();
         let color_holder = Item::Container(Container {
@@ -444,7 +539,11 @@ impl TextAnnotationDialog {
         let fill = Color32::from_rgb(c[0], c[1], c[2]);
         widgets::qt_box(ui, rect(&g, o, "preview"), 0.0, fill, Color32::from_rgb(0x88, 0x88, 0x88));
         let code = rect(&g, o, "code");
-        let fg = if hsl_lightness(c) > 140 { Color32::from_rgb(0x10, 0x10, 0x10) } else { Color32::from_rgb(0xf5, 0xf5, 0xf5) };
+        let fg = if hsl_lightness(c) > 140 {
+            Color32::from_rgb(0x10, 0x10, 0x10)
+        } else {
+            Color32::from_rgb(0xf5, 0xf5, 0xf5)
+        };
         let w = text_width(ui, &self.color, qt::FONT_PX, Weight::Regular);
         let band = Rect::from_min_size(egui::pos2(code.left(), code.center().y - 8.0), vec2(w, 16.0));
         ui.painter().rect_filled(band, 0.0, fill);

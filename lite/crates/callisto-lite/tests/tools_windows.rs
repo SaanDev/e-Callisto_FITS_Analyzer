@@ -56,7 +56,13 @@ fn compare(name: &str, lite: &RgbaImage) -> Option<f64> {
     std::fs::create_dir_all(&out).unwrap();
     let reference = image::open(lite_dir().join(format!("reference/windows/tools/{name}.png"))).ok()?.to_rgba8();
     if (reference.width(), reference.height()) != (lite.width(), lite.height()) {
-        println!("{name}: size {}x{}, full app {}x{}", lite.width(), lite.height(), reference.width(), reference.height());
+        println!(
+            "{name}: size {}x{}, full app {}x{}",
+            lite.width(),
+            lite.height(),
+            reference.width(),
+            reference.height()
+        );
     }
     Some(compare_images(name, &reference, lite))
 }
@@ -87,11 +93,21 @@ impl eframe::App for TestApp {
 }
 
 /// Draws the dialog until `ready` (at least six frames), then renders it.
-fn shot(name: &str, p: Palette, d: Rc<RefCell<BatchDialog>>, env: BatchEnv, ready: impl Fn(&mut BatchDialog) -> bool) -> Option<f64> {
+fn shot(
+    name: &str,
+    p: Palette,
+    d: Rc<RefCell<BatchDialog>>,
+    env: BatchEnv,
+    ready: impl Fn(&mut BatchDialog) -> bool,
+) -> Option<f64> {
     let (dd, pp) = (d.clone(), p.clone());
-    let app = TestApp { draw: Box::new(move |ui| {
-        dd.borrow_mut().frame(ui, &env, &pp);
-    }), p, frames: 0 };
+    let app = TestApp {
+        draw: Box::new(move |ui| {
+            dd.borrow_mut().frame(ui, &env, &pp);
+        }),
+        p,
+        frames: 0,
+    };
     let mut h = Harness::builder()
         .with_size([760.0, 626.0])
         .with_pixels_per_point(1.5)
@@ -142,7 +158,8 @@ fn tools_windows_match_full_app() {
         let p = Palette::new(dark, true);
         // The capture's scratch folders, as its line edits show them.
         let raw: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(lite_dir().join(format!("reference/windows/tools/dialog_batch_raw_{name}.json"))).unwrap(),
+            &std::fs::read_to_string(lite_dir().join(format!("reference/windows/tools/dialog_batch_raw_{name}.json")))
+                .unwrap(),
         )
         .unwrap();
         let edits: Vec<String> = raw["layout"]
@@ -175,45 +192,62 @@ fn tools_windows_match_full_app() {
         let _ = std::fs::remove_dir_all(&scratch);
         let (input, output) = (scratch.join("batch_in"), scratch.join("batch_out"));
         std::fs::create_dir_all(&input).unwrap();
-        for f in ["BIR_20261007_101459_01.fit.gz", "INDIA-GAURI_20261007_041500_02.fit.gz", "GERMANY-DLR_20261007_050000_01.fit.gz"] {
+        for f in [
+            "BIR_20261007_101459_01.fit.gz",
+            "INDIA-GAURI_20261007_041500_02.fit.gz",
+            "GERMANY-DLR_20261007_050000_01.fit.gz",
+        ] {
             std::fs::copy(lite_dir().join("parity/fixtures").join(f), input.join(f)).unwrap();
         }
         std::fs::write(input.join("notes.txt"), "not a FIT file").unwrap();
         d.borrow_mut().set_folders(&input.to_string_lossy(), &output.to_string_lossy());
         d.borrow_mut().set_options(false, 2, "inferno", false, false);
         let reference: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(lite_dir().join(format!("reference/windows/tools/batch_outputs_{name}.json"))).unwrap(),
+            &std::fs::read_to_string(lite_dir().join(format!("reference/windows/tools/batch_outputs_{name}.json")))
+                .unwrap(),
         )
         .unwrap();
         let summary = reference["summaries"][0].clone();
         let n = format!("dialog_batch_done_{name}");
         d.borrow_mut().click_start();
-        results.push((n.clone(), shot(&n, p.clone(), d.clone(), env.clone(), move |d| {
-            if d.is_running() || d.last_summary.is_none() {
-                return false;
-            }
-            // The summary box, then the capture's folder texts.
-            let notices = d.take_notices();
-            assert_eq!(notices.len(), 1, "one summary box: {notices:?}");
-            assert_eq!(notices[0].title, summary["title"].as_str().unwrap());
-            assert_eq!(notices[0].text, summary["text"].as_str().unwrap());
-            d.set_folders(&shown_in, &shown_out);
-            true
-        })));
+        results.push((
+            n.clone(),
+            shot(&n, p.clone(), d.clone(), env.clone(), move |d| {
+                if d.is_running() || d.last_summary.is_none() {
+                    return false;
+                }
+                // The summary box, then the capture's folder texts.
+                let notices = d.take_notices();
+                assert_eq!(notices.len(), 1, "one summary box: {notices:?}");
+                assert_eq!(notices[0].title, summary["title"].as_str().unwrap());
+                assert_eq!(notices[0].text, summary["text"].as_str().unwrap());
+                d.set_folders(&shown_in, &shown_out);
+                true
+            }),
+        ));
         let mut outputs: Vec<String> = std::fs::read_dir(&output)
             .unwrap()
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         outputs.sort();
-        let want: Vec<String> = reference["outputs"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_owned()).collect();
+        let want: Vec<String> =
+            reference["outputs"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_owned()).collect();
         assert_eq!(outputs, want, "the run wrote the full app's files");
         for f in &outputs {
             let lite = image::open(output.join(f)).unwrap().to_rgba8();
-            let full = image::open(lite_dir().join(format!("reference/windows/tools/batch_png_{name}_{f}"))).unwrap().to_rgba8();
+            let full = image::open(lite_dir().join(format!("reference/windows/tools/batch_png_{name}_{f}")))
+                .unwrap()
+                .to_rgba8();
             let label = format!("batch_png_{name}_{}", f.trim_end_matches(".png"));
             if (lite.width(), lite.height()) != (full.width(), full.height()) {
-                println!("{label}: size {}x{}, full app {}x{}", lite.width(), lite.height(), full.width(), full.height());
+                println!(
+                    "{label}: size {}x{}, full app {}x{}",
+                    lite.width(),
+                    lite.height(),
+                    full.width(),
+                    full.height()
+                );
             }
             results.push((label.clone(), Some(compare_images(&label, &full, &lite))));
         }

@@ -44,7 +44,8 @@ impl LightCurveSettings {
 }
 
 /// `LIGHT_CURVE_COLOR_PALETTE`.
-pub const COLOR_PALETTE: [&str; 8] = ["#00e5ff", "#ffb000", "#7bd88f", "#ff66c4", "#ffffff", "#c6a4ff", "#f95d6a", "#00d084"];
+pub const COLOR_PALETTE: [&str; 8] =
+    ["#00e5ff", "#ffb000", "#7bd88f", "#ff66c4", "#ffffff", "#c6a4ff", "#f95d6a", "#00d084"];
 
 /// `_light_curve_color_for_index`: the chosen colour first, then the palette without it.
 pub fn color_for_index(selected: &str, index: usize) -> String {
@@ -59,7 +60,10 @@ pub fn frequency_limits(freqs: &[f64]) -> Option<(f64, f64)> {
     if finite.is_empty() {
         return None;
     }
-    Some((finite.iter().copied().fold(f64::INFINITY, f64::min), finite.iter().copied().fold(f64::NEG_INFINITY, f64::max)))
+    Some((
+        finite.iter().copied().fold(f64::INFINITY, f64::min),
+        finite.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+    ))
 }
 
 /// `_nearest_light_curve_frequency`: the row and its frequency.

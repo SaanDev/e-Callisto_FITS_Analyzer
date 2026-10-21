@@ -110,7 +110,12 @@ fn button(h: &mut Harness<'_, LiteApp>, (x, y): (f64, f64), pressed: bool) {
     let p = pos(h, x, y);
     let events = &mut h.input_mut().events;
     events.push(Event::PointerMoved(p));
-    events.push(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Default::default() });
+    events.push(Event::PointerButton {
+        pos: p,
+        button: PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    });
     h.step();
 }
 
@@ -122,7 +127,8 @@ const POLYGON: [(f64, f64); 3] = [(120.0, 85.0), (300.0, 75.0), (250.0, 50.0)];
 const POLYGON_CURSOR: (f64, f64) = (140.0, 45.0);
 const LINE: [(f64, f64); 2] = [(500.0, 85.0), (800.0, 40.0)];
 const TEXT: (f64, f64) = (600.0, 70.0);
-const LASSO: [(f64, f64); 6] = [(100.0, 85.0), (300.0, 88.0), (500.0, 70.0), (520.0, 45.0), (350.0, 35.0), (150.0, 50.0)];
+const LASSO: [(f64, f64); 6] =
+    [(100.0, 85.0), (300.0, 88.0), (500.0, 70.0), (520.0, 45.0), (350.0, 35.0), (150.0, 50.0)];
 
 type Step<'a> = (&'a str, Box<dyn Fn(&mut Harness<'static, LiteApp>) + 'a>);
 

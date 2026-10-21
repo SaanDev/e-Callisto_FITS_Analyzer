@@ -1,0 +1,275 @@
+<a name="top"></a>
+<h1>e-CALLISTO FITS Analyzer Lite</h1>
+<p class="lead">User Guide &#8226; version {{VERSION}}</p>
+<p>This guide explains how to load and view e-CALLISTO solar radio spectra, reduce noise, isolate and analyze
+bursts, and use the built-in downloaders. Start with the Quick Start, then use the reference sections for details.
+Click any entry below to jump to it.</p>
+
+<div class="toc">
+<p><b>Contents</b></p>
+<p><b>Getting started</b><br>
+&#8226; <a href="#quick-start">1. Quick Start</a><br>
+&#8226; <a href="#interface">2. The Main Window</a></p>
+<p><b>Menu reference</b><br>
+&#8226; <a href="#menu-file">3. File menu</a><br>
+&#8226; <a href="#menu-edit">4. Edit menu</a><br>
+&#8226; <a href="#menu-download">5. Download menu</a><br>
+&#8226; <a href="#menu-solar-events">6. Solar Events menu</a><br>
+&#8226; <a href="#menu-view">7. View menu</a><br>
+&#8226; <a href="#menu-analysis">8. Analysis menu</a><br>
+&#8226; <a href="#menu-processing">9. Processing menu</a><br>
+&#8226; <a href="#menu-about">10. About menu</a></p>
+<p><b>Tools and controls</b><br>
+&#8226; <a href="#toolbar">11. Toolbar</a><br>
+&#8226; <a href="#sidebar">12. Left sidebar panels</a><br>
+&#8226; <a href="#navigation">13. Navigation and picking</a></p>
+<p><b>Companion windows</b><br>
+&#8226; <a href="#fits-downloader">14. FITS Downloader</a></p>
+<p><b>Appendix</b><br>
+&#8226; <a href="#shortcuts">A. Keyboard shortcuts</a><br>
+&#8226; <a href="#file-types">B. File types</a><br>
+&#8226; <a href="#tips">C. Tips and troubleshooting</a></p>
+</div>
+<hr>
+
+<a name="quick-start"></a>
+<h2>1. Quick Start</h2>
+<p class="lead">The fastest path from a raw file to an analysis figure.</p>
+<ol>
+<li><b>Open a file.</b> Choose <code>File &#8594; Open</code> (or press <code>Ctrl+O</code>, or click the
+Open icon on the toolbar) and select an e-CALLISTO FITS file. The dynamic spectrum appears at once.</li>
+<li><b>Remove the background.</b> In the left sidebar's <b>Background Subtraction</b> section, pick a
+method (Mean, Median, or Median (dB)) and click <b>Subtract Background</b>. It is always computed from the raw
+data, so clicking again with another method replaces the result rather than stacking on it.</li>
+<li><b>Adjust the contrast.</b> Drag the <b>Lower Threshold</b> and <b>Upper Threshold</b> sliders. They only
+set the color-scale limits and update live, so you can watch the burst emerge; the data are never modified.</li>
+<li><b>Pick units and colors.</b> In <b>Units</b> choose Digits or dB, and Seconds or UT. In
+<b>Graph Properties</b> pick a colormap.</li>
+<li><b>Focus on the burst.</b> Click <b>Isolate Burst</b> on the toolbar and draw a loop around the emission.
+Only the enclosed region is kept for analysis.</li>
+<li><b>Extract the ridge.</b> Open <code>Analysis &#8594; Maximum Intensities</code> to trace the peak
+frequency over time, then lasso-select and remove any stray outliers.</li>
+<li><b>Fit and measure.</b> Run the Burst Analyzer for a power-law fit, drift rate, and shock speed/height,
+or use <code>Analysis &#8594; Type II Band-splitting</code> for a magnetic-field estimate.</li>
+<li><b>Export.</b> Save the figure with <code>File &#8594; Export As &#8594; Export Figure</code>
+(or <code>Ctrl+E</code>), and save your whole session with <code>File &#8594; Save Project</code>
+(<code>Ctrl+S</code>).</li>
+</ol>
+<p class="note">Tip: many buttons stay greyed out until a file is loaded. Open a file first and the
+analysis controls become active.</p>
+
+<a name="interface"></a>
+<h2>2. The Main Window</h2>
+<p>The window has four regions:</p>
+<ul>
+<li><b>Menu bar</b> (top): File, Edit, Download, Solar Events, View, Analysis, Processing, About, and Help.</li>
+<li><b>Toolbar</b> (below the menu): icon buttons for the most common actions, plus a
+<b>Cite this Software</b> button on the right.</li>
+<li><b>Left sidebar</b>: grouped controls for the timeline, background subtraction, thresholds, units, graph appearance, the analysis summary,
+and ruler readouts. A vertical arrow button on its edge hides or shows the sidebar to give the plot more room.</li>
+<li><b>Viewer</b> (center): the dynamic spectrum. A status bar at the bottom shows messages on the left and,
+on the right, the live cursor readout (time, frequency, intensity) and the update-check status.</li>
+</ul>
+
+<a name="menu-file"></a>
+<h2>3. File menu</h2>
+<table>
+<tr><th>Item</th><th>What it does</th></tr>
+<tr><td><b>Open</b> (<code>Ctrl+O</code>)</td><td>Load one FITS file, or automatically combine a compatible multi-file time, frequency, or time + frequency selection.</td></tr>
+<tr><td><b>Combine FITS Files...</b></td><td>Select, validate, preview, and import time-only, frequency-only, or complete timestamp × focus-code grid combinations.</td></tr>
+<tr><td><b>Open Project</b> (<code>Ctrl+Shift+O</code>)</td><td>Reopen a saved <code>.efaproj</code> project: the spectrum with its view, processing, annotations and analysis, and the analysis windows it needs. Projects written by the full e-CALLISTO FITS Analyzer open too; the parts Lite does not show (solar images, GCS fits, the geomagnetic response) are kept and written back unchanged when you save.</td></tr>
+<tr><td><b>Save Project</b> (<code>Ctrl+S</code>)</td><td>Save everything in one file: the radio spectrum with its view, thresholds, units, colormap, styling and analysis.</td></tr>
+<tr><td><b>Save Project As</b> (<code>Ctrl+Shift+S</code>)</td><td>Save the project to a new file.</td></tr>
+<tr><td><b>Recover Last Session</b></td><td>Restore the most recent autosave snapshot after a crash.</td></tr>
+<tr><td><b>Generate Project Report</b></td><td>Build a consolidated PDF with the data source, header, processing, analysis and Type II results, the spectra and the fits. Every graph in the report is drawn in the OriginPro style, in light mode.</td></tr>
+<tr><td><b>Export &#8594; Export Figure</b> (<code>Ctrl+E</code>)</td><td>Save the current plot, with its zoom and overlays, as PNG, PDF, EPS, SVG, TIFF, or JPG. The file is an OriginPro-style graph in light mode (Arial, closed black frame, inward ticks on all four sides, framed color scale) with your Graph Properties titles and font sizes; the plot on screen keeps its own look.</td></tr>
+<tr><td><b>Export &#8594; Export to FIT</b> (<code>Ctrl+F</code>)</td><td>Write processed data (raw, background-subtracted, or combined) as a new FITS file.</td></tr>
+<tr><td><b>Export &#8594; Export Provenance Report</b></td><td>Write Markdown and JSON summaries of the source, processing, RFI, annotations, and operation log.</td></tr>
+<tr><td><b>Export &#8594; Export Analysis Log</b></td><td>Write CSV and text summaries of fit parameters and derived shock metrics.</td></tr>
+</table>
+
+<a name="menu-edit"></a>
+<h2>4. Edit menu</h2>
+<ul>
+<li><b>Undo</b> (<code>Ctrl+Z</code>) and <b>Redo</b> (<code>Ctrl+Shift+Z</code>): step through processing changes.</li>
+<li><b>Reset to Raw</b>: revert all applied processing and return to the original loaded data.</li>
+<li><b>Reset All</b>: return the app to how it starts: the loaded data, processing, graph settings, sidebar
+readouts and undo history are cleared, and the analysis windows are closed. Your preferences and the download
+cache are kept.</li>
+</ul>
+
+<a name="menu-download"></a>
+<h2>5. Download menu</h2>
+<p><b>Launch FITS Downloader</b> opens the e-CALLISTO downloader window (also reachable from
+<code>Solar Events &#8594; Radio Bursts</code>). See <a href="#fits-downloader">section 14</a>.</p>
+
+<a name="menu-solar-events"></a>
+<h2>6. Solar Events menu</h2>
+<p><b>Radio Bursts</b>: the e-CALLISTO and Learmonth downloaders (see <a href="#fits-downloader">section 14</a>).</p>
+
+<a name="menu-view"></a>
+<h2>7. View menu</h2>
+<ul>
+<li><b>View FITS Header</b>: inspect the header of the loaded file.</li>
+<li><b>Set Display Range</b>: type exact start/stop times and frequency bounds for aligned comparisons.</li>
+<li><b>Save / Apply / Delete Display Range Preset</b>: reuse the same visible window on later files.</li>
+<li><b>Export / Import View Config</b>: share the display range, units, thresholds, colormap, and styling as an
+<code>.efaview.json</code> file.</li>
+<li><b>Multi-Station Comparison</b>: stack several station spectra in synchronized panels aligned by UT clock or
+seconds from file start, with shared, per-station, or manual color scaling, then export the view.</li>
+<li><b>Theme</b>: System, Light, or Dark.</li>
+</ul>
+
+<a name="menu-analysis"></a>
+<h2>8. Analysis menu</h2>
+<ul>
+<li><b>Maximum Intensities &#8594; Open Maximum Intensities</b>: trace the peak frequency for each time channel
+after noise reduction or burst isolation. Inside that window you can lasso-select outliers and remove them.
+In the Analyzer, the <b>Best Fit</b> graph is drawn in the OriginPro style (black squares, red fitted curve, boxed
+legend). <b>Save Graph</b> in the Analyzer and <b>File &#8594; Export As</b> in the Maximum Intensities window save
+the plot on show as an OriginPro-style graph, while the windows keep their own look.</li>
+<li><b>Type II Band-splitting &#8594; Open Type II Band-splitting</b>: pick points along the upper and lower
+bands, fit both, and derive shock speed, height, bandwidth, compression ratio, Alfven Mach number, Alfven speed,
+and magnetic field. <b>Save Plot</b> writes the lanes (or the B-versus-R fit) as an OriginPro-style graph with
+your lane colours. Validate results against known events.</li>
+<li><b>Plot Light Curves</b>: overlay intensity-versus-time curves. Enter a frequency, or switch on
+<b>Click on a frequency</b> and click the spectrum. Use <b>Settings</b> for color, width, opacity, scale, line
+style, and labels; <b>Clear light curve(s)</b> removes them without resetting the data.</li>
+<li><b>Ruler Measurement</b>: click two points on the spectrum to read duration, frequency change, and drift
+slope; <b>Clear Ruler Measurement</b> removes it.</li>
+</ul>
+
+<a name="menu-processing"></a>
+<h2>9. Processing menu</h2>
+<ul>
+<li><b>RFI Cleaning</b>: <b>Open RFI Panel</b>, <b>Apply RFI</b>, and <b>Reset RFI</b>. The panel runs a
+deterministic pipeline (median smoothing, hot-channel masking, masked-channel repair, and per-channel upper
+percentile clipping). Sensible defaults are kernel 3 by 3, Channel Z threshold 6.0, and percentile clip 99.5.
+Use <b>Preview</b> to inspect, then <b>Apply</b>. If channel streaks remain, lower the Channel Z threshold
+gradually; if detail looks over-smoothed, reduce the kernels.</li>
+<li><b>Annotations</b>: add Polygon, Line, or Text; edit or move a text label; toggle visibility; delete the last;
+or clear all. Annotations are saved with the project.</li>
+<li><b>Presets</b>: apply the Raw FITS Percentile (5 to 98%) preset for a quick starting range, save the current
+settings as a preset, apply or delete a preset, and set or clear a default preset applied to future loads.</li>
+<li><b>Maximum Intensity &#8594; Auto-Clean Isolated Burst Outliers</b>: automatically drop outliers while still
+allowing manual cleanup.</li>
+<li><b>Analysis Session &#8594; Open Restored Analysis</b>: reopen a saved analysis session.</li>
+<li><b>Batch Processing &#8594; Open Batch Processor</b>: export many files from a folder with consistent
+background subtraction (per-channel mean, median, or median_dB) and, optionally, a locked display range or saved
+view config.</li>
+</ul>
+
+<a name="menu-about"></a>
+<h2>10. About menu</h2>
+<ul>
+<li><b>Check for Updates</b>: query GitHub for a newer release and download it in-app.</li>
+<li><b>Report a Bug</b>: capture session and environment details, build a diagnostics ZIP, and open a prefilled
+GitHub issue draft.</li>
+<li><b>About</b>: version and author information.</li>
+</ul>
+<p class="note">The <b>Help &#8594; User Guide</b> menu (shortcut <code>F1</code>) opens this document.</p>
+
+<a name="toolbar"></a>
+<h2>11. Toolbar</h2>
+<p>Icon buttons, left to right, cover the common actions: Open (<code>Ctrl+O</code>), Download, Export
+(<code>Ctrl+E</code>), Export as FITS (<code>Ctrl+F</code>), Save Project, Undo, Redo, Estimate Drift Rate,
+Isolate Burst, Plot Maximum Intensities, Rectangular Zooming, Lock/Unlock navigation, Reset Selection,
+Reset to Raw, and Reset All. On the right is the <b>Cite this Software</b> button. Actions that need processed
+data or a loaded file stay disabled until they are usable.</p>
+
+<a name="sidebar"></a>
+<h2>12. Left sidebar panels</h2>
+<ul>
+<li><b>Background Subtraction</b>: choose <b>Mean</b> or <b>Median</b> to subtract each channel's mean or
+median (the result stays in Digits), or <b>Median (dB)</b> to subtract each channel's median and convert to dB above
+that background, as the Plotutil recipe and the batch processor do. Click <b>Subtract Background</b> to apply.
+The subtraction always starts from the raw data, so re-applying replaces the previous result, and RFI cleaning or
+an isolated burst made from the old result is cleared. While a Median (dB) result is shown, the Digits/dB switch is
+locked to dB because the data are already in dB. <code>Edit &#8594; Reset to Raw</code> removes the subtraction.</li>
+<li><b>Noise Clipping Thresholds</b>: the <b>Lower</b> and <b>Upper</b> sliders set the color-scale limits
+(Vmin/Vmax) live, for contrast only &#8212; the data are never clipped or changed. With both at zero the color
+scale fits the whole data range. Limits chosen on raw data reset when you subtract the background, since they
+would saturate the new scale. The <b>Logarithmic Threshold Scale</b> checkbox gives finer control near zero.</li>
+<li><b>Units</b>: Intensity as Digits or dB, and Time as Seconds or UT. Switching time units does not lose data.</li>
+<li><b>Graph Properties</b> (active after a file loads): colormap (Custom, viridis, plasma, inferno, magma,
+cividis, turbo, RdYlBu, jet, cubehelix, bone_r), font family, graph title and a Remove Titles checkbox, font
+sizes for tick labels/axis labels/title, and Bold/Italic style toggles.</li>
+<li><b>Analysis Summary</b>: a read-only summary of the current analysis session.</li>
+<li><b>Ruler Measurement</b>: the latest ruler readout, with a Clear control.</li>
+</ul>
+
+<a name="navigation"></a>
+<h2>13. Navigation and picking</h2>
+<table>
+<tr><th>Interaction</th><th>How</th></tr>
+<tr><td>Zoom</td><td>Scroll the mouse wheel over the plot (centered on the cursor).</td></tr>
+<tr><td>Pan</td><td>Hold the left mouse button and drag inside the plot.</td></tr>
+<tr><td>Rectangle zoom</td><td>Click <b>Lock</b> on the toolbar first, then drag a rectangle.</td></tr>
+<tr><td>Cursor readout</td><td>Move the cursor over the plot to read time, frequency, and intensity in the status bar.</td></tr>
+<tr><td>Estimate drift rate</td><td>Click points along the burst; right-click or double-click to finish.</td></tr>
+<tr><td>Isolate burst</td><td>Press, drag a loop around the burst, and release.</td></tr>
+<tr><td>Ruler</td><td>Click two points to measure duration, frequency change, and slope.</td></tr>
+<tr><td>Light-curve click</td><td>With click mode on, click a frequency to plot its light curve.</td></tr>
+<tr><td>Annotations</td><td>Line: click start then end. Text: click the placement point. Polygon: click points, right-click to close.</td></tr>
+</table>
+
+<a name="fits-downloader"></a>
+<h2>14. FITS Downloader</h2>
+<p>Open from <code>Download &#8594; Launch FITS Downloader</code> or
+<code>Solar Events &#8594; Radio Bursts</code>. Station lists are read from the archive whenever a date changes, so
+they offer only the stations with data on the chosen UTC days. It has three tabs:</p>
+<ul>
+<li><b>Single Station</b>: pick a date and one of its stations, show available files, then preview, download,
+compare, or import them into the analyzer.</li>
+<li><b>Multi-Station Event</b>: set a UTC event window, select from the stations with data in it, search matching
+files, then download,
+import compatible selections with automatic time/frequency combination, or open the comparison workspace with
+the explicit <b>Compare</b> button.</li>
+<li><b>Spectral Overview</b>: generate a station's full UTC-day spectrum as six four-hour panels with a day-wide
+median_dB baseline, with per-focus-code preview tabs, and export it.</li>
+</ul>
+<p>The separate <b>Learmonth</b> downloader loads or downloads the Learmonth daily archive, converts selected
+chunks to FIT, and imports them for the same workflow used with e-CALLISTO data.</p>
+
+<a name="shortcuts"></a>
+<h2>A. Keyboard shortcuts</h2>
+<table>
+<tr><th>Shortcut</th><th>Action</th></tr>
+<tr><td><code>F1</code></td><td>Open this User Guide</td></tr>
+<tr><td><code>Ctrl+O</code></td><td>Open a FITS file</td></tr>
+<tr><td><code>Ctrl+E</code></td><td>Export figure</td></tr>
+<tr><td><code>Ctrl+F</code></td><td>Export as FITS</td></tr>
+<tr><td><code>Ctrl+S</code></td><td>Save Project</td></tr>
+<tr><td><code>Ctrl+Shift+S</code></td><td>Save Project As</td></tr>
+<tr><td><code>Ctrl+Shift+O</code></td><td>Open Project</td></tr>
+<tr><td><code>Ctrl+Z</code></td><td>Undo</td></tr>
+<tr><td><code>Ctrl+Shift+Z</code></td><td>Redo</td></tr>
+</table>
+
+<a name="file-types"></a>
+<h2>B. File types</h2>
+<table>
+<tr><th>Extension</th><th>Meaning</th></tr>
+<tr><td><code>.fit .fits .fit.gz .fits.gz</code></td><td>Radio spectra loaded by the analyzer. Upper-case suffixes (<code>.FITS</code>) open the same way.</td></tr>
+<tr><td><code>.efaproj</code></td><td>The project file, shared with the full e-CALLISTO FITS Analyzer: Lite opens its projects and keeps the parts it does not show.</td></tr>
+<tr><td><code>.efaview.json</code></td><td>Portable view configuration (range, units, thresholds, colormap, styling).</td></tr>
+</table>
+
+<a name="tips"></a>
+<h2>C. Tips and troubleshooting</h2>
+<ul>
+<li><b>Greyed-out buttons?</b> Load a file first. Analysis controls and the Graph Properties panel activate once
+data is present.</li>
+<li><b>Rectangle zoom does nothing?</b> Click <b>Lock</b> on the toolbar first, then drag the rectangle.</li>
+<li><b>Drift picking will not stop?</b> Right-click or double-click to finish the point series.</li>
+<li><b>Restricted save folder on Windows?</b> If the default location (for example inside Program Files) is not
+writable, the app prompts you to choose another folder.</li>
+<li><b>Recovering after a crash?</b> Use <code>File &#8594; Recover Last Session</code> to restore the latest autosave.</li>
+<li><b>Type II magnetic-field results</b> should be confirmed against independently validated events
+before drawing scientific conclusions.</li>
+</ul>
+
+<hr>
+<p class="muted">e-CALLISTO FITS Analyzer Lite version {{VERSION}}. Developed by Sahan S Liyanage, Astronomical and Space
+Science Unit, University of Colombo, Sri Lanka. Use <b>About &#8594; Cite this Software</b> for the recommended
+citation.</p>

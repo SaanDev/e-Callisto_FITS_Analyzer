@@ -110,7 +110,12 @@ pub struct AnalyzerFit {
 }
 
 /// `plot_fit`: fit (or, given `params`, reuse) the power law in time since `t0`.
-pub fn analyzer_fit(time: &[f64], freq: &[f64], t0: f64, params: Option<([f64; 2], Option<[f64; 2]>)>) -> Result<AnalyzerFit, String> {
+pub fn analyzer_fit(
+    time: &[f64],
+    freq: &[f64],
+    t0: f64,
+    params: Option<([f64; 2], Option<[f64; 2]>)>,
+) -> Result<AnalyzerFit, String> {
     let shifted: Vec<f64> = time.iter().map(|t| t - t0).collect();
     let mask = fit_mask(&shifted, freq);
     if mask.iter().filter(|m| **m).count() < 2 {
@@ -257,11 +262,27 @@ pub fn update_shock_parameters(
     let shock_freq_err = fit.freq_err / harmonic_number;
     let comparison: BTreeMap<DensityModel, ShockParameters> = DensityModel::ALL
         .into_iter()
-        .map(|m| (m, shock_parameters(&shock_freq_values, &shock_drift_vals, &shock_drift_errs, shock_freq_err, m, fold as f64, 90.0)))
+        .map(|m| {
+            (
+                m,
+                shock_parameters(
+                    &shock_freq_values,
+                    &shock_drift_vals,
+                    &shock_drift_errs,
+                    shock_freq_err,
+                    m,
+                    fold as f64,
+                    90.0,
+                ),
+            )
+        })
         .collect();
     let selected = &comparison[&model];
-    let avg_freq_values: Vec<f64> =
-        if max_freqs.is_empty() { shock_freq_values.clone() } else { max_freqs.iter().map(|v| v / harmonic_number).collect() };
+    let avg_freq_values: Vec<f64> = if max_freqs.is_empty() {
+        shock_freq_values.clone()
+    } else {
+        max_freqs.iter().map(|v| v / harmonic_number).collect()
+    };
     let avg_freq = mean(&avg_freq_values);
     let avg_freq_err = std(&avg_freq_values) / (avg_freq_values.len() as f64).sqrt();
     let avg_drift = mean(&shock_drift_vals);

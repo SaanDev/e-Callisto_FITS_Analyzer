@@ -156,7 +156,12 @@ pub fn write(pages: &[Vec<Draw>], page: (f64, f64), title: &str, author: &str) -
         let mask_id = match mask {
             Some(a) => Some(add(
                 &mut objects,
-                stream(format!("/Type /XObject /Subtype /Image /Width {w} /Height {h} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode"), &deflate(a)?),
+                stream(
+                    format!(
+                        "/Type /XObject /Subtype /Image /Width {w} /Height {h} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode"
+                    ),
+                    &deflate(a)?,
+                ),
             )),
             None => None,
         };
@@ -195,14 +200,23 @@ pub fn write(pages: &[Vec<Draw>], page: (f64, f64), title: &str, author: &str) -
     for o in &offsets {
         out.extend(format!("{o:010} 00000 n \n").as_bytes());
     }
-    out.extend(format!("trailer\n<< /Size {} /Root 1 0 R /Info 3 0 R >>\nstartxref\n{xref}\n%%EOF\n", offsets.len() + 1).as_bytes());
+    out.extend(
+        format!("trailer\n<< /Size {} /Root 1 0 R /Info 3 0 R >>\nstartxref\n{xref}\n%%EOF\n", offsets.len() + 1)
+            .as_bytes(),
+    );
     Ok(out)
 }
 
 /// A TrueType font as a Type0 font over a CIDFontType2 (glyph ids as CIDs):
 /// the file embedded, the used glyphs' widths, a ToUnicode map. Returns the
 /// Type0 font's object number.
-fn embed_font(objects: &mut Vec<Vec<u8>>, m: &TtMetrics, face: &ttf_parser::Face, used: &Used, stream: &dyn Fn(String, &[u8]) -> Vec<u8>) -> Result<usize> {
+fn embed_font(
+    objects: &mut Vec<Vec<u8>>,
+    m: &TtMetrics,
+    face: &ttf_parser::Face,
+    used: &Used,
+    stream: &dyn Fn(String, &[u8]) -> Vec<u8>,
+) -> Result<usize> {
     let scale = 1000.0 / m.units_per_em as f64;
     let file = deflate(m.data)?;
     objects.push(stream(format!("/Length1 {} /Filter /FlateDecode", m.data.len()), &file));

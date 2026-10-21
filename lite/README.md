@@ -34,8 +34,31 @@ when there is not, and OpenGL if neither starts. `CALLISTO_LITE_GPU` forces one:
 way and reports which renderer it used.
 
 Lite keeps its settings and its archive download cache in its own folder, apart
-from the full app's. `CALLISTO_LITE_OFFLINE=1` stops it asking the archive
-whether adjacent observations exist.
+from the full app's. On its first start it takes over the full app's settings
+(theme, presets, recent files and the like), reading them only.
+`CALLISTO_LITE_OFFLINE=1` stops it asking the archive whether adjacent
+observations exist and skips the update check at startup;
+`CALLISTO_LITE_NO_SPLASH=1` opens the main window without the splash.
+
+## Installers
+
+Each builds into `lite/dist`, beside the full app (its own install folder,
+application id and shortcuts):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File lite\packaging\windows\build_windows_installer.ps1
+```
+
+```bash
+bash lite/packaging/macos/build_macos_dmg.sh
+bash lite/packaging/linux/build_deb_linux.sh
+```
+
+Windows needs Inno Setup 6. On macOS, `CODESIGN_IDENTITY` (a Developer ID
+Application certificate) signs the app and `NOTARY_PROFILE` (a
+`notarytool` keychain profile) notarises and staples the image; without them
+it is signed ad hoc. The Lite workflow builds all three on demand
+(Actions → Lite (Rust) → Run workflow).
 
 ## Tests
 
@@ -159,6 +182,23 @@ cargo test -p callisto-core --test report_parity
 
 `CALLISTO_KEEP_FIGURES=1` keeps Lite's exported figures and reports and prints
 where they are.
+
+**Help windows.** `tools/make_user_guide.py` writes Lite's user guide from
+the full app's. `tools/capture_help.py` opens the full app's help windows with
+throwaway settings and Lite's name, version and guide: the User Guide (with
+where Qt put each block), Cite this Software, Report a Bug, About, the update
+check's boxes and download dialog, and the splash.
+`parity/make_settings_reference.py` writes a settings INI file with Qt for
+the first-start import's test:
+
+```powershell
+python lite/tools/make_user_guide.py
+python lite/tools/capture_help.py lite/reference/windows/help light
+python lite/tools/capture_help.py lite/reference/windows/help dark
+python lite/parity/make_settings_reference.py
+cargo test -p callisto-lite --test help_windows
+cargo test -p callisto-lite --test help_windows -- --ignored --nocapture
+```
 
 **Speed.** The plan's speed targets, timed on a folder of e-CALLISTO files
 (INDIA-GAURI focus code 02, a full day):

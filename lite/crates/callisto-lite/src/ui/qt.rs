@@ -119,7 +119,8 @@ pub fn label_spec(ui: &Ui, id: &'static str, text: &str) -> WidgetSpec {
 pub fn wrap_lines(ctx: &egui::Context, text: &str, width: f32, weight: Weight) -> Vec<String> {
     let mut out = Vec::new();
     for para in text.split('\n') {
-        let galley = ctx.fonts_mut(|f| f.layout(para.to_owned(), ui_font(FONT_PX, weight), Color32::WHITE, width.max(1.0)));
+        let galley =
+            ctx.fonts_mut(|f| f.layout(para.to_owned(), ui_font(FONT_PX, weight), Color32::WHITE, width.max(1.0)));
         if galley.rows.is_empty() {
             out.push(String::new());
         }
@@ -216,7 +217,10 @@ pub fn label(ui: &Ui, rect: Rect, text: &str, color: Color32) {
 /// A word-wrapped label: lines centred as a block in `rect`.
 pub fn wrapped(ui: &Ui, rect: Rect, text: &str, color: Color32, status: bool) {
     let (pad_x, pad_y, indent) = if status { (4.0, 2.0, 3.0) } else { (0.0, 0.0, 0.0) };
-    let inner = Rect::from_min_max(pos2(rect.left() + pad_x, rect.top() + pad_y), pos2(rect.right() - pad_x, rect.bottom() - pad_y));
+    let inner = Rect::from_min_max(
+        pos2(rect.left() + pad_x, rect.top() + pad_y),
+        pos2(rect.right() - pad_x, rect.bottom() - pad_y),
+    );
     // QLabel lays text out in contentsRect less its indent, but wraps
     // it at the width that also excludes the right indent.
     let lines = wrap_lines(ui.ctx(), text, inner.width() - 2.0 * indent, Weight::Regular);
@@ -242,7 +246,8 @@ pub fn status_with_link(ui: &Ui, rect: Rect, id: Id, text: &str, link: &str, p: 
     let link_x = r.right() + text_width(ui, " ", FONT_PX, Weight::Regular);
     let lr = text_left(ui, link_x, rect.center().y, link, FONT_PX, Weight::Regular, p.accent);
     let underline_y = lr.bottom() - 2.0;
-    ui.painter().line_segment([pos2(lr.left(), underline_y), pos2(lr.right(), underline_y)], Stroke::new(1.0, p.accent));
+    ui.painter()
+        .line_segment([pos2(lr.left(), underline_y), pos2(lr.right(), underline_y)], Stroke::new(1.0, p.accent));
     let resp = ui.interact(lr, id, Sense::click());
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -272,7 +277,13 @@ pub(crate) fn qt_box(ui: &Ui, rect: Rect, radius: f32, fill: Color32, border: Co
 /// clips it to the widget's device rectangle; egui would snap it to whole
 /// pixels.
 fn qt_box_in(ui: &Ui, widget: Rect, rect: Rect, radius: f32, fill: Color32, border: Color32) {
-    let shape = egui::epaint::RectShape::new(rect, CornerRadius::same(radius.round() as u8), fill, Stroke::new(1.0, border), StrokeKind::Inside);
+    let shape = egui::epaint::RectShape::new(
+        rect,
+        CornerRadius::same(radius.round() as u8),
+        fill,
+        Stroke::new(1.0, border),
+        StrokeKind::Inside,
+    );
     ui.painter().with_clip_rect(widget).add(shape.with_round_to_pixels(false));
 }
 
@@ -293,7 +304,13 @@ pub fn button(ui: &Ui, rect: Rect, id: Id, text: &str, primary: bool, enabled: b
         }
         (true, false) => (p.surface_alt, p.border, p.muted, Weight::Semibold),
         (false, true) => {
-            let fill = if down { p.pressed } else if resp.hovered() { p.hover } else { p.surface_bg };
+            let fill = if down {
+                p.pressed
+            } else if resp.hovered() {
+                p.hover
+            } else {
+                p.surface_bg
+            };
             (fill, p.border, p.text, Weight::Regular)
         }
         (false, false) => (p.surface_alt, p.border, p.disabled, Weight::Regular),
@@ -327,7 +344,8 @@ fn titled_frame(ui: &Ui, rect: Rect, frame_top: f32, radius: f32, title_x: f32, 
     fill_exact(&painter, frame.shrink(0.5), corners, p.surface_bg);
     let tw = text_width(ui, &format!("{title} "), FONT_PX, Weight::Semibold).round();
     let cut = Rect::from_min_max(pos2(title_x, rect.top()), pos2(title_x + tw + 10.0, rect.top() + LINE));
-    let border = egui::epaint::RectShape::stroke(frame, corners, Stroke::new(1.0, p.border), StrokeKind::Inside).with_round_to_pixels(false);
+    let border = egui::epaint::RectShape::stroke(frame, corners, Stroke::new(1.0, p.border), StrokeKind::Inside)
+        .with_round_to_pixels(false);
     for clip in [
         Rect::from_min_max(rect.min, pos2(cut.left(), rect.bottom())),
         Rect::from_min_max(pos2(cut.right(), rect.top()), rect.max),
@@ -354,8 +372,18 @@ fn drop_down(ui: &Ui, rect: Rect, hovered: bool, p: &Palette) -> Rect {
     let fill = if hovered { p.hover } else { p.surface_alt };
     // The left border under the background: a 1 px rectangle of its own
     // would be drawn as an antialiased line, two device pixels wide.
-    fill_exact(&painter, Rect::from_min_max(strip.min, pos2(strip.left() + 2.0, strip.bottom())), CornerRadius::ZERO, p.border);
-    fill_exact(&painter, Rect::from_min_max(pos2(strip.left() + 1.0, strip.top()), strip.max), CornerRadius { nw: 0, sw: 0, ne: 10, se: 10 }, fill);
+    fill_exact(
+        &painter,
+        Rect::from_min_max(strip.min, pos2(strip.left() + 2.0, strip.bottom())),
+        CornerRadius::ZERO,
+        p.border,
+    );
+    fill_exact(
+        &painter,
+        Rect::from_min_max(pos2(strip.left() + 1.0, strip.top()), strip.max),
+        CornerRadius { nw: 0, sw: 0, ne: 10, se: 10 },
+        fill,
+    );
     arrow_icon(ui, strip, crate::icons::Icon::ChevronDownSmall, p);
     strip
 }
@@ -384,7 +412,12 @@ fn step_buttons(ui: &Ui, rect: Rect, over_frame: bool, hovered: [bool; 2], p: &P
         if over_frame {
             let mut body = Rect::from_min_max(pos2(b.left() + 1.0, b.top()), b.max);
             let radius = if i == 0 {
-                fill_exact(&painter, Rect::from_min_max(pos2(b.left(), b.bottom() - 2.0), b.max), CornerRadius::ZERO, p.border);
+                fill_exact(
+                    &painter,
+                    Rect::from_min_max(pos2(b.left(), b.bottom() - 2.0), b.max),
+                    CornerRadius::ZERO,
+                    p.border,
+                );
                 body.max.y -= 1.0;
                 CornerRadius { ne: 10, ..CornerRadius::ZERO }
             } else {
@@ -393,7 +426,8 @@ fn step_buttons(ui: &Ui, rect: Rect, over_frame: bool, hovered: [bool; 2], p: &P
             fill_exact(&painter, body, radius, fill);
         } else {
             // A square background is Qt's aliased fillRect: whole pixels.
-            let body = Rect::from_min_max(pos2(snap(b.left() + 1.0), snap(b.top())), pos2(snap(b.right()), snap(b.bottom())));
+            let body =
+                Rect::from_min_max(pos2(snap(b.left() + 1.0), snap(b.top())), pos2(snap(b.right()), snap(b.bottom())));
             fill_exact(&painter, body, CornerRadius::ZERO, fill);
         }
         let mut contents = b;
@@ -406,10 +440,21 @@ fn step_buttons(ui: &Ui, rect: Rect, over_frame: bool, hovered: [bool; 2], p: &P
 }
 
 /// An editable text field; `text_x` is the text's inset. Returns the response.
-fn text_field(ui: &mut Ui, rect: Rect, id: Id, text: &mut String, right_inset: f32, enabled: bool, color: Color32) -> Response {
+fn text_field(
+    ui: &mut Ui,
+    rect: Rect,
+    id: Id,
+    text: &mut String,
+    right_inset: f32,
+    enabled: bool,
+    color: Color32,
+) -> Response {
     let color = if HIDDEN_TEXT.with(|h| h.get()) { Color32::TRANSPARENT } else { color };
     let inset = if app_style() { 13.0 } else { 11.0 };
-    let field = Rect::from_min_max(pos2(rect.left() + inset, rect.top() + 1.0), pos2(rect.right() - right_inset, rect.bottom() - 1.0));
+    let field = Rect::from_min_max(
+        pos2(rect.left() + inset, rect.top() + 1.0),
+        pos2(rect.right() - right_inset, rect.bottom() - 1.0),
+    );
     ui.add_enabled_ui(enabled, |ui| {
         let mut style = (**ui.style()).clone();
         style.spacing.item_spacing = vec2(0.0, 0.0);
@@ -430,7 +475,15 @@ fn text_field(ui: &mut Ui, rect: Rect, id: Id, text: &mut String, right_inset: f
 }
 
 /// `QLineEdit` with a placeholder. Returns true when the text changed.
-pub fn line_edit(ui: &mut Ui, rect: Rect, id: Id, text: &mut String, placeholder: &str, enabled: bool, p: &Palette) -> bool {
+pub fn line_edit(
+    ui: &mut Ui,
+    rect: Rect,
+    id: Id,
+    text: &mut String,
+    placeholder: &str,
+    enabled: bool,
+    p: &Palette,
+) -> bool {
     let focused = ui.memory(|m| m.has_focus(id));
     field_box(ui, rect, focused, enabled, p);
     let color = text_color(enabled, p);
@@ -470,7 +523,16 @@ fn snap_origin(ui: &Ui, r: Rect) -> Rect {
 /// (`QComboBox QAbstractItemView`: 10 px radius, 4 px padding) of 24 px
 /// rows, at most ten. Returns the item clicked.
 #[allow(clippy::too_many_arguments)]
-fn popup_list(ui: &Ui, anchor: Rect, id: Id, items: &[String], current: Option<usize>, open: &mut bool, owner: &Response, p: &Palette) -> Option<usize> {
+fn popup_list(
+    ui: &Ui,
+    anchor: Rect,
+    id: Id,
+    items: &[String],
+    current: Option<usize>,
+    open: &mut bool,
+    owner: &Response,
+    p: &Palette,
+) -> Option<usize> {
     use crate::theme::{darker, lighter};
     let row_h = 24.0;
     let visible = items.len().clamp(1, 10);
@@ -478,7 +540,9 @@ fn popup_list(ui: &Ui, anchor: Rect, id: Id, items: &[String], current: Option<u
     let height = visible as f32 * row_h + 18.0;
     let first_id = id.with("first");
     let max_first = items.len().saturating_sub(visible);
-    let mut first: usize = ui.data(|d| d.get_temp(first_id)).unwrap_or_else(|| current.map_or(0, |c| c.saturating_sub(visible / 2)).min(max_first));
+    let mut first: usize = ui
+        .data(|d| d.get_temp(first_id))
+        .unwrap_or_else(|| current.map_or(0, |c| c.saturating_sub(visible / 2)).min(max_first));
     let top_id = id.with("top");
     let screen = ui.ctx().content_rect();
     let top: f32 = ui.data(|d| d.get_temp(top_id)).unwrap_or_else(|| {
@@ -539,7 +603,9 @@ fn popup_list(ui: &Ui, anchor: Rect, id: Id, items: &[String], current: Option<u
     });
     let clicked_elsewhere = ui.input(|i| i.pointer.any_click())
         && !owner.clicked()
-        && !ui.input(|i| i.pointer.interact_pos()).is_some_and(|pos| inner.response.rect.contains(pos) || frame.contains(pos));
+        && !ui
+            .input(|i| i.pointer.interact_pos())
+            .is_some_and(|pos| inner.response.rect.contains(pos) || frame.contains(pos));
     if picked.is_some() || clicked_elsewhere || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         *open = false;
         ui.data_mut(|d| {
@@ -553,7 +619,16 @@ fn popup_list(ui: &Ui, anchor: Rect, id: Id, items: &[String], current: Option<u
 /// `QComboBox`; an empty list shows `placeholder`. Returns the item picked
 /// (also the current one, as `textActivated`).
 #[allow(clippy::too_many_arguments)]
-pub fn combo(ui: &Ui, rect: Rect, id: Id, items: &[String], current: Option<usize>, placeholder: &str, enabled: bool, p: &Palette) -> Option<usize> {
+pub fn combo(
+    ui: &Ui,
+    rect: Rect,
+    id: Id,
+    items: &[String],
+    current: Option<usize>,
+    placeholder: &str,
+    enabled: bool,
+    p: &Palette,
+) -> Option<usize> {
     let resp = ui.interact(rect, id, if enabled { Sense::click() } else { Sense::hover() });
     let popup = id.with("popup");
     let mut open = ui.data(|d| d.get_temp::<bool>(popup)).unwrap_or(false);
@@ -570,7 +645,15 @@ pub fn combo(ui: &Ui, rect: Rect, id: Id, items: &[String], current: Option<usiz
             text_left_clipped(ui, clip, rect.left() + 11.0, rect.center().y, t, FONT_PX, Weight::Regular, color);
         }
         None => {
-            text_left(ui, rect.left() + 11.0, rect.center().y, placeholder, FONT_PX, Weight::Regular, placeholder_color(p));
+            text_left(
+                ui,
+                rect.left() + 11.0,
+                rect.center().y,
+                placeholder,
+                FONT_PX,
+                Weight::Regular,
+                placeholder_color(p),
+            );
         }
     }
     if resp.clicked() && !items.is_empty() {
@@ -589,7 +672,15 @@ pub fn combo(ui: &Ui, rect: Rect, id: Id, items: &[String], current: Option<usiz
 
 /// An editable combo box: free text with the items as a popup.
 /// Returns true when the text changed (typed or picked).
-pub fn editable_combo(ui: &mut Ui, rect: Rect, id: Id, text: &mut String, items: &[String], enabled: bool, p: &Palette) -> bool {
+pub fn editable_combo(
+    ui: &mut Ui,
+    rect: Rect,
+    id: Id,
+    text: &mut String,
+    items: &[String],
+    enabled: bool,
+    p: &Palette,
+) -> bool {
     let popup = id.with("popup");
     let mut open = ui.data(|d| d.get_temp::<bool>(popup)).unwrap_or(false);
     let edit_id = id.with("edit");
@@ -667,12 +758,24 @@ fn section_at(fmt: &str, i: usize) -> Section {
 }
 
 fn qt_format(t: NaiveDateTime, fmt: &str) -> String {
-    let f = fmt.replace("yyyy", "%Y").replace("MM", "%m").replace("dd", "%d").replace("HH", "%H").replace("mm", "%M").replace("ss", "%S");
+    let f = fmt
+        .replace("yyyy", "%Y")
+        .replace("MM", "%m")
+        .replace("dd", "%d")
+        .replace("HH", "%H")
+        .replace("mm", "%M")
+        .replace("ss", "%S");
     t.format(&f).to_string()
 }
 
 fn qt_parse(text: &str, fmt: &str, base: NaiveDateTime) -> Option<NaiveDateTime> {
-    let f = fmt.replace("yyyy", "%Y").replace("MM", "%m").replace("dd", "%d").replace("HH", "%H").replace("mm", "%M").replace("ss", "%S");
+    let f = fmt
+        .replace("yyyy", "%Y")
+        .replace("MM", "%m")
+        .replace("dd", "%d")
+        .replace("HH", "%H")
+        .replace("mm", "%M")
+        .replace("ss", "%S");
     let text = text.trim();
     if fmt.contains("yyyy") && fmt.contains("HH") {
         NaiveDateTime::parse_from_str(text, &f).ok()
@@ -691,7 +794,15 @@ pub struct DateOut {
 
 /// A `QDateEdit` / `QDateTimeEdit` (calendar popup) or `QTimeEdit`
 /// (up/down buttons) on `value`, in display format `fmt`.
-pub fn datetime_edit(ui: &mut Ui, rect: Rect, id: Id, value: &mut NaiveDateTime, fmt: &str, enabled: bool, p: &Palette) -> bool {
+pub fn datetime_edit(
+    ui: &mut Ui,
+    rect: Rect,
+    id: Id,
+    value: &mut NaiveDateTime,
+    fmt: &str,
+    enabled: bool,
+    p: &Palette,
+) -> bool {
     let before = *value;
     let calendar = fmt.contains("yyyy");
     let edit_id = id.with("edit");
@@ -716,7 +827,9 @@ pub fn datetime_edit(ui: &mut Ui, rect: Rect, id: Id, value: &mut NaiveDateTime,
         .map_or(0, |r| r.primary.index.into());
     let section = section_at(fmt, cursor);
     if resp.has_focus() {
-        let (up, down, enter) = ui.input(|i| (i.key_pressed(egui::Key::ArrowUp), i.key_pressed(egui::Key::ArrowDown), i.key_pressed(egui::Key::Enter)));
+        let (up, down, enter) = ui.input(|i| {
+            (i.key_pressed(egui::Key::ArrowUp), i.key_pressed(egui::Key::ArrowDown), i.key_pressed(egui::Key::Enter))
+        });
         if let Some(t) = qt_parse(&text, fmt, *value) {
             *value = t;
         }
@@ -742,7 +855,17 @@ pub fn datetime_edit(ui: &mut Ui, rect: Rect, id: Id, value: &mut NaiveDateTime,
                 .sum()
         });
         if wheel != 0.0 {
-            *value = step_datetime(*value, if resp.has_focus() { section } else if calendar { Section::Year } else { Section::Hour }, wheel.signum() as i64);
+            *value = step_datetime(
+                *value,
+                if resp.has_focus() {
+                    section
+                } else if calendar {
+                    Section::Year
+                } else {
+                    Section::Hour
+                },
+                wheel.signum() as i64,
+            );
         }
     }
     if !calendar {
@@ -763,9 +886,7 @@ pub fn datetime_edit(ui: &mut Ui, rect: Rect, id: Id, value: &mut NaiveDateTime,
         if !enabled {
             open = false;
         }
-        if open
-            && let Some(day) = calendar_popup(ui, rect, popup, value.date(), &mut open, &strip_resp, p)
-        {
+        if open && let Some(day) = calendar_popup(ui, rect, popup, value.date(), &mut open, &strip_resp, p) {
             *value = day.and_time(value.time());
         }
         ui.data_mut(|d| d.insert_temp(popup, open));
@@ -778,7 +899,10 @@ pub fn datetime_edit(ui: &mut Ui, rect: Rect, id: Id, value: &mut NaiveDateTime,
 pub fn focus_first_section(ctx: &egui::Context, id: Id, len: usize) {
     let edit = id.with("edit");
     let mut state = egui::TextEdit::load_state(ctx, edit).unwrap_or_default();
-    state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(len))));
+    state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+        egui::text::CCursor::new(0),
+        egui::text::CCursor::new(len),
+    )));
     state.store(ctx, edit);
     ctx.memory_mut(|m| m.request_focus(edit));
 }
@@ -808,7 +932,15 @@ pub fn time_edit(ui: &mut Ui, rect: Rect, id: Id, value: &mut NaiveTime, enabled
 /// 32 × 20 cells: day names and ISO weeks on the alternate base, days on the
 /// base, the month's weekends red, the chosen day in highlight. Returns the
 /// day clicked.
-fn calendar_popup(ui: &Ui, anchor: Rect, id: Id, current: NaiveDate, open: &mut bool, owner: &Response, p: &Palette) -> Option<NaiveDate> {
+fn calendar_popup(
+    ui: &Ui,
+    anchor: Rect,
+    id: Id,
+    current: NaiveDate,
+    open: &mut bool,
+    owner: &Response,
+    p: &Palette,
+) -> Option<NaiveDate> {
     let month_id = id.with("month");
     let mut shown: NaiveDate = ui.data(|d| d.get_temp(month_id)).unwrap_or_else(|| current.with_day(1).unwrap());
     let (w, h) = (256.0, 169.0);
@@ -853,7 +985,14 @@ fn calendar_popup(ui: &Ui, anchor: Rect, id: Id, current: NaiveDate, open: &mut 
         let yw = text_width(ui, &year, FONT_PX, Weight::Regular).ceil() + 19.0;
         let mx = nav.left() + 29.0 + ((w - 58.0 - mw - yw) / 2.0).floor();
         super::widgets::text_center(ui, pos2(mx + mw / 2.0, nav.center().y), &month, FONT_PX, Weight::Regular, p.text);
-        super::widgets::text_center(ui, pos2(mx + mw + yw / 2.0, nav.center().y), &year, FONT_PX, Weight::Regular, p.text);
+        super::widgets::text_center(
+            ui,
+            pos2(mx + mw + yw / 2.0, nav.center().y),
+            &year,
+            FONT_PX,
+            Weight::Regular,
+            p.text,
+        );
         // The menu indicator: PE_IndicatorArrowDown in the button's last 16 px.
         let (ix, iy) = (mx + mw - 7.0, nav.top() + 22.0);
         painter.add(egui::Shape::convex_polygon(
@@ -862,7 +1001,15 @@ fn calendar_popup(ui: &Ui, anchor: Rect, id: Id, current: NaiveDate, open: &mut 
             Stroke::NONE,
         ));
         let wheel: f32 = if ui.rect_contains_pointer(frame) {
-            ui.input(|i| i.events.iter().filter_map(|e| match e { egui::Event::MouseWheel { delta, .. } => Some(delta.y), _ => None }).sum())
+            ui.input(|i| {
+                i.events
+                    .iter()
+                    .filter_map(|e| match e {
+                        egui::Event::MouseWheel { delta, .. } => Some(delta.y),
+                        _ => None,
+                    })
+                    .sum()
+            })
         } else {
             0.0
         };
@@ -871,17 +1018,43 @@ fn calendar_popup(ui: &Ui, anchor: Rect, id: Id, current: NaiveDate, open: &mut 
         }
         // The view: header row and week column, then the days.
         let grid_top = nav.bottom();
-        let cell = |col: usize, row: usize| Rect::from_min_size(pos2(frame.left() + 32.0 * col as f32, grid_top + 20.0 * row as f32), vec2(32.0, 20.0));
-        fill_exact(&painter, snap_rect(ui, Rect::from_min_max(pos2(frame.left(), grid_top), frame.max)), CornerRadius::ZERO, p.surface_alt);
-        fill_exact(&painter, snap_rect(ui, Rect::from_min_max(cell(1, 1).min, frame.max)), CornerRadius::ZERO, p.qt.base);
+        let cell = |col: usize, row: usize| {
+            Rect::from_min_size(pos2(frame.left() + 32.0 * col as f32, grid_top + 20.0 * row as f32), vec2(32.0, 20.0))
+        };
+        fill_exact(
+            &painter,
+            snap_rect(ui, Rect::from_min_max(pos2(frame.left(), grid_top), frame.max)),
+            CornerRadius::ZERO,
+            p.surface_alt,
+        );
+        fill_exact(
+            &painter,
+            snap_rect(ui, Rect::from_min_max(cell(1, 1).min, frame.max)),
+            CornerRadius::ZERO,
+            p.qt.base,
+        );
         for (c, name) in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].iter().enumerate() {
-            super::widgets::text_center(ui, cell(c + 1, 0).center(), name, FONT_PX, Weight::Regular, if c >= 5 { red } else { p.text });
+            super::widgets::text_center(
+                ui,
+                cell(c + 1, 0).center(),
+                name,
+                FONT_PX,
+                Weight::Regular,
+                if c >= 5 { red } else { p.text },
+            );
         }
         let offset = shown.weekday().num_days_from_monday() as i64;
         let start = shown - chrono::Duration::days(if offset == 0 { 7 } else { offset });
         for row in 0..6 {
             let week_day = start + chrono::Duration::days(row as i64 * 7);
-            super::widgets::text_center(ui, cell(0, row + 1).center(), &week_day.iso_week().week().to_string(), FONT_PX, Weight::Regular, p.text);
+            super::widgets::text_center(
+                ui,
+                cell(0, row + 1).center(),
+                &week_day.iso_week().week().to_string(),
+                FONT_PX,
+                Weight::Regular,
+                p.text,
+            );
             for col in 0..7 {
                 let day = week_day + chrono::Duration::days(col as i64);
                 let r = cell(col + 1, row + 1);
@@ -902,7 +1075,9 @@ fn calendar_popup(ui: &Ui, anchor: Rect, id: Id, current: NaiveDate, open: &mut 
     ui.data_mut(|d| d.insert_temp(month_id, shown));
     let clicked_elsewhere = ui.input(|i| i.pointer.any_click())
         && !owner.clicked()
-        && !ui.input(|i| i.pointer.interact_pos()).is_some_and(|pos| inner.response.rect.contains(pos) || frame.contains(pos));
+        && !ui
+            .input(|i| i.pointer.interact_pos())
+            .is_some_and(|pos| inner.response.rect.contains(pos) || frame.contains(pos));
     if picked.is_some() || clicked_elsewhere || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         *open = false;
         ui.data_mut(|d| d.remove::<NaiveDate>(month_id));
@@ -913,7 +1088,17 @@ fn calendar_popup(ui: &Ui, anchor: Rect, id: Id, current: NaiveDate, open: &mut 
 /// `QSpinBox` with an optional suffix and special text for the minimum.
 /// Returns true when the value changed.
 #[allow(clippy::too_many_arguments)]
-pub fn spin_box(ui: &mut Ui, rect: Rect, id: Id, value: &mut i32, range: (i32, i32), suffix: &str, special: &str, enabled: bool, p: &Palette) -> bool {
+pub fn spin_box(
+    ui: &mut Ui,
+    rect: Rect,
+    id: Id,
+    value: &mut i32,
+    range: (i32, i32),
+    suffix: &str,
+    special: &str,
+    enabled: bool,
+    p: &Palette,
+) -> bool {
     spin_box_step(ui, rect, id, value, range, 1, suffix, special, enabled, p)
 }
 
@@ -944,7 +1129,8 @@ pub fn spin_box_step(
             *value += delta * step;
         }
     }
-    let display = |v: i32| if v == range.0 && !special.is_empty() { special.to_owned() } else { format!("{v}{suffix}") };
+    let display =
+        |v: i32| if v == range.0 && !special.is_empty() { special.to_owned() } else { format!("{v}{suffix}") };
     let text_id = id.with("text");
     let mut text: String = ui.data(|d| d.get_temp::<String>(text_id)).unwrap_or_else(|| display(*value));
     let color = text_color(enabled, p);
@@ -967,7 +1153,15 @@ pub fn spin_box_step(
         ui.data_mut(|d| d.remove::<String>(text_id));
     }
     if resp.hovered() && enabled {
-        let wheel: f32 = ui.input(|i| i.events.iter().filter_map(|e| match e { egui::Event::MouseWheel { delta, .. } => Some(delta.y), _ => None }).sum());
+        let wheel: f32 = ui.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::MouseWheel { delta, .. } => Some(delta.y),
+                    _ => None,
+                })
+                .sum()
+        });
         if wheel != 0.0 {
             *value += wheel.signum() as i32 * step;
         }
@@ -1119,7 +1313,15 @@ pub fn progress_bar(ui: &Ui, rect: Rect, prog: &Progress, p: &Palette) {
 /// The downloader's tab bar (`QTabWidget#DownloaderTabs QTabBar::tab`):
 /// 150 px minimum, 6×18 padding, 8 px radius, 6 px apart. Returns the tab
 /// clicked.
-pub fn tab_bar(ui: &Ui, origin: Pos2, id: Id, tabs: &[&str], current: usize, enabled: &[bool], p: &Palette) -> Option<usize> {
+pub fn tab_bar(
+    ui: &Ui,
+    origin: Pos2,
+    id: Id,
+    tabs: &[&str],
+    current: usize,
+    enabled: &[bool],
+    p: &Palette,
+) -> Option<usize> {
     let mut x = origin.x;
     let mut clicked = None;
     for (i, title) in tabs.iter().enumerate() {
@@ -1156,7 +1358,14 @@ pub fn tab_width(ui: &Ui, title: &str) -> f32 {
 /// (`CE_TabBarTabShape`: gradient tabs, the unselected ones 2 px lower, the
 /// selected one merged into the pane). Labels take the stylesheet's text
 /// colour. Returns the page's rectangle and the tab clicked.
-pub fn fusion_tab_widget(ui: &Ui, rect: Rect, id: Id, tabs: &[String], current: usize, p: &Palette) -> (Rect, Option<usize>) {
+pub fn fusion_tab_widget(
+    ui: &Ui,
+    rect: Rect,
+    id: Id,
+    tabs: &[String],
+    current: usize,
+    p: &Palette,
+) -> (Rect, Option<usize>) {
     use crate::theme::{darker, lighter};
     let frame = p.qt.tab_frame();
     let outline = darker(p.qt.window, 140);
@@ -1165,10 +1374,18 @@ pub fn fusion_tab_widget(ui: &Ui, rect: Rect, id: Id, tabs: &[String], current: 
     let painter = ui.painter().with_clip_rect(rect);
     let pane = Rect::from_min_max(pos2(rect.left(), rect.top() + if many { 26.0 } else { 0.0 }), rect.max);
     let stroke = |painter: &egui::Painter, r: Rect, c: Color32, radius: u8| {
-        painter.add(egui::epaint::RectShape::stroke(r, CornerRadius::same(radius), Stroke::new(1.0, c), StrokeKind::Inside).with_round_to_pixels(false));
+        painter.add(
+            egui::epaint::RectShape::stroke(r, CornerRadius::same(radius), Stroke::new(1.0, c), StrokeKind::Inside)
+                .with_round_to_pixels(false),
+        );
     };
     fill_exact(&painter, Rect::from_min_max(pane.min, pane.max - vec2(1.0, 1.0)), CornerRadius::ZERO, frame);
-    fill_exact(&painter, Rect::from_min_max(pos2(pane.left(), pane.bottom() - 1.0), pane.max), CornerRadius::ZERO, Color32::from_black_alpha(15));
+    fill_exact(
+        &painter,
+        Rect::from_min_max(pos2(pane.left(), pane.bottom() - 1.0), pane.max),
+        CornerRadius::ZERO,
+        Color32::from_black_alpha(15),
+    );
     stroke(&painter, Rect::from_min_max(pane.min, pane.max - vec2(0.0, 1.0)), outline, 0);
     stroke(&painter, Rect::from_min_max(pane.min + vec2(1.0, 1.0), pane.max - vec2(1.0, 2.0)), inner, 0);
     let mut clicked = None;
@@ -1185,13 +1402,18 @@ pub fn fusion_tab_widget(ui: &Ui, rect: Rect, id: Id, tabs: &[String], current: 
             })
             .collect();
         // Unselected tabs first, the selected one over them.
-        let order = (0..tabs.len()).filter(|&i| i != current).chain(std::iter::once(current).filter(|&i| i < tabs.len()));
+        let order =
+            (0..tabs.len()).filter(|&i| i != current).chain(std::iter::once(current).filter(|&i| i < tabs.len()));
         for i in order {
             let selected = i == current;
             let last = i + 1 == tabs.len();
             let r = Rect::from_min_max(rects[i].min, rects[i].max + vec2(if last { 0.0 } else { 1.0 }, 0.0));
-            let shape = Rect::from_min_max(pos2(r.left(), r.top() + if selected { 0.0 } else { 2.0 }), r.max + vec2(0.0, 3.0));
-            let clip = Rect::from_min_max(r.min - vec2(1.0, 1.0), pos2(r.right() + 1.0, r.bottom() - if selected { 1.0 } else { 2.0 }));
+            let shape =
+                Rect::from_min_max(pos2(r.left(), r.top() + if selected { 0.0 } else { 2.0 }), r.max + vec2(0.0, 3.0));
+            let clip = Rect::from_min_max(
+                r.min - vec2(1.0, 1.0),
+                pos2(r.right() + 1.0, r.bottom() - if selected { 1.0 } else { 2.0 }),
+            );
             let tab = painter.with_clip_rect(clip);
             let stops: &[(f32, Color32)] = if selected {
                 &[(0.0, lighter(frame, 104)), (1.0, frame)]
@@ -1202,7 +1424,10 @@ pub fn fusion_tab_widget(ui: &Ui, rect: Rect, id: Id, tabs: &[String], current: 
             let mut mesh = egui::Mesh::default();
             for pair in stops.windows(2) {
                 let y = |t: f32| r.top() + t * r.height();
-                let band = Rect::from_min_max(pos2(body.left(), y(pair[0].0).max(body.top())), pos2(body.right(), y(pair[1].0).min(body.bottom())));
+                let band = Rect::from_min_max(
+                    pos2(body.left(), y(pair[0].0).max(body.top())),
+                    pos2(body.right(), y(pair[1].0).min(body.bottom())),
+                );
                 if band.height() > 0.0 {
                     let k = mesh.vertices.len() as u32;
                     mesh.colored_vertex(band.left_top(), pair[0].1);
@@ -1219,14 +1444,31 @@ pub fn fusion_tab_widget(ui: &Ui, rect: Rect, id: Id, tabs: &[String], current: 
             if selected {
                 // Over the pane's inner line beneath the tab (the tab's own
                 // body already covers the outline).
-                fill_exact(&painter, Rect::from_min_max(pos2(r.left() + 1.0, r.bottom() - 1.0), pos2(r.right() - 1.0, r.bottom() + 0.5)), CornerRadius::ZERO, frame);
+                fill_exact(
+                    &painter,
+                    Rect::from_min_max(pos2(r.left() + 1.0, r.bottom() - 1.0), pos2(r.right() - 1.0, r.bottom() + 0.5)),
+                    CornerRadius::ZERO,
+                    frame,
+                );
                 for dx in [0.0, r.width() - 2.0, r.width() - 1.0] {
-                    fill_exact(&painter, Rect::from_min_size(pos2(r.left() + dx, r.bottom() - 2.0), vec2(1.0, 1.0)), CornerRadius::ZERO, inner);
+                    fill_exact(
+                        &painter,
+                        Rect::from_min_size(pos2(r.left() + dx, r.bottom() - 2.0), vec2(1.0, 1.0)),
+                        CornerRadius::ZERO,
+                        inner,
+                    );
                 }
             }
             // Measured: both kinds of label centred 15 px below the bar's top.
             let tr = rects[i];
-            super::widgets::text_center(ui, pos2(tr.center().x, top + 15.0), &tabs[i], FONT_PX, Weight::Regular, p.text);
+            super::widgets::text_center(
+                ui,
+                pos2(tr.center().x, top + 15.0),
+                &tabs[i],
+                FONT_PX,
+                Weight::Regular,
+                p.text,
+            );
             if ui.interact(tr, id.with(i), Sense::click()).clicked() {
                 clicked = Some(i);
             }
@@ -1245,13 +1487,28 @@ pub fn splitter_handle(ui: &Ui, rect: Rect, id: Id) -> Response {
     // each a 2 × 2 lightShade (white, alpha 90) with a 1 × 1 darkShade
     // (black, alpha 60) on top, filled on whole device pixels.
     let ppp = ui.ctx().pixels_per_point();
-    let snap = |r: Rect| Rect::from_min_max(pos2((r.min.x * ppp).round() / ppp, (r.min.y * ppp).round() / ppp), pos2((r.max.x * ppp).round() / ppp, (r.max.y * ppp).round() / ppp));
+    let snap = |r: Rect| {
+        Rect::from_min_max(
+            pos2((r.min.x * ppp).round() / ppp, (r.min.y * ppp).round() / ppp),
+            pos2((r.max.x * ppp).round() / ppp, (r.max.y * ppp).round() / ppp),
+        )
+    };
     let cx = rect.left() + ((rect.width() - 1.0) / 2.0).floor();
     let cy = rect.top() + ((rect.height() - 1.0) / 2.0).floor();
     for i in (-6..12).step_by(3) {
         let at = pos2(cx + i as f32, cy);
-        fill_exact(ui.painter(), snap(Rect::from_min_size(at, vec2(2.0, 2.0))), CornerRadius::ZERO, Color32::from_rgba_unmultiplied(255, 255, 255, 90));
-        fill_exact(ui.painter(), snap(Rect::from_min_size(at, vec2(1.0, 1.0))), CornerRadius::ZERO, Color32::from_rgba_unmultiplied(0, 0, 0, 60));
+        fill_exact(
+            ui.painter(),
+            snap(Rect::from_min_size(at, vec2(2.0, 2.0))),
+            CornerRadius::ZERO,
+            Color32::from_rgba_unmultiplied(255, 255, 255, 90),
+        );
+        fill_exact(
+            ui.painter(),
+            snap(Rect::from_min_size(at, vec2(1.0, 1.0))),
+            CornerRadius::ZERO,
+            Color32::from_rgba_unmultiplied(0, 0, 0, 60),
+        );
     }
     resp
 }
@@ -1262,4 +1519,144 @@ pub fn splitter_handle(ui: &Ui, rect: Rect, id: Id) -> Response {
 /// so there they keep the text colour when disabled; only push buttons grey.
 pub fn text_color(enabled: bool, p: &Palette) -> Color32 {
     if enabled || app_style() { p.text } else { p.disabled }
+}
+
+/// The wheel over `area`: three 20 px lines a notch (`QScrollArea`).
+pub fn wheel_scroll(ui: &Ui, area: Rect, offset: &mut f32, max: f32) {
+    if !ui.rect_contains_pointer(area) || max <= 0.0 {
+        return;
+    }
+    let wheel: f32 = ui.input(|i| {
+        i.events
+            .iter()
+            .filter_map(|e| match e {
+                egui::Event::MouseWheel { unit, delta, .. } => Some(match unit {
+                    egui::MouseWheelUnit::Line => delta.y * 60.0,
+                    egui::MouseWheelUnit::Page => delta.y * area.height(),
+                    egui::MouseWheelUnit::Point => delta.y,
+                }),
+                _ => None,
+            })
+            .sum()
+    });
+    *offset = (*offset - wheel).clamp(0.0, max);
+}
+
+/// The app's `QScrollBar` (10 px, transparent, a rounded handle in the
+/// border colour, 4 px end margins, at least 24 px long).
+#[allow(clippy::too_many_arguments)]
+pub fn scroll_bar(ui: &Ui, bar: Rect, id: Id, vertical: bool, offset: &mut f32, content: f32, view: f32, p: &Palette) {
+    let max = (content - view).max(0.0);
+    if max <= 0.0 {
+        return;
+    }
+    let groove = if vertical {
+        Rect::from_min_max(pos2(bar.left(), bar.top() + 4.0), pos2(bar.right(), bar.bottom() - 4.0))
+    } else {
+        Rect::from_min_max(pos2(bar.left() + 4.0, bar.top()), pos2(bar.right() - 4.0, bar.bottom()))
+    };
+    let track = if vertical { groove.height() } else { groove.width() };
+    let len = (track * view / content).max(24.0).min(track);
+    let start = (track - len) * (*offset / max).clamp(0.0, 1.0);
+    let handle = if vertical {
+        Rect::from_min_size(pos2(groove.left(), groove.top() + start), vec2(groove.width(), len))
+    } else {
+        Rect::from_min_size(pos2(groove.left() + start, groove.top()), vec2(len, groove.height()))
+    };
+    let resp = ui.interact(handle, id, Sense::drag());
+    if resp.dragged() {
+        let d = if vertical { resp.drag_delta().y } else { resp.drag_delta().x };
+        *offset = (*offset + d * max / (track - len).max(1.0)).clamp(0.0, max);
+    }
+    ui.painter().rect_filled(handle, 5.0, p.border);
+}
+
+/// `QPlainTextEdit` (or a plain-text `QTextEdit`): the field frame, the
+/// text 9 + 4 px in and 7 + 4 px down (viewport inset and document
+/// margin), wrapped at the viewport, the app's scroll bar when it
+/// overflows. Read-only fields can still be selected and copied. Returns
+/// true when the text changed.
+#[allow(clippy::too_many_arguments)]
+pub fn plain_text_edit(
+    ui: &mut Ui,
+    rect: Rect,
+    id: Id,
+    text: &mut String,
+    placeholder: &str,
+    read_only: bool,
+    p: &Palette,
+) -> bool {
+    let focused = ui.memory(|m| m.has_focus(id));
+    field_box(ui, rect, focused, true, p);
+    let inner = Rect::from_min_max(rect.min + vec2(9.0, 7.0), rect.max - vec2(9.0, 7.0));
+    let offset_id = id.with("scroll");
+    let mut offset: f32 = ui.data(|d| d.get_temp(offset_id)).unwrap_or(0.0);
+    let content_id = id.with("content_h");
+    let content_h: f32 = ui.data(|d| d.get_temp(content_id)).unwrap_or(0.0);
+    let bar = content_h > inner.height();
+    let view = if bar { Rect::from_min_max(inner.min, pos2(inner.right() - 10.0, inner.bottom())) } else { inner };
+    let max = (content_h - view.height()).max(0.0);
+    wheel_scroll(ui, view, &mut offset, max);
+    if bar {
+        let bar_rect = Rect::from_min_max(pos2(view.right(), inner.top()), inner.max);
+        scroll_bar(ui, bar_rect, id.with("vbar"), true, &mut offset, content_h, view.height(), p);
+    }
+    offset = offset.clamp(0.0, max);
+    let mut changed = false;
+    let mut out_h = content_h;
+    ui.scope_builder(egui::UiBuilder::new().max_rect(view), |ui| {
+        ui.set_clip_rect(view.intersect(ui.clip_rect()));
+        let mut style = (**ui.style()).clone();
+        style.spacing.item_spacing = vec2(0.0, 0.0);
+        style.visuals.selection.bg_fill = Color32::from_rgb(0x14, 0x6f, 0xda);
+        style.visuals.selection.stroke.color = Color32::WHITE;
+        ui.set_style(style);
+        let top = view.top() + 4.0 - offset;
+        let edit_rect = Rect::from_min_size(
+            pos2(view.left() + 4.0 - 2.0, top),
+            vec2(view.width() - 8.0 + 4.0, f32::INFINITY.min(1.0e6)),
+        );
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(edit_rect));
+        let resp = if read_only {
+            let mut shown = text.as_str();
+            egui::TextEdit::multiline(&mut shown)
+                .id(id)
+                .font(ui_font(FONT_PX, Weight::Regular))
+                .frame(egui::Frame::NONE)
+                .margin(egui::Margin { left: 2, right: 2, top: 0, bottom: 0 })
+                .desired_width(view.width() - 8.0)
+                .desired_rows(1)
+                .text_color(p.text)
+                .show(&mut child)
+        } else {
+            egui::TextEdit::multiline(text)
+                .id(id)
+                .font(ui_font(FONT_PX, Weight::Regular))
+                .frame(egui::Frame::NONE)
+                .margin(egui::Margin { left: 2, right: 2, top: 0, bottom: 0 })
+                .desired_width(view.width() - 8.0)
+                .desired_rows(1)
+                .text_color(p.text)
+                .show(&mut child)
+        };
+        changed = resp.response.changed();
+        out_h = resp.galley.size().y + 8.0;
+        // Clicking the empty part of the field focuses it too.
+        let bg = ui.interact(view, id.with("bg"), Sense::click());
+        if bg.clicked() {
+            ui.memory_mut(|m| m.request_focus(id));
+        }
+    });
+    if text.is_empty() && !placeholder.is_empty() {
+        let ph = placeholder_color(p);
+        for (k, line) in placeholder.split('\n').enumerate() {
+            let cy = view.top() + 4.0 + k as f32 * LINE + LINE / 2.0;
+            text_left(ui, view.left() + 4.0, cy, line, FONT_PX, Weight::Regular, ph);
+        }
+    }
+    ui.data_mut(|d| {
+        d.insert_temp(offset_id, offset);
+        d.insert_temp(content_id, out_h);
+    });
+    changed
 }

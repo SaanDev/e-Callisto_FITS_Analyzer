@@ -73,7 +73,15 @@ impl ReportDialog {
             return events;
         }
         let width = {
-            let w = ctx.fonts_mut(|f| f.layout_no_wrap(self.label.clone(), crate::fonts::ui_font(12.0, crate::fonts::Weight::Regular), egui::Color32::WHITE).size().x);
+            let w = ctx.fonts_mut(|f| {
+                f.layout_no_wrap(
+                    self.label.clone(),
+                    crate::fonts::ui_font(12.0, crate::fonts::Weight::Regular),
+                    egui::Color32::WHITE,
+                )
+                .size()
+                .x
+            });
             (w.ceil() + 22.0).max(300.0)
         };
         let size = vec2(width, 104.0);
@@ -95,9 +103,16 @@ impl ReportDialog {
             egui::CentralPanel::default().frame(egui::Frame::NONE.fill(bg)).show(ctx, |ui| {
                 let full = ui.max_rect();
                 let top = Rect::from_min_max(full.min, pos2(full.max.x, full.top() + 70.0));
-                ui.scope_builder(egui::UiBuilder::new().max_rect(top), |ui| crate::downloads::import::body(ui, &label, &progress, p));
-                let b = Rect::from_min_size(pos2(full.right() - 11.0 - 80.0, full.bottom() - 11.0 - 25.0), vec2(80.0, 25.0));
-                if qt::button(ui, b, Id::new("report_cancel"), "Cancel", false, !self.job.cancel_requested(), p).clicked() {
+                ui.scope_builder(egui::UiBuilder::new().max_rect(top), |ui| {
+                    crate::downloads::import::body(ui, &label, &progress, p)
+                });
+                let b = Rect::from_min_size(
+                    pos2(full.right() - 11.0 - 80.0, full.bottom() - 11.0 - 25.0),
+                    vec2(80.0, 25.0),
+                );
+                if qt::button(ui, b, Id::new("report_cancel"), "Cancel", false, !self.job.cancel_requested(), p)
+                    .clicked()
+                {
                     cancel = true;
                 }
             });

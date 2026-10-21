@@ -126,19 +126,35 @@ pub fn draw(prim: &Prim, pix: &mut PixmapMut, scale: f64, origin: (f64, f64)) {
                         let sv = snap_value(ew);
                         let (lo, hi) = ((-half + 0.5).floor() + sv, (half + 0.5).floor() + sv);
                         let (cx, cy) = ((xd + 0.5).floor() - ox, (yd + 0.5).floor() - oy);
-                        tiny_skia::Rect::from_ltrb((cx + lo) as f32, (cy + lo) as f32, (cx + hi) as f32, (cy + hi) as f32).map(PathBuilder::from_rect)
+                        tiny_skia::Rect::from_ltrb(
+                            (cx + lo) as f32,
+                            (cy + lo) as f32,
+                            (cx + hi) as f32,
+                            (cy + hi) as f32,
+                        )
+                        .map(PathBuilder::from_rect)
                     }
-                    (MarkerKind::Square, false) => {
-                        tiny_skia::Rect::from_ltrb((xd - half - ox) as f32, (yd - half - oy) as f32, (xd + half - ox) as f32, (yd + half - oy) as f32)
-                            .map(PathBuilder::from_rect)
-                    }
+                    (MarkerKind::Square, false) => tiny_skia::Rect::from_ltrb(
+                        (xd - half - ox) as f32,
+                        (yd - half - oy) as f32,
+                        (xd + half - ox) as f32,
+                        (yd + half - oy) as f32,
+                    )
+                    .map(PathBuilder::from_rect),
                     (MarkerKind::Circle, true) => {
                         // Not snappable: centred on the stamped pixel's centre.
-                        PathBuilder::from_circle(((xd + 0.5).floor() + 0.5 - ox) as f32, ((yd + 0.5).floor() + 0.5 - oy) as f32, half as f32)
+                        PathBuilder::from_circle(
+                            ((xd + 0.5).floor() + 0.5 - ox) as f32,
+                            ((yd + 0.5).floor() + 0.5 - oy) as f32,
+                            half as f32,
+                        )
                     }
-                    (MarkerKind::Circle, false) => PathBuilder::from_circle((xd - ox) as f32, (yd - oy) as f32, half as f32),
+                    (MarkerKind::Circle, false) => {
+                        PathBuilder::from_circle((xd - ox) as f32, (yd - oy) as f32, half as f32)
+                    }
                     (MarkerKind::Star, _) => {
-                        let (cx, cy) = if *snapped { ((xd + 0.5).floor() + 0.5, (yd + 0.5).floor() + 0.5) } else { (xd, yd) };
+                        let (cx, cy) =
+                            if *snapped { ((xd + 0.5).floor() + 0.5, (yd + 0.5).floor() + 0.5) } else { (xd, yd) };
                         star((cx - ox) as f32, (cy - oy) as f32, half as f32)
                     }
                 };
@@ -165,10 +181,18 @@ pub fn draw(prim: &Prim, pix: &mut PixmapMut, scale: f64, origin: (f64, f64)) {
             if let Some(path) = pb.finish() {
                 // `lines.solid_capstyle` projecting, `lines.dash_capstyle` butt.
                 let (cap, dash) = match dash {
-                    Some((on, off)) => (LineCap::Butt, StrokeDash::new(vec![(on * scale) as f32, (off * scale) as f32], 0.0)),
+                    Some((on, off)) => {
+                        (LineCap::Butt, StrokeDash::new(vec![(on * scale) as f32, (off * scale) as f32], 0.0))
+                    }
                     None => (LineCap::Square, None),
                 };
-                let stroke = Stroke { width: (width * scale) as f32, line_cap: cap, line_join: LineJoin::Round, dash, ..Stroke::default() };
+                let stroke = Stroke {
+                    width: (width * scale) as f32,
+                    line_cap: cap,
+                    line_join: LineJoin::Round,
+                    dash,
+                    ..Stroke::default()
+                };
                 pix.stroke_path(&path, &paint(*color), &stroke, Transform::identity(), mask.as_ref());
             }
         }
@@ -184,7 +208,14 @@ pub fn draw(prim: &Prim, pix: &mut PixmapMut, scale: f64, origin: (f64, f64)) {
             if b[2] <= b[0] || b[3] <= b[1] {
                 return;
             }
-            let Some(r) = tiny_skia::Rect::from_ltrb((b[0] - ox) as f32, (b[1] - oy) as f32, (b[2] - ox) as f32, (b[3] - oy) as f32) else { return };
+            let Some(r) = tiny_skia::Rect::from_ltrb(
+                (b[0] - ox) as f32,
+                (b[1] - oy) as f32,
+                (b[2] - ox) as f32,
+                (b[3] - oy) as f32,
+            ) else {
+                return;
+            };
             pix.fill_path(&PathBuilder::from_rect(r), &paint(*face), FillRule::Winding, Transform::identity(), None);
             let Some(mut mask) = Mask::new(pix.width(), pix.height()) else { return };
             mask.fill_path(&PathBuilder::from_rect(r), FillRule::Winding, false, Transform::identity());
@@ -211,7 +242,10 @@ pub fn draw(prim: &Prim, pix: &mut PixmapMut, scale: f64, origin: (f64, f64)) {
             let w = width * scale;
             let sv = snap_value(w);
             let s = |v: f64, o: f64| ((v * scale + 0.5).floor() + sv - o) as f32;
-            let Some(r) = tiny_skia::Rect::from_ltrb(s(rect.x0, ox), s(rect.y0, oy), s(rect.x1, ox), s(rect.y1, oy)) else { return };
+            let Some(r) = tiny_skia::Rect::from_ltrb(s(rect.x0, ox), s(rect.y0, oy), s(rect.x1, ox), s(rect.y1, oy))
+            else {
+                return;
+            };
             let path = PathBuilder::from_rect(r);
             pix.fill_path(&path, &paint(*face), FillRule::Winding, Transform::identity(), None);
             let stroke = Stroke { width: w as f32, line_join: LineJoin::Miter, ..Stroke::default() };

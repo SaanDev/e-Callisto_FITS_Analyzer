@@ -1101,7 +1101,15 @@ fn rich_extent(ui: &Ui, html: &str, font: &FontId, color: Color32) -> (f64, f64)
 /// Draws the runs from the text box's top-left `at` (canvas coordinates):
 /// a subscript's baseline lowered by a sixth of its font's height, a
 /// superscript's raised by half (`QTextLine::draw`).
-fn draw_rich(ui: &Ui, painter: &egui::Painter, px: &Pixels, at: (f64, f64), runs: &[(String, i32)], font: &FontId, color: Color32) {
+fn draw_rich(
+    ui: &Ui,
+    painter: &egui::Painter,
+    px: &Pixels,
+    at: (f64, f64),
+    runs: &[(String, i32)],
+    font: &FontId,
+    color: Color32,
+) {
     let main = metrics(&galley(ui, "x", font, color), font);
     let baseline = at.1 + main.ascent;
     let mut x = at.0;

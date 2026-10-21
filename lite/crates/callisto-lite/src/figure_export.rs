@@ -9,7 +9,9 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use callisto_core::mpl::{Face, Figure, GlyphRun, MarkerKind, Prim, PxRect, image_pixels, rasterize_image, rasterize_image_mesh, render};
+use callisto_core::mpl::{
+    Face, Figure, GlyphRun, MarkerKind, Prim, PxRect, image_pixels, rasterize_image, rasterize_image_mesh, render,
+};
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
 use crate::fonts::{MplMeasure, mpl_font, with_mpl_face};
@@ -52,7 +54,13 @@ fn paint(c: [u8; 4]) -> Paint<'static> {
 
 /// Glyph outlines of `text` at `size_px` in `face`, pen at the origin, y
 /// down; a math label's glyphs where mathtext placed them.
-pub(crate) fn text_path(ctx: &egui::Context, text: &str, size_px: f64, face: Face, runs: &[GlyphRun]) -> Option<tiny_skia::Path> {
+pub(crate) fn text_path(
+    ctx: &egui::Context,
+    text: &str,
+    size_px: f64,
+    face: Face,
+    runs: &[GlyphRun],
+) -> Option<tiny_skia::Path> {
     if runs.is_empty() && matches!(face, Face::Styled { .. }) {
         // A graph font list: each glyph from the font that has it.
         let mut pb = PathBuilder::new();
@@ -64,8 +72,13 @@ pub(crate) fn text_path(ctx: &egui::Context, text: &str, size_px: f64, face: Fac
     }
     // (character, x, y, size)
     let glyphs: Vec<(char, f32, f32, f64)> = if runs.is_empty() {
-        let galley = ctx.fonts_mut(|f| f.layout_no_wrap(text.to_owned(), mpl_font(face, size_px as f32), egui::Color32::WHITE));
-        galley.rows.first().map(|r| r.row.glyphs.iter().map(|g| (g.chr, g.pos.x, 0.0, size_px)).collect()).unwrap_or_default()
+        let galley =
+            ctx.fonts_mut(|f| f.layout_no_wrap(text.to_owned(), mpl_font(face, size_px as f32), egui::Color32::WHITE));
+        galley
+            .rows
+            .first()
+            .map(|r| r.row.glyphs.iter().map(|g| (g.chr, g.pos.x, 0.0, size_px)).collect())
+            .unwrap_or_default()
     } else {
         runs.iter().map(|g| (g.c, g.dx as f32, g.dy as f32, g.size_px)).collect()
     };
@@ -145,7 +158,9 @@ pub fn rasterize(ctx: &egui::Context, fig: &Figure, scale: f64) -> Result<Pixmap
     for p in &list.prims {
         match p {
             Prim::Fill { rect, color } => {
-                if let Some(r) = tiny_skia::Rect::from_ltrb(rect.x0 as f32, rect.y0 as f32, rect.x1 as f32, rect.y1 as f32) {
+                if let Some(r) =
+                    tiny_skia::Rect::from_ltrb(rect.x0 as f32, rect.y0 as f32, rect.x1 as f32, rect.y1 as f32)
+                {
                     pix.fill_rect(r, &paint(*color), to, None);
                 }
             }
@@ -171,7 +186,8 @@ pub fn rasterize(ctx: &egui::Context, fig: &Figure, scale: f64) -> Result<Pixmap
                 let (dx1, dy1) = map(dest.x0.max(dest.x1), dest.y0.max(dest.y1));
                 let (cx0, cy0) = map(clip.x0, clip.y0);
                 let (cx1, cy1) = map(clip.x1, clip.y1);
-                let Some((out, iw, ih, px)) = image_pixels(im, [dx0, dy0, dx1, dy1], [cx0, cy0, cx1, cy1], *log_y) else {
+                let Some((out, iw, ih, px)) = image_pixels(im, [dx0, dy0, dx1, dy1], [cx0, cy0, cx1, cy1], *log_y)
+                else {
                     continue;
                 };
                 let Some(mut sub) = Pixmap::new(iw as u32, ih as u32) else { continue };
@@ -181,7 +197,14 @@ pub fn rasterize(ctx: &egui::Context, fig: &Figure, scale: f64) -> Result<Pixmap
                     let d = &mut sub.data_mut()[i * 4..i * 4 + 4];
                     d.copy_from_slice(&[pm(c[0]), pm(c[1]), pm(c[2]), c[3]]);
                 }
-                pix.draw_pixmap(out[0] as i32, out[1] as i32, sub.as_ref(), &tiny_skia::PixmapPaint::default(), Transform::identity(), None);
+                pix.draw_pixmap(
+                    out[0] as i32,
+                    out[1] as i32,
+                    sub.as_ref(),
+                    &tiny_skia::PixmapPaint::default(),
+                    Transform::identity(),
+                    None,
+                );
             }
             Prim::Markers { .. } | Prim::Path { .. } | Prim::Frame { .. } | Prim::Hatch { .. } => {
                 render::draw(p, &mut pix.as_mut(), 1.0, (0.0, 0.0));
@@ -189,7 +212,10 @@ pub fn rasterize(ctx: &egui::Context, fig: &Figure, scale: f64) -> Result<Pixmap
             Prim::Text { pos, text, size_px, color, rotation, face, glyphs, .. } => {
                 if let Some(path) = text_path(ctx, text, *size_px, *face, glyphs) {
                     let (dx, dy) = callisto_core::mpl::agg_rotated_text_offset(*rotation);
-                    let t = Transform::from_rotate(-*rotation as f32).post_translate(pos.0 as f32, pos.1 as f32).post_concat(to).post_translate(dx as f32, dy as f32);
+                    let t = Transform::from_rotate(-*rotation as f32)
+                        .post_translate(pos.0 as f32, pos.1 as f32)
+                        .post_concat(to)
+                        .post_translate(dx as f32, dy as f32);
                     pix.fill_path(&path, &paint(*color), FillRule::Winding, t, None);
                 }
             }
@@ -212,7 +238,14 @@ pub fn png_bytes(ctx: &egui::Context, fig: &Figure, dpi: f64, pad_inches: f64) -
     let (w, h) = (pix.width(), pix.height());
     let rgba = pix.data().to_vec();
     let mut png = Vec::new();
-    image::write_buffer_with_format(&mut std::io::Cursor::new(&mut png), &rgba, w, h, image::ExtendedColorType::Rgba8, image::ImageFormat::Png)?;
+    image::write_buffer_with_format(
+        &mut std::io::Cursor::new(&mut png),
+        &rgba,
+        w,
+        h,
+        image::ExtendedColorType::Rgba8,
+        image::ImageFormat::Png,
+    )?;
     Ok((png, w, h, rgba))
 }
 
@@ -237,8 +270,17 @@ pub fn save_figure_padded(ctx: &egui::Context, fig: &Figure, path: &Path, dpi: f
     let rgba: Vec<u8> = pix.data().to_vec();
     let rgb: Vec<u8> = rgba.as_chunks::<4>().0.iter().flat_map(|c| [c[0], c[1], c[2]]).collect();
     match ext.as_str() {
-        "png" => image::save_buffer_with_format(path, &rgba, w, h, image::ExtendedColorType::Rgba8, image::ImageFormat::Png)?,
-        "tif" | "tiff" => image::save_buffer_with_format(path, &rgba, w, h, image::ExtendedColorType::Rgba8, image::ImageFormat::Tiff)?,
+        "png" => {
+            image::save_buffer_with_format(path, &rgba, w, h, image::ExtendedColorType::Rgba8, image::ImageFormat::Png)?
+        }
+        "tif" | "tiff" => image::save_buffer_with_format(
+            path,
+            &rgba,
+            w,
+            h,
+            image::ExtendedColorType::Rgba8,
+            image::ImageFormat::Tiff,
+        )?,
         "jpg" | "jpeg" => {
             let file = std::fs::File::create(path)?;
             let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::BufWriter::new(file), 95);
@@ -255,8 +297,12 @@ pub fn save_figure_padded(ctx: &egui::Context, fig: &Figure, path: &Path, dpi: f
 pub fn save_raster(path: &Path, ext: &str, rgba: &[u8], w: u32, h: u32) -> Result<()> {
     let rgb: Vec<u8> = rgba.as_chunks::<4>().0.iter().flat_map(|c| [c[0], c[1], c[2]]).collect();
     match ext {
-        "png" => image::save_buffer_with_format(path, rgba, w, h, image::ExtendedColorType::Rgba8, image::ImageFormat::Png)?,
-        "tif" | "tiff" => image::save_buffer_with_format(path, rgba, w, h, image::ExtendedColorType::Rgba8, image::ImageFormat::Tiff)?,
+        "png" => {
+            image::save_buffer_with_format(path, rgba, w, h, image::ExtendedColorType::Rgba8, image::ImageFormat::Png)?
+        }
+        "tif" | "tiff" => {
+            image::save_buffer_with_format(path, rgba, w, h, image::ExtendedColorType::Rgba8, image::ImageFormat::Tiff)?
+        }
         "jpg" | "jpeg" => {
             let file = std::fs::File::create(path)?;
             let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::BufWriter::new(file), 95);
@@ -271,7 +317,14 @@ pub fn save_raster(path: &Path, ext: &str, rgba: &[u8], w: u32, h: u32) -> Resul
         "eps" => std::fs::write(path, eps(&rgb, w, h, 300.0))?,
         "svg" => {
             let mut png = Vec::new();
-            image::write_buffer_with_format(&mut std::io::Cursor::new(&mut png), rgba, w, h, image::ExtendedColorType::Rgba8, image::ImageFormat::Png)?;
+            image::write_buffer_with_format(
+                &mut std::io::Cursor::new(&mut png),
+                rgba,
+                w,
+                h,
+                image::ExtendedColorType::Rgba8,
+                image::ImageFormat::Png,
+            )?;
             let svg = format!(
                 "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\">
 <image width=\"{w}\" height=\"{h}\" href=\"data:image/png;base64,{}\"/>
@@ -315,7 +368,9 @@ fn pdf_on_page(rgb: &[u8], w: u32, h: u32, page: (f64, f64), place: [f64; 4]) ->
     for o in &offsets {
         out.extend(format!("{o:010} 00000 n \n").as_bytes());
     }
-    out.extend(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", offsets.len() + 1).as_bytes());
+    out.extend(
+        format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", offsets.len() + 1).as_bytes(),
+    );
     Ok(out)
 }
 
@@ -447,7 +502,11 @@ fn svg(ctx: &egui::Context, fig: &Figure) -> Result<String> {
         match p {
             Prim::Fill { rect, color } => s.push_str(&format!(
                 "<rect x=\"{:.3}\" y=\"{:.3}\" width=\"{:.3}\" height=\"{:.3}\" fill=\"{}\"/>\n",
-                rect.x0, rect.y0, rect.x1 - rect.x0, rect.y1 - rect.y0, svg_color(*color)
+                rect.x0,
+                rect.y0,
+                rect.x1 - rect.x0,
+                rect.y1 - rect.y0,
+                svg_color(*color)
             )),
             Prim::Line { a, b, color, width, square_caps } => {
                 if *width <= 0.0 {
@@ -467,8 +526,18 @@ fn svg(ctx: &egui::Context, fig: &Figure) -> Result<String> {
                 if x1 <= x0 || y1 <= y0 {
                     continue;
                 }
-                let d = [dest.x0.min(dest.x1) * sc, dest.y0.min(dest.y1) * sc, dest.x0.max(dest.x1) * sc, dest.y0.max(dest.y1) * sc];
-                let out = [(x0 * sc).floor() as i64, (y0 * sc).floor() as i64, (x1 * sc).ceil() as i64, (y1 * sc).ceil() as i64];
+                let d = [
+                    dest.x0.min(dest.x1) * sc,
+                    dest.y0.min(dest.y1) * sc,
+                    dest.x0.max(dest.x1) * sc,
+                    dest.y0.max(dest.y1) * sc,
+                ];
+                let out = [
+                    (x0 * sc).floor() as i64,
+                    (y0 * sc).floor() as i64,
+                    (x1 * sc).ceil() as i64,
+                    (y1 * sc).ceil() as i64,
+                ];
                 let c = [clip.x0 * sc, clip.y0 * sc, clip.x1 * sc, clip.y1 * sc];
                 let (out, iw, ih, px) = match log_y {
                     Some(log) => match rasterize_image_mesh(im, d, c, *log) {
@@ -481,13 +550,22 @@ fn svg(ctx: &egui::Context, fig: &Figure) -> Result<String> {
                     }
                 };
                 let mut png = Vec::new();
-                image::write_buffer_with_format(&mut std::io::Cursor::new(&mut png), &px, iw as u32, ih as u32, image::ExtendedColorType::Rgba8, image::ImageFormat::Png)?;
+                image::write_buffer_with_format(
+                    &mut std::io::Cursor::new(&mut png),
+                    &px,
+                    iw as u32,
+                    ih as u32,
+                    image::ExtendedColorType::Rgba8,
+                    image::ImageFormat::Png,
+                )?;
                 s.push_str(&format!(
                     "<image x=\"{:.3}\" y=\"{:.3}\" width=\"{:.3}\" height=\"{:.3}\" preserveAspectRatio=\"none\" xlink:href=\"data:image/png;base64,{}\"/>\n",
                     out[0] as f64 / sc, out[1] as f64 / sc, iw as f64 / sc, ih as f64 / sc, base64(&png)
                 ));
             }
-            Prim::Markers { .. } | Prim::Path { .. } | Prim::Frame { .. } | Prim::Hatch { .. } => s.push_str(&svg_shape(p)),
+            Prim::Markers { .. } | Prim::Path { .. } | Prim::Frame { .. } | Prim::Hatch { .. } => {
+                s.push_str(&svg_shape(p))
+            }
             Prim::Text { pos, text, size_px, color, rotation, face, glyphs, .. } => {
                 let Some(path) = text_path(ctx, text, *size_px, *face, glyphs) else { continue };
                 let mut d = String::new();
@@ -497,13 +575,18 @@ fn svg(ctx: &egui::Context, fig: &Figure) -> Result<String> {
                         P::MoveTo(p) => d.push_str(&format!("M{:.2} {:.2}", p.x, p.y)),
                         P::LineTo(p) => d.push_str(&format!("L{:.2} {:.2}", p.x, p.y)),
                         P::QuadTo(a, p) => d.push_str(&format!("Q{:.2} {:.2} {:.2} {:.2}", a.x, a.y, p.x, p.y)),
-                        P::CubicTo(a, b2, p) => d.push_str(&format!("C{:.2} {:.2} {:.2} {:.2} {:.2} {:.2}", a.x, a.y, b2.x, b2.y, p.x, p.y)),
+                        P::CubicTo(a, b2, p) => {
+                            d.push_str(&format!("C{:.2} {:.2} {:.2} {:.2} {:.2} {:.2}", a.x, a.y, b2.x, b2.y, p.x, p.y))
+                        }
                         P::Close => d.push('Z'),
                     }
                 }
                 s.push_str(&format!(
                     "<path transform=\"translate({:.3} {:.3}) rotate({:.3})\" d=\"{d}\" fill=\"{}\"/>\n",
-                    pos.0, pos.1, -rotation, svg_color(*color)
+                    pos.0,
+                    pos.1,
+                    -rotation,
+                    svg_color(*color)
                 ));
             }
         }

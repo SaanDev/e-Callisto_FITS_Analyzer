@@ -8,12 +8,10 @@ use std::path::Path;
 
 use chrono::{NaiveDate, NaiveDateTime};
 
-use super::array::Array2;
 use super::archive::{ListingError, check_archive_server, day_url, extract_fits_links, fetch_listing, join_url};
+use super::array::Array2;
 use super::cache::{self, DEFAULT_MAX_CACHE_BYTES, fetch_cached};
-use super::combine::{
-    self, CombineOptions, CombineType, Combined, FrequencyRelation, group_combinable_paths,
-};
+use super::combine::{self, CombineOptions, CombineType, Combined, FrequencyRelation, group_combinable_paths};
 use super::fits_io::{FitsLoadResult, load_callisto_fits};
 use super::naming::{basename, parse_archive_filename};
 
@@ -175,7 +173,11 @@ pub fn describe_days(days: &[NaiveDate]) -> String {
 
 /// `FetchWorker`'s result: the whole day's files whose name contains the
 /// station, as `(filename, url)`.
-pub fn fetch_station_day(date: NaiveDate, station: &str, mut progress: impl FnMut(usize, usize)) -> Result<Vec<(String, String)>, ListingError> {
+pub fn fetch_station_day(
+    date: NaiveDate,
+    station: &str,
+    mut progress: impl FnMut(usize, usize),
+) -> Result<Vec<(String, String)>, ListingError> {
     let (ok, message) = check_archive_server();
     if !ok {
         return Err(ListingError::Unreachable(message));
@@ -630,7 +632,11 @@ mod tests {
         let names: Vec<&str> = found.iter().map(|c| c.filename.as_str()).collect();
         assert_eq!(
             names,
-            ["BIR_20261007_103000_01.fit.gz", "BIR_20261007_103000_02.fit.gz", "Malaysia_Banting_20261007_101500_59.fit.gz"]
+            [
+                "BIR_20261007_103000_01.fit.gz",
+                "BIR_20261007_103000_02.fit.gz",
+                "Malaysia_Banting_20261007_101500_59.fit.gz"
+            ]
         );
         assert_eq!(found[0].url, "https://x/2026/10/07/BIR_20261007_103000_01.fit.gz");
         let sorted = sort_event_candidates([found.clone(), found].concat());
@@ -659,7 +665,10 @@ mod tests {
         let d = |s| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
         assert_eq!(describe_days(&[d("2026-10-07")]), "2026-10-07");
         assert_eq!(describe_days(&[d("2026-10-06"), d("2026-10-07")]), "2026-10-06 to 2026-10-07");
-        assert_eq!(utc_archive_dates_for_window(dt("2026-10-06 23:00:00"), dt("2026-10-07 01:00:00")).unwrap().len(), 2);
+        assert_eq!(
+            utc_archive_dates_for_window(dt("2026-10-06 23:00:00"), dt("2026-10-07 01:00:00")).unwrap().len(),
+            2
+        );
         assert!(utc_archive_dates_for_window(dt("2026-10-07 01:00:00"), dt("2026-10-06 23:00:00")).is_err());
         assert_eq!(import_label(&["https://a".into()]), "Downloading selected FITS files...");
         assert_eq!(import_label(&["C:/a.fit".into()]), "Preparing selected FITS files...");

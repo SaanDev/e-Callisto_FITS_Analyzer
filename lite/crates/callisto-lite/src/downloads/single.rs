@@ -112,7 +112,8 @@ impl SingleTab {
             map.push((gi, None));
             if g.expanded {
                 for (ci, (c, checked)) in g.children.iter().enumerate() {
-                    let time = c.observed_at.map_or_else(|| "\u{2014}".to_owned(), |t| t.format("%H:%M:%S").to_string());
+                    let time =
+                        c.observed_at.map_or_else(|| "\u{2014}".to_owned(), |t| t.format("%H:%M:%S").to_string());
                     let mut r = Row::new(vec![c.filename.clone(), time]).checked(Check::from_bool(*checked));
                     r.depth = 1;
                     rows.push(r);
@@ -134,7 +135,11 @@ impl SingleTab {
         self.progress = None;
         let files = match result {
             Err(ListingError::Unreachable(m)) => {
-                return sh.out.notice(NoticeKind::Critical, "Server Error", format!("FITS server is not responding.\n\nDetails:\n{m}"));
+                return sh.out.notice(
+                    NoticeKind::Critical,
+                    "Server Error",
+                    format!("FITS server is not responding.\n\nDetails:\n{m}"),
+                );
             }
             Err(ListingError::Http(m)) => {
                 return sh.out.notice(
@@ -147,25 +152,43 @@ impl SingleTab {
         };
         let valid: Vec<(String, String)> = files.into_iter().filter(|(n, u)| !n.is_empty() && !u.is_empty()).collect();
         if valid.is_empty() {
-            return sh.out.notice(NoticeKind::Information, "No Data Found", "No FITS files were found for the selected station on that date.");
+            return sh.out.notice(
+                NoticeKind::Information,
+                "No Data Found",
+                "No FITS files were found for the selected station on that date.",
+            );
         }
         let mut parsed = Vec::new();
         let mut unparsed = Vec::new();
         for (name, url) in valid {
             match Candidate::parse(&name, url.clone()) {
                 Some(c) => parsed.push(c),
-                None => unparsed.push(Candidate { station: String::new(), observed_at: None, filename: name, url, receiver_id: String::new() }),
+                None => unparsed.push(Candidate {
+                    station: String::new(),
+                    observed_at: None,
+                    filename: name,
+                    url,
+                    receiver_id: String::new(),
+                }),
             }
         }
         for (code, members) in downloader::group_by_focus_code(&parsed) {
             let label = downloader::focus_group_label(&code, &members);
-            self.groups.push(Group { label, expanded: true, children: members.into_iter().map(|c| (c, false)).collect() });
+            self.groups.push(Group {
+                label,
+                expanded: true,
+                children: members.into_iter().map(|c| (c, false)).collect(),
+            });
         }
         if !unparsed.is_empty() {
             unparsed.sort_by_key(|c| c.filename.to_lowercase());
             let n = unparsed.len();
             let label = format!("Unparsed ({n} {})", if n == 1 { "file" } else { "files" });
-            self.groups.push(Group { label, expanded: true, children: unparsed.into_iter().map(|c| (c, false)).collect() });
+            self.groups.push(Group {
+                label,
+                expanded: true,
+                children: unparsed.into_iter().map(|c| (c, false)).collect(),
+            });
         }
     }
 
@@ -235,7 +258,13 @@ impl SingleTab {
                 if failed > 0 {
                     details.push(String::new());
                     details.push("Failures:".into());
-                    details.extend(batch.failures.iter().take(8).map(|(_, e)| if e.is_empty() { "Unknown error".to_owned() } else { e.clone() }));
+                    details.extend(
+                        batch
+                            .failures
+                            .iter()
+                            .take(8)
+                            .map(|(_, e)| if e.is_empty() { "Unknown error".to_owned() } else { e.clone() }),
+                    );
                     if failed > 8 {
                         details.push("...".into());
                     }
@@ -254,7 +283,11 @@ impl SingleTab {
             .widget(qt::label_spec(ui, "station_label", "Station:"))
             .widget(qt::combo_len_spec("station", 22))
             .widget(qt::button_spec(ui, "show", "Show Available FITS", true));
-        let params = BoxLayout::v([9; 4], 4).add(p_row.into_item()).widget(super::status_label(ui, "stations_status", &self.loader.summary));
+        let params = BoxLayout::v([9; 4], 4).add(p_row.into_item()).widget(super::status_label(
+            ui,
+            "stations_status",
+            &self.loader.summary,
+        ));
         let files = BoxLayout::v([9; 4], 6).widget(qt::view_spec("tree"));
         let mut actions = BoxLayout::h([9; 4], 8);
         for (id, t) in ACTIONS {
@@ -280,7 +313,16 @@ impl SingleTab {
         if qt::date_edit(ui, at(&g, o, "date"), Id::new("single_date"), &mut self.date, true, p) {
             self.request_stations(sh.svc);
         }
-        if let Some(i) = qt::combo(ui, at(&g, o, "station"), Id::new("single_station"), &self.combo.items, self.combo.current, &self.combo.placeholder, true, p) {
+        if let Some(i) = qt::combo(
+            ui,
+            at(&g, o, "station"),
+            Id::new("single_station"),
+            &self.combo.items,
+            self.combo.current,
+            &self.combo.placeholder,
+            true,
+            p,
+        ) {
             self.combo.activate(i);
         }
         let status_rect = at(&g, o, "stations_status");
@@ -306,7 +348,19 @@ impl SingleTab {
         let width = vp.width() - if scroll { 10.0 } else { 0.0 };
         let half = (width / 2.0).floor();
         let visible: Vec<usize> = (0..rows.len()).collect();
-        let events = itemview::item_view(ui, tree, Id::new("single_tree"), &["File", "UTC Time"], &[half, width - half], &rows, &visible, &style, &mut self.view, true, p);
+        let events = itemview::item_view(
+            ui,
+            tree,
+            Id::new("single_tree"),
+            &["File", "UTC Time"],
+            &[half, width - half],
+            &rows,
+            &visible,
+            &style,
+            &mut self.view,
+            true,
+            p,
+        );
         for e in events {
             match e {
                 Event::Toggled(r) => match map[r] {
@@ -360,12 +414,17 @@ impl SingleTab {
     fn show_available(&mut self, sh: &mut Shared) {
         let station = self.combo.text().trim().to_owned();
         if station.is_empty() {
-            return sh.out.notice(NoticeKind::Information, "No Station", format!("No station is selected. {}", self.loader.summary).trim().to_owned());
+            return sh.out.notice(
+                NoticeKind::Information,
+                "No Station",
+                format!("No station is selected. {}", self.loader.summary).trim().to_owned(),
+            );
         }
         self.groups.clear();
         self.progress = Some(qt::Progress::busy());
         let date = self.date;
-        self.fetch = Some(Job::spawn(&sh.ctx, move |r| downloader::fetch_station_day(date, &station, |v, m| r.send((v, m)))));
+        self.fetch =
+            Some(Job::spawn(&sh.ctx, move |r| downloader::fetch_station_day(date, &station, |v, m| r.send((v, m)))));
     }
 
     fn action(&mut self, id: &str, sh: &mut Shared) {
@@ -393,14 +452,19 @@ impl SingleTab {
                     return sh.out.notice(NoticeKind::Warning, "No Selection", "Please select files to preview.");
                 }
                 if self.preview.is_some() {
-                    return sh.out.notice(NoticeKind::Information, "Preview In Progress", "Another preview is already being prepared.");
+                    return sh.out.notice(
+                        NoticeKind::Information,
+                        "Preview In Progress",
+                        "Another preview is already being prepared.",
+                    );
                 }
                 self.progress = Some(qt::Progress::range(selected.len() as i64));
                 let root = sh.cache_root.to_path_buf();
                 self.preview = Some(Job::spawn(&sh.ctx, move |r| prepare_preview(&root, &selected, r)));
             }
             "compare" | "import" => {
-                let urls: Vec<String> = self.checked().into_iter().filter(|c| !c.url.is_empty()).map(|c| c.url).collect();
+                let urls: Vec<String> =
+                    self.checked().into_iter().filter(|c| !c.url.is_empty()).map(|c| c.url).collect();
                 if urls.is_empty() {
                     return sh.out.notice(NoticeKind::Warning, "No Selection", "Please select at least one FITS file.");
                 }
@@ -425,7 +489,11 @@ const ACTIONS: [(&str, &str); 6] = [
 ];
 
 /// `PreviewPrepareWorker.run`.
-fn prepare_preview(root: &std::path::Path, candidates: &[Candidate], r: &super::jobs::Reporter<Progress>) -> Result<PreviewResult, String> {
+fn prepare_preview(
+    root: &std::path::Path,
+    candidates: &[Candidate],
+    r: &super::jobs::Reporter<Progress>,
+) -> Result<PreviewResult, String> {
     let n = candidates.len();
     let mut local = Vec::new();
     let mut errors = Vec::new();
@@ -459,7 +527,11 @@ fn prepare_preview(root: &std::path::Path, candidates: &[Candidate], r: &super::
 /// `_on_preview_ready`: the preview window, and a warning for files it lacks.
 pub fn open_preview(res: PreviewResult, sh: &mut Shared) {
     if res.panels.is_empty() {
-        let text = if res.errors.is_empty() { "No preview available.".to_owned() } else { res.errors.iter().take(8).cloned().collect::<Vec<_>>().join("\n") };
+        let text = if res.errors.is_empty() {
+            "No preview available.".to_owned()
+        } else {
+            res.errors.iter().take(8).cloned().collect::<Vec<_>>().join("\n")
+        };
         return sh.out.notice(NoticeKind::Critical, "Preview Error", text);
     }
     let errors = res.errors.clone();
@@ -468,7 +540,10 @@ pub fn open_preview(res: PreviewResult, sh: &mut Shared) {
         sh.out.notice(
             NoticeKind::Warning,
             "Preview Warnings",
-            format!("Some files could not be previewed:\n\n{}", errors.iter().take(8).cloned().collect::<Vec<_>>().join("\n")),
+            format!(
+                "Some files could not be previewed:\n\n{}",
+                errors.iter().take(8).cloned().collect::<Vec<_>>().join("\n")
+            ),
         );
     }
 }

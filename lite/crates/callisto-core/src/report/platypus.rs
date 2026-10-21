@@ -194,7 +194,9 @@ fn unescape(text: &str) -> String {
             "quot" => Some('"'),
             "apos" => Some('\''),
             "nbsp" => Some('\u{a0}'),
-            e if e.starts_with("#x") || e.starts_with("#X") => u32::from_str_radix(&e[2..], 16).ok().and_then(char::from_u32),
+            e if e.starts_with("#x") || e.starts_with("#X") => {
+                u32::from_str_radix(&e[2..], 16).ok().and_then(char::from_u32)
+            }
             e if e.starts_with('#') => e[1..].parse().ok().and_then(char::from_u32),
             _ => None,
         };
@@ -660,10 +662,36 @@ fn list_height(items: &mut [Flow], aw: f64) -> (f64, f64) {
 #[derive(Clone, Debug)]
 pub enum Draw {
     /// Text with its baseline's left end at (`x`, `y`).
-    Text { x: f64, y: f64, text: String, font: FontId, size: f64, color: [u8; 3] },
-    Rect { x: f64, y: f64, w: f64, h: f64, color: [u8; 3] },
-    Line { x0: f64, y0: f64, x1: f64, y1: f64, width: f64, color: [u8; 3] },
-    Image { x: f64, y: f64, w: f64, h: f64, png: Arc<Vec<u8>> },
+    Text {
+        x: f64,
+        y: f64,
+        text: String,
+        font: FontId,
+        size: f64,
+        color: [u8; 3],
+    },
+    Rect {
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        color: [u8; 3],
+    },
+    Line {
+        x0: f64,
+        y0: f64,
+        x1: f64,
+        y1: f64,
+        width: f64,
+        color: [u8; 3],
+    },
+    Image {
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        png: Arc<Vec<u8>>,
+    },
 }
 
 /// Where a flowable was drawn, as `make_report_reference.py` records it.
@@ -726,7 +754,14 @@ impl Builder<'_> {
     fn new_frame(doc: &Doc) -> Frame {
         let (x1, y1) = (doc.left, doc.bottom);
         let (w, h) = (doc.width(), doc.page.1 - doc.top - doc.bottom);
-        Frame { x: x1 + FRAME_PAD, y: y1 + h - FRAME_PAD, bottom: y1 + FRAME_PAD, aw: w - 2.0 * FRAME_PAD, at_top: true, prev_space: 0.0 }
+        Frame {
+            x: x1 + FRAME_PAD,
+            y: y1 + h - FRAME_PAD,
+            bottom: y1 + FRAME_PAD,
+            aw: w - 2.0 * FRAME_PAD,
+            at_top: true,
+            prev_space: 0.0,
+        }
     }
 
     fn page(&mut self) -> &mut Vec<Draw> {
@@ -813,7 +848,18 @@ impl Builder<'_> {
 
     fn place(&mut self, kind: &'static str, style: &'static str, x: f64, y: f64, w: f64, h: f64) -> &mut Placed {
         let page = self.out.pages.len();
-        self.out.placed.push(Placed { page, kind, style, x, y, width: w, height: h, lines: Vec::new(), col_widths: Vec::new(), row_heights: Vec::new() });
+        self.out.placed.push(Placed {
+            page,
+            kind,
+            style,
+            x,
+            y,
+            width: w,
+            height: h,
+            lines: Vec::new(),
+            col_widths: Vec::new(),
+            row_heights: Vec::new(),
+        });
         self.out.placed.last_mut().unwrap()
     }
 
@@ -838,7 +884,14 @@ impl Builder<'_> {
                 let st = &p.style;
                 for (i, line) in p.lines.iter().enumerate() {
                     let by = y + h - st.size - i as f64 * st.leading;
-                    self.page().push(Draw::Text { x, y: by, text: line.clone(), font: st.font, size: st.size, color: st.color });
+                    self.page().push(Draw::Text {
+                        x,
+                        y: by,
+                        text: line.clone(),
+                        font: st.font,
+                        size: st.size,
+                        color: st.color,
+                    });
                 }
             }
             _ => {}
@@ -855,7 +908,14 @@ impl Builder<'_> {
                 Align::Left => x,
                 Align::Center => x + 0.5 * l.extra,
             };
-            self.page().push(Draw::Text { x: lx, y: by, text: l.text.trim_end().to_owned(), font: st.font, size: st.size, color: st.color });
+            self.page().push(Draw::Text {
+                x: lx,
+                y: by,
+                text: l.text.trim_end().to_owned(),
+                font: st.font,
+                size: st.size,
+                color: st.color,
+            });
         }
     }
 
@@ -937,7 +997,8 @@ impl Builder<'_> {
 
 /// Lays `story` out over pages of `doc`.
 pub fn build(doc: &Doc, story: Vec<Flow>) -> Laid {
-    let mut b = Builder { doc, out: Laid { pages: vec![Vec::new()], placed: Vec::new() }, frame: Builder::new_frame(doc) };
+    let mut b =
+        Builder { doc, out: Laid { pages: vec![Vec::new()], placed: Vec::new() }, frame: Builder::new_frame(doc) };
     b.build(story);
     b.out
 }
@@ -947,7 +1008,17 @@ mod tests {
     use super::*;
 
     fn small() -> Arc<Style> {
-        Arc::new(Style { name: "SmallText", font: FontId::Regular, size: 8.5, leading: 11.0, space_before: 0.0, space_after: 0.0, align: Align::Left, cjk: true, color: [0, 0, 0] })
+        Arc::new(Style {
+            name: "SmallText",
+            font: FontId::Regular,
+            size: 8.5,
+            leading: 11.0,
+            space_before: 0.0,
+            space_after: 0.0,
+            align: Align::Left,
+            cjk: true,
+            color: [0, 0, 0],
+        })
     }
 
     #[test]

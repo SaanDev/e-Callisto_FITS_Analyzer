@@ -44,7 +44,10 @@ fn u32_at(b: &[u8], i: usize) -> Result<u32> {
 
 /// The entries of a zip archive, in order, decompressed.
 fn read_zip(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>> {
-    let eocd = (0..bytes.len().saturating_sub(21)).rev().find(|&i| bytes[i..].starts_with(&[0x50, 0x4b, 0x05, 0x06])).context("not a zip archive")?;
+    let eocd = (0..bytes.len().saturating_sub(21))
+        .rev()
+        .find(|&i| bytes[i..].starts_with(&[0x50, 0x4b, 0x05, 0x06]))
+        .context("not a zip archive")?;
     let count = u16_at(bytes, eocd + 10)? as usize;
     let mut at = u32_at(bytes, eocd + 16)? as usize;
     let mut out = Vec::with_capacity(count);
@@ -61,7 +64,8 @@ fn read_zip(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>> {
         if csize == 0xffff_ffff || local == 0xffff_ffff {
             bail!("ZIP64 workbooks are not supported");
         }
-        let name = String::from_utf8_lossy(bytes.get(at + 46..at + 46 + name_len).context("truncated zip")?).into_owned();
+        let name =
+            String::from_utf8_lossy(bytes.get(at + 46..at + 46 + name_len).context("truncated zip")?).into_owned();
         let data_at = local + 30 + u16_at(bytes, local + 26)? as usize + u16_at(bytes, local + 28)? as usize;
         let raw = bytes.get(data_at..data_at + csize).context("truncated zip entry")?;
         let data = match method {
@@ -162,7 +166,10 @@ fn row_xml(r: usize, cells: &[Cell]) -> String {
         match cell {
             Cell::Num(v) if v.is_finite() => s.push_str(&format!("<c r=\"{at}\" t=\"n\"><v>{v}</v></c>")),
             Cell::Num(v) => s.push_str(&format!("<c r=\"{at}\" t=\"inlineStr\"><is><t>{v}</t></is></c>")),
-            Cell::Str(t) => s.push_str(&format!("<c r=\"{at}\" t=\"inlineStr\"><is><t xml:space=\"preserve\">{}</t></is></c>", escape(t))),
+            Cell::Str(t) => s.push_str(&format!(
+                "<c r=\"{at}\" t=\"inlineStr\"><is><t xml:space=\"preserve\">{}</t></is></c>",
+                escape(t)
+            )),
         }
     }
     s.push_str("</row>");
@@ -214,14 +221,20 @@ fn attr<'a>(xml: &'a str, tag_start: usize, name: &str) -> Option<&'a str> {
 
 /// The active sheet's part name (`xl/worksheets/…`).
 fn active_sheet(entries: &[(String, Vec<u8>)]) -> Result<String> {
-    let text = |name: &str| entries.iter().find(|(n, _)| n == name).map(|(_, d)| String::from_utf8_lossy(d).into_owned());
+    let text =
+        |name: &str| entries.iter().find(|(n, _)| n == name).map(|(_, d)| String::from_utf8_lossy(d).into_owned());
     let wb = text("xl/workbook.xml").context("no workbook part")?;
-    let active: usize = wb.find("<workbookView").and_then(|i| attr(&wb, i, "activeTab")).and_then(|v| v.parse().ok()).unwrap_or(0);
+    let active: usize =
+        wb.find("<workbookView").and_then(|i| attr(&wb, i, "activeTab")).and_then(|v| v.parse().ok()).unwrap_or(0);
     let sheets: Vec<usize> = wb.match_indices("<sheet ").map(|(i, _)| i).collect();
     let at = *sheets.get(active).or(sheets.first()).context("the workbook has no sheet")?;
     let rid = attr(&wb, at, "r:id").context("sheet without a relationship")?.to_owned();
     let rels = text("xl/_rels/workbook.xml.rels").context("no workbook relationships")?;
-    let rel = rels.match_indices("<Relationship ").map(|(i, _)| i).find(|&i| attr(&rels, i, "Id") == Some(rid.as_str())).context("missing sheet relationship")?;
+    let rel = rels
+        .match_indices("<Relationship ")
+        .map(|(i, _)| i)
+        .find(|&i| attr(&rels, i, "Id") == Some(rid.as_str()))
+        .context("missing sheet relationship")?;
     let target = attr(&rels, rel, "Target").context("relationship without target")?;
     Ok(match target.strip_prefix('/') {
         Some(abs) => abs.to_owned(),
@@ -257,7 +270,11 @@ pub fn append_row(path: &Path, cells: &[Cell]) -> Result<()> {
         && let Some(old) = attr(&xml, i, "ref")
     {
         let start = old.split(':').next().unwrap_or("A1");
-        let cols = old.split(':').nth(1).map(|e| e.trim_end_matches(|c: char| c.is_ascii_digit()).to_owned()).unwrap_or_default();
+        let cols = old
+            .split(':')
+            .nth(1)
+            .map(|e| e.trim_end_matches(|c: char| c.is_ascii_digit()).to_owned())
+            .unwrap_or_default();
         let width = cols.bytes().fold(0usize, |a, b| a * 26 + (b - b'A' + 1) as usize).max(cells.len());
         let new = format!("{start}:{}{r}", column_name(width.max(1) - 1));
         let from = xml[i..].find(old).map(|k| k + i);
@@ -273,13 +290,22 @@ pub fn append_row(path: &Path, cells: &[Cell]) -> Result<()> {
 pub fn read_rows(path: &Path) -> Result<Vec<Vec<String>>> {
     let entries = read_zip(&std::fs::read(path)?)?;
     let sheet = active_sheet(&entries)?;
-    let xml = String::from_utf8_lossy(&entries.iter().find(|(n, _)| *n == sheet).context("missing sheet")?.1).into_owned();
+    let xml =
+        String::from_utf8_lossy(&entries.iter().find(|(n, _)| *n == sheet).context("missing sheet")?.1).into_owned();
     let shared: Vec<String> = entries
         .iter()
         .find(|(n, _)| n == "xl/sharedStrings.xml")
         .map(|(_, d)| {
             let s = String::from_utf8_lossy(d);
-            s.split("<si>").skip(1).map(|si| si.split("<t").skip(1).filter_map(|t| t.split_once('>').map(|(_, r)| r.split("</t>").next().unwrap_or("").to_owned())).collect()).collect()
+            s.split("<si>")
+                .skip(1)
+                .map(|si| {
+                    si.split("<t")
+                        .skip(1)
+                        .filter_map(|t| t.split_once('>').map(|(_, r)| r.split("</t>").next().unwrap_or("").to_owned()))
+                        .collect()
+                })
+                .collect()
         })
         .unwrap_or_default();
     let mut rows = Vec::new();
@@ -292,7 +318,11 @@ pub fn read_rows(path: &Path) -> Result<Vec<Vec<String>>> {
                 t.split_once('>').map(|(_, r)| r.split("</t>").next().unwrap_or("").to_owned()).unwrap_or_default()
             } else if let Some(v) = c.split("<v>").nth(1) {
                 let v = v.split("</v>").next().unwrap_or("").to_owned();
-                if shared_ref { v.parse::<usize>().ok().and_then(|i| shared.get(i).cloned()).unwrap_or_default() } else { v }
+                if shared_ref {
+                    v.parse::<usize>().ok().and_then(|i| shared.get(i).cloned()).unwrap_or_default()
+                } else {
+                    v
+                }
             } else {
                 String::new()
             };
@@ -324,10 +354,24 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("callisto_xlsx_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("data.xlsx");
-        write_rows(&path, &[vec![Cell::Str("Date".into()), Cell::Str("t0_s".into())], vec![Cell::Str("2026-10-07".into()), Cell::Num(0.0)]]).unwrap();
+        write_rows(
+            &path,
+            &[
+                vec![Cell::Str("Date".into()), Cell::Str("t0_s".into())],
+                vec![Cell::Str("2026-10-07".into()), Cell::Num(0.0)],
+            ],
+        )
+        .unwrap();
         append_row(&path, &[Cell::Str("a & b".into()), Cell::Num(1.5)]).unwrap();
         let rows = read_rows(&path).unwrap();
-        assert_eq!(rows, vec![vec!["Date".to_owned(), "t0_s".into()], vec!["2026-10-07".into(), "0".into()], vec!["a & b".into(), "1.5".into()]]);
+        assert_eq!(
+            rows,
+            vec![
+                vec!["Date".to_owned(), "t0_s".into()],
+                vec!["2026-10-07".into(), "0".into()],
+                vec!["a & b".into(), "1.5".into()]
+            ]
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

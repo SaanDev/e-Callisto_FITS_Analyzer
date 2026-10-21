@@ -13,14 +13,16 @@ use crate::fonts::SystemFonts;
 use crate::menus::{Command, MenuState};
 use crate::session::{DisplayRangePreset, Notice, NoticeKind, Session};
 use crate::theme::{Palette, ThemeMode};
+use crate::ui::tool_dialogs::{
+    FrequencyDialog, LightCurveSettingsDialog, SettingsAction, TextAnnotationDialog, TextPurpose,
+};
 use crate::ui::{self, dialogs, menubar::MenuBarState, sidebar::SidebarState};
 use callisto_core::analysis::light_curve::LightCurveSettings;
 use callisto_core::radio::timeline::Direction;
-use crate::ui::tool_dialogs::{FrequencyDialog, LightCurveSettingsDialog, SettingsAction, TextAnnotationDialog, TextPurpose};
 
 const SETTINGS_KEY: &str = "settings";
 /// `recent_files.MAX_RECENT_ENTRIES`.
-const MAX_RECENT_ENTRIES: usize = 10;
+pub const MAX_RECENT_ENTRIES: usize = 10;
 /// `recent_files.FITS_SUFFIXES`.
 const FITS_SUFFIXES: [&str; 4] = [".fit", ".fits", ".fit.gz", ".fits.gz"];
 
@@ -277,7 +279,17 @@ pub struct LiteApp {
     installed_graph_family: String,
     /// The text annotations' font families installed in egui.
     installed_extra_families: Vec<String>,
-    pub update_status: String,
+    /// The update check, its status label and its windows.
+    pub updates: crate::help::updates::Updates,
+    /// Help → User Guide, Cite this Software, Report a Bug, About.
+    pub guide: Option<crate::help::guide::UserGuide>,
+    pub cite: Option<crate::help::cite::CitationDialog>,
+    pub bug_report: Option<crate::help::bug_report::BugReportDialog>,
+    pub about: Option<crate::ui::message_box::MessageBox>,
+    /// A help window to bring to the front (its viewport's id).
+    focus_help: Option<&'static str>,
+    /// The startup splash's step while it shows (the window starts as the splash).
+    pub splash: Option<usize>,
     /// The message box showing, if any.
     pub notice: Option<Notice>,
     pub combine_dialog: Option<dialogs::CombineOptionsDialog>,
@@ -332,8 +344,16 @@ pub struct LiteApp {
 
 impl LiteApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let settings = cc.storage.and_then(|s| eframe::get_value(s, SETTINGS_KEY)).unwrap_or_default();
-        Self::with_settings(&cc.egui_ctx, settings)
+        // First start: the full app's settings, if it has any here.
+        let settings = cc.storage.and_then(|s| eframe::get_value(s, SETTINGS_KEY)).unwrap_or_else(|| {
+            crate::settings_import::read_full_app().map(|v| crate::settings_import::import(&v)).unwrap_or_default()
+        });
+        let mut app = Self::with_settings(&cc.egui_ctx, settings);
+        app.updates.schedule_startup();
+        if crate::splash_enabled() {
+            app.splash = Some(0);
+        }
+        app
     }
 
     pub fn with_settings(ctx: &egui::Context, mut settings: Settings) -> Self {
@@ -347,7 +367,8 @@ impl LiteApp {
         session.tools.light_curve_settings = settings.light_curve.settings();
         session.prefetch_adjacent = settings.prefetch_adjacent;
         // Lite keeps its own download caches, next to its settings.
-        let data_dir = eframe::storage_dir(crate::APP_NAME).unwrap_or_else(|| std::env::temp_dir().join(crate::APP_NAME));
+        let data_dir =
+            eframe::storage_dir(crate::APP_NAME).unwrap_or_else(|| std::env::temp_dir().join(crate::APP_NAME));
         let cache_root = data_dir.join("callisto_cache");
         let learmonth_cache = data_dir.join("learmonth_cache");
         let online = std::env::var_os("CALLISTO_LITE_OFFLINE").is_none();
@@ -367,7 +388,9 @@ impl LiteApp {
         let stations = if online {
             StationService::online()
         } else {
-            StationService::new(std::sync::Arc::new(|_| Err("The archive is offline (CALLISTO_LITE_OFFLINE).".to_owned())))
+            StationService::new(std::sync::Arc::new(|_| {
+                Err("The archive is offline (CALLISTO_LITE_OFFLINE).".to_owned())
+            }))
         };
         Self {
             settings,
@@ -378,7 +401,13 @@ impl LiteApp {
             fonts,
             installed_graph_family: String::new(),
             installed_extra_families: Vec::new(),
-            update_status: "Updates: not checked".into(),
+            updates: crate::help::updates::Updates::new(),
+            guide: None,
+            cite: None,
+            bug_report: None,
+            about: None,
+            focus_help: None,
+            splash: None,
             notice: None,
             combine_dialog: None,
             header_viewer: None,
@@ -417,7 +446,12 @@ impl LiteApp {
         MenuState {
             has_data: self.session.has_data(),
             recent_files: self.settings.recent_fits.iter().map(|e| fits_entry_label(e)).collect(),
-            recent_projects: self.settings.recent_projects.iter().map(|p| callisto_core::radio::naming::basename(p).to_owned()).collect(),
+            recent_projects: self
+                .settings
+                .recent_projects
+                .iter()
+                .map(|p| callisto_core::radio::naming::basename(p).to_owned())
+                .collect(),
             has_project: self.project.has_content(&self.session),
             can_undo: self.session.can_undo(),
             can_redo: self.session.can_redo(),
@@ -428,6 +462,7 @@ impl LiteApp {
             has_noise: self.session.noise_reduced.is_some(),
             has_light_curves: self.session.has_light_curves(),
             has_ruler_measurement: self.session.has_ruler_measurement(),
+            checking_updates: self.updates.checking(),
         }
     }
 
@@ -518,7 +553,8 @@ impl LiteApp {
     fn finish_preset(&mut self, purpose: InputPurpose, value: String) {
         use callisto_core::presets;
         let list = presets::parse(&self.settings.presets_json);
-        let find = |name: &str| list.iter().find(|p| p.get("name").map(|n| n.py_str()).as_deref() == Some(name)).cloned();
+        let find =
+            |name: &str| list.iter().find(|p| p.get("name").map(|n| n.py_str()).as_deref() == Some(name)).cloned();
         match purpose {
             InputPurpose::SavePreset => {
                 if value.trim().is_empty() {
@@ -537,7 +573,8 @@ impl LiteApp {
                 if let Some(preset) = find(&value)
                     && let Err(e) = self.session.apply_preset_payload(&preset, true, true, true)
                 {
-                    self.notice = Some(Notice { kind: NoticeKind::Warning, title: "Preset Version Unsupported".into(), text: e });
+                    self.notice =
+                        Some(Notice { kind: NoticeKind::Warning, title: "Preset Version Unsupported".into(), text: e });
                 }
             }
             InputPurpose::SetDefaultPreset => {
@@ -592,7 +629,10 @@ impl LiteApp {
         }
         if matches!(
             purpose,
-            InputPurpose::SavePreset | InputPurpose::ApplyPreset | InputPurpose::SetDefaultPreset | InputPurpose::DeletePreset
+            InputPurpose::SavePreset
+                | InputPurpose::ApplyPreset
+                | InputPurpose::SetDefaultPreset
+                | InputPurpose::DeletePreset
         ) {
             self.finish_preset(purpose, value);
             return;
@@ -674,6 +714,38 @@ impl LiteApp {
     }
 
     /// `FitsHeaderViewerDialog.save_as_txt`.
+    /// The help windows and the update check, each frame.
+    fn help_windows(&mut self, ctx: &egui::Context, p: &Palette) {
+        if let Some(id) = self.focus_help.take() {
+            ctx.send_viewport_cmd_to(egui::ViewportId::from_hash_of(id), egui::ViewportCommand::Focus);
+        }
+        for (text, ms) in self.updates.show(ctx, p) {
+            self.session.show_message(text, ms);
+        }
+        if let Some(g) = &mut self.guide
+            && !g.show(ctx, p)
+        {
+            self.guide = None;
+        }
+        if let Some(c) = &mut self.cite
+            && !c.show(ctx, p)
+        {
+            self.cite = None;
+        }
+        if let Some(b) = &mut self.bug_report {
+            let (session, project_path) = (&self.session, self.project.path.clone());
+            let provider = || bug_context(session, project_path.as_deref());
+            if !b.show(ctx, p, &provider) {
+                self.bug_report = None;
+            }
+        }
+        if let Some(a) = &mut self.about
+            && a.show(ctx, "about", p).is_some()
+        {
+            self.about = None;
+        }
+    }
+
     fn save_header_text(&mut self, default_name: &str, text: &str) {
         let Some(path) = rfd::FileDialog::new()
             .set_title("Save FITS Header")
@@ -705,10 +777,16 @@ impl LiteApp {
     /// at 300 dpi, trimmed to the drawing); the screen keeps its own look.
     fn export_figure(&mut self, ctx: &egui::Context) {
         if !self.session.has_data() {
-            self.notice = Some(Notice { kind: NoticeKind::Warning, title: "No File Loaded".into(), text: "Load a FITS file before exporting.".into() });
+            self.notice = Some(Notice {
+                kind: NoticeKind::Warning,
+                title: "No File Loaded".into(),
+                text: "Load a FITS file before exporting.".into(),
+            });
             return;
         }
-        let Some(path) = crate::analysis::max_window::export_dialog(&sanitize_export_stem(&self.session.graph_title_for_export())) else {
+        let Some(path) =
+            crate::analysis::max_window::export_dialog(&sanitize_export_stem(&self.session.graph_title_for_export()))
+        else {
             return;
         };
         let shown = path.to_string_lossy().into_owned();
@@ -717,7 +795,8 @@ impl LiteApp {
                 kind: NoticeKind::Warning,
                 title: "Permission Denied".into(),
                 text: "Windows does not allow saving files inside Program Files.
-Please choose another folder such as Documents or Desktop.".into(),
+Please choose another folder such as Documents or Desktop."
+                    .into(),
             });
             return;
         }
@@ -729,17 +808,31 @@ Please choose another folder such as Documents or Desktop.".into(),
             }
         };
         self.notice = Some(match result {
-            Ok(()) => Notice { kind: NoticeKind::Information, title: "Export Complete".into(), text: format!("Figure saved:
-{shown}") },
-            Err(e) => Notice { kind: NoticeKind::Critical, title: "Export Failed".into(), text: format!("An error occurred:
-{e}") },
+            Ok(()) => Notice {
+                kind: NoticeKind::Information,
+                title: "Export Complete".into(),
+                text: format!(
+                    "Figure saved:
+{shown}"
+                ),
+            },
+            Err(e) => Notice {
+                kind: NoticeKind::Critical,
+                title: "Export Failed".into(),
+                text: format!(
+                    "An error occurred:
+{e}"
+                ),
+            },
         });
     }
 
     /// `generate_project_report`: the report's data gathered here, then
     /// written by a worker behind the progress dialog.
     fn generate_project_report(&mut self, ctx: &egui::Context) {
-        let info = |text: &str| Some(Notice { kind: NoticeKind::Information, title: "Generate Project Report".into(), text: text.into() });
+        let info = |text: &str| {
+            Some(Notice { kind: NoticeKind::Information, title: "Generate Project Report".into(), text: text.into() })
+        };
         if !self.session.has_data() {
             self.notice = info("Load a FITS file first.");
             return;
@@ -750,7 +843,8 @@ Please choose another folder such as Documents or Desktop.".into(),
         }
         let project = self.project.path.clone();
         let default = self.session.project_report_default_path(project.as_deref());
-        let mut dialog = rfd::FileDialog::new().set_title("Generate Project Report").add_filter("PDF (*.pdf)", &["pdf"]);
+        let mut dialog =
+            rfd::FileDialog::new().set_title("Generate Project Report").add_filter("PDF (*.pdf)", &["pdf"]);
         if let Some(name) = default.file_name() {
             dialog = dialog.set_file_name(name.to_string_lossy());
         }
@@ -803,14 +897,22 @@ Please choose another folder such as Documents or Desktop.".into(),
             path.push_str(".fit");
         }
         if let Err(e) = self.session.export_fits(Path::new(&path), bitpix) {
-            self.notice = Some(Notice { kind: NoticeKind::Critical, title: "Export Failed".into(), text: format!("Could not write FITS file:\n{e}") });
+            self.notice = Some(Notice {
+                kind: NoticeKind::Critical,
+                title: "Export Failed".into(),
+                text: format!("Could not write FITS file:\n{e}"),
+            });
         }
     }
 
     /// `export_analysis_log`.
     fn export_analysis_log(&mut self) {
         if !self.session.has_data() {
-            self.notice = Some(Notice { kind: NoticeKind::Information, title: "Export Analysis Log".into(), text: "Load a FITS file first.".into() });
+            self.notice = Some(Notice {
+                kind: NoticeKind::Information,
+                title: "Export Analysis Log".into(),
+                text: "Load a FITS file first.".into(),
+            });
             return;
         }
         let mut dialog = rfd::FileDialog::new()
@@ -826,14 +928,22 @@ Please choose another folder such as Documents or Desktop.".into(),
         let stem = path.with_extension("");
         let project = self.project.path.clone();
         if let Err(e) = self.session.export_analysis_log(&stem, project.as_deref()) {
-            self.notice = Some(Notice { kind: NoticeKind::Critical, title: "Export Analysis Log Failed".into(), text: e.to_string() });
+            self.notice = Some(Notice {
+                kind: NoticeKind::Critical,
+                title: "Export Analysis Log Failed".into(),
+                text: e.to_string(),
+            });
         }
     }
 
     /// `export_provenance_report`.
     fn export_provenance_report(&mut self) {
         if !self.session.has_data() {
-            self.notice = Some(Notice { kind: NoticeKind::Information, title: "Export Provenance".into(), text: "Load a FITS file first.".into() });
+            self.notice = Some(Notice {
+                kind: NoticeKind::Information,
+                title: "Export Provenance".into(),
+                text: "Load a FITS file first.".into(),
+            });
             return;
         }
         let Some(path) = rfd::FileDialog::new()
@@ -847,7 +957,11 @@ Please choose another folder such as Documents or Desktop.".into(),
             return;
         };
         if let Err(e) = self.session.export_provenance(&path.with_extension("")) {
-            self.notice = Some(Notice { kind: NoticeKind::Critical, title: "Export Provenance Failed".into(), text: e.to_string() });
+            self.notice = Some(Notice {
+                kind: NoticeKind::Critical,
+                title: "Export Provenance Failed".into(),
+                text: e.to_string(),
+            });
         }
     }
 
@@ -861,7 +975,11 @@ Please choose another folder such as Documents or Desktop.".into(),
             });
             return;
         };
-        let stem = sanitize_export_stem(if self.session.filename().is_empty() { "view_config" } else { self.session.filename() });
+        let stem = sanitize_export_stem(if self.session.filename().is_empty() {
+            "view_config"
+        } else {
+            self.session.filename()
+        });
         let Some(path) = rfd::FileDialog::new()
             .set_title("Export View Config")
             .set_file_name(view_config_path_with_extension(&stem))
@@ -880,7 +998,11 @@ Please choose another folder such as Documents or Desktop.".into(),
             });
             return;
         }
-        self.notice = Some(Notice { kind: NoticeKind::Information, title: "Export View Config".into(), text: format!("View config saved:\n{path}") });
+        self.notice = Some(Notice {
+            kind: NoticeKind::Information,
+            title: "Export View Config".into(),
+            text: format!("View config saved:\n{path}"),
+        });
     }
 
     /// `import_view_config`.
@@ -893,7 +1015,9 @@ Please choose another folder such as Documents or Desktop.".into(),
         else {
             return;
         };
-        let cfg = std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| callisto_core::view_config::ViewConfig::parse(&t));
+        let cfg = std::fs::read_to_string(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|t| callisto_core::view_config::ViewConfig::parse(&t));
         match cfg {
             Err(e) => {
                 self.notice = Some(Notice {
@@ -904,7 +1028,11 @@ Please choose another folder such as Documents or Desktop.".into(),
             }
             Ok(cfg) => {
                 if self.session.apply_view_config(&cfg) {
-                    self.notice = Some(Notice { kind: NoticeKind::Information, title: "Import View Config".into(), text: "View config applied.".into() });
+                    self.notice = Some(Notice {
+                        kind: NoticeKind::Information,
+                        title: "Import View Config".into(),
+                        text: "View config applied.".into(),
+                    });
                 }
             }
         }
@@ -948,7 +1076,11 @@ Please choose another folder such as Documents or Desktop.".into(),
     /// Where the project dialogs start: the project's folder, else the FITS file's.
     fn project_start_dir(&self) -> Option<PathBuf> {
         self.project.path.as_ref().and_then(|p| p.parent().map(Path::to_path_buf)).or_else(|| {
-            self.session.data.as_ref().and_then(|d| d.source_path.as_ref()).and_then(|s| Path::new(s).parent().map(Path::to_path_buf))
+            self.session
+                .data
+                .as_ref()
+                .and_then(|d| d.source_path.as_ref())
+                .and_then(|s| Path::new(s).parent().map(Path::to_path_buf))
         })
     }
 
@@ -1135,7 +1267,11 @@ Please choose another folder such as Documents or Desktop.".into(),
             Command::ExportAnalysisLog => self.export_analysis_log(),
             Command::ExportToFit => match self.session.fits_export_source() {
                 None => {
-                    self.notice = Some(Notice { kind: NoticeKind::Warning, title: "No Data".into(), text: "Load a FITS file before exporting.".into() })
+                    self.notice = Some(Notice {
+                        kind: NoticeKind::Warning,
+                        title: "No Data".into(),
+                        text: "Load a FITS file before exporting.".into(),
+                    })
                 }
                 Some(data) => {
                     let rec = callisto_core::radio::fits_export::recommend_bitpix(&data.data);
@@ -1146,7 +1282,11 @@ Please choose another folder such as Documents or Desktop.".into(),
                         "32 (signed int32)".to_owned(),
                     ];
                     self.input = Some((
-                        dialogs::InputDialog::item("Export FITS - BITPIX", "Choose BITPIX for the exported FITS:", items),
+                        dialogs::InputDialog::item(
+                            "Export FITS - BITPIX",
+                            "Choose BITPIX for the exported FITS:",
+                            items,
+                        ),
                         InputPurpose::ExportFitsBitpix,
                     ));
                 }
@@ -1154,23 +1294,36 @@ Please choose another folder such as Documents or Desktop.".into(),
             Command::ExportProvenanceReport => self.export_provenance_report(),
             Command::ImportViewConfig => self.import_view_config(),
             Command::SavePreset => {
-                self.input = Some((dialogs::InputDialog::text("Save Preset", "Preset name:"), InputPurpose::SavePreset));
+                self.input =
+                    Some((dialogs::InputDialog::text("Save Preset", "Preset name:"), InputPurpose::SavePreset));
             }
             Command::ApplyPreset | Command::DeletePreset | Command::SetDefaultPreset => {
                 let presets = callisto_core::presets::parse(&self.settings.presets_json);
                 let (title, empty, label, purpose) = match command {
-                    Command::ApplyPreset => ("Apply Preset", "No presets have been saved yet.", "Choose preset:", InputPurpose::ApplyPreset),
-                    Command::DeletePreset => ("Delete Preset", "No presets are available.", "Choose preset:", InputPurpose::DeletePreset),
-                    _ => ("Set Default Preset", "No presets have been saved yet.", "Apply on FITS load:", InputPurpose::SetDefaultPreset),
+                    Command::ApplyPreset => {
+                        ("Apply Preset", "No presets have been saved yet.", "Choose preset:", InputPurpose::ApplyPreset)
+                    }
+                    Command::DeletePreset => {
+                        ("Delete Preset", "No presets are available.", "Choose preset:", InputPurpose::DeletePreset)
+                    }
+                    _ => (
+                        "Set Default Preset",
+                        "No presets have been saved yet.",
+                        "Apply on FITS load:",
+                        InputPurpose::SetDefaultPreset,
+                    ),
                 };
                 if presets.is_empty() {
-                    self.notice = Some(Notice { kind: NoticeKind::Information, title: title.into(), text: empty.into() });
+                    self.notice =
+                        Some(Notice { kind: NoticeKind::Information, title: title.into(), text: empty.into() });
                 } else {
-                    let names: Vec<String> = presets.iter().map(|p| p.get("name").map(|n| n.py_str()).unwrap_or_default()).collect();
+                    let names: Vec<String> =
+                        presets.iter().map(|p| p.get("name").map(|n| n.py_str()).unwrap_or_default()).collect();
                     let mut dialog = dialogs::InputDialog::item(title, label, names.clone());
                     if purpose == InputPurpose::SetDefaultPreset {
                         let key = callisto_core::presets::name_key(&self.settings.default_preset_name);
-                        dialog.choice = names.iter().position(|n| callisto_core::presets::name_key(n) == key).unwrap_or(0);
+                        dialog.choice =
+                            names.iter().position(|n| callisto_core::presets::name_key(n) == key).unwrap_or(0);
                     }
                     self.input = Some((dialog, purpose));
                 }
@@ -1188,7 +1341,8 @@ Please choose another folder such as Documents or Desktop.".into(),
                 }
             }
 
-            Command::RecoverLastSession => match callisto_core::project::recovery::latest_snapshot(&self.recovery_root) {
+            Command::RecoverLastSession => match callisto_core::project::recovery::latest_snapshot(&self.recovery_root)
+            {
                 Some(path) => self.recover_snapshot(&path),
                 None => {
                     self.notice = Some(Notice {
@@ -1267,6 +1421,26 @@ Please choose another folder such as Documents or Desktop.".into(),
                     self.input = Some((dialogs::InputDialog::item(title, "Choose preset:", names), purpose));
                 }
             }
+            Command::UserGuide => {
+                if self.guide.is_none() {
+                    self.guide = Some(crate::help::guide::UserGuide::new());
+                }
+                self.focus_help = Some("user_guide");
+            }
+            Command::CiteSoftware => {
+                if self.cite.is_none() {
+                    self.cite = Some(crate::help::cite::CitationDialog::new());
+                }
+                self.focus_help = Some("cite_software");
+            }
+            Command::ReportBug => {
+                if self.bug_report.is_none() {
+                    self.bug_report =
+                        Some(crate::help::bug_report::BugReportDialog::new(callisto_core::updates::GITHUB_REPO));
+                }
+                self.focus_help = Some("report_bug");
+            }
+            Command::About => self.about = Some(crate::help::about_box()),
             Command::ViewFitsHeader => {
                 if let Some((title, default_name, text)) = s.fits_header_view() {
                     self.header_viewer = Some(dialogs::HeaderViewer { title, default_name, text });
@@ -1279,7 +1453,8 @@ Please choose another folder such as Documents or Desktop.".into(),
             Command::LaunchDownloader => {
                 if self.downloader.is_none() {
                     let state = self.downloader_state.clone();
-                    self.downloader = Some(DownloaderDialog::new(self.cache_root.clone(), &mut self.stations, state.as_ref()));
+                    self.downloader =
+                        Some(DownloaderDialog::new(self.cache_root.clone(), &mut self.stations, state.as_ref()));
                 }
             }
             Command::LaunchLearmonthDownloader => {
@@ -1369,7 +1544,11 @@ Please choose another folder such as Documents or Desktop.".into(),
             return self.notify(NoticeKind::Warning, "No Files", "No files were received from the downloader.");
         }
         if self.importing.is_some() {
-            return self.notify(NoticeKind::Information, "Import In Progress", "Another FITS import is already running.");
+            return self.notify(
+                NoticeKind::Information,
+                "Import In Progress",
+                "Another FITS import is already running.",
+            );
         }
         self.importing = Some((ImportDialog::import(ctx, self.cache_root.clone(), sources), Some(from)));
     }
@@ -1380,7 +1559,11 @@ Please choose another folder such as Documents or Desktop.".into(),
             return self.notify(NoticeKind::Warning, "No Files", "No files were received for comparison.");
         }
         if self.importing.is_some() {
-            return self.notify(NoticeKind::Information, "Comparison In Progress", "Another comparison preparation is already running.");
+            return self.notify(
+                NoticeKind::Information,
+                "Comparison In Progress",
+                "Another comparison preparation is already running.",
+            );
         }
         self.importing = Some((ImportDialog::compare(ctx, self.cache_root.clone(), sources), None));
     }
@@ -1420,7 +1603,11 @@ Please choose another folder such as Documents or Desktop.".into(),
                 self.notify(NoticeKind::Warning, "Invalid Selection", invalid_selection_text(&detail));
             }
             Outcome::Import(Err(m)) => {
-                self.notify(NoticeKind::Critical, "Import Failed", if m.is_empty() { "Import failed.".to_owned() } else { m });
+                self.notify(
+                    NoticeKind::Critical,
+                    "Import Failed",
+                    if m.is_empty() { "Import failed.".to_owned() } else { m },
+                );
             }
             Outcome::Compare(Ok(paths)) if paths.is_empty() => {
                 self.notify(NoticeKind::Warning, "Comparison", "No FITS files were prepared for comparison.");
@@ -1441,7 +1628,9 @@ Please choose another folder such as Documents or Desktop.".into(),
         if let Some(d) = &mut self.downloader {
             d.blocked = importing;
             match d.show(ctx, &mut self.stations, palette) {
-                Some(DownloaderAction::Import(urls)) => self.process_imported_files(ctx, urls, ImportSource::Downloader),
+                Some(DownloaderAction::Import(urls)) => {
+                    self.process_imported_files(ctx, urls, ImportSource::Downloader)
+                }
                 Some(DownloaderAction::Compare(urls)) => {
                     if let Some(d) = self.downloader.take() {
                         self.downloader_state = Some(d.date_time_state());
@@ -1459,7 +1648,9 @@ Please choose another folder such as Documents or Desktop.".into(),
         if let Some(l) = &mut self.learmonth {
             l.blocked = importing;
             match l.show(ctx, palette) {
-                Some(LearmonthAction::Import(paths)) => self.process_imported_files(ctx, paths, ImportSource::Learmonth),
+                Some(LearmonthAction::Import(paths)) => {
+                    self.process_imported_files(ctx, paths, ImportSource::Learmonth)
+                }
                 Some(LearmonthAction::Close) => self.learmonth = None,
                 None => {}
             }
@@ -1506,13 +1697,23 @@ Please choose another folder such as Documents or Desktop.".into(),
                                 let name = callisto_core::radio::naming::basename(&shown).to_owned();
                                 self.session.show_message(format!("Project report generated: {name}"), 5000);
                                 self.session.log_operation(format!("Generated project report: {name}"));
-                                self.notice = Some(Notice { kind: NoticeKind::Information, title: "Project Report Complete".into(), text: format!("Report saved:\n{shown}") });
+                                self.notice = Some(Notice {
+                                    kind: NoticeKind::Information,
+                                    title: "Project Report Complete".into(),
+                                    text: format!("Report saved:\n{shown}"),
+                                });
                             }
                             Outcome::Failed(m) => {
                                 let text = if m.is_empty() { "Unknown error.".to_owned() } else { m };
-                                self.notice = Some(Notice { kind: NoticeKind::Critical, title: "Generate Project Report Failed".into(), text });
+                                self.notice = Some(Notice {
+                                    kind: NoticeKind::Critical,
+                                    title: "Generate Project Report Failed".into(),
+                                    text,
+                                });
                             }
-                            Outcome::Cancelled => self.session.show_message("Project report generation cancelled.", 4000),
+                            Outcome::Cancelled => {
+                                self.session.show_message("Project report generation cancelled.", 4000)
+                            }
                         }
                     }
                 }
@@ -1585,6 +1786,26 @@ impl eframe::App for LiteApp {
             self.installed_graph_family = family;
             self.installed_extra_families = families;
         }
+        // The startup splash, a step a frame, before the window becomes the main window.
+        if let Some(step) = self.splash {
+            ui.painter().rect_filled(ui.max_rect(), 0.0, egui::Color32::from_rgb(0x07, 0x13, 0x1f));
+            let (value, text) = crate::ui::splash::STEPS[step.min(crate::ui::splash::STEPS.len() - 1)];
+            crate::ui::splash::draw(ui, value, text);
+            if step + 1 < crate::ui::splash::STEPS.len() {
+                self.splash = Some(step + 1);
+            } else {
+                self.splash = None;
+                // `window.showMaximized()`, then the splash closes.
+                ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(900.0, 600.0)));
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1600.0, 1000.0)));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+            ctx.request_repaint();
+            return;
+        }
         // The downloaders and the import dialog are modal (`exec()`).
         let modal = self.downloader.is_some()
             || self.learmonth.is_some()
@@ -1613,7 +1834,7 @@ impl eframe::App for LiteApp {
             sections: &mut self.settings.sidebar_sections,
             sidebar_collapsed: self.settings.sidebar_collapsed,
             session: &mut self.session,
-            update_status: &self.update_status,
+            update_status: &self.updates.status,
             commands: &mut self.commands,
         };
         ui::main_window(ui, state, &palette);
@@ -1635,6 +1856,12 @@ impl eframe::App for LiteApp {
             }
             if matches!(command, Command::GenerateProjectReport) {
                 self.generate_project_report(&ctx);
+                continue;
+            }
+            if matches!(command, Command::CheckForUpdates) {
+                for (text, ms) in self.updates.check(&ctx, true) {
+                    self.session.show_message(text, ms);
+                }
                 continue;
             }
             let before = self.session.opened.len();
@@ -1805,6 +2032,7 @@ impl eframe::App for LiteApp {
             }
         }
         self.download_windows(&ctx, &palette);
+        self.help_windows(&ctx, &palette);
         if let Some(dialog) = &mut self.combine_dialog
             && let Some(result) = dialog.show(&ctx, &palette)
         {
@@ -1818,7 +2046,11 @@ impl eframe::App for LiteApp {
                             self.session.load_combined_into_main(c);
                             self.import_success(Some(from));
                         }
-                        Err(e) => self.notify(NoticeKind::Critical, "Import Failed", format!("Could not import downloaded files:\n{e}")),
+                        Err(e) => self.notify(
+                            NoticeKind::Critical,
+                            "Import Failed",
+                            format!("Could not import downloaded files:\n{e}"),
+                        ),
                     }
                 }
             } else {
@@ -1832,6 +2064,47 @@ impl eframe::App for LiteApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, SETTINGS_KEY, &self.settings);
     }
+}
+
+/// `_build_bug_report_context`, with the provenance report Generate
+/// Diagnostics... puts in the bundle.
+fn bug_context(
+    s: &Session,
+    project_path: Option<&std::path::Path>,
+) -> (callisto_core::bug_report::BugContext, callisto_core::pyjson::Json, String) {
+    use callisto_core::pyjson::Json;
+    let d = s.data.as_ref();
+    let s_ = |v: &str| Json::from(v);
+    let environment = vec![
+        ("app_name".to_owned(), s_(crate::APP_NAME)),
+        ("app_version".to_owned(), s_(crate::APP_VERSION)),
+        ("platform".to_owned(), Json::from(format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH))),
+        ("gui".to_owned(), s_("egui")),
+    ];
+    let summary = vec![
+        ("filename".to_owned(), s_(s.filename())),
+        ("plot_type".to_owned(), Json::from(s.current_plot_type.clone())),
+        ("cmap".to_owned(), Json::from(s.graph.cmap.clone())),
+        ("use_db".to_owned(), Json::Bool(s.use_db)),
+        ("use_utc".to_owned(), Json::Bool(s.use_utc)),
+    ];
+    let session = vec![
+        ("is_combined".to_owned(), Json::Bool(d.is_some_and(|d| d.combined_mode.is_some()))),
+        ("combined_mode".to_owned(), d.and_then(|d| d.combined_mode).map_or(Json::Null, |m| m.key().into())),
+        ("source_path".to_owned(), Json::from(d.and_then(|d| d.source_path.clone()).unwrap_or_default())),
+        ("project_path".to_owned(), Json::from(project_path.map(|p| p.display().to_string()).unwrap_or_default())),
+    ];
+    let provenance = s.provenance_payload();
+    let markdown = Session::provenance_markdown(&provenance);
+    let ctx = callisto_core::bug_report::BugContext {
+        summary,
+        environment,
+        session,
+        operation_log: s.log.clone(),
+        processing: provenance.get("processing").cloned().unwrap_or_else(Json::object),
+        rfi: provenance.get("rfi").cloned().unwrap_or_else(Json::object),
+    };
+    (ctx, provenance, markdown)
 }
 
 #[cfg(test)]

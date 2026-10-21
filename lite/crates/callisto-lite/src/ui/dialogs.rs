@@ -8,6 +8,7 @@ use callisto_core::radio::naming::basename;
 use callisto_core::radio::processing::RfiSettings;
 use egui::{Color32, Id, Rect, Sense, Ui, ViewportBuilder, ViewportId, pos2, vec2};
 
+use super::message_box::{Answer, Icon, MessageBox, Role};
 use super::widgets::{self, ButtonKind};
 use crate::fonts::{Weight, ui_font};
 use crate::session::{Notice, NoticeKind, PendingCombine};
@@ -59,81 +60,35 @@ pub(crate) fn dialog_window<R>(
 
 /// `QMessageBox`: icon, text, OK. Returns true once dismissed.
 pub fn message_box(ctx: &egui::Context, notice: &Notice, p: &Palette) -> bool {
-    let text_w = 360.0;
-    let probe = ctx.fonts_mut(|f| f.layout(notice.text.clone(), ui_font(12.0, Weight::Regular), p.text, text_w));
-    let text_h = probe.size().y.max(32.0);
-    let size = vec2(MARGIN * 2.0 + 32.0 + 16.0 + text_w, MARGIN * 3.0 + text_h + BUTTON_H);
-    let id = format!("notice:{}:{}", notice.title, notice.text);
-    dialog_window(ctx, &id, &notice.title, size, p, true, |ui| {
-        let full = ui.max_rect();
-        let icon = Rect::from_min_size(full.min + vec2(MARGIN, MARGIN), vec2(32.0, 32.0));
-        let (glyph, color) = match notice.kind {
-            NoticeKind::Information => ("i", Color32::from_rgb(0x1f, 0x6f, 0xeb)),
-            NoticeKind::Warning => ("!", Color32::from_rgb(0xe8, 0xa3, 0x17)),
-            NoticeKind::Critical => ("×", Color32::from_rgb(0xd9, 0x3a, 0x3a)),
-        };
-        ui.painter().circle_filled(icon.center(), 16.0, color);
-        ui.painter().text(
-            icon.center(),
-            egui::Align2::CENTER_CENTER,
-            glyph,
-            ui_font(20.0, Weight::Bold),
-            Color32::WHITE,
-        );
-        let galley = wrapped(ui, &notice.text, text_w, p.text);
-        ui.painter().galley(pos2(icon.right() + 16.0, full.top() + MARGIN), galley, p.text);
-        let ok = Rect::from_min_size(
-            pos2(full.right() - MARGIN - BUTTON_W, full.bottom() - MARGIN - BUTTON_H),
-            vec2(BUTTON_W, BUTTON_H),
-        );
-        let clicked = widgets::push_button(ui, ok, Id::new("notice_ok"), "OK", ButtonKind::Normal, true, p).clicked();
-        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Escape));
-        (clicked || enter).then_some(true)
-    })
-    .unwrap_or(false)
+    let icon = match notice.kind {
+        NoticeKind::Information => Icon::Information,
+        NoticeKind::Warning => Icon::Warning,
+        NoticeKind::Critical => Icon::Critical,
+    };
+    let mut b = MessageBox::ok(icon, &notice.title, &notice.text);
+    b.show(ctx, &format!("notice:{}:{}", notice.title, notice.text), p).is_some()
 }
 
-/// `QMessageBox.question`: the question icon, the text, and `buttons`
-/// right-aligned in order, `default` taking Enter. Returns the clicked
-/// button's index; closing the window or Escape picks the last (Cancel).
-pub fn question_box(ctx: &egui::Context, title: &str, text: &str, buttons: &[&str], default: usize, p: &Palette) -> Option<usize> {
-    let text_w = 360.0;
-    let probe = ctx.fonts_mut(|f| f.layout(text.to_owned(), ui_font(12.0, Weight::Regular), p.text, text_w));
-    let text_h = probe.size().y.max(32.0);
-    let widths: Vec<f32> = buttons
-        .iter()
-        .map(|b| (ctx.fonts_mut(|f| f.layout_no_wrap((*b).to_owned(), ui_font(12.0, Weight::Regular), Color32::WHITE).size().x) + 32.0).max(BUTTON_W))
-        .collect();
-    let buttons_w: f32 = widths.iter().sum::<f32>() + 6.0 * (buttons.len().saturating_sub(1)) as f32;
-    let width = (MARGIN * 2.0 + 32.0 + 16.0 + text_w).max(buttons_w + MARGIN * 2.0);
-    let size = vec2(width, MARGIN * 3.0 + text_h + BUTTON_H);
-    let cancel = buttons.len().saturating_sub(1);
-    dialog_window(ctx, &format!("question:{title}:{text}"), title, size, p, cancel, |ui| {
-        let full = ui.max_rect();
-        let icon = Rect::from_min_size(full.min + vec2(MARGIN, MARGIN), vec2(32.0, 32.0));
-        ui.painter().circle_filled(icon.center(), 16.0, Color32::from_rgb(0x1f, 0x6f, 0xeb));
-        ui.painter().text(icon.center(), egui::Align2::CENTER_CENTER, "?", ui_font(20.0, Weight::Bold), Color32::WHITE);
-        let galley = wrapped(ui, text, text_w, p.text);
-        ui.painter().galley(pos2(icon.right() + 16.0, full.top() + MARGIN), galley, p.text);
-        let mut x = full.right() - MARGIN - buttons_w;
-        let mut picked = None;
-        for (i, (label, w)) in buttons.iter().zip(&widths).enumerate() {
-            let r = Rect::from_min_size(pos2(x, full.bottom() - MARGIN - BUTTON_H), vec2(*w, BUTTON_H));
-            let kind = if i == default { ButtonKind::Primary } else { ButtonKind::Normal };
-            if widgets::push_button(ui, r, Id::new(("question", i)), label, kind, true, p).clicked() {
-                picked = Some(i);
-            }
-            x += w + 6.0;
-        }
-        if picked.is_none() {
-            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                picked = Some(default);
-            } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                picked = Some(cancel);
-            }
-        }
-        picked
-    })
+/// `QMessageBox.question`: the question icon, the text, and `buttons` in
+/// order, `default` taking Enter. Returns the clicked button's index;
+/// closing the window or Escape picks the last (Cancel).
+pub fn question_box(
+    ctx: &egui::Context,
+    title: &str,
+    text: &str,
+    buttons: &[&str],
+    default: usize,
+    p: &Palette,
+) -> Option<usize> {
+    let mut b = MessageBox::new(Icon::Question, title, text);
+    for label in buttons {
+        b = b.button(label, Role::Action);
+    }
+    let mut b = b.default_button(default).escape_button(buttons.len().saturating_sub(1));
+    match b.show(ctx, &format!("question:{title}:{text}"), p)? {
+        Answer::Button(i) => Some(i),
+        Answer::Closed => Some(buttons.len().saturating_sub(1)),
+    }
 }
 
 /// `FrequencyCombineOptionsDialog`.
@@ -610,11 +565,27 @@ pub struct InputDialog {
 
 impl InputDialog {
     pub fn text(title: &str, label: &str) -> Self {
-        Self { title: title.into(), label: label.into(), items: None, text: String::new(), choice: 0, window: None, first_frame: true }
+        Self {
+            title: title.into(),
+            label: label.into(),
+            items: None,
+            text: String::new(),
+            choice: 0,
+            window: None,
+            first_frame: true,
+        }
     }
 
     pub fn item(title: &str, label: &str, items: Vec<String>) -> Self {
-        Self { title: title.into(), label: label.into(), items: Some(items), text: String::new(), choice: 0, window: None, first_frame: true }
+        Self {
+            title: title.into(),
+            label: label.into(),
+            items: Some(items),
+            text: String::new(),
+            choice: 0,
+            window: None,
+            first_frame: true,
+        }
     }
 
     /// The label, the field and the button box (`QInputDialogPrivate::ensureLayout`).
@@ -657,7 +628,9 @@ impl InputDialog {
                 if first {
                     ui.memory_mut(|m| m.request_focus(Id::new("input_choice")));
                 }
-                if let Some(i) = super::qt::combo(ui, field, Id::new("input_choice"), items, Some(self.choice), "", true, p) {
+                if let Some(i) =
+                    super::qt::combo(ui, field, Id::new("input_choice"), items, Some(self.choice), "", true, p)
+                {
                     self.choice = i;
                 }
             }

@@ -11,7 +11,9 @@
 
 use std::path::{Path, PathBuf};
 
-use callisto_core::analysis::analyzer::{analysis_time_axis, analyzer_fit, burst_onset_t0, resolve_time_seconds, update_shock_parameters};
+use callisto_core::analysis::analyzer::{
+    analysis_time_axis, analyzer_fit, burst_onset_t0, resolve_time_seconds, update_shock_parameters,
+};
 use callisto_core::analysis::density::{self, DensityModel};
 use callisto_core::analysis::fit::fit_power_law;
 use callisto_core::analysis::lasso::lasso_mask;
@@ -66,7 +68,13 @@ struct Checker {
 impl Checker {
     fn value(&mut self, case: &str, what: &str, got: f64, want: f64, rtol: f64, atol: f64) {
         self.compared += 1;
-        let ok = if want.is_nan() { got.is_nan() } else if want.is_infinite() { got == want } else { (got - want).abs() <= atol + rtol * want.abs() };
+        let ok = if want.is_nan() {
+            got.is_nan()
+        } else if want.is_infinite() {
+            got == want
+        } else {
+            (got - want).abs() <= atol + rtol * want.abs()
+        };
         if !ok {
             self.failures.push(format!("{case}: {what}: got {got:e}, want {want:e}"));
         }
@@ -338,7 +346,8 @@ fn ruler(c: &mut Checker, name: &str, case: &Value) {
 
 fn drift(c: &mut Checker, name: &str, case: &Value) {
     for run in case["runs"].as_array().unwrap() {
-        let points: Vec<(f64, f64)> = run["points"].as_array().unwrap().iter().map(|p| (num(&p[0]), num(&p[1]))).collect();
+        let points: Vec<(f64, f64)> =
+            run["points"].as_array().unwrap().iter().map(|p| (num(&p[0]), num(&p[1]))).collect();
         match (drift_summary(&points), run.get("avg")) {
             (None, None) => {}
             (Some(s), Some(avg)) => {

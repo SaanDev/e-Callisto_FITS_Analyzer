@@ -219,7 +219,11 @@ pub fn batch_figure_spec(
     if let Some(v) = visual
         && (v.noise_clip_low.abs() > 1e-9 || v.noise_clip_high.abs() > 1e-9)
     {
-        let (mut lo, mut hi) = if v.noise_clip_low <= v.noise_clip_high { (v.noise_clip_low, v.noise_clip_high) } else { (v.noise_clip_high, v.noise_clip_low) };
+        let (mut lo, mut hi) = if v.noise_clip_low <= v.noise_clip_high {
+            (v.noise_clip_low, v.noise_clip_high)
+        } else {
+            (v.noise_clip_high, v.noise_clip_low)
+        };
         if use_db {
             lo = (lo - cold_digits) * db_scale;
             hi = (hi - cold_digits) * db_scale;
@@ -250,7 +254,11 @@ pub fn batch_figure_spec(
         (None, None, None)
     } else {
         let title = if title.trim().is_empty() { "Background Subtracted".to_owned() } else { title.trim().to_owned() };
-        (Some(title), Some(if use_utc { "Time [UT]" } else { "Time [s]" }.to_owned()), Some("Frequency [MHz]".to_owned()))
+        (
+            Some(title),
+            Some(if use_utc { "Time [UT]" } else { "Time [s]" }.to_owned()),
+            Some("Frequency [MHz]".to_owned()),
+        )
     };
     let extent = matplotlib_extent(&res.freqs, &res.time, None).ok_or("Frequency axis cannot be empty.")?;
     let (xlim, ylim) = match cfg.and_then(|c| c.range) {

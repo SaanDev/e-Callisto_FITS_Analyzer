@@ -429,9 +429,8 @@ impl Raster {
             }
         }
         let Some(path) = pb.finish() else { return };
-        let dash = pen.style.pattern().and_then(|p| {
-            StrokeDash::new(p.iter().map(|v| (v * pen.width) as f32).collect(), 0.0)
-        });
+        let dash =
+            pen.style.pattern().and_then(|p| StrokeDash::new(p.iter().map(|v| (v * pen.width) as f32).collect(), 0.0));
         let stroke = Stroke {
             width: pen.width as f32,
             line_cap: LineCap::Square,
@@ -849,7 +848,15 @@ impl CosmeticStroker {
 
     /// The aliased `drawLine` template, with the dasher when the pen has a pattern.
     #[allow(clippy::too_many_arguments)]
-    fn draw_line(&mut self, raster: &mut Raster, mut rx1: f64, mut ry1: f64, mut rx2: f64, mut ry2: f64, mut caps: i32) {
+    fn draw_line(
+        &mut self,
+        raster: &mut Raster,
+        mut rx1: f64,
+        mut ry1: f64,
+        mut rx2: f64,
+        mut ry2: f64,
+        mut caps: i32,
+    ) {
         if self.clip_line(&mut rx1, &mut ry1, &mut rx2, &mut ry2) {
             return;
         }
@@ -911,11 +918,8 @@ impl CosmeticStroker {
                         }
                     } else if self.last_dir == dir && ((lp.0 - first.0).abs() <= 1 && (lp.1 - first.1).abs() > 1) {
                         x += xinc >> 1;
-                        last.0 = if swapped {
-                            (x >> 16) as i32
-                        } else {
-                            ((x + (ys - y - 1) as i64 * xinc) >> 16) as i32
-                        };
+                        last.0 =
+                            if swapped { (x >> 16) as i32 } else { ((x + (ys - y - 1) as i64 * xinc) >> 16) as i32 };
                     }
                 }
                 self.last_dir = dir;
@@ -987,11 +991,8 @@ impl CosmeticStroker {
                         }
                     } else if self.last_dir == dir && ((lp.0 - first.0).abs() <= 1 && (lp.1 - first.1).abs() > 1) {
                         y += yinc >> 1;
-                        last.1 = if swapped {
-                            (y >> 16) as i32
-                        } else {
-                            ((y + (xs - x - 1) as i64 * yinc) >> 16) as i32
-                        };
+                        last.1 =
+                            if swapped { (y >> 16) as i32 } else { ((y + (xs - x - 1) as i64 * yinc) >> 16) as i32 };
                     }
                 }
                 self.last_dir = dir;

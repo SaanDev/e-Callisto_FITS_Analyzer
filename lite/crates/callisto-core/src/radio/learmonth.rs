@@ -124,8 +124,8 @@ pub fn download_learmonth_day(day: NaiveDate, cache_dir: &Path) -> Result<PathBu
             return Err(archive_error(format!("Learmonth archive request failed with HTTP {status}.")));
         }
         let mut reader = resp.into_body().into_reader();
-        let mut out =
-            File::create(&part).map_err(|e| archive_error(format!("Could not download Learmonth archive data: {e}")))?;
+        let mut out = File::create(&part)
+            .map_err(|e| archive_error(format!("Could not download Learmonth archive data: {e}")))?;
         std::io::copy(&mut reader, &mut out)
             .map_err(|e| archive_error(format!("Could not download Learmonth archive data: {e}")))?;
         Ok(())
@@ -152,9 +152,7 @@ fn read_up_to(reader: &mut impl Read, count: usize) -> std::io::Result<Vec<u8>> 
 fn read_exact(reader: &mut impl Read, count: usize, label: &str) -> Result<Vec<u8>> {
     let buf = read_up_to(reader, count).map_err(|e| archive_error(e.to_string()))?;
     if buf.len() != count {
-        return Err(archive_error(format!(
-            "{label} could not be read completely from the Learmonth archive file."
-        )));
+        return Err(archive_error(format!("{label} could not be read completely from the Learmonth archive file.")));
     }
     Ok(buf)
 }
@@ -164,12 +162,12 @@ fn header_to_datetime(header: &[u8]) -> Result<NaiveDateTime> {
         return Err(archive_error("Learmonth scan header is too short to decode a timestamp."));
     }
     let v: Vec<u32> = header[..6].iter().map(|&b| b as u32).collect();
-    NaiveDate::from_ymd_opt(2000 + v[0] as i32, v[1], v[2])
-        .and_then(|d| d.and_hms_opt(v[3], v[4], v[5]))
-        .ok_or_else(|| {
+    NaiveDate::from_ymd_opt(2000 + v[0] as i32, v[1], v[2]).and_then(|d| d.and_hms_opt(v[3], v[4], v[5])).ok_or_else(
+        || {
             let list = v.iter().map(u32::to_string).collect::<Vec<_>>().join(", ");
             archive_error(format!("Invalid Learmonth timestamp in archive header: [{list}]"))
-        })
+        },
+    )
 }
 
 fn nominal_step_seconds(header: &[u8]) -> f64 {
@@ -430,10 +428,7 @@ mod tests {
         assert_eq!((chunks[1].scan_count, chunks[1].offset_start, chunks[1].is_partial), (20, 247824, true));
         assert_eq!(chunks[1].end_dt.format("%H:%M:%S").to_string(), "00:06:00");
         assert_eq!(learmonth_fit_filename(&chunks[1]), "LEARMONTH_20240502_000500_01.fit");
-        assert_eq!(
-            chunks[1].label(),
-            "2024-05-02 00:05:00  ->  2024-05-02 00:06:00  |  20 scans [partial]"
-        );
+        assert_eq!(chunks[1].label(), "2024-05-02 00:05:00  ->  2024-05-02 00:06:00  |  20 scans [partial]");
         let out = write_learmonth_chunk_fit(&day, &chunks[1], &dir.join(learmonth_fit_filename(&chunks[1]))).unwrap();
         let res = crate::radio::fits_io::load_callisto_fits(&out).unwrap();
         assert_eq!(res.data.shape(), (802, 20));
@@ -442,7 +437,10 @@ mod tests {
         let text = res.header0.to_text();
         assert!(text.contains("CDELT2  = -0.19326683291770763 / Median step in frequency axis"));
         assert!(text.contains("OBJECT  = 'Sun     '           / Observed object"));
-        assert_eq!(resolve_learmonth_url(NaiveDate::from_ymd_opt(2024, 5, 1).unwrap()), format!("{BASE_URL}24/LM240501.srs"));
+        assert_eq!(
+            resolve_learmonth_url(NaiveDate::from_ymd_opt(2024, 5, 1).unwrap()),
+            format!("{BASE_URL}24/LM240501.srs")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -204,7 +204,12 @@ impl StationLoader {
     }
 
     /// Runs the debounce timer and picks up resolved days.
-    pub fn tick(&mut self, ctx: &egui::Context, svc: &mut StationService, resolved: &[NaiveDate]) -> Option<LoaderEvent> {
+    pub fn tick(
+        &mut self,
+        ctx: &egui::Context,
+        svc: &mut StationService,
+        resolved: &[NaiveDate],
+    ) -> Option<LoaderEvent> {
         if let Some(t) = self.timer {
             if Instant::now() >= t {
                 self.timer = None;
