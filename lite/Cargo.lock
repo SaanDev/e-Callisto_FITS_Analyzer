@@ -539,7 +539,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "callisto-core"
-version = "0.1.0"
+version = "3.2.0-lite"
 dependencies = [
  "anyhow",
  "chrono",
@@ -557,7 +557,7 @@ dependencies = [
 
 [[package]]
 name = "callisto-lite"
-version = "0.1.0"
+version = "3.2.0-lite"
 dependencies = [
  "anyhow",
  "callisto-core",

@@ -107,11 +107,11 @@ fn guide_layout_matches_full_app() {
 fn update_check() -> UpdateCheck {
     UpdateCheck {
         update_available: true,
-        current_version: "1.0.0".into(),
-        latest_version: "1.1.0".into(),
-        release_name: "Lite 1.1.0".into(),
-        release_url: "https://github.com/SaanDev/e-Callisto_FITS_Analyzer/releases/tag/lite-v1.1.0".into(),
-        download_url: "https://example.invalid/e-CALLISTO_FITS_Analyzer_Lite_v1.1.0.exe".into(),
+        current_version: callisto_lite::APP_VERSION.into(),
+        latest_version: "3.3.0-lite".into(),
+        release_name: "e-CALLISTO FITS Analyzer v3.3.0".into(),
+        release_url: "https://github.com/SaanDev/e-Callisto_FITS_Analyzer/releases/tag/v3.3.0".into(),
+        download_url: "https://example.invalid/e-CALLISTO_FITS_Analyzer_v3.3.0-lite_Setup.exe".into(),
         published_at: "2026-11-02T10:00:00Z".into(),
         notes: "## What's New\n- Faster loading of combined files\n- Fixes for the Type II window".into(),
     }
@@ -138,7 +138,9 @@ fn boxes() -> Vec<(&'static str, MessageBox)> {
         ),
         (
             "box_update_downloaded",
-            updates::downloaded_box(Path::new("C:\\Users\\me\\Downloads\\e-CALLISTO_FITS_Analyzer_Lite_v1.1.0.exe")),
+            updates::downloaded_box(Path::new(
+                "C:\\Users\\me\\Downloads\\e-CALLISTO_FITS_Analyzer_v3.3.0-lite_Setup.exe",
+            )),
         ),
     ]
 }

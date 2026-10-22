@@ -8,7 +8,7 @@ installer lands in lite\dist.
 Usage (from anywhere):
   powershell -ExecutionPolicy Bypass -File lite\packaging\windows\build_windows_installer.ps1
 Optional:
-  -Version 1.0.0      the version shown by the installer (default: Lite's Cargo version)
+  -Version 3.2.0-lite the version shown by the installer (default: Lite's Cargo version)
   -TargetDir <dir>    cargo's target folder (default: lite\target)
   -SkipInstaller      stage only
 #>
@@ -63,6 +63,7 @@ if (-not $Iscc) {
 }
 if (-not $Iscc) { throw "Inno Setup 6 (ISCC.exe) was not found. Install it from https://jrsoftware.org/isinfo.php" }
 
-& $Iscc "/DAppVersion=$Version" "/DStageDir=$Stage" "/DRepoRoot=$Repo" (Join-Path $PSScriptRoot "Lite_InnoSetup.iss")
+$Numeric = ($Version -split '-')[0]
+& $Iscc "/DAppVersion=$Version" "/DNumericVersion=$Numeric" "/DStageDir=$Stage" "/DRepoRoot=$Repo" (Join-Path $PSScriptRoot "Lite_InnoSetup.iss")
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed ($LASTEXITCODE)" }
-Write-Host "Installer: $(Join-Path $Lite "dist\e-CALLISTO_FITS_Analyzer_Lite_v$($Version)_Setup.exe")"
+Write-Host "Installer: $(Join-Path $Lite "dist\e-CALLISTO_FITS_Analyzer_v$($Version)_Setup.exe")"

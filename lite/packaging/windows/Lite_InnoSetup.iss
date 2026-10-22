@@ -3,11 +3,17 @@
 ; folder and Start menu group, so it installs beside the full app.
 ;
 ; Build with build_windows_installer.ps1, or:
-;   iscc /DAppVersion=1.0.0 /DStageDir=...\stage Lite_InnoSetup.iss
+;   iscc /DAppVersion=3.2.0-lite /DNumericVersion=3.2.0 /DStageDir=...\stage Lite_InnoSetup.iss
+; The installer is e-CALLISTO_FITS_Analyzer_v3.2.0-lite_Setup.exe, the name
+; the update check looks for in the release tag (v3.2.0).
 
 #define AppName "e-CALLISTO FITS Analyzer Lite"
 #ifndef AppVersion
-  #define AppVersion "1.0.0"
+  #define AppVersion "3.2.0-lite"
+#endif
+; Windows' version fields take numbers only: 3.2.0-lite -> 3.2.0.
+#ifndef NumericVersion
+  #define NumericVersion "3.2.0"
 #endif
 #define AppPublisher "Sahan S. Liyanage"
 #define AppExeName "e-CALLISTO FITS Analyzer Lite.exe"
@@ -30,7 +36,7 @@ AppPublisherURL=https://github.com/SaanDev/e-Callisto_FITS_Analyzer
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 OutputDir={#RepoRoot}\lite\dist
-OutputBaseFilename=e-CALLISTO_FITS_Analyzer_Lite_v{#AppVersion}_Setup
+OutputBaseFilename=e-CALLISTO_FITS_Analyzer_v{#AppVersion}_Setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -40,7 +46,8 @@ ArchitecturesInstallIn64BitMode=x64compatible
 SetupIconFile={#RepoRoot}\assets\branding\icon.ico
 UninstallDisplayIcon={app}\{#AppExeName}
 UninstallDisplayName={#AppName}
-VersionInfoVersion={#AppVersion}
+VersionInfoVersion={#NumericVersion}
+VersionInfoProductTextVersion={#AppVersion}
 CloseApplications=yes
 
 [Languages]

@@ -7,14 +7,14 @@ same user interface as the full app (v3.2.0), including all of its icons.
 
 | Topic | Decision |
 |---|---|
-| Name and version | **e-CALLISTO FITS Analyzer Lite**, own versions starting at 1.0.0, installable side by side with the full app |
+| Name and version | **e-CALLISTO FITS Analyzer Lite**, versioned with the full app and marked `-lite` (3.2.0-lite), installable side by side with it |
 | Platforms | Windows, macOS and Linux; every phase is built and tested on all three |
 | Plot canvas | One canvas with the **Modern** look; the *View → Mode* menu is removed. Exported figures still match the full app's exports |
 | Project files | **Two-way**: Lite opens full-app `.efaproj` projects and saves projects the full app opens. Parts Lite does not handle are kept unchanged |
 | Settings | Lite keeps its own settings and offers to import the full app's theme, presets and recent files on first start |
 | Old or low-end PCs | Must work: GPU drawing when available, software drawing otherwise (old drivers, remote desktop, virtual machines) |
 | Code location | `lite/` in this repository, sharing `assets/` and the user-guide text with the full app |
-| Releases | One public release (1.0.0) when every feature in scope is done. You review a build at the end of each phase; nothing is published before 1.0 |
+| Releases | From 3.2.0 one tag (`v3.2.0`; pre-releases `v3.3.0-beta`) carries the full app's three installers and Lite's three, always both. Lite is first released in v3.2.0 once every feature in scope is done; you review a build at the end of each phase |
 
 **What "same UI" means here.** The reference is the full app v3.2.0 on each
 platform, in the light and dark themes. For every window and dialog, a Lite
@@ -99,7 +99,7 @@ compared directly with the Python results.
 | Settings import | Reads the full app's QSettings for `SaanDev` / `e-CALLISTO FITS Analyzer` (registry on Windows, plist on macOS, INI on Linux): theme, presets (JSON), recent files and projects (JSON lists), sidebar section states |
 | Background work | Loading, combining, downloading and fitting run on worker threads, as `gui_workers.py` does, so the window never freezes |
 | Network | ureq for the archive, burst list, Learmonth and update check |
-| Update check | GitHub releases tagged `lite-v*`. **The full app needs a small change too:** `update_checker.py` would read a `lite-v1.0.0` tag as version 1.0.0, so it must skip `lite-` tags. That change has to ship in a full-app release before Lite 1.0 |
+| Update check | The shared tags; each app takes the installers named for it (Lite's carry `-lite`). The full app's `update_checker.py` skips `-lite` installers (and `lite-` tags); copies up to 3.1.x cannot, and take the first installer GitHub lists, so the full app's are uploaded first (`packaging/check_release_assets.py` checks the published release) |
 | Installers | Inno Setup on Windows (reusing `packaging/windows`), a signed and notarised `.dmg` on macOS, `.deb` on Linux; different install folders and app IDs from the full app |
 
 ## 4. Checking that Lite matches the full app
@@ -371,7 +371,7 @@ Found in the full app while porting (Lite reproduces them):
 ### Phase 5: app shell and release
 - User guide, generated from `ui/help/user_guide_content.py` without the chapters for removed features, plus citation, bug report, update check, About, startup splash, and first-start settings import.
 - Installers for the three platforms, side by side with the full app.
-- Full review of the checklist and parity results with you; Lite 1.0.0 released.
+- Full review of the checklist and parity results with you; Lite released in v3.2.0 (3.2.0-lite).
 
 **Status (2026-10-21), on `master`:** everything but the review and the release.
 
@@ -382,11 +382,11 @@ Found in the full app while porting (Lite reproduces them):
 | Report a Bug | Done: issue text, prefilled GitHub issue, diagnostics zip (`bug_report.json`/`.md`, issue notes, provenance JSON/Markdown) as `bug_report.py` writes them. The environment names egui where the full app names Python and Qt. 1.4–1.7 % |
 | About | Done (`QMessageBox.about`: the application icon at 64 px). 5.7–5.9 % |
 | Message boxes | Every Lite notice is now a `QMessageBox` laid out as Qt lays it out (`setupLayout`, `updateSize` with its 500 px soft limit, `adjustSize` for wrapped informative text, the platform's button order, Show/Hide Details). Sizes of eight captured boxes equal Qt's to 1 px (DirectWrite advances run a fraction of a pixel under egui's). Icons are drawn after Windows 11's: 2.8–5.9 % |
-| Update check | Done: Lite's own releases (`lite-` tags; the full app skips them), the status-bar label, the startup check 1.5 s after start (not with `CALLISTO_LITE_OFFLINE`), Update Available with release notes behind Show Details, Up to Date, Check Failed, the download with its progress dialog (3.7–6.3 %), Cancel, Update Downloaded with Open File / Open Folder |
+| Update check | Done: the shared release tags (`v3.2.0`; the old per-platform tags such as `v3.1.1(Windows)` are still read and have no Lite installer), Lite's `-lite` installers only (the full app now skips them), the status-bar label, the startup check 1.5 s after start (not with `CALLISTO_LITE_OFFLINE`), Update Available with release notes behind Show Details, Up to Date, Check Failed, the download with its progress dialog (3.7–6.3 %), Cancel, Update Downloaded with Open File / Open Folder |
 | Startup splash | Done: the window opens as the 540 × 300 splash (the four loading steps), then becomes the maximised main window; 2.8 % apart. `CALLISTO_LITE_NO_SPLASH` skips it |
 | First-start settings import | Done: with no Lite settings yet, Lite reads the full app's (registry, plist or INI) and takes over theme, sidebar sections, frequency axis scale, auto-clean, processing and display range presets, the default preset, light-curve settings and recent files and projects. The INI reader is checked against a file Qt wrote (`parity/make_settings_reference.py`); the registry and plist readers are not yet tried on real stores |
-| Installers | Windows: `packaging/windows/build_windows_installer.ps1` (Inno Setup, after the full app's script): own AppId, "e-CALLISTO FITS Analyzer Lite" folder and Start menu group; the executable carries the icon and version. Built and checked here. macOS: `packaging/macos/build_macos_dmg.sh` (universal app, bundle id `…fitsanalyzer.lite`, Developer ID signing and notarisation when configured). Linux: `packaging/linux/build_deb_linux.sh` (`e-callisto-fits-analyzer-lite`, its own command and desktop entry). The macOS and Linux scripts are not yet run; the Lite workflow builds all three on demand (Run workflow) |
-| Version 1.0.0 | Not yet: Lite is still 0.1.0 until the review |
+| Installers | Windows: `packaging/windows/build_windows_installer.ps1` (Inno Setup, after the full app's script): own AppId, "e-CALLISTO FITS Analyzer Lite" folder and Start menu group; the executable carries the icon and version. Built and checked here. macOS: `packaging/macos/build_macos_dmg.sh` (arm64, bundle id `…fitsanalyzer.lite`, Developer ID signing and notarisation when configured). Linux: `packaging/linux/build_deb_linux.sh` (package `e-callisto-fits-analyzer-lite`, its own command and desktop entry). Files: `e-CALLISTO_FITS_Analyzer_v3.2.0-lite_Setup.exe`, `e-callisto-fits-analyzer_3.2.0-lite_amd64.deb`, `e-callisto-fits-analyzer_3.2.0-lite_macOS_arm64.dmg`. The macOS and Linux scripts are not yet run; the Lite workflow builds all three on demand (Run workflow) |
+| Version | 3.2.0-lite everywhere Lite shows it (title, About, guide, splash, installers); Windows and macOS version fields get 3.2.0 |
 
 Found in the full app while porting (Lite reproduces it):
 

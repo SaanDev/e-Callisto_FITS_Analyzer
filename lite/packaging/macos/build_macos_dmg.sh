@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Build "e-CALLISTO FITS Analyzer Lite.app" and its .dmg, beside the full
 # app's (packaging/macos/build_macos_dmg.sh): its own bundle identifier,
-# name and disk image.
+# name and disk image. Apple Silicon (arm64) only, as the full app's; the
+# image is e-callisto-fits-analyzer_<version>_macOS_arm64.dmg, the name the
+# update check looks for in the release tag.
 #
 # Usage, from anywhere on a Mac with Xcode's command line tools and rustup:
 #   bash lite/packaging/macos/build_macos_dmg.sh
 # Optional:
-#   VERSION=1.0.0                         the bundle version (default: Lite's Cargo version)
-#   UNIVERSAL=0                           build for this Mac's architecture only
+#   VERSION=3.2.0-lite                    the version (default: Lite's Cargo version)
 #   CODESIGN_IDENTITY="Developer ID Application: ..."   sign for distribution (default: ad hoc)
 #   NOTARY_PROFILE=<keychain profile>     notarise and staple the .dmg
 #                                         (xcrun notarytool store-credentials <profile> ...)
@@ -18,27 +19,19 @@ ROOT="$(cd "$LITE/.." && pwd)"
 APP_NAME="e-CALLISTO FITS Analyzer Lite"
 BUNDLE_ID="com.sahansliyanage.callisto.fitsanalyzer.lite"
 VERSION="${VERSION:-$(awk -F'"' '/^version[[:space:]]*=/{print $2; exit}' "$LITE/Cargo.toml")}"
-UNIVERSAL="${UNIVERSAL:-1}"
+# Bundle versions take numbers only: 3.2.0-lite -> 3.2.0.
+NUMERIC_VERSION="${VERSION%%-*}"
 TARGET_DIR="${CARGO_TARGET_DIR:-$LITE/target}"
 DIST="$LITE/dist"
 APP="$DIST/$APP_NAME.app"
-DMG="$DIST/e-CALLISTO_FITS_Analyzer_Lite_v${VERSION}_macOS.dmg"
+DMG="$DIST/e-callisto-fits-analyzer_${VERSION}_macOS_arm64.dmg"
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
 
 echo "==> Building $APP_NAME $VERSION"
 cd "$LITE"
-if [ "$UNIVERSAL" = "1" ]; then
-  rustup target add aarch64-apple-darwin x86_64-apple-darwin
-  cargo build --release -p callisto-lite --target aarch64-apple-darwin
-  cargo build --release -p callisto-lite --target x86_64-apple-darwin
-  BIN="$TARGET_DIR/callisto-lite-universal"
-  lipo -create -output "$BIN" \
-    "$TARGET_DIR/aarch64-apple-darwin/release/callisto-lite" \
-    "$TARGET_DIR/x86_64-apple-darwin/release/callisto-lite"
-else
-  cargo build --release -p callisto-lite
-  BIN="$TARGET_DIR/release/callisto-lite"
-fi
+rustup target add aarch64-apple-darwin
+cargo build --release -p callisto-lite --target aarch64-apple-darwin
+BIN="$TARGET_DIR/aarch64-apple-darwin/release/callisto-lite"
 
 echo "==> Assembling the bundle"
 rm -rf "$APP"
@@ -55,8 +48,9 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundleName</key><string>$APP_NAME</string>
   <key>CFBundleDisplayName</key><string>$APP_NAME</string>
   <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
-  <key>CFBundleVersion</key><string>$VERSION</string>
-  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+  <key>CFBundleVersion</key><string>$NUMERIC_VERSION</string>
+  <key>CFBundleShortVersionString</key><string>$NUMERIC_VERSION</string>
+  <key>LSArchitecturePriority</key><array><string>arm64</string></array>
   <key>CFBundleExecutable</key><string>callisto-lite</string>
   <key>CFBundleIconFile</key><string>icon.icns</string>
   <key>CFBundlePackageType</key><string>APPL</string>

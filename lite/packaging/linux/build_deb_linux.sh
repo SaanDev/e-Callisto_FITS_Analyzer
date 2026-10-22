@@ -6,7 +6,11 @@
 # Usage, from anywhere on Debian/Ubuntu with rustup and dpkg-deb:
 #   bash lite/packaging/linux/build_deb_linux.sh
 # Optional:
-#   VERSION=1.0.0      the package version (default: Lite's Cargo version)
+#   VERSION=3.2.0-lite the package version (default: Lite's Cargo version)
+#
+# The file is e-callisto-fits-analyzer_<version>_<arch>.deb, the name the
+# update check looks for in the release tag; the package inside is
+# e-callisto-fits-analyzer-lite, so it installs beside the full app.
 set -euo pipefail
 
 LITE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -18,7 +22,7 @@ ARCH="$(dpkg --print-architecture)"
 TARGET_DIR="${CARGO_TARGET_DIR:-$LITE/target}"
 DIST="$LITE/dist"
 STAGE="$DIST/deb"
-OUT="$DIST/${PKG}_${VERSION}_${ARCH}.deb"
+OUT="$DIST/e-callisto-fits-analyzer_${VERSION}_${ARCH}.deb"
 
 echo "==> Building $APP_NAME $VERSION ($ARCH)"
 cd "$LITE"

@@ -43,7 +43,11 @@ observations exist and skips the update check at startup;
 ## Installers
 
 Each builds into `lite/dist`, beside the full app (its own install folder,
-application id and shortcuts):
+application id and shortcuts), named for the release tag:
+`e-CALLISTO_FITS_Analyzer_v3.2.0-lite_Setup.exe`,
+`e-callisto-fits-analyzer_3.2.0-lite_amd64.deb` (package
+`e-callisto-fits-analyzer-lite`) and
+`e-callisto-fits-analyzer_3.2.0-lite_macOS_arm64.dmg` (Apple Silicon).
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File lite\packaging\windows\build_windows_installer.ps1
@@ -59,6 +63,23 @@ Application certificate) signs the app and `NOTARY_PROFILE` (a
 `notarytool` keychain profile) notarises and staples the image; without them
 it is signed ad hoc. The Lite workflow builds all three on demand
 (Actions → Lite (Rust) → Run workflow).
+
+**Releasing.** One tag per release, `v3.2.0` (pre-releases `v3.3.0-beta`,
+marked pre-release on GitHub), with all six installers: the full app's
+(`e-CALLISTO_FITS_Analyzer_v3.2.0_Setup.exe`,
+`e-callisto-fits-analyzer_3.2.0_amd64.deb`,
+`e-callisto-fits-analyzer_3.2.0_macOS_arm64.dmg`) and Lite's. Lite's version
+is the full app's with `-lite` (`version` in `lite/Cargo.toml`). Give the
+release a title that names no platform, or all three. Upload the full app's
+installers first, then Lite's: copies of the full app up to 3.1.x download
+the first installer GitHub lists for their platform. Before announcing, run
+
+```powershell
+python packaging/check_release_assets.py v3.2.0
+```
+
+It checks the six names, the order, and which installer each update check
+(3.1.x, today's full app, Lite) would download.
 
 ## Tests
 

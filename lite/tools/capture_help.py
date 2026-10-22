@@ -29,7 +29,10 @@ only = set(sys.argv[3:])
 out_dir.mkdir(parents=True, exist_ok=True)
 
 LITE_NAME = "e-CALLISTO FITS Analyzer Lite"
-LITE_VERSION = "1.0.0"
+import re  # noqa: E402
+
+# Lite's own version (lite/Cargo.toml), as its windows show it.
+LITE_VERSION = re.search(r'^version\s*=\s*"([^"]+)"', (REPO / "lite" / "Cargo.toml").read_text(encoding="utf-8"), re.M).group(1)
 GUIDE = (REPO / "lite" / "crates" / "callisto-lite" / "assets" / "user_guide.html").read_text(encoding="utf-8")
 GUIDE = GUIDE.replace("{{VERSION}}", LITE_VERSION)
 
@@ -230,7 +233,7 @@ available = QMessageBox(win)
 available.setWindowTitle("Update Available")
 available.setIcon(QMessageBox.Information)
 available.setText(f"A newer version of {LITE_NAME} is available.")
-available.setInformativeText("Current version: v1.0.0\nLatest version: v1.1.0\nPublished: 2026-11-02")
+available.setInformativeText(f"Current version: v{LITE_VERSION}\nLatest version: v3.3.0-lite\nPublished: 2026-11-02")
 available.setDetailedText("What's New\n- Faster loading of combined files\n- Fixes for the Type II window")
 available.addButton("Download", QMessageBox.AcceptRole)
 available.addButton("Release Page", QMessageBox.ActionRole)
@@ -268,7 +271,7 @@ downloaded = QMessageBox(win)
 downloaded.setWindowTitle("Update Downloaded")
 downloaded.setIcon(QMessageBox.Information)
 downloaded.setText("The update was downloaded successfully.")
-downloaded.setInformativeText("Saved to:\nC:\\Users\\me\\Downloads\\e-CALLISTO_FITS_Analyzer_Lite_v1.1.0.exe\n\n"
+downloaded.setInformativeText("Saved to:\nC:\\Users\\me\\Downloads\\e-CALLISTO_FITS_Analyzer_v3.3.0-lite_Setup.exe\n\n"
                               "Close the app and run this installer/package to complete the update.")
 downloaded.addButton("Open File", QMessageBox.ActionRole)
 downloaded.addButton("Open Folder", QMessageBox.ActionRole)
@@ -277,7 +280,7 @@ capture("box_update_downloaded", downloaded)
 downloaded.close()
 
 # The status bar's update label in each state.
-for state, text in (("checking", "Updates: checking..."), ("available", "Updates: v1.1.0 available"),
+for state, text in (("checking", "Updates: checking..."), ("available", "Updates: v3.3.0-lite available"),
                     ("current", "Updates: up to date"), ("failed", "Updates: check failed")):
     win._set_update_status_label(text)
     pump(0.2)

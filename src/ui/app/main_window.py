@@ -9589,16 +9589,15 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        version = str(latest_version or APP_VERSION).strip() or APP_VERSION
+        version = (str(latest_version or APP_VERSION).strip() or APP_VERSION).lstrip("vV")
+        # The release installers' names.
         if sys.platform.startswith("win"):
-            ext = ".exe"
-        elif sys.platform == "darwin":
-            ext = ".dmg"
-        elif sys.platform.startswith("linux"):
-            ext = ".deb"
-        else:
-            ext = ".bin"
-        return f"e-CALLISTO_FITS_Analyzer_v{version}{ext}"
+            return f"e-CALLISTO_FITS_Analyzer_v{version}_Setup.exe"
+        if sys.platform == "darwin":
+            return f"e-callisto-fits-analyzer_{version}_macOS_arm64.dmg"
+        if sys.platform.startswith("linux"):
+            return f"e-callisto-fits-analyzer_{version}_amd64.deb"
+        return f"e-CALLISTO_FITS_Analyzer_v{version}.bin"
 
     def _default_download_dir(self) -> str:
         candidates = [

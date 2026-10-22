@@ -1,8 +1,15 @@
 //! About → Check for Updates (`update_checker.py`, `UpdateDownloadWorker`):
 //! the newest stable GitHub release for this platform, and its installer
-//! downloaded. Lite is released from the full app's repository under
-//! `lite-v…` tags with its own version numbers, so it looks at those
-//! releases only (the full app skips them).
+//! downloaded.
+//!
+//! From 3.2.0 one tag (`v3.2.0`, pre-releases `v3.3.0-beta`) carries the
+//! full app's installers and Lite's, Lite's marked `-lite` in the file name
+//! (`e-CALLISTO_FITS_Analyzer_v3.2.0-lite_Setup.exe`,
+//! `e-callisto-fits-analyzer_3.2.0-lite_amd64.deb`,
+//! `e-callisto-fits-analyzer_3.2.0-lite_macOS_arm64.dmg`). Lite takes only
+//! its own installers, and only releases that have one for this platform;
+//! the full app skips them. Lite's version is the release's with `-lite`
+//! (3.2.0-lite).
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -132,12 +139,23 @@ fn s(v: &Value, k: &str) -> String {
     v.get(k).and_then(Value::as_str).unwrap_or("").trim().to_owned()
 }
 
-/// `select_download_url`: the platform's preferred installer.
+/// The suffix Lite's version and installer names carry.
+pub const LITE_SUFFIX: &str = "-lite";
+
+/// An installer of Lite: `lite` set off in its name (`…3.2.0-lite_Setup.exe`).
+pub fn is_lite_asset(name: &str) -> bool {
+    let n = name.to_lowercase();
+    let b = n.as_bytes();
+    let sep = |c: u8| matches!(c, b'-' | b'_' | b'.');
+    n.match_indices("lite").any(|(i, _)| i > 0 && sep(b[i - 1]) && b.get(i + 4).is_some_and(|&c| sep(c)))
+}
+
+/// `select_download_url`: the platform's preferred installer, of Lite's.
 pub fn select_download_url(assets: &[Value], platform: Platform) -> Option<String> {
     let named: Vec<(String, String)> = assets
         .iter()
         .map(|a| (s(a, "name").to_lowercase(), s(a, "browser_download_url")))
-        .filter(|(n, u)| !n.is_empty() && !u.is_empty())
+        .filter(|(n, u)| !n.is_empty() && !u.is_empty() && is_lite_asset(n))
         .collect();
     for ext in platform.extensions() {
         if let Some((_, u)) = named.iter().find(|(n, _)| n.ends_with(ext)) {
@@ -150,23 +168,19 @@ pub fn select_download_url(assets: &[Value], platform: Platform) -> Option<Strin
     named.first().map(|(_, u)| u.clone())
 }
 
-/// A Lite release: tagged `lite-…`, neither a draft nor a pre-release, with a version.
-fn is_lite_stable(r: &Value) -> bool {
+/// `_is_stable_release`: neither a draft nor a pre-release, with a version.
+fn is_stable(r: &Value) -> bool {
     if r.get("draft").and_then(Value::as_bool).unwrap_or(false)
         || r.get("prerelease").and_then(Value::as_bool).unwrap_or(false)
     {
         return false;
     }
-    let tag = s(r, "tag_name").to_lowercase();
-    tag.starts_with("lite-")
-        && (version_text(tag.trim_start_matches("lite-")).is_some() || version_text(&s(r, "name")).is_some())
+    release_version(r).is_some()
 }
 
-/// A release's version: from its tag (past `lite-`), else its name.
+/// A release's version: from its tag (`v3.2.0`, `v3.1.1(Windows)`), else its name.
 fn release_version(r: &Value) -> Option<String> {
-    let tag = s(r, "tag_name");
-    let tag = tag.get(5..).unwrap_or("");
-    version_text(tag).or_else(|| version_text(&s(r, "name")))
+    version_text(&s(r, "tag_name")).or_else(|| version_text(&s(r, "name")))
 }
 
 /// `_explicit_platform_markers`.
@@ -206,7 +220,7 @@ fn platform_score(r: &Value, platform: Platform) -> (i32, i32) {
 /// `_pick_latest_stable_release_for_platform` over a release list.
 pub fn pick_release(releases: &Value, platform: Platform) -> Result<Value> {
     let Some(list) = releases.as_array() else { bail!("Unexpected release list payload from GitHub API.") };
-    let stable: Vec<&Value> = list.iter().filter(|r| is_lite_stable(r)).collect();
+    let stable: Vec<&Value> = list.iter().filter(|r| is_stable(r)).collect();
     if stable.is_empty() {
         bail!("No stable release found in GitHub release list.");
     }
@@ -227,17 +241,17 @@ pub fn pick_release(releases: &Value, platform: Platform) -> Result<Value> {
     if scored.is_empty() {
         bail!("No parseable stable release version found.");
     }
-    if platform != Platform::Unknown {
-        scored.retain(|x| x.1 > 0 || x.2 > 0);
-        if scored.is_empty() {
-            let name = match platform {
-                Platform::Windows => "windows",
-                Platform::MacOs => "macos",
-                Platform::Linux => "linux",
-                Platform::Unknown => "unknown",
-            };
-            bail!("No release found for platform '{name}'.");
-        }
+    // Only releases with a Lite installer for this platform: the full app's
+    // per-platform releases before 3.2.0 have none.
+    scored.retain(|x| x.2 > 0);
+    if scored.is_empty() {
+        let name = match platform {
+            Platform::Windows => "windows",
+            Platform::MacOs => "macos",
+            Platform::Linux => "linux",
+            Platform::Unknown => "unknown",
+        };
+        bail!("No release found for platform '{name}'.");
     }
     scored.sort_by(|a, b| (&b.0, b.1, b.2, &b.3).cmp(&(&a.0, a.1, a.2, &a.3)));
     Ok(scored[0].4.clone())
@@ -246,7 +260,8 @@ pub fn pick_release(releases: &Value, platform: Platform) -> Result<Value> {
 /// `check_for_updates` on a release list (for tests and the worker).
 pub fn evaluate(releases: &Value, current_version: &str, platform: Platform) -> Result<UpdateCheck> {
     let r = pick_release(releases, platform)?;
-    let latest = release_version(&r).context("Could not parse release version from GitHub response.")?;
+    let numbers = release_version(&r).context("Could not parse release version from GitHub response.")?;
+    let latest = format!("{numbers}{LITE_SUFFIX}");
     let release_url = s(&r, "html_url");
     let assets = r.get("assets").and_then(Value::as_array).cloned().unwrap_or_default();
     let download_url = select_download_url(&assets, platform).unwrap_or_else(|| release_url.clone());
@@ -254,7 +269,7 @@ pub fn evaluate(releases: &Value, current_version: &str, platform: Platform) -> 
     Ok(UpdateCheck {
         update_available: is_newer_version(current_version, &latest),
         current_version: current_version.to_owned(),
-        release_name: if name.is_empty() { format!("v{latest}") } else { name },
+        release_name: if name.is_empty() { format!("v{numbers}") } else { name },
         latest_version: latest,
         release_url,
         download_url,
@@ -414,13 +429,14 @@ pub fn suggest_filename(url: &str, latest_version: &str, current_version: &str) 
         return base;
     }
     let v = if latest_version.trim().is_empty() { current_version } else { latest_version.trim() };
-    let ext = match Platform::current() {
-        Platform::Windows => ".exe",
-        Platform::MacOs => ".dmg",
-        Platform::Linux => ".deb",
-        Platform::Unknown => ".bin",
-    };
-    format!("e-CALLISTO_FITS_Analyzer_Lite_v{v}{ext}")
+    let v = v.trim_start_matches(['v', 'V']);
+    let v = if v.ends_with(LITE_SUFFIX) { v.to_owned() } else { format!("{v}{LITE_SUFFIX}") };
+    match Platform::current() {
+        Platform::Windows => format!("e-CALLISTO_FITS_Analyzer_v{v}_Setup.exe"),
+        Platform::MacOs => format!("e-callisto-fits-analyzer_{v}_macOS_arm64.dmg"),
+        Platform::Linux => format!("e-callisto-fits-analyzer_{v}_amd64.deb"),
+        Platform::Unknown => format!("e-CALLISTO_FITS_Analyzer_v{v}.bin"),
+    }
 }
 
 fn percent_decode(s: &str) -> String {
@@ -524,6 +540,10 @@ mod tests {
     #[test]
     fn versions_like_the_full_app() {
         assert_eq!(version_text("lite-v1.2.3"), Some("1.2.3".into()));
+        assert_eq!(version_text("v3.1.1(Windows)"), Some("3.1.1".into()));
+        assert!(!is_prerelease("3.2.0-lite"));
+        assert!(is_prerelease("3.3.0-beta-lite"));
+        assert!(!is_newer_version("3.2.0-lite", "3.2.0-lite"));
         assert!(is_newer_version("1.0.0", "1.0.1"));
         assert!(!is_newer_version("1.0.1", "1.0.1"));
         assert!(is_newer_version("1.0.0-beta", "1.0.0"));
@@ -561,20 +581,62 @@ mod tests {
         }
     }
 
+    /// The releases as published: per platform up to 3.1.1, one tag from 3.2.0.
+    fn published() -> Value {
+        json!([
+            release("v3.1.1(Windows)", &["e-CALLISTO_FITS_Analyzer_v3.1.1_Setup.exe"], "2026-10-14"),
+            release("v3.1.1(Linux)", &["e-callisto-fits-analyzer_3.1.1_amd64.deb"], "2026-10-14"),
+            release("v3.1.0(MacOS)", &["e-callisto-fits-analyzer_3.1.0_macOS_arm64.dmg"], "2026-10-06"),
+            release(
+                "v3.2.0",
+                &[
+                    "e-CALLISTO_FITS_Analyzer_v3.2.0_Setup.exe",
+                    "e-callisto-fits-analyzer_3.2.0_amd64.deb",
+                    "e-callisto-fits-analyzer_3.2.0_macOS_arm64.dmg",
+                    "e-CALLISTO_FITS_Analyzer_v3.2.0-lite_Setup.exe",
+                    "e-callisto-fits-analyzer_3.2.0-lite_amd64.deb",
+                    "e-callisto-fits-analyzer_3.2.0-lite_macOS_arm64.dmg",
+                ],
+                "2026-11-01",
+            ),
+        ])
+    }
+
     #[test]
-    fn only_lite_releases_count() {
-        let list = json!([
-            release("v3.2.0", &["full.exe"], "2026-10-01"),
-            release("lite-v1.1.0", &["lite.exe", "lite.dmg"], "2026-10-02"),
-            release("lite-v1.0.0", &["lite.exe"], "2026-09-01"),
-        ]);
-        let r = evaluate(&list, "1.0.0", Platform::Windows).unwrap();
+    fn lite_takes_its_own_installers() {
+        assert!(is_lite_asset("e-CALLISTO_FITS_Analyzer_v3.2.0-lite_Setup.exe"));
+        assert!(is_lite_asset("e-callisto-fits-analyzer_3.3.0-beta-lite_amd64.deb"));
+        assert!(!is_lite_asset("e-CALLISTO_FITS_Analyzer_v3.2.0_Setup.exe"));
+        assert!(!is_lite_asset("satellite_3.2.0.exe"));
+        let list = published();
+        for (platform, file) in [
+            (Platform::Windows, "e-CALLISTO_FITS_Analyzer_v3.2.0-lite_Setup.exe"),
+            (Platform::Linux, "e-callisto-fits-analyzer_3.2.0-lite_amd64.deb"),
+            (Platform::MacOs, "e-callisto-fits-analyzer_3.2.0-lite_macOS_arm64.dmg"),
+        ] {
+            let r = evaluate(&list, "3.2.0-lite", platform).unwrap();
+            assert!(!r.update_available, "{platform:?}");
+            assert_eq!(r.latest_version, "3.2.0-lite");
+            assert_eq!(r.download_url, format!("https://dl/{file}"));
+        }
+        // A newer release, and a pre-release of Lite updating to its final release.
+        let mut newer = list.as_array().unwrap().clone();
+        newer.push(release(
+            "v3.3.0",
+            &["e-CALLISTO_FITS_Analyzer_v3.3.0_Setup.exe", "e-CALLISTO_FITS_Analyzer_v3.3.0-lite_Setup.exe"],
+            "2026-12-01",
+        ));
+        let mut beta = release("v3.4.0-beta", &["e-CALLISTO_FITS_Analyzer_v3.4.0-beta-lite_Setup.exe"], "2026-12-20");
+        beta["prerelease"] = json!(true);
+        newer.push(beta);
+        let r = evaluate(&Value::Array(newer.clone()), "3.2.0-lite", Platform::Windows).unwrap();
         assert!(r.update_available);
-        assert_eq!(r.latest_version, "1.1.0");
-        assert_eq!(r.download_url, "https://dl/lite.exe");
-        let mac = evaluate(&list, "1.1.0", Platform::MacOs).unwrap();
-        assert!(!mac.update_available);
-        assert!(evaluate(&list, "1.0.0", Platform::Linux).is_err());
+        assert_eq!(r.latest_version, "3.3.0-lite");
+        assert_eq!(r.download_url, "https://dl/e-CALLISTO_FITS_Analyzer_v3.3.0-lite_Setup.exe");
+        assert!(evaluate(&Value::Array(newer), "3.3.0-beta-lite", Platform::Windows).unwrap().update_available);
+        // Before Lite's first release there is nothing for it.
+        let old = json!([release("v3.1.1(Windows)", &["e-CALLISTO_FITS_Analyzer_v3.1.1_Setup.exe"], "2026-10-14")]);
+        assert!(evaluate(&old, "3.2.0-lite", Platform::Windows).is_err());
         assert_eq!(release_notes_preview(&r.notes, 1400), "What's New\n- Faster loading");
     }
 
@@ -583,5 +645,7 @@ mod tests {
         assert_eq!(format_bytes(512), "512 B");
         assert_eq!(format_bytes(1536), "1.5 KB");
         assert_eq!(suggest_filename("https://dl/a%20b.exe?x=1", "1.1.0", "1.0.0"), "a b.exe");
+        let name = suggest_filename("", "3.3.0-lite", "3.2.0-lite");
+        assert!(name.contains("3.3.0-lite") && !name.contains("-lite-lite"), "{name}");
     }
 }

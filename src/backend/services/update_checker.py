@@ -113,6 +113,17 @@ def _asset_extension_priority(platform_family: str) -> list[str]:
     return [".exe", ".dmg", ".deb", ".appimage", ".pkg", ".zip", ".tar.gz"]
 
 
+# Lite's installers share the release tags from v3.2.0 on and are marked in
+# their names: e-CALLISTO_FITS_Analyzer_v3.2.0-lite_Setup.exe,
+# e-callisto-fits-analyzer_3.2.0-lite_amd64.deb, ..._3.2.0-lite_macOS_arm64.dmg.
+_LITE_ASSET_RE = re.compile(r"[-_.]lite(?=[-_.])", re.IGNORECASE)
+
+
+def is_lite_asset(name: str) -> bool:
+    """Whether a release asset is an installer of e-CALLISTO FITS Analyzer Lite."""
+    return bool(_LITE_ASSET_RE.search(str(name or "")))
+
+
 def select_download_url(assets: list[dict[str, Any]], system_name: str | None = None) -> str | None:
     if not assets:
         return None
@@ -124,7 +135,7 @@ def select_download_url(assets: list[dict[str, Any]], system_name: str | None = 
     for asset in assets:
         name = str(asset.get("name") or "").strip()
         url = str(asset.get("browser_download_url") or "").strip()
-        if name and url:
+        if name and url and not is_lite_asset(name):
             lowered_assets.append((name.lower(), url))
 
     for ext in extension_priority:
@@ -152,11 +163,11 @@ def _github_get_json(url: str, timeout: float) -> Any:
 
 
 def _is_lite_release(payload: dict[str, Any]) -> bool:
-    """Releases of e-CALLISTO FITS Analyzer Lite, tagged ``lite-v…``.
+    """A release of e-CALLISTO FITS Analyzer Lite alone, tagged ``lite-…``.
 
-    Lite is released from this repository with its own version numbers
-    (starting at 1.0.0), so its releases must never be offered to, or
-    compared with, the full application.
+    Lite ships in the same tags as the full application (``v3.2.0``), its
+    installers told apart by name (``is_lite_asset``). A ``lite-`` tag is
+    never offered to, or compared with, the full application.
     """
     tag = str(payload.get("tag_name") or "").strip().lower()
     return tag.startswith("lite-")

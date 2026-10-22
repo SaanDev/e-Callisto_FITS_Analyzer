@@ -221,6 +221,71 @@ def test_check_for_updates_ignores_lite_releases(monkeypatch):
     assert result.release_url == "https://example.com/release/windows-v3.2.0"
 
 
+def _shared_release(version, *, lite_first=True, published="2026-11-01T12:00:00Z"):
+    """One tag carrying the full app's and Lite's installers (from v3.2.0)."""
+    main = [
+        f"e-CALLISTO_FITS_Analyzer_v{version}_Setup.exe",
+        f"e-callisto-fits-analyzer_{version}_amd64.deb",
+        f"e-callisto-fits-analyzer_{version}_macOS_arm64.dmg",
+    ]
+    lite = [
+        f"e-CALLISTO_FITS_Analyzer_v{version}-lite_Setup.exe",
+        f"e-callisto-fits-analyzer_{version}-lite_amd64.deb",
+        f"e-callisto-fits-analyzer_{version}-lite_macOS_arm64.dmg",
+    ]
+    names = lite + main if lite_first else main + lite
+    return {
+        "tag_name": f"v{version}",
+        "name": f"e-CALLISTO FITS Analyzer v{version}",
+        "html_url": f"https://example.com/release/v{version}",
+        "published_at": published,
+        "assets": [{"name": n, "browser_download_url": f"https://example.com/{n}"} for n in names],
+    }
+
+
+def test_is_lite_asset():
+    assert update_checker.is_lite_asset("e-CALLISTO_FITS_Analyzer_v3.2.0-lite_Setup.exe")
+    assert update_checker.is_lite_asset("e-callisto-fits-analyzer_3.3.0-beta-lite_amd64.deb")
+    assert not update_checker.is_lite_asset("e-CALLISTO_FITS_Analyzer_v3.2.0_Setup.exe")
+    assert not update_checker.is_lite_asset("satellite_3.2.0.exe")
+
+
+def test_check_for_updates_takes_main_installer_from_shared_tag(monkeypatch):
+    releases_payload = [
+        _shared_release("3.2.0"),
+        {
+            "tag_name": "v3.1.1(Windows)",
+            "name": "e-CALLISTO FITS Analyzer - Windows Release (v3.1.1)",
+            "html_url": "https://example.com/release/windows-v3.1.1",
+            "published_at": "2026-10-14T08:59:35Z",
+            "assets": [{"name": "e-CALLISTO_FITS_Analyzer_v3.1.1_Setup.exe",
+                        "browser_download_url": "https://example.com/e-CALLISTO_FITS_Analyzer_v3.1.1_Setup.exe"}],
+        },
+    ]
+    monkeypatch.setattr(update_checker.requests, "get", lambda url, headers=None, timeout=0: FakeResponse(releases_payload))
+
+    for system, name in (
+        ("Windows", "e-CALLISTO_FITS_Analyzer_v3.2.0_Setup.exe"),
+        ("Linux", "e-callisto-fits-analyzer_3.2.0_amd64.deb"),
+        ("Darwin", "e-callisto-fits-analyzer_3.2.0_macOS_arm64.dmg"),
+    ):
+        result = update_checker.check_for_updates("3.1.1", system_name=system)
+        assert result.status == "update_available", system
+        assert result.latest_version == "3.2.0"
+        assert result.download_url == f"https://example.com/{name}"
+
+
+def test_check_for_updates_skips_tag_with_only_lite_installers(monkeypatch):
+    lite_only = _shared_release("3.3.0", published="2026-12-01T12:00:00Z")
+    lite_only["assets"] = [a for a in lite_only["assets"] if update_checker.is_lite_asset(a["name"])]
+    releases_payload = [lite_only, _shared_release("3.2.0")]
+    monkeypatch.setattr(update_checker.requests, "get", lambda url, headers=None, timeout=0: FakeResponse(releases_payload))
+
+    result = update_checker.check_for_updates("3.2.0", system_name="Windows")
+    assert result.status == "up_to_date"
+    assert result.latest_version == "3.2.0"
+
+
 def test_check_for_updates_ignores_newer_release_from_other_platform(monkeypatch):
     releases_payload = [
         {
