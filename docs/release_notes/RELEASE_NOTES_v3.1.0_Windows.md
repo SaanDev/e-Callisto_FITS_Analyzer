@@ -1,6 +1,11 @@
-# e-CALLISTO FITS Analyzer v3.1.1 — Windows
+# e-CALLISTO FITS Analyzer v3.1.2 — Windows
 
-v3.1.1 is a bug-fix release of v3.1.0. It includes every v3.1.0 feature described below, plus the fixes listed under **Bug fixes in v3.1.1**.
+v3.1.2 is a bug-fix release of v3.1.0. It includes every v3.1.0 feature described below, plus the fixes listed under **Bug fixes in v3.1.2** and **Bug fixes in v3.1.1**.
+
+## Bug fixes in v3.1.2
+
+- **Update check ready for v3.2.0:** from v3.2.0 on, a single release carries the installers of both e-CALLISTO FITS Analyzer and e-CALLISTO FITS Analyzer Lite. **About → Check for Updates...** now ignores Lite's installers and Lite-only releases, and only offers a release that has this application's installer for your operating system, so updating downloads the full application rather than Lite.
+- When a downloaded update's file name cannot be read from its link, it is saved under the release installer's name (for example `e-CALLISTO_FITS_Analyzer_v3.2.0_Setup.exe`).
 
 ## Bug fixes in v3.1.1
 
@@ -57,14 +62,14 @@ v3.1.0 adds automatic ridge tracking and a choice of coronal density models to r
 
 ## Windows installation
 
-**Installer:** `e-CALLISTO_FITS_Analyzer_v3.1.1_Setup.exe`
+**Installer:** `e-CALLISTO_FITS_Analyzer_v3.1.2_Setup.exe`
 
 1. Download the installer from the release assets.
 2. Close any running instance of e-CALLISTO FITS Analyzer.
 3. Run the installer and approve the Windows administrator prompt.
 4. Follow the setup wizard, then launch the application from the Start menu or the optional desktop shortcut.
 
-The installer upgrades an existing v3.x installation, including v3.1.0 and the v3.1.0 beta, in place. It requires 64-bit Windows 10 or 11.
+The installer upgrades an existing v3.x installation, including v3.1.1, v3.1.0 and the v3.1.0 beta, in place. It requires 64-bit Windows 10 or 11.
 
 ## Notes
 

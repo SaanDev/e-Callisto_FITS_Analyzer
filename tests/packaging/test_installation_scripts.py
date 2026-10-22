@@ -315,7 +315,7 @@ def test_macos_signing_is_deferred_until_py2app_finishes():
     assert build_text.index('echo "==> Repairing bundled OpenSSL libraries"') < build_text.index(
         'echo "==> Signing the bundle"'
     )
-    assert 'TARGET_MACOS="${MACOSX_DEPLOYMENT_TARGET:-13.0}"' in build_text
+    assert 'TARGET_MACOS="${MACOSX_DEPLOYMENT_TARGET:-15.0}"' in build_text
     assert 'grep -q -- "--target-macos"' in build_text
     assert build_text.index('grep -q -- "--target-macos"') < build_text.index("Running py2app")
     assert "codesign --verify --deep --strict" in build_text
