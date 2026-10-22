@@ -28,7 +28,11 @@ LZMA_CANDIDATES = [
     "/opt/homebrew/opt/xz/lib/liblzma.5.dylib",
     "/usr/local/opt/xz/lib/liblzma.5.dylib",
 ]
+NATIVE_LIB_DIR = os.environ.get("MACOS_NATIVE_LIB_DIR", "")
+if NATIVE_LIB_DIR:
+    LZMA_CANDIDATES.insert(0, os.path.join(NATIVE_LIB_DIR, "liblzma.5.dylib"))
 LZMA_FRAMEWORKS = [path for path in LZMA_CANDIDATES if os.path.exists(path)]
+LZMA_FRAMEWORKS = LZMA_FRAMEWORKS[:1]
 
 def R(*parts: str) -> str:
     return os.path.join(PROJECT_ROOT, *parts)
@@ -61,11 +65,24 @@ def _replace_bundled_lzma(app_path: str) -> None:
     shutil.copy2(source_lzma, bundled_lzma)
 
 
+def _replace_bundled_sqlite(app_path: str) -> None:
+    if sys.platform != "darwin" or not NATIVE_LIB_DIR:
+        return
+    source = os.path.join(NATIVE_LIB_DIR, "libsqlite3.dylib")
+    if not os.path.isfile(source):
+        raise RuntimeError(f"Missing compatible SQLite library: {source}")
+    for destination in glob(os.path.join(app_path, "Contents", "Frameworks", "libsqlite3*.dylib")):
+        if os.path.islink(destination):
+            continue
+        shutil.copy2(source, destination)
+
+
 if py2app_cmd is not None:
     class Py2AppCommand(py2app_cmd):
         def run(self):
             super().run()
             _replace_bundled_lzma(os.path.join(self.dist_dir, f"{self.distribution.get_name()}.app"))
+            _replace_bundled_sqlite(os.path.join(self.dist_dir, f"{self.distribution.get_name()}.app"))
 
 
     CMDCLASS = {"py2app": Py2AppCommand}
@@ -292,7 +309,7 @@ OPTIONS = {
         "CFBundleShortVersionString": APP_VERSION,
         "CFBundleVersion": APP_VERSION,
         "CFBundleIdentifier": "com.sahansliyanage.callisto.fitsanalyzer",
-        "LSMinimumSystemVersion": os.environ.get("MACOSX_DEPLOYMENT_TARGET", "13.0"),
+        "LSMinimumSystemVersion": os.environ.get("MACOSX_DEPLOYMENT_TARGET", "15.0"),
     },
 }
 

@@ -1,5 +1,29 @@
 # Build the macOS app from source (beginner guide)
 
+## v3.1.2 release target
+
+The release build targets **macOS 15.0 or later**. Builds are specific to the
+build machine's architecture: `arm64` for Apple silicon or `x86_64` for Intel.
+The signing step checks every bundled Mach-O binary and rejects libraries
+whose minimum macOS version exceeds the deployment target.
+
+On a newer build host, Homebrew libraries may require a newer OS. Build private
+OpenSSL, liblzma, and SQLite copies targeting macOS 15 (requires CMake and the
+Apple command-line tools):
+
+```bash
+bash packaging/macos/build_compat_libs.sh
+MACOS_NATIVE_LIB_DIR="$PWD/.venv-macos-native/lib" \
+OPENSSL_LIB_DIR="$PWD/.venv-macos-native/lib" \
+MACOSX_DEPLOYMENT_TARGET=15.0 \
+bash packaging/macos/build_macos_dmg.sh
+```
+
+Use `PYTHON_BIN` to select a different Python environment for either command.
+The helper verifies source archive SHA-256 checksums and leaves Homebrew's
+installed libraries untouched. The binary scan and launch smoke checks do not
+replace a full functional test on a physical macOS 15 machine.
+
 This guide creates a new **e-Callisto FITS Analyzer.app** on the Mac where it
 will be used. No programming knowledge is required.
 
