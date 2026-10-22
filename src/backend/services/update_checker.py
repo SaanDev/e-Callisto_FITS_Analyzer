@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 3.1.1
+Version 3.1.2
 Sahan S Liyanage (sahanslst@gmail.com)
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 """
@@ -113,6 +113,17 @@ def _asset_extension_priority(platform_family: str) -> list[str]:
     return [".exe", ".dmg", ".deb", ".appimage", ".pkg", ".zip", ".tar.gz"]
 
 
+# Lite's installers share the release tags from v3.2.0 on and are marked in
+# their names: e-CALLISTO_FITS_Analyzer_v3.2.0-lite_Setup.exe,
+# e-callisto-fits-analyzer_3.2.0-lite_amd64.deb, ..._3.2.0-lite_macOS_arm64.dmg.
+_LITE_ASSET_RE = re.compile(r"[-_.]lite(?=[-_.])", re.IGNORECASE)
+
+
+def is_lite_asset(name: str) -> bool:
+    """Whether a release asset is an installer of e-CALLISTO FITS Analyzer Lite."""
+    return bool(_LITE_ASSET_RE.search(str(name or "")))
+
+
 def select_download_url(assets: list[dict[str, Any]], system_name: str | None = None) -> str | None:
     if not assets:
         return None
@@ -124,7 +135,7 @@ def select_download_url(assets: list[dict[str, Any]], system_name: str | None = 
     for asset in assets:
         name = str(asset.get("name") or "").strip()
         url = str(asset.get("browser_download_url") or "").strip()
-        if name and url:
+        if name and url and not is_lite_asset(name):
             lowered_assets.append((name.lower(), url))
 
     for ext in extension_priority:
@@ -151,12 +162,25 @@ def _github_get_json(url: str, timeout: float) -> Any:
     return response.json()
 
 
+def _is_lite_release(payload: dict[str, Any]) -> bool:
+    """A release of e-CALLISTO FITS Analyzer Lite alone, tagged ``lite-…``.
+
+    Lite ships in the same tags as the full application (``v3.2.0``), its
+    installers told apart by name (``is_lite_asset``). A ``lite-`` tag is
+    never offered to, or compared with, the full application.
+    """
+    tag = str(payload.get("tag_name") or "").strip().lower()
+    return tag.startswith("lite-")
+
+
 def _is_stable_release(payload: dict[str, Any]) -> bool:
     if not isinstance(payload, dict):
         return False
     if bool(payload.get("draft")):
         return False
     if bool(payload.get("prerelease")):
+        return False
+    if _is_lite_release(payload):
         return False
 
     tag = str(payload.get("tag_name") or "").strip()
@@ -237,12 +261,12 @@ def _pick_latest_stable_release_for_platform(timeout: float, system_name: str | 
     if not scored:
         raise ValueError("No parseable stable release version found.")
 
-    if platform_family != PLATFORM_UNKNOWN:
-        filtered = [item for item in scored if (item[1] > 0 or item[2] > 0)]
-        if not filtered:
-            raise ValueError(f"No release found for platform '{platform_family}'.")
-    else:
-        filtered = scored
+    # Only releases with the full app's installer for this platform, as Lite
+    # takes only those with its own: a shared tag may carry Lite's installer
+    # alone for a platform, or none yet while its assets upload.
+    filtered = [item for item in scored if item[2] > 0]
+    if not filtered:
+        raise ValueError(f"No release found for platform '{platform_family}'.")
 
     filtered.sort(key=lambda item: (item[0], item[1], item[2], item[3]), reverse=True)
     return filtered[0][-1]
