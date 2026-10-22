@@ -1796,6 +1796,9 @@ impl eframe::App for LiteApp {
             } else {
                 self.splash = None;
                 // `window.showMaximized()`, then the splash closes.
+                // On Wayland the non-resizable splash pinned the max size to its own
+                // size; clear it first, or the larger min size is a protocol error.
+                ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(egui::Vec2::INFINITY));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(900.0, 600.0)));
