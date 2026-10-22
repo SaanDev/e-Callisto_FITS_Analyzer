@@ -286,6 +286,23 @@ def test_check_for_updates_skips_tag_with_only_lite_installers(monkeypatch):
     assert result.latest_version == "3.2.0"
 
 
+def test_check_for_updates_skips_tag_naming_platform_without_main_installer(monkeypatch):
+    # Named for every platform, but only Lite's .dmg is there for macOS so far.
+    partial = _shared_release("3.3.0", published="2026-12-01T12:00:00Z")
+    partial["name"] = "e-CALLISTO FITS Analyzer v3.3.0 (Windows, Linux, macOS)"
+    partial["assets"] = [a for a in partial["assets"] if not a["name"].endswith("_macOS_arm64.dmg")
+                         or update_checker.is_lite_asset(a["name"])]
+    releases_payload = [partial, _shared_release("3.2.0")]
+    monkeypatch.setattr(update_checker.requests, "get", lambda url, headers=None, timeout=0: FakeResponse(releases_payload))
+
+    mac = update_checker.check_for_updates("3.2.0", system_name="Darwin")
+    assert mac.status == "up_to_date"
+    assert mac.latest_version == "3.2.0"
+    win = update_checker.check_for_updates("3.2.0", system_name="Windows")
+    assert win.status == "update_available"
+    assert win.download_url == "https://example.com/e-CALLISTO_FITS_Analyzer_v3.3.0_Setup.exe"
+
+
 def test_check_for_updates_ignores_newer_release_from_other_platform(monkeypatch):
     releases_payload = [
         {

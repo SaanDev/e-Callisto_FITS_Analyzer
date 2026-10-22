@@ -261,12 +261,12 @@ def _pick_latest_stable_release_for_platform(timeout: float, system_name: str | 
     if not scored:
         raise ValueError("No parseable stable release version found.")
 
-    if platform_family != PLATFORM_UNKNOWN:
-        filtered = [item for item in scored if (item[1] > 0 or item[2] > 0)]
-        if not filtered:
-            raise ValueError(f"No release found for platform '{platform_family}'.")
-    else:
-        filtered = scored
+    # Only releases with the full app's installer for this platform, as Lite
+    # takes only those with its own: a shared tag may carry Lite's installer
+    # alone for a platform, or none yet while its assets upload.
+    filtered = [item for item in scored if item[2] > 0]
+    if not filtered:
+        raise ValueError(f"No release found for platform '{platform_family}'.")
 
     filtered.sort(key=lambda item: (item[0], item[1], item[2], item[3]), reverse=True)
     return filtered[0][-1]
