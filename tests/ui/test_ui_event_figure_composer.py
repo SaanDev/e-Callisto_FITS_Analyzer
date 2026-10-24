@@ -188,7 +188,41 @@ def test_missing_data_is_fetched_in_a_worker(tmp_path, monkeypatch):
     assert len(state.thumbs) == 3
     assert all(item.source == "helioviewer" for item in state.thumbs.values())
     assert "Helioviewer" in composer.thumb_table.item(0, 2).text()
+    assert collect_event_figure_data(window, composer.current_spec(), state).sep is state.sep
     composer.close()
+    window.close()
+
+
+def test_series_fetched_for_another_event_are_not_drawn(tmp_path):
+    _app()
+    from tests.helpers.learmonth import write_test_callisto_fit
+
+    window = _main_with_data(tmp_path)
+    state = window._composer_state
+    spec = EventFigureSpec()
+    first = collect_event_figure_data(window, spec, state)
+    start = first.base_utc + timedelta(seconds=first.x_range[0])
+    end = first.base_utc + timedelta(seconds=first.x_range[1])
+    # What a fetch for this file leaves behind.
+    state.sep = SepSeries((start, end), (1.0, 2.0), (0.1, 0.2), "P≥10 MeV", "P≥100 MeV", "pfu", "GOES-18")
+    state.sep_for = (start, end)
+    state.goes = [("GOES-18 XRS-B", np.array([0.0, 1800.0]), np.array([1e-6, 2e-6]))]
+    state.goes_for = (first.base_utc, start, end)
+    again = collect_event_figure_data(window, spec, state)
+    assert again.sep is state.sep and again.goes == state.goes
+
+    # Another day's file: the old series would be drawn at the wrong times.
+    other = write_test_callisto_fit(
+        tmp_path / "BIR_20240511_120000_01.fit",
+        data=(np.arange(30 * 40) % 200).reshape(30, 40).astype(np.uint8),
+        freqs=np.linspace(80.0, 20.0, 30), time=np.linspace(0.0, 1800.0, 40),
+        date_obs="2024/05/11", time_obs="12:00:00",
+    )
+    window.open_fits_paths([str(other)])
+    _flush()
+    after = collect_event_figure_data(window, spec, state)
+    assert after.base_utc == datetime(2024, 5, 11, 12, 0)
+    assert after.sep is None and after.goes == []
     window.close()
 
 

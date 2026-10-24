@@ -344,10 +344,13 @@ def read_project(
                 if not is_safe_arcname(name):
                     raise ProjectFormatError(f"Project contains an unsafe file path: {name!r}")
 
-            target = extract_dir(meta) if callable(extract_dir) else extract_dir
             files: dict[str, str] = {}
-            if target is not None and members:
-                files = extract_members(zf, members, str(target))
+            if members:
+                # Only a project with embedded files touches the folder: a linked
+                # one may reference files unpacked there by an earlier open.
+                target = extract_dir(meta) if callable(extract_dir) else extract_dir
+                if target is not None:
+                    files = extract_members(zf, members, str(target))
     except zipfile.BadZipFile as e:
         raise ProjectFormatError("Not a valid project file (bad zip).") from e
 

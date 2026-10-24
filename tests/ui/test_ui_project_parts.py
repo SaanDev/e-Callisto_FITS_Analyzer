@@ -194,6 +194,36 @@ def test_an_embedded_solar_project_reopens_after_the_originals_are_gone(tmp_path
     other.close()
 
 
+def test_the_open_embedded_project_can_be_opened_again(tmp_path, monkeypatch):
+    """Reopening (to discard changes) while its frames are on screen and memory-mapped."""
+    _app()
+    loads = _sync_loader(monkeypatch)
+    window = MainWindow(theme=None)
+    _solar_with_picks(window, _frame_files(tmp_path, 3))
+    project = tmp_path / "reopen.efaproj"
+    assert window._write_project_to(str(project), "embed")
+    window._solar_data_analysis_window.close()
+    window.close()
+
+    other = MainWindow(theme=None)
+    assert other.open_project_path(str(project))
+    _flush()
+    first = list(loads[-1])
+    # Real FITS frames keep their files mapped; on Windows a mapped file can be
+    # neither deleted nor rewritten.
+    maps = [np.memmap(path, dtype=np.uint8, mode="r") for path in first]
+
+    assert other.open_project_path(str(project))
+    _flush()
+    second = list(loads[-1])
+    assert len(other._solar_data_analysis_window._map_frames) == 3
+    assert sorted(other._solar_data_analysis_window._measure.picks) == [0, 1]
+    assert {os.path.dirname(path) for path in second}.isdisjoint({os.path.dirname(path) for path in first})
+    del maps
+    other._solar_data_analysis_window.close()
+    other.close()
+
+
 def test_a_legacy_ecsolar_imports_as_an_untitled_dirty_project(tmp_path, monkeypatch):
     _app()
     _sync_loader(monkeypatch)

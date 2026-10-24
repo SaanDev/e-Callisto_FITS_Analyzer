@@ -120,6 +120,11 @@ class ComposerState(QObject):
         self.touched = False
         self.sep: SepSeries | None = None
         self.goes: list[tuple[str, Any, Any]] = []
+        #: What the fetched series were fetched for: ``(start, end)`` for the
+        #: protons, ``(base_utc, start, end)`` for the X-rays, whose x values are
+        #: seconds after ``base_utc``. Another event or range does not use them.
+        self.sep_for: tuple | None = None
+        self.goes_for: tuple | None = None
         self.thumbs: dict[str, ThumbnailImage] = {}
 
     def set_spec(self, spec: EventFigureSpec) -> None:
@@ -143,6 +148,8 @@ class ComposerState(QObject):
         self.touched = False
         self.sep = None
         self.goes = []
+        self.sep_for = None
+        self.goes_for = None
         self.thumbs = {}
         self.restored.emit()
 
@@ -223,13 +230,17 @@ def collect_event_figure_data(main: Any, spec: EventFigureSpec, state: ComposerS
                          main._goes_payload_field(item, "flux_wm2", [])))
     except Exception:
         goes = []
-    data.goes = goes or list(state.goes)
-    data.sep = state.sep
-
     start, end = spec.start, spec.end
     if (start is None or end is None) and data.base_utc is not None and data.x_range is not None:
         start = data.base_utc + timedelta(seconds=data.x_range[0])
         end = data.base_utc + timedelta(seconds=data.x_range[1])
+
+    # Series fetched here earlier count only for the event and range they were
+    # fetched for; after another file or range they would be drawn at the wrong times.
+    if not goes and state.goes_for == (data.base_utc, start, end):
+        goes = list(state.goes)
+    data.goes = goes
+    data.sep = state.sep if state.sep_for == (start, end) else None
 
     controller = getattr(main, "_event_context", None)
     if controller is not None and controller.result is not None and data.base_utc is not None and start and end:
@@ -286,7 +297,7 @@ class ComposerFetchWorker(QObject):
 
     @Slot()
     def run(self) -> None:
-        out: dict[str, Any] = {"thumbs": {}, "errors": []}
+        out: dict[str, Any] = {"thumbs": {}, "errors": [], "for": (self.base_utc, self.start, self.end)}
         try:
             if self.need_sep and self.start and self.end:
                 self.progress.emit("Fetching GOES proton flux…")
@@ -758,10 +769,13 @@ class EventFigureComposer(QMainWindow):
     @Slot(object)
     def _on_fetched(self, result: object) -> None:
         result = dict(result or {})
+        base_utc, start, end = result.get("for") or (None, None, None)
         if result.get("sep") is not None:
             self.state.sep = result["sep"]
+            self.state.sep_for = (start, end)
         if result.get("goes"):
             self.state.goes = list(result["goes"])
+            self.state.goes_for = (base_utc, start, end)
         self.state.thumbs.update(result.get("thumbs") or {})
         errors = result.get("errors") or []
         self.status_label.setText("Fetched." if not errors else "Fetched, with problems: " + "; ".join(errors))

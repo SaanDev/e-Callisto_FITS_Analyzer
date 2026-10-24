@@ -140,6 +140,27 @@ def test_a_selection_overrides_the_loaded_event_until_use_loaded_data(tmp_path):
     assert "FITS: a.fit" in card.event_label.text()
 
 
+def test_another_events_response_is_not_shown_under_the_new_event(tmp_path):
+    _app()
+    controller = GeomagneticController(loader=StubLoader(), cache_dir=tmp_path)
+    card = GeomagneticCard(controller)
+    controller.set_loaded_event(datetime(2024, 5, 10, 17), "FITS: a.fit")
+    controller.refresh()
+    assert _wait_for(lambda: controller.context is not None)
+    assert card.value_labels["storm"].text() == "Super storm"
+
+    # Same event hour: the response is still this event's and stays.
+    controller.set_loaded_event(datetime(2024, 5, 10, 17, 40), "FITS: b.fit")
+    assert controller.context is not None
+
+    # Another event, and automatic fetching is off: dashes, not the old numbers.
+    controller.select_event(datetime(2024, 5, 8, 5, 36), "Burst list: type II", "burst_list")
+    assert controller.context is None
+    assert card.value_labels["storm"].text() == "—" and card.value_labels["dst"].text() == "—"
+    assert controller.project_has_content() is False
+    controller.shutdown()
+
+
 def test_the_card_shows_the_summary(tmp_path):
     _app()
     controller = GeomagneticController(loader=StubLoader(), cache_dir=tmp_path)

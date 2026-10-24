@@ -159,6 +159,18 @@ def test_extract_dir_may_depend_on_the_meta(tmp_path):
     assert payload.files["solar/frames/0000_frame.fits"].endswith(os.path.join("abc123", "solar", "frames", "0000_frame.fits"))
 
 
+def test_a_linked_project_never_touches_the_extract_dir(tmp_path):
+    # A linked project may reference files an earlier open unpacked there.
+    path = tmp_path / "linked.efaproj"
+    write_project(str(path), meta={"project_id": "abc123", "storage": "link"})
+
+    def where(meta):
+        raise AssertionError("a project with no embedded files asked for an extract folder")
+
+    payload = read_project(str(path), extract_dir=where)
+    assert payload.files == {}
+
+
 @pytest.mark.parametrize(
     "name",
     ["../evil.fits", "/abs/evil.fits", "C:/evil.fits", "solar\\..\\evil", "solar//x", "./x", "meta.json", ""],

@@ -210,6 +210,7 @@ class GeomagneticController(QObject):
         if radio_interval is not None:
             self.radio_interval = (_naive_utc(radio_interval[0]), _naive_utc(radio_interval[1]))
         self._override = None
+        self._drop_stale_context()
         self.eventChanged.emit()
         self._schedule()
 
@@ -218,6 +219,7 @@ class GeomagneticController(QObject):
         if when is None:
             return
         self._override = EventChoice(_naive_utc(when), str(label), str(source))
+        self._drop_stale_context()
         self.eventChanged.emit()
         self._schedule()
 
@@ -225,6 +227,7 @@ class GeomagneticController(QObject):
         if self._override is None:
             return
         self._override = None
+        self._drop_stale_context()
         self.eventChanged.emit()
         self._schedule(force=True)
 
@@ -234,8 +237,23 @@ class GeomagneticController(QObject):
         if (before, after) == (self.before, self.after):
             return
         self.before, self.after = before, after
+        self._drop_stale_context()
         self.modified.emit()
         self._schedule(force=True)
+
+    def _drop_stale_context(self) -> None:
+        """Forget a response loaded for another event hour or span than the current one.
+
+        Otherwise its numbers stay under the new event's label until the new
+        fetch arrives, and for good if that fails or automatic fetching is off;
+        a project saved meanwhile would store them as the new event's.
+        """
+        if self.context is None or self.request_key() == self._context_key:
+            return
+        self.context = None
+        self._context_key = None
+        self.contextChanged.emit(None)
+        self.modified.emit()
 
     def request_key(self, choice: EventChoice | None = None) -> str:
         """De-duplication key: the event hour and the span."""

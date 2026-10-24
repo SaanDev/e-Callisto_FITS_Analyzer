@@ -421,12 +421,23 @@ class ProjectCoordinator(QObject):
 
     # ----------------------------------------------------------- opening
     def extract_dir_for(self, meta: dict[str, Any]) -> Path:
+        """A new, empty folder under ``<projects cache>/<project id>`` for this open.
+
+        Every open gets its own folder, so a reopened project never mixes in
+        stale files and never writes over the frames already on screen: loaded
+        FITS frames are memory-mapped, and Windows refuses to delete or rewrite
+        a mapped file. Earlier folders of the same project are removed where
+        they can be; one still in use is left for a later open.
+        """
         project_id = "".join(ch for ch in str(meta.get("project_id") or "") if ch.isalnum()) or "legacy"
-        target = projects_cache_root() / project_id
-        # Start clean so a reopened project never mixes in stale files.
-        if target.exists():
-            shutil.rmtree(target, ignore_errors=True)
-        return target
+        root = projects_cache_root() / project_id
+        if root.is_dir():
+            for old in root.iterdir():
+                # "legacy" holds an imported .ecsolar session's frames, which the
+                # imported project links to.
+                if old.is_dir() and old.name != "legacy":
+                    shutil.rmtree(old, ignore_errors=True)
+        return root / uuid.uuid4().hex[:12]
 
     def apply(self, payload: ProjectPayload) -> list[str]:
         """Restore every part the file holds and clear the ones it does not.
