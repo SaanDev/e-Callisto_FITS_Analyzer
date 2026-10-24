@@ -354,7 +354,10 @@ class EventContextController(QObject):
         count = sum(len(v) for v in getattr(result, "events", {}).values())
         message = f"Event context: {count} event(s)."
         if errors:
-            message += " Unavailable: " + ", ".join(SOURCE_LABELS.get(s, s) for s in errors) + "."
+            # A source here failed outright or came back partly (a CDAW month not published yet).
+            message += " Incomplete or unavailable: " + "; ".join(
+                f"{SOURCE_LABELS.get(s, s)} ({(str(m).splitlines() or [''])[0].rstrip('.')})" for s, m in errors.items()
+            ) + "."
         self.statusChanged.emit(message)
 
     @Slot(str, str)

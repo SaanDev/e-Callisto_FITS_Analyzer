@@ -314,3 +314,55 @@ def test_the_geomagnetic_part_is_saved_in_the_project(tmp_path, monkeypatch):
     figure = other._capture_geomagnetic_report_figure()
     assert figure.png_bytes
     other.close()
+
+
+def test_opening_a_radio_project_points_the_card_and_strip_at_its_event(tmp_path, monkeypatch):
+    """A project saved before any response was loaded (every v3.1 project) still targets its spectrum."""
+    _app()
+    from src.backend.session.project_session import read_project_meta
+    from src.ui.app.main_window import MainWindow
+
+    window = MainWindow(theme=None)
+    window.open_fits_paths([str(_fits(tmp_path))])
+    _flush()
+    project = tmp_path / "radio_only.efaproj"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(project), ""))
+    assert window.save_project_as()
+    meta = read_project_meta(str(project))
+    assert meta["parts"]["geomagnetic"] is False and meta["parts"]["event_context"] is False
+    window.close()
+
+    other = MainWindow(theme=None)
+    assert other.open_project_path(str(project))
+    _flush()
+    choice = other._geomagnetic.current_choice()
+    assert choice is not None and choice.when == datetime(2024, 5, 10, 17, 0)
+    assert choice.label.startswith("FITS: STAT_20240510")
+    assert other._event_context.range is not None
+    assert other._event_context.range[0] == datetime(2024, 5, 10, 17, 0)
+    other.close()
+
+
+def test_a_restored_selection_is_kept_when_the_project_opens(tmp_path, monkeypatch):
+    _app()
+    from src.ui.app.main_window import MainWindow
+
+    window = MainWindow(theme=None)
+    window.open_fits_paths([str(_fits(tmp_path))])
+    _flush()
+    window._geomagnetic.select_event(datetime(2024, 5, 8, 5, 36), "Burst list: type II", "burst_list")
+    window._geomagnetic.context = _context(datetime(2024, 5, 8, 5, 36), "Burst list: type II")
+    window._geomagnetic.modified.emit()
+    project = tmp_path / "with_selection.efaproj"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(project), ""))
+    assert window.save_project_as()
+    window.close()
+
+    other = MainWindow(theme=None)
+    assert other.open_project_path(str(project))
+    _flush()
+    choice = other._geomagnetic.current_choice()
+    assert choice.when == datetime(2024, 5, 8, 5, 36)
+    assert choice.label.startswith("Burst list: type II")
+    assert other._geomagnetic.context is not None
+    other.close()

@@ -18,7 +18,9 @@ Four catalogs, one record type (:class:`CatalogEvent`):
 
 Results are cached on disk as JSON, one file per source and UTC day. A day
 within the last 30 days is refetched after a day (catalogs are still being
-filled in); older days never expire. Qt-free.
+filled in); older days never expire. Days a catalog could not answer for (a
+CDAW month not published yet, a DONKI event type that failed) are never
+cached, so they are asked for again. Qt-free.
 """
 
 from __future__ import annotations
@@ -514,6 +516,31 @@ def cdaw_row_to_event(row: CMECatalogRow) -> CatalogEvent:
     )
 
 
+class CatalogFetch(list):
+    """Events, plus the days they do not cover.
+
+    ``incomplete`` holds ``(first_day, last_day, reason)`` for each part of the
+    range the archive could not answer for. The events that did come back are
+    still shown; those days are left out of the cache and the reason is
+    reported with the result.
+    """
+
+    def __init__(self, events: Iterable[CatalogEvent] = (), incomplete: Iterable[tuple[date, date, str]] = ()):
+        super().__init__(events)
+        self.incomplete: list[tuple[date, date, str]] = list(incomplete)
+
+    def notes(self) -> list[str]:
+        """Each reason once, in order."""
+        return list(dict.fromkeys(reason for _first, _last, reason in self.incomplete))
+
+
+def _month_days(year: int, month: int, start: datetime, end: datetime) -> tuple[date, date]:
+    """The days of one month that fall in ``[start, end]``."""
+    first = date(year, month, 1)
+    last = date(year + month // 12, month % 12 + 1, 1) - timedelta(days=1)
+    return max(first, start.date()), min(last, end.date())
+
+
 def _months(start: datetime, end: datetime) -> list[tuple[int, int]]:
     out = []
     year, month = start.year, start.month
@@ -525,21 +552,28 @@ def _months(start: datetime, end: datetime) -> list[tuple[int, int]]:
     return out
 
 
-def fetch_cdaw_cmes(start: datetime, end: datetime, *, cancel_cb: Callable[[], bool] | None = None, **_kwargs: Any) -> list[CatalogEvent]:
-    """CDAW CMEs whose first C2 appearance is in ``[start, end]``."""
+def fetch_cdaw_cmes(start: datetime, end: datetime, *, cancel_cb: Callable[[], bool] | None = None, **_kwargs: Any) -> CatalogFetch:
+    """CDAW CMEs whose first C2 appearance is in ``[start, end]``.
+
+    CDAW publishes each month weeks to months later; an unpublished month, like
+    one that failed to load, is marked incomplete rather than read as no CMEs.
+    """
     events: list[CatalogEvent] = []
     errors = []
+    incomplete: list[tuple[date, date, str]] = []
     for year, month in _months(start, end):
         if cancel_cb is not None and cancel_cb():
             raise CatalogCancelled("Catalog load cancelled.")
         outcome = fetch_catalog_outcome(str(year), f"{month:02d}", None, max_attempts=2)
-        if outcome.status == STATUS_FETCH_ERROR:
-            errors.append(outcome.message)
+        if outcome.status in (STATUS_FETCH_ERROR, STATUS_MONTH_UNPUBLISHED):
+            if outcome.status == STATUS_FETCH_ERROR:
+                errors.append(outcome.message)
+            incomplete.append((*_month_days(year, month, start, end), outcome.message))
             continue
         events.extend(cdaw_row_to_event(row) for row in outcome.rows if start <= row.timestamp <= end)
     if errors and not events:
         raise CatalogError("; ".join(errors))
-    return sorted(events, key=lambda event: event.start)
+    return CatalogFetch(sorted(events, key=lambda event: event.start), incomplete)
 
 
 # ---------------------------------------------------------------------- DONKI
@@ -622,7 +656,8 @@ def fetch_donki(
     session: Any = None,
     cancel_cb: Callable[[], bool] | None = None,
     **_kwargs: Any,
-) -> list[CatalogEvent]:
+) -> CatalogFetch:
+    """DONKI events of every kind; when one kind fails, the whole range is incomplete."""
     client = session or requests
     headers = {"User-Agent": f"e-Callisto-FITS-Analyzer/{APP_VERSION}"}
     params = {"startDate": f"{start:%Y-%m-%d}", "endDate": f"{end:%Y-%m-%d}"}
@@ -645,7 +680,8 @@ def fetch_donki(
         events.extend(parse_donki(kind, payload))
     if errors and not events:
         raise CatalogError("; ".join(errors))
-    return sorted(events, key=lambda event: event.start)
+    incomplete = [(start.date(), end.date(), "; ".join(errors))] if errors else []
+    return CatalogFetch(sorted(events, key=lambda event: event.start), incomplete)
 
 
 def link_donki_events(events: Sequence[CatalogEvent]) -> dict[str, CatalogEvent]:
@@ -710,8 +746,14 @@ FETCHERS: dict[str, Callable[..., list[CatalogEvent]]] = {
 }
 
 
+#: Cache layout version. v1 (the first v3.2 builds) cached unpublished CDAW
+#: months and failed DONKI kinds as empty days that never expired; v2 starts
+#: afresh so those days are asked for again.
+CACHE_VERSION = "v2"
+
+
 def _day_path(cache_dir: Path, source: str, day: date) -> Path:
-    return Path(cache_dir) / "event_catalogs" / source / f"{day:%Y-%m-%d}.json"
+    return Path(cache_dir) / "event_catalogs" / CACHE_VERSION / source / f"{day:%Y-%m-%d}.json"
 
 
 def _day_is_fresh(path: Path, day: date, *, now: datetime) -> bool:
@@ -745,11 +787,12 @@ def load_catalog(
     now: datetime | None = None,
     session: Any = None,
     cancel_cb: Callable[[], bool] | None = None,
-) -> list[CatalogEvent]:
+) -> CatalogFetch:
     """Events of one source overlapping ``[start, end]``, through the per-day cache.
 
     Missing or stale days are fetched as contiguous ranges, and each fetched
     day is written back, empty days included (an empty day is an answer too).
+    Days the fetcher marks incomplete are not written; the result carries them.
     """
     start, end = _naive_utc(start), _naive_utc(end)
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
@@ -774,17 +817,23 @@ def load_catalog(
             ranges[-1] = (ranges[-1][0], day)
         else:
             ranges.append((day, day))
+    incomplete: list[tuple[date, date, str]] = []
     for first, last in ranges:
         if cancel_cb is not None and cancel_cb():
             raise CatalogCancelled("Catalog load cancelled.")
         range_start = datetime(first.year, first.month, first.day)
         range_end = datetime(last.year, last.month, last.day, 23, 59, 59)
         fetched = fetcher(range_start, range_end, session=session, cancel_cb=cancel_cb)
+        gaps = list(getattr(fetched, "incomplete", None) or [])
+        incomplete.extend(gaps)
         by_day: dict[date, list[CatalogEvent]] = {}
         for event in fetched:
             by_day.setdefault(event.start.date(), []).append(event)
         day = first
         while day <= last:
+            if any(gap_first <= day <= gap_last for gap_first, gap_last, _reason in gaps):
+                day += timedelta(days=1)
+                continue
             path = _day_path(Path(cache_dir), source, day)
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -797,7 +846,7 @@ def load_catalog(
         events.extend(fetched)
 
     unique = {(e.kind, e.source, e.start, e.label): e for e in events}
-    return events_in_window(unique.values(), start, end)
+    return CatalogFetch(events_in_window(unique.values(), start, end), incomplete)
 
 
 @dataclass
@@ -874,10 +923,15 @@ def load_event_context(
                 pass
         fetcher = (fetchers or {}).get(source)
         try:
-            result.events[source] = load_catalog(
+            events = load_catalog(
                 source, query_start, query_end, cache_dir=cache_dir, fetcher=fetcher,
                 now=now, session=session, cancel_cb=cancel_cb,
             )
+            result.events[source] = list(events)
+            # Partly answered: what came back is shown, and the lane says what is missing.
+            notes = events.notes() if isinstance(events, CatalogFetch) else []
+            if notes:
+                result.errors[source] = "; ".join(notes)
         except CatalogCancelled:
             raise
         except Exception as exc:

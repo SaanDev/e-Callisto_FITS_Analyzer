@@ -157,7 +157,7 @@ def test_the_day_cache_is_used_and_recent_days_expire(tmp_path, monkeypatch):
     assert len(calls) == 1 and [e.start for e in again] == [e.start for e in first]
 
     # Within the last 30 days a cached day is refetched once it is a day old.
-    path = tmp_path / "event_catalogs" / ec.SOURCE_GOES / "2024-05-10.json"
+    path = tmp_path / "event_catalogs" / ec.CACHE_VERSION / ec.SOURCE_GOES / "2024-05-10.json"
     old = path.stat().st_mtime - 2 * 86400
     os.utime(path, (old, old))
     ec.load_catalog(ec.SOURCE_GOES, *window, cache_dir=tmp_path, fetcher=fetcher, now=now)
@@ -167,6 +167,72 @@ def test_the_day_cache_is_used_and_recent_days_expire(tmp_path, monkeypatch):
     os.utime(path, (old, old))
     ec.load_catalog(ec.SOURCE_GOES, *window, cache_dir=tmp_path, fetcher=fetcher, now=datetime(2025, 1, 1))
     assert len(calls) == 2
+
+
+def test_days_a_fetcher_could_not_answer_for_are_not_cached(tmp_path):
+    calls = []
+
+    def fetcher(start, end, **kwargs):
+        calls.append((start, end))
+        event = ec.CatalogEvent(ec.KIND_CME, ec.SOURCE_CDAW, datetime(2024, 5, 10, 7, 12), label="CME")
+        return ec.CatalogFetch([event], [(datetime(2024, 5, 11).date(), datetime(2024, 5, 11).date(), "not yet")])
+
+    now = datetime(2025, 1, 1)  # both days are old enough never to expire
+    window = (datetime(2024, 5, 10, 5), datetime(2024, 5, 11, 7))
+    first = ec.load_catalog(ec.SOURCE_CDAW, *window, cache_dir=tmp_path, fetcher=fetcher, now=now)
+    assert [e.label for e in first] == ["CME"]  # what came back is still shown
+    assert first.notes() == ["not yet"]
+    folder = tmp_path / "event_catalogs" / ec.CACHE_VERSION / ec.SOURCE_CDAW
+    assert sorted(p.name for p in folder.iterdir()) == ["2024-05-10.json"]
+
+    # Only the unanswered day is asked for again; the answered one comes from the cache.
+    again = ec.load_catalog(ec.SOURCE_CDAW, *window, cache_dir=tmp_path, fetcher=fetcher, now=now)
+    assert calls[-1] == (datetime(2024, 5, 11), datetime(2024, 5, 11, 23, 59, 59))
+    assert [e.label for e in again] == ["CME"]
+
+
+def test_an_unpublished_cdaw_month_is_incomplete_not_empty(tmp_path, monkeypatch):
+    def outcome(year, month, day, **kwargs):
+        if (year, month) == ("2026", "09"):
+            return ec.FetchOutcome(ec.STATUS_MONTH_UNPUBLISHED, [], "CME catalog for 2026-09 is not published yet.")
+        return ec.FetchOutcome(ec.STATUS_NO_DATA, [], "No CME data available for 2026-08.")
+
+    monkeypatch.setattr(ec, "fetch_catalog_outcome", outcome)
+    fetched = ec.fetch_cdaw_cmes(datetime(2026, 8, 30), datetime(2026, 9, 2, 23, 59, 59))
+    assert list(fetched) == []
+    # August answered (no CMEs); only the September days are incomplete.
+    assert fetched.incomplete == [
+        (datetime(2026, 9, 1).date(), datetime(2026, 9, 2).date(), "CME catalog for 2026-09 is not published yet.")
+    ]
+
+    result = ec.load_event_context(
+        datetime(2026, 9, 1, 6), datetime(2026, 9, 1, 7), sources=(ec.SOURCE_CDAW,),
+        cache_dir=tmp_path, now=datetime(2026, 12, 1),
+    )
+    assert result.events[ec.SOURCE_CDAW] == []
+    assert "not published yet" in result.errors[ec.SOURCE_CDAW]
+    assert not (tmp_path / "event_catalogs" / ec.CACHE_VERSION / ec.SOURCE_CDAW / "2026-09-01.json").exists()
+
+
+def test_a_failed_donki_kind_makes_the_range_incomplete():
+    class Response:
+        def __init__(self, status, payload):
+            self.status_code = status
+            self.payload = payload
+            self.text = json.dumps(payload)
+
+        def json(self):
+            return self.payload
+
+    class Session:
+        def get(self, url, params=None, **kwargs):
+            if url.endswith("/IPS"):
+                return Response(503, [])
+            return Response(200, [{"activityID": "2024-05-10T06:48:00-CME-001", "startTime": "2024-05-10T06:48Z"}])
+
+    fetched = ec.fetch_donki(datetime(2024, 5, 8), datetime(2024, 5, 12, 23), kinds=("CME", "IPS"), session=Session())
+    assert [e.kind for e in fetched] == [ec.KIND_CME]
+    assert fetched.incomplete == [(datetime(2024, 5, 8).date(), datetime(2024, 5, 12).date(), "DONKI IPS: HTTP 503")]
 
 
 def test_one_failing_source_does_not_stop_the_others(tmp_path):

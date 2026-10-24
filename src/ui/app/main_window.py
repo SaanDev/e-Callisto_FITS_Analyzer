@@ -11079,6 +11079,25 @@ class MainWindow(QMainWindow):
         self._geomagnetic.set_loaded_event(ctx["start_utc"], label, radio_interval=(ctx["start_utc"], ctx["end_utc"]))
         self._event_context.set_range(ctx["start_utc"], ctx["end_utc"])
 
+    def _target_events_after_restore(self) -> None:
+        """After a project or snapshot opens, point what it did not restore at the spectrum.
+
+        A restored geomagnetic response or event strip keeps its own event (an
+        override from the burst list included); one the file did not hold gets
+        the restored spectrum's event, exactly as loading the FITS file would.
+        """
+        try:
+            ctx = self._goes_overlay_request_context()
+        except Exception:
+            ctx = None
+        if not ctx:
+            return
+        if self._geomagnetic.current_choice() is None:
+            label = f"FITS: {os.path.basename(str(getattr(self, 'filename', '') or 'loaded data'))}"
+            self._geomagnetic.set_loaded_event(ctx["start_utc"], label, radio_interval=(ctx["start_utc"], ctx["end_utc"]))
+        if self._event_context.range is None:
+            self._event_context.set_range(ctx["start_utc"], ctx["end_utc"])
+
     def _on_external_event_selected(self, when, label: str, source: str = SOURCE_DOWNLOADER) -> None:
         """A burst-list or downloader selection overrides the loaded data's event."""
         if when is None:
@@ -11480,6 +11499,7 @@ class MainWindow(QMainWindow):
             return False
 
         self._project_coordinator.apply(payload)
+        self._target_events_after_restore()
         self._set_project_clean(None)
         if mark_dirty:
             self._mark_project_dirty()
@@ -15136,6 +15156,7 @@ class MainWindow(QMainWindow):
             return False
 
         restored = coordinator.apply(payload)
+        self._target_events_after_restore()
         self._project_storage = project_storage(payload.meta)
         self._set_project_clean(path)
         self._report_unrestored_parts("Open Project")
