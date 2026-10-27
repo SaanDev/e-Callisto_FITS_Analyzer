@@ -217,8 +217,9 @@ fn platform_score(r: &Value, platform: Platform) -> (i32, i32) {
     (tag_score, select_download_url(&assets, platform).is_some() as i32)
 }
 
-/// `_pick_latest_stable_release_for_platform` over a release list.
-pub fn pick_release(releases: &Value, platform: Platform) -> Result<Value> {
+/// `_pick_latest_stable_release_for_platform` over a release list; `None`
+/// when no release has a Lite installer for this platform.
+pub fn pick_release(releases: &Value, platform: Platform) -> Result<Option<Value>> {
     let Some(list) = releases.as_array() else { bail!("Unexpected release list payload from GitHub API.") };
     let stable: Vec<&Value> = list.iter().filter(|r| is_stable(r)).collect();
     if stable.is_empty() {
@@ -245,21 +246,19 @@ pub fn pick_release(releases: &Value, platform: Platform) -> Result<Value> {
     // per-platform releases before 3.2.0 have none.
     scored.retain(|x| x.2 > 0);
     if scored.is_empty() {
-        let name = match platform {
-            Platform::Windows => "windows",
-            Platform::MacOs => "macos",
-            Platform::Linux => "linux",
-            Platform::Unknown => "unknown",
-        };
-        bail!("No release found for platform '{name}'.");
+        return Ok(None);
     }
     scored.sort_by(|a, b| (&b.0, b.1, b.2, &b.3).cmp(&(&a.0, a.1, a.2, &a.3)));
-    Ok(scored[0].4.clone())
+    Ok(Some(scored[0].4.clone()))
 }
 
 /// `check_for_updates` on a release list (for tests and the worker).
 pub fn evaluate(releases: &Value, current_version: &str, platform: Platform) -> Result<UpdateCheck> {
-    let r = pick_release(releases, platform)?;
+    // No Lite installer for this platform yet (before Lite's first release,
+    // or while a release's assets upload): nothing newer, so up to date.
+    let Some(r) = pick_release(releases, platform)? else {
+        return Ok(UpdateCheck { current_version: current_version.to_owned(), ..UpdateCheck::default() });
+    };
     let numbers = release_version(&r).context("Could not parse release version from GitHub response.")?;
     let latest = format!("{numbers}{LITE_SUFFIX}");
     let release_url = s(&r, "html_url");
@@ -288,15 +287,20 @@ fn agent(timeout: Duration) -> ureq::Agent {
 
 /// `check_for_updates`: asks GitHub (8 s timeout).
 pub fn check_for_updates(current_version: &str) -> Result<UpdateCheck> {
+    check_at(&releases_url(), current_version, Platform::current())
+}
+
+/// `check_for_updates` against a release list at `url`.
+fn check_at(url: &str, current_version: &str, platform: Platform) -> Result<UpdateCheck> {
     let mut resp = agent(Duration::from_secs(8))
-        .get(&releases_url())
+        .get(url)
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .call()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let text = resp.body_mut().with_config().limit(32 * 1024 * 1024).read_to_string()?;
     let releases: Value = serde_json::from_str(&text)?;
-    evaluate(&releases, current_version, Platform::current())
+    evaluate(&releases, current_version, platform)
 }
 
 /// `_extract_whats_new_section`: the "What's New" section of release
@@ -634,10 +638,127 @@ mod tests {
         assert_eq!(r.latest_version, "3.3.0-lite");
         assert_eq!(r.download_url, "https://dl/e-CALLISTO_FITS_Analyzer_v3.3.0-lite_Setup.exe");
         assert!(evaluate(&Value::Array(newer), "3.3.0-beta-lite", Platform::Windows).unwrap().update_available);
-        // Before Lite's first release there is nothing for it.
+        // Before Lite's first release there is nothing newer: up to date.
         let old = json!([release("v3.1.1(Windows)", &["e-CALLISTO_FITS_Analyzer_v3.1.1_Setup.exe"], "2026-10-14")]);
-        assert!(evaluate(&old, "3.2.0-lite", Platform::Windows).is_err());
+        let none = evaluate(&old, "3.2.0-lite", Platform::Windows).unwrap();
+        assert!(!none.update_available);
+        assert_eq!(none.current_version, "3.2.0-lite");
+        assert!(none.download_url.is_empty());
+        // Nor while a release's Lite installers are still uploading.
+        let uploading = json!([release("v3.2.0", &["e-CALLISTO_FITS_Analyzer_v3.2.0_Setup.exe"], "2026-11-01")]);
+        assert!(!evaluate(&uploading, "3.2.0-lite", Platform::Windows).unwrap().update_available);
+        // A payload that is not a release list is still an error.
+        assert!(evaluate(&json!({"message": "API rate limit exceeded"}), "3.2.0-lite", Platform::Windows).is_err());
         assert_eq!(release_notes_preview(&r.notes, 1400), "What's New\n- Faster loading");
+    }
+
+    /// A dummy GitHub on localhost: answers each path in `routes` with its
+    /// body (404 otherwise) and returns its base URL.
+    fn serve(routes: Vec<(&'static str, Vec<u8>)>) -> String {
+        use std::io::{BufRead, BufReader};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut first = String::new();
+                reader.read_line(&mut first).unwrap();
+                let mut line = String::new();
+                while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
+                    line.clear();
+                }
+                let path = first.split_whitespace().nth(1).unwrap_or("").to_owned();
+                let (status, body) = match routes.iter().find(|(p, _)| *p == path) {
+                    Some((_, b)) => ("200 OK", b.as_slice()),
+                    None => ("404 Not Found", &b"missing"[..]),
+                };
+                let head = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let _ = stream.write_all(head.as_bytes()).and_then(|_| stream.write_all(body));
+            }
+        });
+        base
+    }
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("callisto-lite-updates-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A dummy installer bigger than one read buffer, so progress is reported in steps.
+    fn installer_bytes(tag: &[u8]) -> Vec<u8> {
+        tag.iter().copied().cycle().take(300 * 1024 + 17).collect()
+    }
+
+    #[test]
+    fn dummy_release_checked_and_downloaded() {
+        let lite = installer_bytes(b"LITE");
+        let full = installer_bytes(b"FULL");
+        // Installers on one server; the release list, linking to them, on another.
+        let base = serve(vec![
+            ("/dl/e-CALLISTO_FITS_Analyzer_v3.2.1_Setup.exe", full),
+            ("/dl/e-CALLISTO_FITS_Analyzer_v3.2.1-lite_Setup.exe", lite.clone()),
+        ]);
+        let asset = |n: &str| json!({"name": n, "browser_download_url": format!("{base}/dl/{n}")});
+        let list = json!([
+            {"tag_name": "v3.2.1", "name": "e-CALLISTO FITS Analyzer v3.2.1", "draft": false, "prerelease": false,
+             "published_at": "2026-12-01", "html_url": "https://github.com/x/releases/tag/v3.2.1", "body": "## What's New\n- Fixes",
+             // The full app's installer first, as uploaded.
+             "assets": [asset("e-CALLISTO_FITS_Analyzer_v3.2.1_Setup.exe"), asset("e-CALLISTO_FITS_Analyzer_v3.2.1-lite_Setup.exe")]},
+            release("v3.2.0", &["e-CALLISTO_FITS_Analyzer_v3.2.0_Setup.exe", "e-CALLISTO_FITS_Analyzer_v3.2.0-lite_Setup.exe"], "2026-11-01"),
+        ]);
+        let api = serve(vec![("/releases", serde_json::to_vec(&list).unwrap())]);
+
+        // The check over HTTP, as the app makes it.
+        let r = check_at(&format!("{api}/releases"), "3.2.0-lite", Platform::Windows).unwrap();
+        assert!(r.update_available);
+        assert_eq!(r.latest_version, "3.2.1-lite");
+        assert_eq!(r.download_url, format!("{base}/dl/e-CALLISTO_FITS_Analyzer_v3.2.1-lite_Setup.exe"));
+        // Already on it: up to date.
+        assert!(!check_at(&format!("{api}/releases"), "3.2.1-lite", Platform::Windows).unwrap().update_available);
+
+        // The download: Lite's installer, whole, under its release name.
+        let dir = scratch_dir("download");
+        let dest = dir.join(suggest_filename(&r.download_url, &r.latest_version, "3.2.0-lite"));
+        assert_eq!(dest.file_name().unwrap(), "e-CALLISTO_FITS_Analyzer_v3.2.1-lite_Setup.exe");
+        std::fs::write(&dest, b"an older download").unwrap();
+        let mut steps = Vec::new();
+        let done = download(&r.download_url, &dest, &mut |d, t| steps.push((d, t)), &|| false).unwrap();
+        assert!(matches!(done, Download::Done(ref p) if *p == dest));
+        assert_eq!(std::fs::read(&dest).unwrap(), lite, "replaced with Lite's installer");
+        let total = lite.len() as u64;
+        assert_eq!(steps.first(), Some(&(0, total)));
+        assert_eq!(steps.last(), Some(&(total, total)));
+        assert!(steps.len() > 2 && steps.windows(2).all(|w| w[0].0 <= w[1].0), "{steps:?}");
+        assert!(!PathBuf::from(format!("{}.part", dest.display())).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dummy_download_cancelled_or_failed_leaves_nothing() {
+        let base = serve(vec![("/dl/e-CALLISTO_FITS_Analyzer_v3.2.1-lite_Setup.exe", installer_bytes(b"LITE"))]);
+        let dir = scratch_dir("cancel");
+        let dest = dir.join("e-CALLISTO_FITS_Analyzer_v3.2.1-lite_Setup.exe");
+        let part = PathBuf::from(format!("{}.part", dest.display()));
+
+        // Cancelled after the first chunk.
+        let calls = std::cell::Cell::new(0);
+        let url = format!("{base}/dl/e-CALLISTO_FITS_Analyzer_v3.2.1-lite_Setup.exe");
+        let out = download(&url, &dest, &mut |_, _| {}, &|| {
+            calls.set(calls.get() + 1);
+            calls.get() > 1
+        })
+        .unwrap();
+        assert!(matches!(out, Download::Cancelled));
+        assert!(!dest.exists() && !part.exists());
+
+        // A missing asset (404) is an error, with no partial file left.
+        assert!(download(&format!("{base}/dl/gone.exe"), &dest, &mut |_, _| {}, &|| false).is_err());
+        assert!(!dest.exists() && !part.exists());
+        // So is an unreachable release list.
+        assert!(check_at(&format!("{base}/no-such-list"), "3.2.0-lite", Platform::Windows).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
