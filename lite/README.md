@@ -1,8 +1,7 @@
 # e-CALLISTO FITS Analyzer Lite
 
 The radio part of the e-CALLISTO FITS Analyzer, written in Rust, with the same
-user interface as the full app. Scope, decisions and phases are in
-[PLAN.md](PLAN.md).
+user interface as the full app.
 
 ## Layout
 
