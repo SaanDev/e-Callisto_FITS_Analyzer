@@ -209,7 +209,7 @@ SIDEBAR_SECTIONS_SETTINGS_KEY = "ui/sidebar_sections_solar"
 # The solar image analysis window is a young, experimental feature; the title
 # and About dialog flag it as a beta so users calibrate their expectations and
 # know where to report problems.
-SOLAR_WINDOW_VERSION = "v1.6 beta"
+SOLAR_WINDOW_VERSION = "v1.7"
 SOLAR_WINDOW_TITLE = f"Solar Image Analysis (Experimental) {SOLAR_WINDOW_VERSION}"
 SOLAR_ISSUES_URL = "https://github.com/SaanDev/e-Callisto_FITS_Analyzer/issues"
 
