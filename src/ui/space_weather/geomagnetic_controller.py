@@ -33,7 +33,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from PySide6.QtCore import QObject, QStandardPaths, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, QSettings, QStandardPaths, QThread, QTimer, Signal, Slot
 
 from src.backend.space_weather.geomagnetic_context import (
     DEFAULT_AFTER,
@@ -50,6 +50,36 @@ DEBOUNCE_MS = 600
 #: Set to "1" to stop data loads and selections from fetching automatically
 #: (the test suite does; Refresh still fetches).
 AUTOFETCH_ENV = "E_CALLISTO_DISABLE_GEOMAGNETIC_AUTOFETCH"
+
+#: The user's switch, Solar Events → Fetch Event Context Automatically (on by
+#: default). Off, data loads and selections fetch nothing for the geomagnetic
+#: card and the event strip; Refresh and the project report still do.
+AUTOFETCH_KEY = "space_weather/fetch_automatically"
+
+
+def _make_settings() -> QSettings:
+    """Persistent settings (a module-level factory so tests can redirect it)."""
+    from src.version import APP_NAME, APP_ORG
+
+    return QSettings(APP_ORG, APP_NAME)
+
+
+def autofetch_preference() -> bool:
+    """The user's Fetch Event Context Automatically choice."""
+    try:
+        value = _make_settings().value(AUTOFETCH_KEY, "true")
+    except Exception:
+        return True
+    return str(value).strip().lower() not in ("0", "false", "no")
+
+
+def set_autofetch_preference(enabled: bool) -> None:
+    try:
+        settings = _make_settings()
+        settings.setValue(AUTOFETCH_KEY, "true" if enabled else "false")
+        settings.sync()
+    except Exception:
+        pass
 
 #: Fetch threads and their workers, kept alive independently of the controller:
 #: a QThread destroyed while running aborts the process, and a controller can be
@@ -178,8 +208,19 @@ class GeomagneticController(QObject):
 
     # ------------------------------------------------------------- the event
     @staticmethod
-    def autofetch_enabled() -> bool:
+    def fetching_allowed() -> bool:
+        """False only when the environment forbids fetching (the test suite)."""
         return os.environ.get(AUTOFETCH_ENV, "").strip() != "1"
+
+    @classmethod
+    def autofetch_enabled(cls) -> bool:
+        """Whether loads and selections fetch on their own: allowed, and the user's switch is on."""
+        return cls.fetching_allowed() and autofetch_preference()
+
+    def autofetch_changed(self) -> None:
+        """The user's switch changed: fetch what is now due, or say Refresh is needed."""
+        if self.current_choice() is not None and self.request_key() != self._context_key:
+            self._schedule()
 
     def current_choice(self) -> EventChoice | None:
         return self._override or self._loaded

@@ -255,8 +255,22 @@ class EventContextController(QObject):
             pass
 
     @staticmethod
-    def autofetch_enabled() -> bool:
+    def fetching_allowed() -> bool:
+        """False only when the environment forbids fetching (the test suite)."""
         return os.environ.get(AUTOFETCH_ENV, "").strip() != "1"
+
+    @classmethod
+    def autofetch_enabled(cls) -> bool:
+        """Whether a new data range fetches on its own: allowed, and the user's switch is on."""
+        from src.ui.space_weather.geomagnetic_controller import autofetch_preference
+
+        return cls.fetching_allowed() and autofetch_preference()
+
+    def autofetch_changed(self) -> None:
+        """The user's switch changed: fetch the shown range if it is now due."""
+        if self.enabled and self.autofetch_enabled() and self.range is not None \
+                and self.request_key() != self._result_key:
+            self._debounce.start()
 
     # ------------------------------------------------------------ state
     def set_enabled(self, enabled: bool) -> None:

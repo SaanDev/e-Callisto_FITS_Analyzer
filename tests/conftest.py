@@ -82,6 +82,7 @@ def _isolate_qsettings(tmp_path, monkeypatch):
         "src.ui.solar.sunpy_solar_viewer",
         "src.ui.app.main_window",
         "src.ui.space_weather.geomagnetic_response_window",
+        "src.ui.space_weather.geomagnetic_controller",
         "src.ui.app.event_context_strip",
     ):
         module = sys.modules.get(module_name)

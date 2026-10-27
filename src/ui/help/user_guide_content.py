@@ -192,7 +192,7 @@ on the right, the live cursor readout (time, frequency, intensity) and the updat
 <tr><td><b>Save Project</b> ({_kbd('Ctrl+S')})</td><td>Save everything in one file: the radio spectrum with its view, thresholds, units, colormap, styling and analysis, the Solar Image Analysis frames and measurements, and the GCS fits. A project may hold any of these on its own. {_kbd('Ctrl+S')} in the Solar Image Analysis or GCS window saves the same project.</td></tr>
 <tr><td><b>Save Project As</b> ({_kbd('Ctrl+Shift+S')})</td><td>Save the project to a new file. When it holds solar or GCS images you choose <b>Link data (small)</b>, which refers to the image files on this computer, or <b>Embed data (portable)</b>, which stores them in the project (the dialog shows the size) so it opens anywhere, even offline. The choice is remembered for {_kbd('Ctrl+S')}.</td></tr>
 <tr><td><b>Recover Last Session</b></td><td>Restore the most recent autosave snapshot after a crash.</td></tr>
-<tr><td><b>Generate Project Report</b></td><td>Build a consolidated PDF with the spectra, fits, and available solar-context plots. Every graph in the report is drawn in the OriginPro style, in light mode. It opens with an <b>Event Story</b>: a headline and a one-line chain (flare → radio burst → CME → shock at Earth → storm), the event chain graphic (Sun, corona, heliosphere and Earth lanes on a compressed time axis), key numbers, four short chapters, a timeline of every milestone, the event overview and geomagnetic response figures, and the sources and caveats. The pieces are matched by timing and by DONKI's links, and the story says when they do not fit (a storm that peaked before this event's shock arrived was driven by earlier eruptions). Catalogs and the geomagnetic response that are not loaded yet are fetched first, unless automatic fetching is off.</td></tr>
+<tr><td><b>Generate Project Report</b></td><td>Build a consolidated PDF with the spectra, fits, and available solar-context plots. Every graph in the report is drawn in the OriginPro style, in light mode. A project without a radio spectrum has a report too: the radio sections are then left out. When the Solar Image Analysis window holds frames, a <b>Solar Image Analysis</b> section shows the current frame as on screen, the instrument, product, frames and processing, the overlay layers and the CME measurements with their kinematics; when the GCS window holds work, a <b>GCS CME Fitting</b> section shows the viewpoints and a table of the recorded fits (the GCS window's own report draws every fit on its images). The report opens with an <b>Event Story</b>: a headline and a one-line chain (flare → radio burst → CME → shock at Earth → storm), the event chain graphic (Sun, corona, heliosphere and Earth lanes on a compressed time axis), key numbers, four short chapters, a timeline of every milestone, the event overview and geomagnetic response figures, and the sources and caveats. The pieces are matched by timing and by DONKI's links, and the story says when they do not fit (a storm that peaked before this event's shock arrived was driven by earlier eruptions). Without radio data the story starts from the Solar Image Analysis frames or the GCS event. Catalogs and the geomagnetic response that are not loaded yet are fetched first, even when <b>Fetch Event Context Automatically</b> is off, and are then kept: the sidebar card and the event strip show them, and the project saves them.</td></tr>
 <tr><td><b>Export &#8594; Export Figure</b> ({_kbd('Ctrl+E')})</td><td>Save the current plot, with its zoom and overlays, as PNG, PDF, EPS, SVG, TIFF, or JPG. The file is an OriginPro-style graph in light mode (Arial, closed black frame, inward ticks on all four sides, framed color scale) with your Graph Properties titles and font sizes; the plot on screen keeps its own look.</td></tr>
 <tr><td><b>Export &#8594; Export to FIT</b> ({_kbd('Ctrl+F')})</td><td>Write processed data (raw, background-subtracted, or combined) as a new FITS file.</td></tr>
 <tr><td><b>Export &#8594; Export Provenance Report</b></td><td>Write Markdown and JSON summaries of the source, processing, RFI, annotations, and operation log.</td></tr>
@@ -207,8 +207,10 @@ on the right, the live cursor readout (time, frequency, intensity) and the updat
 <li><b>Reset to Raw</b>: revert all applied processing and return to the original loaded data.</li>
 <li><b>Reset All</b>: return the app to how it starts: the loaded data, processing, graph settings, sidebar
 readouts and undo history are cleared, and the analysis, Geomagnetic Response, Event Figure, Solar Image Analysis
-and GCS windows are closed. If the Solar Image Analysis or GCS window holds work, you are asked first. Your
-preferences and the download cache are kept.</li>
+and GCS windows are closed. With unsaved changes you are asked to <b>Save</b>, <b>Discard</b> or
+<b>Cancel</b>, as when opening or closing; with everything saved but work in the Solar Image Analysis or GCS
+window, you are asked to confirm. Your preferences (including the View menu's event-strip choices) and the
+download cache are kept.</li>
 </ul>
 
 <a name="menu-download"></a>
@@ -233,6 +235,10 @@ Dst, Kp, IMF, solar-wind and SYM-H/AE response to the selected event (see <a hre
 spectrum, with a flare-class guide (A/B/C/M/X). The overlay does not alter the data.</li>
 <li><b>SWAVES Panel</b>: show or hide the loaded STEREO/SWAVES spectrum without discarding it
 (see <a href="#swaves">section 16a</a>).</li>
+<li><b>Fetch Event Context Automatically</b> (on by default, remembered): loading data or selecting an event
+fetches the geomagnetic response and, while the strip is shown, the event catalogs. Turn it off to download
+nothing on your own behalf; the card then says to press <b>Refresh</b>, and <b>Refresh</b>,
+<b>Refresh Event Context</b> and Generate Project Report still fetch when you ask.</li>
 </ul>
 
 <a name="menu-view"></a>
@@ -416,7 +422,10 @@ which difference it shows in a running- or base-difference movie; untick it for 
 <li><b>Project</b>: the frames, view, crop and measurements are part of the main window's project
 (<code>Project &#8594; Save Project</code>, <code>Ctrl+S</code> / <code>Ctrl+Shift+S</code>). A linked project whose
 frames have been moved or cleared from the cache fetches them again from the archive; measurements are matched
-to the reloaded frames by observation time. Press {_kbd('Esc')} to cancel an in-progress measurement pick.</li>
+to the reloaded frames by observation time. An overlay composite that was built when the project was saved (the
+AIA Sun in the occulter, for one) is built again once the frames are in, as if <b>Build Composite</b> were
+clicked; its layer frames usually come from the download cache. A composite built after a crop is cut to the same
+crop. Press {_kbd('Esc')} to cancel an in-progress measurement pick.</li>
 <li><b>GCS CME Fitting</b>: <code>Analysis &#8594; GCS CME Fitting...</code> opens the three-viewpoint fitting window
 at the time of the displayed frame (see <a href="#gcs-fitting">section 15</a>).</li>
 <li><b>Potential Field (PFSS)</b>: extrapolate the coronal magnetic field from a synoptic magnetogram and draw
@@ -680,7 +689,9 @@ PNG/CSV export.</li>
 is editable). The event is the loaded data's observation start, or the row selected in the burst list, or the day or
 file selected in the e-CALLISTO downloader. The sidebar card summarises it; the window
 (<code>Solar Events &#8594; Geomagnetic &#8594; Geomagnetic Response…</code>) shows every panel on one UTC axis. Nothing
-ever pops up on its own.</p>
+ever pops up on its own. The response is fetched when the event changes, unless
+<code>Solar Events &#8594; Fetch Event Context Automatically</code> is off; then press <b>Refresh</b>. When the event
+moves to another hour, the previous event's numbers are cleared rather than shown under the new event.</p>
 <ul>
 <li><b>Dst / SYM-H</b>: Kyoto Dst (final, provisional or real-time, month by month) with the 1-minute SYM-H index.
 The scale follows the data; the storm levels it reaches (moderate −50, intense −100, severe −250 nT) are dotted
@@ -715,8 +726,12 @@ Classic and the hardware-accelerated view:</p>
 </ul>
 <p>Hover a marker for its details. Events up to six hours outside the spectrum are counted at the lane's edge
 ("2 more nearby"). Choose the lanes in <code>View &#8594; Event Context Sources</code>. The catalogs are cached per day
-on disk; recent days are refreshed after a day. The strip is included in <b>Export Figure</b> and the project report
-while it is shown, and saved in the project.</p>
+on disk; recent days are refreshed after a day. A day a catalog cannot answer for yet (a CDAW month not published,
+a DONKI service that failed) is not cached: it is asked for again next time, and its lane is marked (!) with the
+reason in the status bar. The strip is included in <b>Export Figure</b> and the project report while it is shown,
+and saved in the project. A project keeps its own strip and source choices without changing your View menu
+preference. With <code>Solar Events &#8594; Fetch Event Context Automatically</code> off, a new file does not
+fetch the catalogs; <b>Refresh Event Context</b> does.</p>
 
 <a name="event-figure"></a>
 <h2>17c. Event figure composer</h2>
@@ -728,7 +743,9 @@ fetched. Each thumbnail's time is drawn as a dashed line down through the panels
 own, days-long time axis, with the radio interval shaded and DONKI markers. Pick the page width — 8.8 cm (one column),
 12 cm, 18 cm (two columns) or custom — and a font scale; the preview follows every change. <b>Fetch missing data</b>
 downloads what the chosen panels need and is not loaded (GOES protons and X-rays, thumbnails). Export as PNG, PDF, EPS,
-SVG, TIFF or JPG. The composer's settings are saved in the project.</p>
+SVG, TIFF or JPG. The composer's settings are saved in the project; the fetched GOES and proton series are used only
+for the event and range they were fetched for, so after loading another file press <b>Fetch missing data</b>
+again.</p>
 
 <a name="sunpy-explorer"></a>
 <h2>18. SunPy Multi-Mission Explorer</h2>

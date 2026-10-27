@@ -179,6 +179,8 @@ from src.ui.space_weather.geomagnetic_controller import (
     SOURCE_BURST_LIST,
     SOURCE_DOWNLOADER,
     GeomagneticController,
+    autofetch_preference,
+    set_autofetch_preference,
 )
 from src.ui.app.project_parts import (
     ControllerPart,
@@ -1276,6 +1278,16 @@ class MainWindow(QMainWindow):
         self.swaves_panel_action.setEnabled(False)
         self.swaves_panel_action.toggled.connect(self._on_swaves_panel_toggled)
         solar_events_menu.addAction(self.swaves_panel_action)
+
+        solar_events_menu.addSeparator()
+        self.autofetch_action = QAction("Fetch Event Context Automatically", self, checkable=True)
+        self.autofetch_action.setChecked(autofetch_preference())
+        self.autofetch_action.setToolTip(
+            "Load the geomagnetic response and the event catalogs on their own when data is loaded "
+            "or an event is selected. Off, nothing is downloaded until you press Refresh or generate a report."
+        )
+        self.autofetch_action.toggled.connect(self._on_autofetch_toggled)
+        solar_events_menu.addAction(self.autofetch_action)
 
         # View Menu
         view_menu = menubar.addMenu("View")
@@ -11066,6 +11078,12 @@ class MainWindow(QMainWindow):
                 act.setChecked(wanted)
                 act.blockSignals(was)
         self._refresh_event_strip()
+
+    def _on_autofetch_toggled(self, enabled: bool) -> None:
+        """Fetch Event Context Automatically: remembered, and what is now due is fetched."""
+        set_autofetch_preference(bool(enabled))
+        self._geomagnetic.autofetch_changed()
+        self._event_context.autofetch_changed()
 
     def _on_event_context_status(self, text) -> None:
         self.statusBar().showMessage(str(text), 5000)

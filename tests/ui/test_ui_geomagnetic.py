@@ -403,3 +403,45 @@ def test_a_response_the_report_fetched_is_kept_for_the_current_event(tmp_path):
     assert card.value_labels["storm"].text() == "Super storm"
     assert controller.project_has_content()
     controller.shutdown()
+
+
+def test_the_automatic_fetch_switch_is_remembered_and_respected(tmp_path, monkeypatch):
+    _app()
+    from src.ui.space_weather import geomagnetic_controller as gc
+
+    monkeypatch.setenv(AUTOFETCH_ENV, "0")  # the environment allows fetching
+    assert gc.autofetch_preference() is True  # on by default
+    gc.set_autofetch_preference(False)
+    assert gc.autofetch_preference() is False and GeomagneticController.autofetch_enabled() is False
+
+    loader = StubLoader()
+    controller = GeomagneticController(loader=loader, cache_dir=tmp_path)
+    statuses = []
+    controller.statusChanged.connect(statuses.append)
+    controller.set_loaded_event(datetime(2024, 5, 10, 17), "FITS: x.fit")
+    _flush()
+    time.sleep(0.8)
+    _flush()
+    assert loader.calls == []  # off: a load fetches nothing
+    assert any("Refresh" in text for text in statuses)
+
+    gc.set_autofetch_preference(True)
+    controller.autofetch_changed()  # switched back on: what is due is fetched
+    assert _wait_for(lambda: controller.context is not None)
+    assert len(loader.calls) == 1
+    controller.shutdown()
+
+
+def test_the_solar_events_menu_switch_sets_the_preference(tmp_path, monkeypatch):
+    _app()
+    from src.ui.app.main_window import MainWindow
+    from src.ui.space_weather import geomagnetic_controller as gc
+
+    window = MainWindow(theme=None)
+    assert window.autofetch_action.isChecked() is True
+    window.autofetch_action.setChecked(False)
+    assert gc.autofetch_preference() is False
+    window.close()
+    again = MainWindow(theme=None)
+    assert again.autofetch_action.isChecked() is False  # remembered between sessions
+    again.close()

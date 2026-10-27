@@ -3,6 +3,34 @@ A desktop application for visualizing, processing, and analyzing e-CALLISTO sola
 
 **Website: [ecallistoanalyzer.org](https://ecallistoanalyzer.org)**: downloads for Windows, macOS and Linux, the illustrated [user guide](https://ecallistoanalyzer.org/guide/), [tutorials](https://ecallistoanalyzer.org/tutorials/) and [how to cite the software](https://ecallistoanalyzer.org/citation/).
 
+## What's New in v3.2.0
+
+### One project for every window
+- **A single `.efaproj` file** now holds the radio analysis, the Solar Image Analysis frames and measurements, and the GCS CME fits; a project may hold any of them on its own. **Open Project** reopens every window the project needs, and `Ctrl+S` in the main, Solar Image Analysis or GCS window saves the same project.
+- **Link or embed:** **Save Project As** asks whether to *link* the solar and GCS images (a small file that refers to them on this computer; missing frames are fetched from the archive again) or *embed* them (a portable file, sized in the dialog, that opens anywhere, even offline).
+- **Robust reopening:** a part that cannot be read is skipped and named, and the rest opens. Solar measurements are matched to reloaded frames by observation time. Reopening the project that is already open works while its frames are on screen. A built overlay composite (such as the AIA Sun in the LASCO occulter) is rebuilt once the frames are in.
+- **Old sessions:** a v3.1 `.ecsolar` Solar Image Analysis session opens as a new, unsaved project. **Projects saved by v3.2 cannot be opened by v3.1.**
+
+### What the event did at Earth, and around it
+- **Geomagnetic Response** (*Solar Events → Geomagnetic → Geomagnetic Response…* and a sidebar card): Kyoto Dst with SYM-H, GFZ Kp by NOAA G level, the IMF, solar-wind plasma, Ey, β, Mach and AE/AL/AU from one day before the event to seven days after (editable), on one UTC axis. OMNI data are time-shifted to the bow shock; where OMNI is not yet published, DSCOVR or SWPC real-time L1 data stand in and are labelled so. DONKI shock arrivals at Earth, storms and their linked CMEs are marked. The card summarises the Dst minimum (and how long after the event), the Kp maximum and G level, the lowest Bz, the fastest wind and the storm class. Export the figure (OriginPro style) or a CSV with the provenance of every value. The event is the loaded data's start, a burst-list row or a downloader day or file; **Use loaded data** goes back.
+- **Event Context Strip** (*View → Event Context Strip*): GOES flares, CDAW CMEs, NASA DONKI events and e-CALLISTO bursts as lanes above the spectrum in both renderers, with hover details, "n more nearby" counts, a per-day disk cache and a (!) mark on a lane whose catalog is incomplete.
+- **Event Figure composer** (*File → Export As → Event Figure…*): one publication figure of the whole event — image thumbnails (from the Solar Image Analysis or GCS window when loaded, else Helioviewer), the spectrum, SWAVES, GOES X-rays and protons, the catalog lanes and the geomagnetic block — at journal column widths, with a live preview.
+- **Fetch Event Context Automatically** (*Solar Events* menu, on by default): turn it off and nothing is downloaded on your behalf until you press **Refresh**, **Refresh Event Context** or generate a report.
+
+### Project reports that tell the story
+- The PDF opens with an **Event Story**: a headline and chain (flare → radio burst → CME → shock at Earth → storm), the event-chain graphic, key numbers, four short chapters, a timeline of every milestone, the event overview and geomagnetic figures, and sources and caveats. Pieces are matched by timing and DONKI's links, and the story says when they do not fit.
+- New **Solar Image Analysis** and **GCS CME Fitting** sections, and reports for projects without a radio spectrum.
+
+### Solar Image Analysis
+- **Product choice:** *FITS · full resolution*, *FITS · reduced size* (SDO; the AIA synoptic 1024² archive needs no e-mail) or *JP2 · quicklook* — Helioviewer JPEG2000 for AIA, HMI, EIT, LASCO and STEREO EUVI/COR1/COR2, listed in seconds and a few hundred kilobytes a frame. JP2 frames are labelled as not calibrated, and photometric tools are disabled for them.
+- **Honest progress:** bytes, speed and time remaining for every source, a busy bar with a reason while nothing can be measured, and **Stop** that also cancels a JSOC staging wait.
+- **AIA 193 Sun in the occulter:** one tick fills each LASCO C2/C3 frame's occulted centre with the nearest AIA 193 Å image, at true scale and with its corona. Composites are blended live on every draw, so colormap, contrast, scale, NRGF and running/base difference keep working, with a separate AIA colormap.
+- **Movies** play north up and carry a frame label stripe (instrument, UTC time, difference mode).
+
+### Also
+- **Reset All** returns the app to its start-up state, asking to Save / Discard / Cancel when there are unsaved changes.
+- Catalog days that an archive could not answer for yet (an unpublished CDAW month, a failed DONKI service) are asked for again instead of being cached as empty.
+
 ## What's New in v3.1.0
 
 ### Radio burst analysis
@@ -71,7 +99,7 @@ v3.1.0 also includes these archive, instrument, visualization and solar-image an
   **Shock fitting:** choose **Edit: Shock** to fit the shock the CME drives — its faint outer envelope — with a spheroid or ellipsoid, drawn in every view alongside the GCS shell in its own colour. Parameters follow PyThea's convention exactly: apex height, κ = b/(height − 1 R☉), signed eccentricity ε (positive stretches the shock radially, negative flattens it) and, for an ellipsoid, α = b/c and a tilt about the radial axis; the centre distance and semi-axes are shown and exported under PyThea's names. Click the shock front and **Refine fit** pulls the model's exactly computed projected outline through the points in every view. With fewer than three views ε and tilt are weakly constrained, and an ellipsoid's shape parameters trade off — prefer a spheroid. Front points, recorded fits, kinematics, CSV (`cme_shock_fit.csv`), stepping and playback are kept separately for the shock, and the JSON export (schema 2) adds a `shock` section without changing the GCS keys.
 
 - **Circle Fit — CME tracking for on-disk eruptions:** a new measurement tool for events near disk centre, where the front expands as a growing circle instead of marching outward from the limb, and a single leading-edge click has no well-defined origin to measure from. Click three or more points along the front and the least-squares circle is fitted and redrawn live from the third click on; **Commit Circle** (`Ctrl+Return`) records the frame and steps to the next, so a whole sequence is measured with one arc per frame. The CME is modelled as a uniformly expanding sphere resting on the solar surface, so its height from Sun centre is 1 R☉ plus the fitted circle's *diameter* (h = 1 R☉ + 2r); the sequence yields a height–time plot with speed and acceleration — with the fitted radius and the leading-edge distance from disk centre kept alongside it for comparison against a conventional height–time track.
-- **A circle fit that survives a short arc:** the fit is Taubin's rather than the usual algebraic one, which is biased toward small radii on exactly the partial arcs a dome front gives, and it works in helioprojective arcsec so the front stays a circle even where the plate scale differs between the two axes. The panel warns when the clicked arc is too shallow to constrain the radius. **Lock centre** freezes the centre once the dome has settled and fits the radius alone. Circles, the clicked arcs and the lock state are all saved in `.ecsolar` sessions.
+- **A circle fit that survives a short arc:** the fit is Taubin's rather than the usual algebraic one, which is biased toward small radii on exactly the partial arcs a dome front gives, and it works in helioprojective arcsec so the front stays a circle even where the plate scale differs between the two axes. The panel warns when the clicked arc is too shallow to constrain the radius. **Lock centre** freezes the centre once the dome has settled and fits the radius alone. Circles, the clicked arcs and the lock state are all saved with the analysis (in v3.2, in the `.efaproj` project).
 - **Higher-order kinematics with error bars:** a **Fit** dropdown under the tracking table fits the height–time track as a line, a parabola or a cubic, and re-fits the points already on the plot when it changes. Linear reports one speed, with the acceleration taken from a companion quadratic fit as the CDAW CME catalogue does; the curved fits report the speed at *both ends* of the track, because an accelerating eruption has no single speed, and cubic adds the jerk. Every value carries a 1σ uncertainty propagated from the fit covariance, so the correlations between polynomial terms sit in the error bar instead of being assumed away — and the error is reported as unavailable, rather than as zero, when the fit has no degree of freedom left to estimate the scatter from. The chosen order travels with the session, since reopening a cubic analysis as a straight line would quietly change every speed it reports.
 
 ### Interface
@@ -96,7 +124,7 @@ v3.1.0 also includes these archive, instrument, visualization and solar-image an
 - Adjust the contrast live with high-resolution threshold sliders that set the color-scale limits only (the data are never clipped), value readouts, optional signed-log scaling, dB or Digits/ADU display modes, and graph-property controls.
 - Apply the **Raw FITS Percentile (5-98%)** noise-clipping preset from **Processing → Presets** for a fast starting display range on raw FITS files.
 - Inspect FITS headers from the **View** menu, customize titles and labels, and export publication-ready figures from the current analysis view.
-- Generate project report PDFs that summarize the loaded dataset, processing state, analysis outputs, solar-context plots, and report-ready figures.
+- Generate project report PDFs that open with the event's story and summarize the loaded dataset, processing state, analysis outputs, solar-context plots, Solar Image Analysis and GCS work, and report-ready figures.
 
 ### Processing and analysis
 - Apply deterministic RFI cleaning with preview/apply/reset controls for median smoothing, hot-channel masking, masked-channel repair, and percentile clipping.
@@ -109,6 +137,8 @@ v3.1.0 also includes these archive, instrument, visualization and solar-image an
 
 ### Solar-event context tools
 - Open standalone viewers for GOES X-ray flux, GOES SEP proton flux, SOHO/LASCO CME catalog data, Kyoto Dst, and GFZ Kp.
+- See the event's geomagnetic response (Dst/SYM-H, Kp, IMF, solar wind, AE) from a day before to a week after, with DONKI shock arrivals and storms marked, in a sidebar card and a full window.
+- Show GOES flares, CDAW CMEs, NASA DONKI events and e-CALLISTO bursts as lanes above the spectrum, and compose one publication figure of the whole event.
 - Overlay GOES XRS curves directly on the main spectrum with automatic legacy/modern GOES fallback and flare-class guides.
 - Analyze SDO/AIA images from **Analysis -> Solar Data Analysis** with crop, difference, active-region, composite, and movie export tools.
 - Measure a CME frame by frame in the Solar Image Analysis window with a ruler, intensity profiles, region statistics, leading-edge height–time tracking, and circle fitting for on-disk domes — reporting linear, quadratic or cubic kinematics with a 1σ error on every speed and acceleration.
@@ -116,11 +146,12 @@ v3.1.0 also includes these archive, instrument, visualization and solar-image an
 - Extrapolate the coronal magnetic field with a PFSS model from GONG, HMI, ADAPT or a local synoptic magnetogram, and overlay open and closed field lines and coronal-hole boundaries on the AIA disk, with a four-panel diagnostics window for the source-surface field and solution statistics.
 - Explore external archives with the SunPy Multi-Mission Explorer for SDO, SOHO, STEREO-A, and GOES products.
 - Load STEREO/SWAVES space-based dynamic spectra (2.6 kHz - 16 MHz) below the CALLISTO spectrum on a shared time axis, and follow a burst out of the ground-based band into the interplanetary medium.
-- Blend SDO, STEREO, and SOHO (EIT, LASCO) frames into one multi-instrument coronagraph composite that runs continuously from the disk out to the outer corona.
+- Blend SDO, STEREO, and SOHO (EIT, LASCO) frames into one multi-instrument coronagraph composite that runs continuously from the disk out to the outer corona, or fill LASCO's occulter with the AIA 193 Å Sun in one click.
+- Download solar images as full-resolution FITS, reduced-size FITS or fast JPEG2000 quicklooks.
 - Sync the current analyzer time window across supported solar-event windows for faster cross-comparison.
 
 ### Reproducibility and support
-- Save full analyzer state as `.efaproj` project files and recover recent autosave snapshots.
+- Save the whole analysis — radio, Solar Image Analysis and GCS fitting — as one `.efaproj` project with linked or embedded images, and recover recent autosave snapshots.
 - Export processed FITS files, provenance reports (Markdown + JSON), and analysis logs (CSV + TXT).
 - Generate diagnostics ZIP bundles for bug reports and open a prefilled GitHub issue draft from inside the app.
 - Use the built-in citation dialog to copy the recommended citation or BibTeX entry, and check for newer GitHub releases from the app.
@@ -534,6 +565,12 @@ Project format:
 
 Saved state includes plot view, thresholds, units, colormap, graph properties, loaded/combined data, and analysis-session state, including the Analyzer's density model and t₀ choice. Projects saved before these options existed open with Newkirk and the file start as t₀, matching how they were calculated.
 
+From v3.2 the project is the one file for every window. It also holds the Solar Image Analysis frames, view, crop, overlay layers and measurements, the GCS window's channels, front points and recorded fits, the geomagnetic response, the event-context strip and the Event Figure composer's settings. `Ctrl+S` in the Solar Image Analysis or GCS window saves the same project.
+
+- **Link or embed.** When the project holds solar or GCS images, **Save Project As** asks how to keep them: **Link data (small)** refers to the files on this computer, and frames that have since been moved or cleared from the cache are fetched from the archive again when the project opens; **Embed data (portable)** stores them in the project (the dialog shows the size), so it opens anywhere, even offline. The choice is remembered for `Ctrl+S`.
+- **Reopening.** Every window the project needs opens and is restored; a part that cannot be read is skipped and named while the rest opens. Solar measurements are matched to the reloaded frames by observation time, and a composite that was built is built again.
+- **Old files.** v3.1 radio projects open unchanged. A v3.1 `.ecsolar` Solar Image Analysis session opens as a new, unsaved project; the app no longer writes `.ecsolar`. Projects saved by v3.2 cannot be opened by v3.1.
+
 ---
 
 # 17. Export Data as FITS
@@ -588,6 +625,8 @@ These reports are useful for lab notebooks, collaboration handoffs, and paper pr
 
 Use **File → Generate Project Report...** to create a consolidated PDF for the current project or loaded dataset.
 
+The report opens with an **Event Story**: a headline and a one-line chain (flare → radio burst → CME → shock at Earth → storm), an event-chain graphic with Sun, corona, heliosphere and Earth lanes on a compressed time axis, key numbers, four short chapters, a timeline of every milestone, the event overview and geomagnetic response figures, and the sources and caveats. The pieces are matched by timing and by DONKI's links, and the story says when they do not fit — a storm that peaked before this event's shock arrived is attributed to earlier eruptions. Catalogs and the geomagnetic response that are not loaded yet are fetched first, then kept by the sidebar card, the strip and the project.
+
 The report can include:
 
 - Raw dynamic spectrum
@@ -596,6 +635,10 @@ The report can include:
 - Maximum-intensity fit, with the fit equation (including t₀ when it is not the file start) and the density model used for the shock parameters
 - Type II band-splitting output
 - Available GOES X-ray, GOES SGPS proton flux, Dst, and Kp context plots
+- **Solar Image Analysis:** the current frame as on screen, the instrument, product, frames and processing, overlay layers, and the CME measurements with their kinematics
+- **GCS CME Fitting:** the viewpoints and a table of the recorded fits (the GCS window's own report draws every fit on its images)
+
+A project without a radio spectrum gets a report too; its radio sections are then left out, and the story starts from the Solar Image Analysis frames or the GCS event.
 
 Every graph in the report is drawn in the same OriginPro style as **Export Figure**, on a white page even in dark mode. The Solar Events plots are restyled on a copy, so their windows keep their own look.
 
@@ -653,6 +696,22 @@ Features:
 - Visualize Kyoto Dst and GFZ Kp with dedicated storm-level guides for quick contextual interpretation.
 - Export both plots and tabular data as PNG/CSV for reporting and comparison with solar-radio observations.
 
+### Geomagnetic Response, Event Context Strip and Event Figure
+
+Path:
+
+- **Solar Events → Geomagnetic → Geomagnetic Response…** (and the **Geomagnetic Response** sidebar card)
+- **View → Event Context Strip** and **View → Event Context Sources**
+- **File → Export As → Event Figure…**
+- **Solar Events → Fetch Event Context Automatically**
+
+Features:
+
+- **Geomagnetic response** to the selected event, from one day before to seven days after (editable): Kyoto Dst (final, provisional or real-time) with SYM-H, GFZ Kp coloured by NOAA G level, the IMF (Bt, Bz, By), plasma (speed, density, temperature, dynamic pressure), Ey, β, Mach and AE/AL/AU, on one UTC axis. Solar wind comes from OMNI 5-minute data time-shifted to the bow shock; where OMNI is not yet published, DSCOVR or SWPC real-time L1 data are used and labelled *L1, not time-shifted*. DONKI shock arrivals at Earth, storms and their linked CMEs are marked; the radio interval is shaded. The card summarises the Dst minimum (and its delay after the event), the Kp maximum and G level, the lowest Bz, the fastest wind and the storm class. Export the figure (OriginPro style) or a CSV whose provenance column names the archive or spacecraft of every value. The event is the loaded data's start, a burst-list row, or a downloader day or file; **Use loaded data** returns to the loaded file.
+- **Event context strip:** GOES flares (NOAA SWPC through the HEK), CDAW LASCO CMEs, NASA DONKI events and e-CALLISTO bursts as lanes above the spectrum, in both renderers, with hover details and "n more nearby" edge counts. Catalogs are cached per day; a day an archive cannot answer for yet is asked for again, and its lane is marked (!). The strip is included in **Export Figure** and the report while shown.
+- **Event figure composer:** choose and order the panels (spectrum, SWAVES, GOES X-rays and protons, event catalogs), add thumbnails by time and source, add the geomagnetic block on its own days-long axis, pick a journal column width and font scale, preview live, and export PNG, PDF, EPS, SVG, TIFF or JPG. **Fetch missing data** downloads what the chosen panels need.
+- **Fetch Event Context Automatically** (on by default, remembered): loading data or selecting an event fetches the geomagnetic response and, while the strip is shown, the catalogs. Off, nothing is downloaded until you press **Refresh**, **Refresh Event Context** or generate a report.
+
 ---
 
 # 22. Solar Data Analysis
@@ -664,13 +723,15 @@ Path:
 Features:
 
 - Search and download image records using the existing SunPy cache workflow, for SDO/AIA, SDO/HMI, SOHO/EIT (171/195/284/304 A), SOHO/LASCO C2/C3, STEREO-A/B SECCHI (EUVI, COR1, COR2, HI1, HI2) and GOES/SUVI
+- Choose the **Product**: *FITS · full resolution* (the archive's calibrated files), *FITS · reduced size* (SDO only: the AIA synoptic 1024² archive with no e-mail, or JSOC's binned and cutout frames with the JSOC notify e-mail) or *JP2 · quicklook* (Helioviewer JPEG2000 for AIA, HMI, EIT, LASCO and STEREO EUVI/COR1/COR2, listed in seconds and a few hundred kilobytes a frame). JP2 pixels are 8-bit display values: viewing, differences, movies, geometry and derotation work, while processing levels, light curves, Region Stats and active-region detection are disabled and the frames are labelled *not calibrated*
+- Follow downloads honestly: bytes, speed and time remaining on every source, a busy bar with the reason while nothing can be measured (an archive search, a JSOC export being staged), and **Stop** for any of them
 - Load local `.fit`, `.fits`, `.fit.gz`, and `.fits.gz` files
 - Plot image sequences with frame stepping, playback, running-difference, and base-difference modes
 - Crop image sequences using the plot-window ROI selector
 - Detect bright active-region candidates and export centroid/bounding-box/intensity summaries as CSV
 - Optionally fetch NOAA/HEK active-region labels and overlay them on detected regions
 - Create simple RGB composites from loaded AIA frames
-- Export the current plot, cropped FITS products, animated GIFs, and MP4 movies
+- Export the current plot, cropped FITS products, animated GIFs, and MP4 movies; movies play north up, with an optional frame-label stripe naming the instrument, UTC time and difference mode
 
 **A note on SOHO/EIT products.** The archive serves two files for every EIT
 observation — the calibrated Level 1 FITS and the raw level-zero file — and the
@@ -722,7 +783,7 @@ press **Fit** for the kinematics.
 Every value carries a 1σ error from the fit covariance. A degree-*n* fit needs *n*+1 points to exist and *n*+2
 before an error bar can be estimated at all; below that the value is shown without one rather than with a
 misleading zero. **Export CSV** saves the table, and the whole analysis — picks, circles, fit order — is stored
-in and restored from `.ecsolar` session files.
+in and restored from the `.efaproj` project.
 
 ### Overlay Layers (multi-instrument coronagraph composites)
 
@@ -737,18 +798,21 @@ Features:
 - Each layer's frames are searched and downloaded automatically, then time-matched to every loaded frame within the **Time match** window (30 minutes by default; widen it for a slow cadence or a patchy archive)
 - Layers are reprojected onto the loaded series' WCS, masked to their own field-of-view annulus in solar radii, and alpha-blended widest field of view first
 - Set **Colormap**, **Scale** (log/linear), **Opacity**, **Midtones** (gamma), and the **Inner / outer** field-of-view edges in R☉ for each layer independently; un-tick a layer to leave it out without losing its settings
-- **Build Composite** runs in the background with a progress bar; the result replaces the view and works with the measurement tools, PNG save, and movie export
+- **Build Composite** runs in the background with a progress bar; the result works with the measurement tools, PNG save, and movie export
+- The layers are blended each time a frame is drawn, so the view's colormap, contrast sliders, scale, NRGF filter and running or base difference keep working on the composite, and layer colormap, opacity and midtone edits show at once
+- **AIA 193 Sun in the occulter** (Coronagraph Tools, LASCO C2/C3): one tick adds the AIA 193 Å layer from Helioviewer's JP2 archive and builds, filling the occulted centre with the whole AIA image, corona included, at true scale; **AIA colormap** recolours it at once
+- A composite is saved in the project as its recipe and is built again when the project reopens; one built after a crop is cut to the same crop
 - **Clear** drops the composite and restores the originally loaded frames
 
 Notes:
 
-- Each layer is color-mapped to RGB before blending, because the EUV disk and the white-light outer corona differ by orders of magnitude and a single normalization would make one of them invisible
+- Each layer is color-mapped before blending, because the EUV disk and the white-light outer corona differ by orders of magnitude and a single normalization would make one of them invisible
 - Coronagraph layers reproject under a spherical-screen assumption rather than the solar-surface assumption used for disk emission, since an optically-thin white-light feature has no unique line-of-sight depth. Layers that use it are flagged as approximate in the build notes: cross-observer coronagraph overlays are morphological context, not photometry
 - SOHO/LASCO archive files carry no observer keywords, so an Earth-based observer is assumed (SOHO sits at L1, about 0.99 AU, so this is accurate to roughly 1%). The build notes state this once instead of warning per frame
 
 Notes:
 
-- JSOC server-side cutout requests are not part of v3.2.0; cropping is performed locally after files are loaded.
+- JSOC's binned and cutout frames are made on the JSOC server and need the JSOC notify e-mail; the **Crop** tools crop locally after files are loaded.
 - Metadata overlays require network access, but image-based region detection works on local files.
 
 ---

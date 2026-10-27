@@ -206,7 +206,7 @@ def story_request(main: Any, session: dict | None) -> StoryRequest | None:
     request.catalog = result
     wanted = tuple(s for s in SOURCES if result is None or s not in result.events)
     if wanted and interval is not None:
-        if EventContextController.autofetch_enabled():
+        if EventContextController.fetching_allowed():
             request.missing_sources = wanted
         else:
             request.notes.append("Event catalogs were not loaded and automatic fetching is off.")
@@ -215,7 +215,7 @@ def story_request(main: Any, session: dict | None) -> StoryRequest | None:
     if context is not None and abs((_naive_utc(context.event_start) - anchor).total_seconds()) <= SAME_EVENT.total_seconds():
         request.geomagnetic = context
         request.markers = list(controller.all_markers())
-    elif GeomagneticController.autofetch_enabled():
+    elif GeomagneticController.fetching_allowed():
         request.fetch_geomagnetic = True
     else:
         request.notes.append("The geomagnetic response was not loaded and automatic fetching is off.")
