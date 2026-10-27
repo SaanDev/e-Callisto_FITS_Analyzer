@@ -4261,7 +4261,7 @@ def test_the_aia_sun_box_follows_the_layer_stack(monkeypatch):
     win._apply_loaded_frames(_reprojectable_lasco(), paths=[], metadata={})
     monkeypatch.setattr(win, "_start_worker", lambda worker: pytest.fail("no build expected"))
 
-    # A restored project brings the layer back (to be rebuilt by hand).
+    # A restored recipe brings the layer back (the project restore then rebuilds it).
     win._restore_overlay_layers({"layers": [asdict(aia_sun_layer("LASCO", "C2"))]})
     assert win.aia_sun_check.isChecked()
     assert win._overlay_specs[0].source == "jp2"
@@ -4269,6 +4269,47 @@ def test_the_aia_sun_box_follows_the_layer_stack(monkeypatch):
     # Un-ticking the row in Overlay Layers un-ticks the box.
     win.overlay_list.item(0).setCheckState(Qt.Unchecked)
     assert not win.aia_sun_check.isChecked()
+    win.close()
+
+
+@pytest.mark.parametrize("built, expected", [(True, 1), (None, 1), (False, 0)])
+def test_a_reopened_project_builds_its_composite_again(monkeypatch, built, expected):
+    from dataclasses import asdict
+
+    from src.backend.solar.coronagraph_composite import aia_sun_layer
+
+    _app()
+    win = SolarDataAnalysisWindow()
+    win._apply_loaded_frames(_reprojectable_lasco(), paths=[], metadata={})
+    started = []
+    monkeypatch.setattr(win, "_start_worker", lambda worker: started.append(worker))
+    overlay = {"layers": [asdict(aia_sun_layer("LASCO", "C2"))]}
+    if built is not None:  # None: a recipe saved before "built" was stored
+        overlay["built"] = built
+    win._apply_session_restore({"source": {}, "view": {}, "overlay_layers": overlay})
+    for _ in range(3):
+        QApplication.processEvents()
+    assert len([w for w in started if isinstance(w, solar_mod.CompositeBuildWorker)]) == expected
+    assert win.aia_sun_check.isChecked()
+    win.close()
+
+
+def test_a_composite_built_after_a_crop_is_cut_like_the_frames(monkeypatch):
+    from src.backend.solar.solar_data_analysis import crop_maps
+
+    win = _composite_window(monkeypatch)
+    win._map_frames = crop_maps(win._map_frames, (16, 48, 16, 48))
+    win._crop_applied = True
+    win._applied_crop_pixels = (16, 48, 16, 48)
+    # The worker builds on the uncropped frames.
+    from src.backend.solar.coronagraph_composite import AIA_SUN_LABEL, aia_sun_layer
+
+    built = _fake_stack(label=AIA_SUN_LABEL, layer_value=193.0)
+    built.specs[0] = aia_sun_layer("LASCO", "C2")
+    win._on_composite_finished(built, [])
+    plane = win._composite_stack.plane(0, 0)
+    assert (plane.y0, plane.x0) == (0, 0) and plane.data.shape == (32, 32)
+    assert _painted(win).shape == (32, 32, 3)
     win.close()
 
 

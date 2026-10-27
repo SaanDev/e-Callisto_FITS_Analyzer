@@ -387,3 +387,19 @@ def test_a_restored_selection_is_kept_when_the_project_opens(tmp_path, monkeypat
     assert choice.label.startswith("Burst list: type II")
     assert other._geomagnetic.context is not None
     other.close()
+
+
+def test_a_response_the_report_fetched_is_kept_for_the_current_event(tmp_path):
+    _app()
+    controller = GeomagneticController(loader=StubLoader(), cache_dir=tmp_path)
+    card = GeomagneticCard(controller)
+    controller.set_loaded_event(datetime(2024, 5, 10, 17), "FITS: a.fit")
+    # Another event's response is not taken.
+    assert controller.adopt_context(_context(datetime(2024, 5, 8, 5, 36), "Project report")) is False
+    assert controller.context is None
+
+    assert controller.adopt_context(_context(datetime(2024, 5, 10, 17, 20), "FITS: /data/a.fit")) is True
+    assert controller.context.event_label == "FITS: a.fit"
+    assert card.value_labels["storm"].text() == "Super storm"
+    assert controller.project_has_content()
+    controller.shutdown()

@@ -261,3 +261,29 @@ def test_the_strip_is_saved_in_the_project_and_reopens_offline(tmp_path, monkeyp
     assert len(other._event_context.result.events[ec.SOURCE_GOES]) == 2
     assert other._event_strip_ax is not None
     other.close()
+
+
+def test_catalogs_the_report_fetched_are_kept_when_they_cover_the_range(tmp_path):
+    _app()
+    controller = EventContextController(loader=lambda *a, **k: pytest.fail("no fetch expected"), cache_dir=tmp_path)
+    controller.set_range(BASE, BASE + timedelta(minutes=30))
+    assert controller.adopt_result(_result()) is True
+    assert controller.result is not None and controller.project_has_content()
+    assert controller.request_key() == controller._result_key  # nothing left to fetch for this range
+
+    # Another range is not this one's.
+    other = EventContextController(loader=lambda *a, **k: None, cache_dir=tmp_path)
+    other.set_range(BASE + timedelta(days=2), BASE + timedelta(days=2, minutes=30))
+    assert other.adopt_result(_result()) is False and other.result is None
+
+
+def test_opening_a_project_does_not_change_the_saved_strip_preference(tmp_path):
+    _app()
+    controller = EventContextController(loader=lambda *a, **k: None, cache_dir=tmp_path)
+    assert controller.enabled is False  # the stored preference (off by default)
+    controller.project_restore({"enabled": True, "sources": [ec.SOURCE_CDAW], "result": None, "range": None}, {})
+    assert controller.enabled is True and controller.sources == (ec.SOURCE_CDAW,)
+    assert controller._stored_preferences() == (False, ec.SOURCES)  # the project's choice stays its own
+
+    controller.reset()  # Reset All: back to the preference, as a fresh launch
+    assert controller.enabled is False and controller.sources == ec.SOURCES

@@ -137,3 +137,58 @@ def test_project_report_input_does_not_accept_operation_log():
             title="No Operation Log",
             operation_log=[{"ts": "2026-01-01T00:00:00+00:00", "msg": "loaded"}],
         )
+
+
+def _section_titles(monkeypatch):
+    """Record the radio sections' headings (they go through ``_section``)."""
+    from src.backend.session import project_report
+
+    titles = []
+    original = project_report._section
+
+    def record(story, rl, styles, title):
+        titles.append(title)
+        original(story, rl, styles, title)
+
+    monkeypatch.setattr(project_report, "_section", record)
+    return titles
+
+
+def test_a_report_without_radio_data_has_only_its_window_sections(tmp_path, monkeypatch):
+    from src.backend.session.project_report import ProjectReportSection
+
+    titles = _section_titles(monkeypatch)
+    solar = ProjectReportSection(
+        "Solar Image Analysis",
+        pairs=[("Instrument", "SOHO/LASCO C2"), ("Height–time picks", 3)],
+        figures=[ProjectReportFigure("Current Frame", png_bytes=_tiny_png(), caption="SOHO/LASCO | C2")],
+    )
+    gcs = ProjectReportSection(
+        "GCS CME Fitting",
+        pairs=[("Recorded GCS fits", 1)],
+        figures=[ProjectReportFigure("GCS Viewpoints", png_bytes=_tiny_png())],
+        table=(["UTC", "Height (R☉)"], [["2012-07-12 16:24:00", "4.10"]]),
+        table_title="Recorded GCS Fits",
+        notes=["The window's own report has every fit."],
+    )
+    report = ProjectReportInput(title="Solar Only", app={"name": "e-CALLISTO FITS Analyzer", "version": "3.2.0"},
+                                has_radio=False, sections=[solar, gcs])
+    result = generate_project_report_pdf(str(tmp_path / "solar_only.pdf"), report)
+
+    assert (tmp_path / "solar_only.pdf").read_bytes().startswith(b"%PDF")
+    assert result.figures_written == 2
+    # No Data Source, FITS header, processing, analysis or appendix sections.
+    assert titles == []
+
+
+def test_window_sections_follow_the_radio_sections(tmp_path, monkeypatch):
+    from src.backend.session.project_report import ProjectReportSection
+
+    titles = _section_titles(monkeypatch)
+    report = ProjectReportInput(
+        title="Radio And GCS", data_source={"filename": "demo.fit"},
+        sections=[ProjectReportSection("GCS CME Fitting", table=(["UTC"], []), table_title="Recorded GCS Fits")],
+    )
+    result = generate_project_report_pdf(str(tmp_path / "both.pdf"), report)
+    assert result.figures_written == 0
+    assert titles[0] == "Data Source" and titles[-1] == "Full FITS Header Appendix"

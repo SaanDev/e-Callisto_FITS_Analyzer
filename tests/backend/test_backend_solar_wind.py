@@ -287,3 +287,30 @@ def test_a_window_in_the_future_loads_nothing():
     context = load_geomagnetic_context(event, cache_dir=".", now=datetime(2026, 10, 10), loaders={})
     assert not context.series
     assert context.notes
+
+
+def test_stop_during_the_kp_request_returns_at_once():
+    import threading
+    import time as time_module
+
+    from src.backend.space_weather.geomagnetic_context import GeomagneticCancelled
+
+    release = threading.Event()
+    stop = threading.Event()
+
+    def dst_loader(start, end, **kwargs):
+        return np.array([start], dtype=object), np.array([-10.0]), ("Provisional",)
+
+    def kp_loader(start, end, **kwargs):
+        stop.set()  # the user presses Stop while GFZ has not answered yet
+        release.wait(10.0)
+        raise RuntimeError("never reached in time")
+
+    began = time_module.monotonic()
+    with pytest.raises(GeomagneticCancelled):
+        load_geomagnetic_context(
+            datetime(2024, 5, 10, 17), cache_dir=".", now=datetime(2026, 10, 10),
+            loaders={"dst": dst_loader, "kp": kp_loader}, cancel_cb=stop.is_set,
+        )
+    assert time_module.monotonic() - began < 3.0
+    release.set()

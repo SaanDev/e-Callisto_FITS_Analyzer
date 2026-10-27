@@ -369,6 +369,29 @@ class GeomagneticController(QObject):
     def is_busy(self) -> bool:
         return self._thread is not None
 
+    def adopt_context(self, context: GeomagneticContext | None) -> bool:
+        """Keep a response loaded elsewhere (the project report) when it is the current event's.
+
+        Only when nothing is shown or loading, and the response covers this
+        event hour with this span; returns whether it was taken.
+        """
+        choice = self.current_choice()
+        if context is None or choice is None or self.context is not None or self.is_busy():
+            return False
+        if (context.event_start - context.start, context.end - context.event_start) != (self.before, self.after):
+            return False
+        key = self.request_key()
+        if self.request_key(EventChoice(_naive_utc(context.event_start), choice.label, choice.source)) != key:
+            return False
+        context.event_label = choice.label
+        self.context = context
+        self._context_key = key
+        self._requested_key = key
+        self.contextChanged.emit(context)
+        self.modified.emit()
+        self.statusChanged.emit("Geomagnetic response loaded with the project report.")
+        return True
+
     def shutdown(self, wait_ms: int = 3000) -> None:
         self._debounce.stop()
         self._queued = None

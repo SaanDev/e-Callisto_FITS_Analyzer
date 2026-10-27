@@ -9114,12 +9114,19 @@ class MainWindow(QMainWindow):
         per-file readouts (timeline, geomagnetic card, analysis summary), undo
         history, the analysis, Geomagnetic Response and Event Figure windows,
         and the event context and composer settings. The Solar Image Analysis
-        and GCS windows are cleared and closed too, after a confirmation when
-        they hold work. Preferences that a fresh start reads from the settings
-        (theme, view mode, the View-menu choices) stay, and so does the
-        download cache.
+        and GCS windows are cleared and closed too. Unsaved changes get the
+        same Save / Discard / Cancel prompt as Open and Close; a saved project
+        whose Solar or GCS windows hold work gets a Yes / No confirmation.
+        Preferences that a fresh start reads from the settings (theme, view
+        mode, the View-menu choices) stay, and so does the download cache.
         """
-        if not self._confirm_reset_of_solar_and_gcs():
+        if self._solar_operation_blocks_reset():
+            return
+        if getattr(self, "_project_dirty", False):
+            # Save first, discard, or keep everything as it is.
+            if not self._maybe_prompt_save_dirty():
+                return
+        elif not self._confirm_reset_of_solar_and_gcs():
             return
 
         # Background work first, so nothing lands on the window after the reset.
@@ -9214,22 +9221,26 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("All reset", 4000)
         print("Application reset to initial state.")
 
-    def _confirm_reset_of_solar_and_gcs(self) -> bool:
-        """Ask before Reset All discards Solar Image Analysis or GCS work.
+    def _solar_operation_blocks_reset(self) -> bool:
+        """True (and the user is told) while Solar Image Analysis is downloading or computing.
 
-        False means the reset must not go ahead: the user declined, or the
-        solar window is in the middle of a download or computation (stopping
-        it under a running worker is what its own Reset All refuses too).
+        Stopping it under a running worker is what its own Reset All refuses too.
         """
         solar = self._solar_data_analysis_window
         solar = solar if self._dialog_alive(solar) else None
-        gcs = self._gcs_window if self._dialog_alive(self._gcs_window) else None
         if solar is not None and (bool(getattr(solar, "_busy", False)) or solar.is_operation_running()):
             QMessageBox.information(
                 self, "Reset All",
                 "Solar Image Analysis is still working. Wait for it to finish, or stop it, before resetting.",
             )
-            return False
+            return True
+        return False
+
+    def _confirm_reset_of_solar_and_gcs(self) -> bool:
+        """Ask before Reset All closes Solar Image Analysis or GCS work; False if declined."""
+        solar = self._solar_data_analysis_window
+        solar = solar if self._dialog_alive(solar) else None
+        gcs = self._gcs_window if self._dialog_alive(self._gcs_window) else None
         work = []
         if solar is not None and solar.project_has_content():
             work.append("Solar Image Analysis: the loaded images and measurements")
@@ -11047,6 +11058,13 @@ class MainWindow(QMainWindow):
                 pass
 
     def _on_event_context_result(self, _result=None) -> None:
+        # An opened project, or Reset All, may have changed the sources; keep the menu honest.
+        for source, act in getattr(self, "event_strip_source_actions", {}).items():
+            wanted = source in self._event_context.sources
+            if act.isChecked() != wanted:
+                was = act.blockSignals(True)
+                act.setChecked(wanted)
+                act.blockSignals(was)
         self._refresh_event_strip()
 
     def _on_event_context_status(self, text) -> None:
@@ -14078,9 +14096,19 @@ class MainWindow(QMainWindow):
             unavailable="STEREO/SWAVES figure could not be rendered.",
         )
 
-    def _build_project_report_figures(self, session: dict | None) -> list[ProjectReportFigure]:
+    def _build_project_report_figures(self, session: dict | None, *, radio: bool = True) -> list[ProjectReportFigure]:
+        """The report's figures; ``radio=False`` leaves out the spectrum and its analyses."""
         figures: list[ProjectReportFigure] = []
         report_view = self._capture_view()
+        if radio:
+            figures.extend(self._build_radio_report_figures(session, report_view))
+        if getattr(self, "_swaves_payload", None) is not None:
+            figures.append(self._capture_swaves_report_figure(view=report_view))
+        figures.extend(self._build_space_weather_report_figures())
+        return figures
+
+    def _build_radio_report_figures(self, session: dict | None, report_view) -> list[ProjectReportFigure]:
+        figures: list[ProjectReportFigure] = []
         raw_data = getattr(self, "raw_data", None)
         figures.append(
             self._capture_report_spectrum_figure(
@@ -14128,10 +14156,10 @@ class MainWindow(QMainWindow):
 
         figures.append(self._capture_max_intensity_fit_report_figure(session))
         figures.append(self._capture_type_ii_report_figure(session))
+        return figures
 
-        if getattr(self, "_swaves_payload", None) is not None:
-            figures.append(self._capture_swaves_report_figure(view=report_view))
-
+    def _build_space_weather_report_figures(self) -> list[ProjectReportFigure]:
+        figures: list[ProjectReportFigure] = []
         goes_window_fig = self._capture_solar_window_report_figure(
             "_goes_window",
             "GOES X-Ray Data",
@@ -14227,6 +14255,12 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             event_story, story_figures, story_notes = None, [], [f"The event story could not be told: {exc}"]
 
+        has_radio = getattr(self, "raw_data", None) is not None
+        figures = self._build_project_report_figures(session, radio=has_radio)
+        if not has_radio:
+            # Without a spectrum only the space-weather figures that were drawn are worth a place.
+            figures = [figure for figure in figures if figure.png_bytes]
+
         return ProjectReportInput(
             title=title,
             app=dict(context.get("app") or {}),
@@ -14246,11 +14280,30 @@ class MainWindow(QMainWindow):
             date_obs=self._analysis_date_obs(),
             selected_header=selected_header,
             full_header=full_header,
-            figures=self._build_project_report_figures(session),
+            figures=figures,
             event_story=event_story,
             story_figures=story_figures,
             story_notes=story_notes,
+            has_radio=has_radio,
+            sections=self._project_report_window_sections(),
         )
+
+    def _project_report_window_sections(self) -> list:
+        """The Solar Image Analysis and GCS sections, for the windows that hold work."""
+        from src.backend.session.project_report import ProjectReportSection
+
+        sections = []
+        for name, title in (("_solar_data_analysis_window", "Solar Image Analysis"), ("_gcs_window", "GCS CME Fitting")):
+            window = getattr(self, name, None)
+            if not self._dialog_alive(window) or not hasattr(window, "report_section"):
+                continue
+            try:
+                section = window.report_section()
+            except Exception as exc:
+                section = ProjectReportSection(title, notes=[f"This section could not be added: {exc}"])
+            if section is not None:
+                sections.append(section)
+        return sections
 
     def _show_project_report_progress_dialog(self):
         self._close_project_report_progress_dialog()
@@ -14314,8 +14367,10 @@ class MainWindow(QMainWindow):
         self._sync_project_actions()
 
     def generate_project_report(self):
-        if getattr(self, "raw_data", None) is None:
-            QMessageBox.information(self, "Generate Project Report", "Load a FITS file first.")
+        if not self._project_has_content():
+            QMessageBox.information(
+                self, "Generate Project Report", "Load a FITS file, solar images or a GCS event first."
+            )
             return
         if getattr(self, "_project_report_worker", None) is not None:
             QMessageBox.information(self, "Generate Project Report", "A project report is already being generated.")
@@ -14378,6 +14433,13 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def _on_story_fetch_finished(self, fetched) -> None:
         pending = self._release_story_fetch()
+        # What the report fetched for this event is kept, so the card and strip
+        # show it, the project saves it and the next report does not fetch again.
+        try:
+            self._geomagnetic.adopt_context(getattr(fetched, "geomagnetic", None))
+            self._event_context.adopt_result(getattr(fetched, "catalog", None))
+        except Exception:
+            pass
         if pending is not None:
             path, request = pending
             self._start_project_report_worker(path, request, fetched)
@@ -14446,7 +14508,7 @@ class MainWindow(QMainWindow):
         for name, enabled in (
             ("save_project_action", has_project and not saving),
             ("save_project_as_action", has_project and not saving),
-            ("generate_project_report_action", has_data and getattr(self, "_project_report_worker", None) is None),
+            ("generate_project_report_action", has_project and getattr(self, "_project_report_worker", None) is None),
         ):
             act = getattr(self, name, None)
             if act is not None:

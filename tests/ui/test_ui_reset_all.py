@@ -282,6 +282,7 @@ def test_reset_all_asks_then_clears_and_closes_the_solar_and_gcs_windows(tmp_pat
         window.open_fits_paths([str(_fits(tmp_path))])
         _flush()
         solar, gcs = _with_solar_and_gcs_work(window, tmp_path, monkeypatch)
+        window._project_dirty = False  # a saved project: unsaved work gets the save prompt instead
 
         window.reset_all()
         _flush_deletes()
@@ -312,6 +313,7 @@ def test_declining_the_reset_leaves_every_window_as_it_was(tmp_path, monkeypatch
         _flush()
         solar, gcs = _with_solar_and_gcs_work(window, tmp_path, monkeypatch)
         window.title_edit.setText("Kept")
+        window._project_dirty = False  # a saved project: unsaved work gets the save prompt instead
 
         window.reset_all()
         _flush_deletes()
@@ -319,6 +321,41 @@ def test_declining_the_reset_leaves_every_window_as_it_was(tmp_path, monkeypatch
         assert window.raw_data is not None and window.title_edit.text() == "Kept"
         assert window._solar_data_analysis_window is solar and len(solar._map_frames) == 3
         assert window._gcs_window is gcs and gcs.project_has_content()
+    finally:
+        window.close()
+
+
+@pytest.mark.parametrize("answer", ["cancel", "discard", "save"])
+def test_unsaved_changes_get_the_save_prompt_before_a_reset(tmp_path, monkeypatch, answer):
+    _app()
+    from src.ui.app.main_window import MainWindow
+
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: asked.append(a[2]) or QMessageBox.Yes))
+    window = MainWindow(theme=None)
+    try:
+        window.open_fits_paths([str(_fits(tmp_path))])
+        _flush()
+        assert window._project_dirty
+        saved = []
+        monkeypatch.setattr(window, "save_project", lambda: saved.append(True) or True)
+
+        def prompt():
+            # What _maybe_prompt_save_dirty does for each button.
+            if answer == "save":
+                return bool(window.save_project())
+            return answer == "discard"
+
+        monkeypatch.setattr(window, "_maybe_prompt_save_dirty", prompt)
+        window.reset_all()
+        _flush()
+
+        assert asked == []  # the save prompt replaces the Yes / No question
+        assert saved == ([True] if answer == "save" else [])
+        if answer == "cancel":
+            assert window.raw_data is not None
+        else:
+            assert window.raw_data is None and window._project_dirty is False
     finally:
         window.close()
 

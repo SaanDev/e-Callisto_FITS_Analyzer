@@ -27,6 +27,7 @@ Qt-free; every loader takes ``cache_dir``, ``progress_cb`` and ``cancel_cb``.
 from __future__ import annotations
 
 import math
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
@@ -250,6 +251,38 @@ def _naive_utc(value: datetime) -> datetime:
     return value
 
 
+def _call_cancellable(fn: Callable[[], Any], cancel_cb: Callable[[], bool] | None, *, poll_s: float = 0.2) -> Any:
+    """``fn()`` for a loader with no cancel hook of its own (one blocking request).
+
+    It runs on a daemon thread and is waited for in short steps, so Stop
+    returns at once; an abandoned request finishes in the background and its
+    result is dropped.
+    """
+    if cancel_cb is None:
+        return fn()
+    outcome: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            outcome["value"] = fn()
+        except BaseException as exc:  # handed back to the caller below
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=run, name="geomagnetic-load", daemon=True)
+    thread.start()
+    while thread.is_alive():
+        thread.join(poll_s)
+        try:
+            stop = bool(cancel_cb())
+        except Exception:
+            stop = False
+        if stop and thread.is_alive():
+            raise GeomagneticCancelled("Geomagnetic load cancelled.")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome.get("value")
+
+
 def load_geomagnetic_context(
     event_start_utc: datetime,
     *,
@@ -320,13 +353,16 @@ def load_geomagnetic_context(
     report(20, "GFZ Kp…")
     try:
         kp_loader = loaders.get("kp", load_kp_range)
-        kp = kp_loader(start, fetch_end, session=session)
+        # GFZ answers in one request that cannot be interrupted; Stop does not wait for it.
+        kp = _call_cancellable(lambda: kp_loader(start, fetch_end, session=session), cancel_cb)
         kp_times = np.array([np.datetime64(t, "s") for t in kp.interval_starts], dtype="datetime64[s]")
         context.series["kp"] = GeoSeries(
             "kp", kp_times, np.asarray(kp.kp_decimal, dtype=float),
             _segments_from_labels(kp_times, [str(s or "def") for s in kp.status], kp.source_label or "GFZ Kp"),
         )
         context.kp_status = [str(s) for s in kp.status]
+    except GeomagneticCancelled:
+        raise
     except Exception as exc:
         context.errors["Kp"] = str(exc) or type(exc).__name__
     if cancelled():

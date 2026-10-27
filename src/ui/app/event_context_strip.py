@@ -218,13 +218,7 @@ class EventContextController(QObject):
         super().__init__(parent)
         self._loader = loader or load_event_context
         self._cache_dir = Path(cache_dir) if cache_dir is not None else None
-        settings = self._settings()
-        self.enabled = str(settings.value(ENABLED_KEY, "false")).lower() in ("1", "true", "yes")
-        try:
-            stored = json.loads(str(settings.value(SOURCES_KEY, "") or "[]"))
-        except (TypeError, ValueError):
-            stored = []
-        self.sources: tuple[str, ...] = tuple(s for s in SOURCES if s in stored) or SOURCES
+        self.enabled, self.sources = self._stored_preferences()
         self.result: EventContextResult | None = None
         self.range: tuple[datetime, datetime] | None = None
         self._result_key: str | None = None
@@ -240,6 +234,16 @@ class EventContextController(QObject):
     @staticmethod
     def _settings() -> QSettings:
         return _make_settings()
+
+    def _stored_preferences(self) -> tuple[bool, tuple[str, ...]]:
+        """The View-menu choices as saved: strip on or off, and which sources."""
+        settings = self._settings()
+        enabled = str(settings.value(ENABLED_KEY, "false")).lower() in ("1", "true", "yes")
+        try:
+            stored = json.loads(str(settings.value(SOURCES_KEY, "") or "[]"))
+        except (TypeError, ValueError):
+            stored = []
+        return enabled, tuple(s for s in SOURCES if s in stored) or SOURCES
 
     def _save_settings(self) -> None:
         try:
@@ -382,6 +386,28 @@ class EventContextController(QObject):
     def is_busy(self) -> bool:
         return self._thread is not None
 
+    def adopt_result(self, result: EventContextResult | None) -> bool:
+        """Keep catalogs loaded elsewhere (the project report) when they cover this range.
+
+        Only when they hold every chosen source and what is shown does not, and
+        nothing is loading; returns whether they were taken.
+        """
+        if result is None or self.range is None or self.is_busy():
+            return False
+        start, end = self.range
+        if not (result.start <= start and result.end >= end):
+            return False
+        if not all(source in result.events for source in self.sources):
+            return False
+        if self.result is not None and all(source in self.result.events for source in self.sources):
+            return False
+        self.result = result
+        self._result_key = self.request_key()
+        self._requested_key = self._result_key
+        self.resultChanged.emit(result)
+        self.modified.emit()
+        return True
+
     def shutdown(self, wait_ms: int = 3000) -> None:
         self._debounce.stop()
         self._queued = None
@@ -423,8 +449,8 @@ class EventContextController(QObject):
         self._requested_key = self._result_key
         wanted = bool(meta.get("enabled", True))
         if wanted != self.enabled:
+            # For this project only: the saved View-menu preference is not changed.
             self.enabled = wanted
-            self._save_settings()
             self.enabledChanged.emit(wanted)
         self.resultChanged.emit(self.result)
 
@@ -439,10 +465,15 @@ class EventContextController(QObject):
     def reset(self) -> None:
         """Back to a fresh start (Reset All): no range, no catalog results.
 
-        The View-menu choices (strip on or off, which sources) are preferences
-        that a fresh start reads from the settings too, so they are kept.
+        The View-menu choices (strip on or off, which sources) go back to the
+        saved preferences, as a fresh start reads them, in case an opened
+        project had changed them for itself.
         """
         self._queued = None
         if self._worker is not None:
             self._worker.request_cancel()
+        enabled, self.sources = self._stored_preferences()
+        if enabled != self.enabled:
+            self.enabled = enabled
+            self.enabledChanged.emit(enabled)
         self.project_clear()

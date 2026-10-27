@@ -2033,6 +2033,12 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         # exact crop even if the spin fields are edited afterwards).
         self._crop_applied = False
         self._applied_crop_arcsec: list[float] | None = None
+        # The same crop in pixels of the uncropped frames, (x0, x1, y0, y1): a
+        # composite is built on the uncropped frames and cut to match with it.
+        self._applied_crop_pixels: tuple[int, int, int, int] | None = None
+        # A reopened project's overlay composite, built once its frames are in
+        # and no worker is running any more.
+        self._pending_composite_rebuild = False
         self._original_frames: list[Any] = []
         # Frames at the currently selected processing level. The pipeline is
         # _original_frames -> (level) -> _leveled_frames -> (crop/derotation) ->
@@ -5300,6 +5306,10 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             self._pending_session_download = False
             self.download_and_load_selected()
             return
+        # A reopened project's composite is built once its frames have loaded.
+        if self._pending_composite_rebuild:
+            self._start_pending_composite_rebuild()
+            return
         # A vector re-download accepted while the previous worker was still
         # winding down starts once the thread has fully stopped.
         if self._pending_vector_download:
@@ -5702,6 +5712,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self._exposure_varies = exposures_differ(frames)
         self._crop_applied = False
         self._applied_crop_arcsec = None
+        self._applied_crop_pixels = None
         self._loaded_paths = list(paths or [])
         self._original_frames = list(frames)
         self._leveled_frames = list(frames)
@@ -6948,6 +6959,9 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             )
             self._render_current_frame()
             return
+        if self._crop_applied and self._applied_crop_pixels is not None and len(stack) == len(self._map_frames):
+            # Built on the uncropped frames: cut it like the frames on screen.
+            stack = stack.cropped(self._applied_crop_pixels)
         self._composite_stack = stack
         self._composite_labels = list(getattr(self, "_composite_pending_labels", []) or [])
         self._refresh_overlay_note()
@@ -7402,6 +7416,13 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             self._render_current_frame()
             self._set_crop_mode_checked(False)
             # Remember the applied crop so a saved session can reproduce it.
+            absolute = tuple(int(v) for v in bounds)
+            previous = self._applied_crop_pixels if self._crop_applied else None
+            if previous is not None:
+                # A second crop is in pixels of the already cropped frames.
+                absolute = (previous[0] + absolute[0], previous[0] + absolute[1],
+                            previous[2] + absolute[2], previous[2] + absolute[3])
+            self._applied_crop_pixels = absolute
             self._crop_applied = True
             self._applied_crop_arcsec = [
                 float(self.crop_x0_spin.value()),
@@ -7706,6 +7727,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self._composite_token = ""
         self._crop_applied = False
         self._applied_crop_arcsec = None
+        self._applied_crop_pixels = None
 
         mode_label = DEROTATION_MODE_LABELS.get(result.mode, result.mode)
         message = (
@@ -7735,6 +7757,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self._composite_token = ""
         self._crop_applied = False
         self._applied_crop_arcsec = None
+        self._applied_crop_pixels = None
         self._after_frames_replaced("Restored the full frames.", discarded=False)
         self.derotation_status_label.setText("Derotation: off")
 
@@ -7749,6 +7772,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             self._reset_derotation_state()
             self._crop_applied = False
             self._applied_crop_arcsec = None
+            self._applied_crop_pixels = None
             self._composite_stack = None
             self._composite_token = ""
             message += "\nThe previous crop/derotation was cleared — re-apply it if you need it."
@@ -7801,6 +7825,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self._composite_labels = []
         self._crop_applied = False
         self._applied_crop_arcsec = None
+        self._applied_crop_pixels = None
         self._regions = []
         self.region_table.setRowCount(0)
         self._current_frame_index = 0
@@ -8508,10 +8533,11 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         # The layer stack is saved as a recipe, not as pixels: re-embedding every
         # overlay instrument's FITS would balloon the session file, and the layer
         # frames stay in the shared archive cache anyway. On restore the stack
-        # reappears and the user re-runs Build.
+        # reappears and, if it was built, is built again.
         overlay = {
             "window_minutes": int(self.overlay_window_spin.value()),
             "layers": [asdict(spec) for spec in self._overlay_specs],
+            "built": bool(self._has_live_composite()),
         }
         return {
             "source": source,
@@ -8580,6 +8606,72 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             levels = (low, high) if high > low else None
         cmap = self.matplotlib_canvas._matplotlib_colormap(self._resolved_colormap_name())
         return ThumbnailImage(stamp, self._loaded_instrument_label(), data, "loaded", cmap=cmap, levels=levels)
+
+    def report_section(self) -> Any:
+        """The project report's Solar Image Analysis section, or ``None`` with no frames.
+
+        The current frame as it is on screen, what the frames are and how they
+        were processed, and the CME measurements with their kinematics.
+        """
+        from src.backend.session.project_report import ProjectReportFigure, ProjectReportSection
+
+        if not self._map_frames:
+            return None
+        times = []
+        for frame in self._map_frames:
+            try:
+                when = frame_observation_time(frame)
+            except Exception:
+                when = None
+            if isinstance(when, datetime):
+                times.append(when.replace(tzinfo=None))
+        span = f"{min(times):%Y-%m-%d %H:%M:%S} to {max(times):%Y-%m-%d %H:%M:%S} UTC" if times else "Not available"
+        measure = getattr(self, "_measure", None)
+        picks = len(getattr(measure, "picks", {}) or {})
+        circles = len(getattr(measure, "circles", {}) or {})
+        layers = [str(spec.label) for spec in self._overlay_specs if spec.enabled]
+        crop = "None"
+        if self._crop_applied and self._applied_crop_arcsec:
+            x0, x1, y0, y1 = self._applied_crop_arcsec
+            crop = f'x {x0:.0f}″ to {x1:.0f}″, y {y0:.0f}″ to {y1:.0f}″'
+        kinematics = self.tracking_panel.speed_label.text().strip() if (picks or circles) else ""
+        pairs = [
+            ("Instrument", self._loaded_instrument_label()),
+            ("Product", "JP2 quicklook (8-bit display values, not calibrated)" if self._loaded_is_quicklook() else "FITS"),
+            ("Frames", f"{len(self._map_frames)} ({span})"),
+            ("Processing level", self._current_level or "As downloaded"),
+            ("Derotation", DEROTATION_MODE_LABELS.get(self._derotation_meta.get("mode"), "Applied")
+             if self._derotation_applied else "None"),
+            ("Crop", crop),
+            ("View", f"{self.movie_content_combo.currentText()}, {self.colormap_combo.currentText()}, "
+                     f"{self.scale_combo.currentText()} scale"),
+            ("Overlay layers", ", ".join(layers) + ("" if self._has_live_composite() else " (not built)")
+             if layers else "None"),
+            ("Height–time picks", picks),
+            ("Circle fits", circles),
+        ]
+        if kinematics:
+            pairs.append(("Kinematics", kinematics))
+
+        index = int(self._current_frame_index)
+        title = "Current Frame"
+        png = None
+        try:
+            import tempfile
+
+            with tempfile.TemporaryDirectory() as folder:
+                target = Path(folder) / "frame.png"
+                self._save_canvas_plot(str(target))
+                png = target.read_bytes()
+        except Exception:
+            png = None
+        figure = ProjectReportFigure(
+            title,
+            png_bytes=png,
+            caption=self._frame_title(self._map_frames[index], index) if 0 <= index < len(self._map_frames) else "",
+            availability_note="The current frame could not be captured.",
+        )
+        return ProjectReportSection("Solar Image Analysis", pairs=pairs, figures=[figure])
 
     def _project_source_query(self) -> dict[str, Any]:
         """What re-fetches these frames when a linked project's files are gone."""
@@ -8742,6 +8834,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         """Drop loaded frames and measurements without touching the cache or settings."""
         if self._busy or self.is_operation_running():
             return
+        self._pending_composite_rebuild = False
         try:
             self.clear_all_measurements()
         except Exception:
@@ -8758,6 +8851,30 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             self._apply_session_restore_inner(meta)
         finally:
             self._restoring_project = False
+        if self._overlay_was_built(meta.get("overlay_layers")):
+            # Built again as if Build Composite were clicked, once the frames'
+            # loader has stopped (see _on_worker_stopped).
+            self._pending_composite_rebuild = True
+            if not self.is_operation_running():
+                QTimer.singleShot(0, self._start_pending_composite_rebuild)
+
+    def _overlay_was_built(self, saved: Any) -> bool:
+        """Whether a saved overlay recipe was on screen as a composite.
+
+        Recipes saved before ``built`` was stored count as built when any layer
+        is ticked: the AIA Sun box, for one, ticks its layer only by building it.
+        """
+        if not isinstance(saved, dict) or not any(spec.enabled for spec in self._overlay_specs):
+            return False
+        built = saved.get("built")
+        return True if built is None else bool(built)
+
+    def _start_pending_composite_rebuild(self) -> None:
+        if not self._pending_composite_rebuild or self.is_operation_running():
+            return
+        self._pending_composite_rebuild = False
+        if self._map_frames and any(spec.enabled for spec in self._overlay_specs):
+            self.build_composite()
 
     def _apply_session_restore_inner(self, meta: dict[str, Any]) -> None:
         view = dict(meta.get("view") or {})

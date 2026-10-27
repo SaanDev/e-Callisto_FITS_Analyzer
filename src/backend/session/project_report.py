@@ -64,6 +64,22 @@ class ProjectReportFigure:
 
 
 @dataclass
+class ProjectReportSection:
+    """A section another window contributes: Solar Image Analysis, GCS CME fitting.
+
+    ``table`` is ``(headers, rows)`` for a multi-column table (the recorded
+    fits, say); ``pairs`` are key/value rows as in the other sections.
+    """
+
+    title: str
+    pairs: Sequence[tuple[str, Any]] = field(default_factory=tuple)
+    figures: Sequence[ProjectReportFigure] = field(default_factory=tuple)
+    table: tuple[Sequence[str], Sequence[Sequence[Any]]] | None = None
+    table_title: str = ""
+    notes: Sequence[str] = field(default_factory=tuple)
+
+
+@dataclass
 class ProjectReportInput:
     title: str
     app: Mapping[str, Any] = field(default_factory=dict)
@@ -88,6 +104,11 @@ class ProjectReportInput:
     story_figures: Sequence[ProjectReportFigure] = field(default_factory=tuple)
     #: What the story is missing and why (a catalog that could not be fetched, say).
     story_notes: Sequence[str] = field(default_factory=tuple)
+    #: False for a project without a radio spectrum: its data, processing,
+    #: analysis and FITS-header sections are left out.
+    has_radio: bool = True
+    #: Solar Image Analysis and GCS sections, after the radio ones.
+    sections: Sequence[ProjectReportSection] = field(default_factory=tuple)
 
 
 @dataclass
@@ -584,6 +605,57 @@ def _add_event_story(flow: list[Any], rl, styles, report: ProjectReportInput, wi
     return written
 
 
+def _grid_table(rl, styles, headers: Sequence[str], rows: Sequence[Sequence[Any]], width: float):
+    """A plain multi-column table with a header row, repeated on each page."""
+    Paragraph = rl["Paragraph"]
+    Table = rl["Table"]
+    TableStyle = rl["TableStyle"]
+    colors = rl["colors"]
+    data = [[Paragraph(f"<b>{escape(str(text))}</b>", styles["SmallText"]) for text in headers]]
+    for row in rows:
+        data.append([Paragraph(_safe_para_text(value), styles["SmallText"]) for value in row])
+    columns = max(1, len(headers))
+    table = Table(data, colWidths=[width / columns] * columns, hAlign="LEFT", repeatRows=1)
+    table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d7dce3")),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef2f7")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    return table
+
+
+def _add_window_section(flow: list[Any], rl, styles, section: ProjectReportSection, width: float) -> int:
+    """One window's section: its key values, its figures, its table and notes. Returns figures embedded."""
+    Paragraph = rl["Paragraph"]
+    KeepTogether = rl["KeepTogether"]
+    inch = rl["inch"]
+    written = 0
+    flow.append(Paragraph(escape(section.title), styles["Heading1"]))
+    if section.pairs:
+        flow.append(_pair_table(rl, styles, list(section.pairs), width))
+        flow.append(rl["Spacer"](1, 0.12 * inch))
+    for figure in [figure for figure in section.figures or () if figure]:
+        block, count = _figure_block(rl, styles, figure, width, 5.6 * inch)
+        flow.append(KeepTogether(block))
+        written += count
+    if section.table is not None:
+        headers, rows = section.table
+        if section.table_title:
+            flow.append(Paragraph(escape(section.table_title), styles["Heading2"]))
+        if rows:
+            flow.append(_grid_table(rl, styles, list(headers), list(rows), width))
+        else:
+            flow.append(Paragraph("None recorded.", styles["SmallText"]))
+    for note in section.notes or ():
+        if note:
+            flow.append(Paragraph(escape(str(note)), styles["Caption"]))
+    return written
+
+
 def generate_project_report_pdf(
     output_path: str,
     report: ProjectReportInput,
@@ -641,20 +713,21 @@ def generate_project_report_pdf(
         subtitle.append(f"FITS primary: {escape(report.fits_primary)}")
     story.append(Paragraph("<br/>".join(subtitle), styles["ReportSubtitle"]))
     story.append(Spacer(1, 0.25 * inch))
-    story.append(
-        _pair_table(
-            rl,
-            styles,
-            [
-                ("Station", report.station),
-                ("Observation date", report.date_obs),
-                ("Current plot", _as_mapping(report.processing).get("plot_type")),
-                ("Source file", data_source.get("filename")),
-            ]
-            + ([("Event", report.event_story.chain)] if report.event_story is not None and report.event_story.chain else []),
-            doc.width,
-        )
-    )
+    sections = [section for section in report.sections or () if section]
+    if report.has_radio:
+        cover = [
+            ("Station", report.station),
+            ("Observation date", report.date_obs),
+            ("Current plot", _as_mapping(report.processing).get("plot_type")),
+            ("Source file", data_source.get("filename")),
+        ]
+    else:
+        cover = [("Radio spectrum", "Not part of this project")]
+    if sections:
+        cover.append(("Also in this report", ", ".join(section.title for section in sections)))
+    if report.event_story is not None and report.event_story.chain:
+        cover.append(("Event", report.event_story.chain))
+    story.append(_pair_table(rl, styles, cover, doc.width))
     story.append(PageBreak())
 
     figures_written = 0
@@ -663,81 +736,83 @@ def generate_project_report_pdf(
         figures_written += _add_event_story(story, rl, styles, report, doc.width)
         story.append(PageBreak())
 
-    _emit(progress_cb, 18, "Adding data and processing sections...")
-    _section(story, rl, styles, "Data Source")
-    story.append(
-        _pair_table(
-            rl,
-            styles,
-            _available_pairs(
-                data_source,
-                [
-                    ("Filename", "filename"),
-                    ("Combined", "is_combined"),
-                    ("Combined mode", "combined_mode"),
-                    ("Array shape", "shape"),
-                    ("Frequency range (MHz)", "freq_range_mhz"),
-                    ("Time range (s)", "time_range_s"),
-                    ("Sources", "sources"),
+    if report.has_radio:
+        # Data, processing and analysis of the radio spectrum.
+        _emit(progress_cb, 18, "Adding data and processing sections...")
+        _section(story, rl, styles, "Data Source")
+        story.append(
+            _pair_table(
+                rl,
+                styles,
+                _available_pairs(
+                    data_source,
+                    [
+                        ("Filename", "filename"),
+                        ("Combined", "is_combined"),
+                        ("Combined mode", "combined_mode"),
+                        ("Array shape", "shape"),
+                        ("Frequency range (MHz)", "freq_range_mhz"),
+                        ("Time range (s)", "time_range_s"),
+                        ("Sources", "sources"),
+                    ],
+                )
+                + [
+                    ("Project path", report.project_path),
+                    ("FITS primary", report.fits_primary),
                 ],
+                doc.width,
             )
-            + [
-                ("Project path", report.project_path),
-                ("FITS primary", report.fits_primary),
-            ],
-            doc.width,
         )
-    )
-    story.append(Spacer(1, 0.12 * inch))
+        story.append(Spacer(1, 0.12 * inch))
 
-    _section(story, rl, styles, "Selected FITS Header")
-    story.append(_pair_table(rl, styles, list(_as_mapping(report.selected_header).items()), doc.width))
-    story.append(Spacer(1, 0.12 * inch))
+        _section(story, rl, styles, "Selected FITS Header")
+        story.append(_pair_table(rl, styles, list(_as_mapping(report.selected_header).items()), doc.width))
+        story.append(Spacer(1, 0.12 * inch))
 
-    _section(story, rl, styles, "Processing")
-    processing_pairs = _available_pairs(
-        report.processing,
-        [
-            ("Plot type", "plot_type"),
-            ("Units in dB", "use_db"),
-            ("Use UT axis", "use_utc"),
-            ("Colormap", "cmap"),
-            ("Noise clip low", "noise_clip_low"),
-            ("Noise clip high", "noise_clip_high"),
-            ("Noise clip scale", "noise_clip_scale"),
-            ("Active preset", "active_preset"),
-        ],
-    )
-    story.append(_pair_table(rl, styles, processing_pairs, doc.width))
-    story.append(Spacer(1, 0.12 * inch))
-
-    _section(story, rl, styles, "RFI, Annotations, And Light Curves")
-    story.append(
-        _pair_table(
-            rl,
-            styles,
+        _section(story, rl, styles, "Processing")
+        processing_pairs = _available_pairs(
+            report.processing,
             [
-                ("RFI settings", report.rfi),
-                ("Annotation count", len(list(report.annotations or []))),
-                ("Annotations", report.annotations),
-                ("Light curve settings", _as_mapping(report.light_curve).get("settings")),
-                ("Light curve records", _as_mapping(report.light_curve).get("records")),
+                ("Plot type", "plot_type"),
+                ("Units in dB", "use_db"),
+                ("Use UT axis", "use_utc"),
+                ("Colormap", "cmap"),
+                ("Noise clip low", "noise_clip_low"),
+                ("Noise clip high", "noise_clip_high"),
+                ("Noise clip scale", "noise_clip_scale"),
+                ("Active preset", "active_preset"),
             ],
-            doc.width,
         )
-    )
-    story.append(PageBreak())
+        story.append(_pair_table(rl, styles, processing_pairs, doc.width))
+        story.append(Spacer(1, 0.12 * inch))
 
-    _emit(progress_cb, 34, "Adding analysis sections...")
-    _section(story, rl, styles, "Analysis Summary")
-    story.append(_pair_table(rl, styles, _analysis_pairs(report), doc.width))
-    story.append(Spacer(1, 0.12 * inch))
-    _section(story, rl, styles, "Type II Results")
-    story.append(_pair_table(rl, styles, _type_ii_pairs(report.analysis_session), doc.width))
-    story.append(Spacer(1, 0.12 * inch))
+        _section(story, rl, styles, "RFI, Annotations, And Light Curves")
+        story.append(
+            _pair_table(
+                rl,
+                styles,
+                [
+                    ("RFI settings", report.rfi),
+                    ("Annotation count", len(list(report.annotations or []))),
+                    ("Annotations", report.annotations),
+                    ("Light curve settings", _as_mapping(report.light_curve).get("settings")),
+                    ("Light curve records", _as_mapping(report.light_curve).get("records")),
+                ],
+                doc.width,
+            )
+        )
+        story.append(PageBreak())
+
+        _emit(progress_cb, 34, "Adding analysis sections...")
+        _section(story, rl, styles, "Analysis Summary")
+        story.append(_pair_table(rl, styles, _analysis_pairs(report), doc.width))
+        story.append(Spacer(1, 0.12 * inch))
+        _section(story, rl, styles, "Type II Results")
+        story.append(_pair_table(rl, styles, _type_ii_pairs(report.analysis_session), doc.width))
+        story.append(Spacer(1, 0.12 * inch))
 
     figure_items = [fig for fig in list(report.figures or []) if fig]
-    if not figure_items:
+    if not figure_items and report.has_radio:
         _section(story, rl, styles, "Figures")
         story.append(Paragraph("Not available", styles["Normal"]))
     for idx, figure in enumerate(figure_items, start=1):
@@ -768,23 +843,30 @@ def generate_project_report_pdf(
         figure_block.append(Spacer(1, 0.1 * inch))
         story.append(KeepTogether(figure_block))
 
-    story.append(PageBreak())
-    _emit(progress_cb, 80, "Adding appendix...")
-    _section(story, rl, styles, "Full FITS Header Appendix")
-    header_text = str(report.full_header or "").strip()
-    if header_text:
-        story.append(
-            Preformatted(
-                header_text[:18000],
-                styles["SmallText"],
-                maxLineLength=110,
-                newLineChars="\n",
+    for section in sections:
+        _emit(progress_cb, 78, f"Adding {section.title}...")
+        if story and not isinstance(story[-1], PageBreak):
+            story.append(PageBreak())
+        figures_written += _add_window_section(story, rl, styles, section, doc.width)
+
+    if report.has_radio:
+        story.append(PageBreak())
+        _emit(progress_cb, 80, "Adding appendix...")
+        _section(story, rl, styles, "Full FITS Header Appendix")
+        header_text = str(report.full_header or "").strip()
+        if header_text:
+            story.append(
+                Preformatted(
+                    header_text[:18000],
+                    styles["SmallText"],
+                    maxLineLength=110,
+                    newLineChars="\n",
+                )
             )
-        )
-        if len(header_text) > 18000:
-            story.append(Paragraph("Header appendix was truncated for PDF readability.", styles["Caption"]))
-    else:
-        story.append(Paragraph("Not available", styles["Normal"]))
+            if len(header_text) > 18000:
+                story.append(Paragraph("Header appendix was truncated for PDF readability.", styles["Caption"]))
+        else:
+            story.append(Paragraph("Not available", styles["Normal"]))
 
     _emit(progress_cb, 92, "Writing PDF...")
     on_page = _draw_header_footer(title, rl)

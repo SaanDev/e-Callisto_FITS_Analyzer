@@ -54,6 +54,9 @@ class StoryRequest:
     markers: list[dict[str, Any]] = field(default_factory=list)
     gcs: GCSKinematics | None = None
     radio_interval: tuple[datetime, datetime] | None = None
+    #: The interval the catalogs are looked up for: the radio data's, or for a
+    #: project without radio data the Solar Image Analysis frames' or GCS event's.
+    catalog_interval: tuple[datetime, datetime] | None = None
     event_label: str = ""
     #: Catalog sources to fetch (none when fetching is off or nothing is missing).
     missing_sources: tuple[str, ...] = ()
@@ -143,29 +146,66 @@ def gcs_kinematics(main: Any) -> GCSKinematics | None:
     )
 
 
+def window_interval(main: Any) -> tuple[tuple[datetime, datetime], str] | None:
+    """``((start, end), label)`` of the Solar Image Analysis frames, else the GCS event; None without either."""
+    from src.backend.solar.solar_data_analysis import frame_observation_time
+
+    solar = getattr(main, "_solar_data_analysis_window", None)
+    try:
+        frames = list(getattr(solar, "_map_frames", []) or []) if solar is not None else []
+    except RuntimeError:
+        frames = []
+    times = []
+    for frame in frames:
+        try:
+            when = frame_observation_time(frame)
+        except Exception:
+            when = None
+        if isinstance(when, datetime):
+            times.append(_naive_utc(when))
+    if times:
+        return (min(times), max(times)), "Solar Image Analysis"
+    window = getattr(main, "_gcs_window", None)
+    try:
+        if window is not None and window.project_has_content():
+            fits = sorted(getattr(window, "_fits", {}) or {})
+            start, end = (fits[0], fits[-1]) if fits else window.event_range()
+            return (_naive_utc(start), _naive_utc(end)), "GCS CME fitting"
+    except RuntimeError:
+        return None
+    return None
+
+
 def story_request(main: Any, session: dict | None) -> StoryRequest | None:
-    """Everything the main window holds for the story (GUI thread); None without an event."""
+    """Everything the main window holds for the story (GUI thread); None without an event.
+
+    The story is anchored on the radio data's start; a project without radio
+    data is anchored on its Solar Image Analysis frames or its GCS event.
+    """
     from src.ui.app.event_context_strip import EventContextController
     from src.ui.space_weather.geomagnetic_controller import GeomagneticController, space_weather_cache_dir
 
     radio = _radio_summary(main, session)
     controller = getattr(main, "_geomagnetic", None)
     context = getattr(controller, "context", None)
-    anchor = radio.start if radio is not None else _naive_utc(getattr(context, "event_start", None))
+    interval, label = ((radio.start, radio.end), f"FITS: {radio.label}" if radio.label else "Project report") \
+        if radio is not None else (window_interval(main) or (None, "Project report"))
+    anchor = interval[0] if interval is not None else _naive_utc(getattr(context, "event_start", None))
     if anchor is None:
         return None
     request = StoryRequest(radio=radio, anchor=anchor, gcs=gcs_kinematics(main), cache_dir=space_weather_cache_dir())
-    request.event_label = f"FITS: {radio.label}" if radio is not None and radio.label else "Project report"
+    request.event_label = label
     request.radio_interval = (radio.start, radio.end) if radio is not None else None
+    request.catalog_interval = interval
 
-    # Catalogs: the strip's result, if it covers the radio data; the rest is fetched.
+    # Catalogs: the strip's result, if it covers the interval; the rest is fetched.
     strip = getattr(main, "_event_context", None)
     result = getattr(strip, "result", None)
-    if result is not None and radio is not None and not (result.start <= radio.start and result.end >= radio.end):
+    if result is not None and interval is not None and not (result.start <= interval[0] and result.end >= interval[1]):
         result = None
     request.catalog = result
     wanted = tuple(s for s in SOURCES if result is None or s not in result.events)
-    if wanted and radio is not None:
+    if wanted and interval is not None:
         if EventContextController.autofetch_enabled():
             request.missing_sources = wanted
         else:
@@ -215,11 +255,11 @@ class EventStoryFetchWorker(QObject):
         request = self.request
         out = StoryFetchResult()
         try:
-            if request.missing_sources and request.radio is not None:
+            if request.missing_sources and request.catalog_interval is not None:
                 self.progress.emit(2, "Fetching event catalogs (flares, CMEs, DONKI, radio bursts)...")
                 try:
                     fetched = load_event_context(
-                        request.radio.start, request.radio.end, sources=request.missing_sources,
+                        *request.catalog_interval, sources=request.missing_sources,
                         cache_dir=request.cache_dir, cancel_cb=self._cancel.is_set,
                     )
                     out.catalog = _merge(request.catalog, fetched)

@@ -72,7 +72,37 @@ def test_generate_project_report_without_data_shows_message(monkeypatch):
 
     assert messages
     assert messages[0][1] == "Generate Project Report"
-    assert "Load a FITS file first" in messages[0][2]
+    assert "Load a FITS file, solar images or a GCS event first" in messages[0][2]
+    win.close()
+
+
+def test_a_solar_only_project_gets_a_report_with_its_solar_section(tmp_path, monkeypatch):
+    _app()
+    from src.backend.session.project_report import generate_project_report_pdf
+    from tests.ui.test_ui_project_parts import _frame_files, _solar_with_picks, _sync_loader
+
+    monkeypatch.setenv("ECALLISTO_PROJECTS_CACHE", str(tmp_path / "projects_cache"))
+    _sync_loader(monkeypatch)
+    win = MainWindow(theme=None)
+    solar = _solar_with_picks(win, _frame_files(tmp_path, 3))
+    win._sync_project_actions()
+    assert win.raw_data is None
+    assert win.generate_project_report_action.isEnabled() is True
+
+    report = win._build_project_report_input()
+    assert report.has_radio is False
+    (section,) = report.sections
+    assert section.title == "Solar Image Analysis"
+    pairs = dict(section.pairs)
+    assert pairs["Frames"].startswith("3 (2012-07-12 16:00:00 to 2012-07-12 16:20:00 UTC")
+    assert pairs["Height–time picks"] == 2
+    assert section.figures[0].png_bytes  # the frame as it is on screen
+    # Only the space-weather figures that were drawn; none here.
+    assert list(report.figures) == []
+
+    result = generate_project_report_pdf(str(tmp_path / "solar.pdf"), report)
+    assert result.figures_written >= 1
+    solar.close()
     win.close()
 
 
@@ -430,4 +460,34 @@ def test_goes_payload_report_uses_matplotlib_renderer():
 
     assert figure.png_bytes.startswith(b"\x89PNG")
     assert "Matplotlib" in figure.caption
+    win.close()
+
+
+def test_a_gcs_only_project_gets_a_report_with_its_gcs_section(tmp_path, monkeypatch):
+    _app()
+    from datetime import datetime
+
+    from tests.ui.test_ui_project_parts import _fake_fetch
+
+    monkeypatch.setenv("ECALLISTO_PROJECTS_CACHE", str(tmp_path / "projects_cache"))
+    _fake_fetch(monkeypatch, {"A": 0.0, "B": 62.0, "C": -70.0})
+    win = MainWindow(theme=None)
+    gcs = win.open_gcs_fitting_window(datetime(2012, 7, 12, 16, 12))
+    for panel in gcs.panels:
+        panel.start_fetch()
+    for _ in range(10):
+        QApplication.processEvents()
+    win._sync_project_actions()
+    assert win.raw_data is None and win.generate_project_report_action.isEnabled() is True
+
+    report = win._build_project_report_input()
+    (section,) = report.sections
+    assert section.title == "GCS CME Fitting"
+    pairs = dict(section.pairs)
+    assert pairs["Recorded GCS fits"] == 0
+    assert all(f"Viewpoint {label}" in pairs for label in ("A", "B", "C"))
+    assert section.figures and section.figures[0].png_bytes
+    headers, rows = section.table
+    assert headers[0] == "UTC" and rows == []
+    gcs.close()
     win.close()

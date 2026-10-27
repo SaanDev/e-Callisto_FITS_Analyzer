@@ -297,6 +297,78 @@ class GCSWindowExports:
             )
 
     # ------------------------------------------------------------------ report
+    def report_section(self) -> Any:
+        """The main project report's GCS section, or ``None`` with nothing loaded or recorded.
+
+        The viewpoints as on screen, what each shows, and the recorded GCS and
+        shock fits; the window's own report draws every fit on its images.
+        """
+        from src.backend.session.project_report import ProjectReportFigure, ProjectReportSection
+
+        if not self.project_has_content():
+            return None
+        gcs, shock = self._tracks[_GCS], self._tracks[_SHOCK]
+        start, end = self.event_range()
+        pairs: list[tuple[str, Any]] = [("Event range", f"{start:%Y-%m-%d %H:%M} to {end:%Y-%m-%d %H:%M} UTC")]
+        for panel in self.panels:
+            source = panel.source()
+            stamps = panel.times()
+            shown = f"{len(panel.frames)} frame(s)"
+            if stamps:
+                shown += f", {min(stamps):%H:%M} to {max(stamps):%H:%M} UTC"
+            pairs.append((f"Viewpoint {panel.label}", f"{source.label if source is not None else '—'}: {shown}"))
+        pairs.append(("Recorded GCS fits", len(gcs.fits)))
+        pairs.append(("Recorded shock fits", len(shock.fits)))
+        speed = self._report_gcs_speed()
+        if speed is not None:
+            pairs.append(("GCS apex speed (linear fit)", f"{speed:,.0f} km/s"))
+
+        figures = []
+        if any(panel.frames for panel in self.panels):
+            try:
+                png = self._report_image()
+            except Exception:
+                png = None
+            figures.append(ProjectReportFigure(
+                "GCS Viewpoints", png_bytes=png, caption=self._export_footer(),
+                availability_note="The viewpoints could not be drawn.",
+            ))
+
+        def number(value: Any, spec: str) -> str:
+            try:
+                return format(float(value), spec)
+            except (TypeError, ValueError):
+                return "—"
+
+        rows = [
+            [f"{when:%Y-%m-%d %H:%M:%S}", number(entry.apex_height_rsun, ".2f"), number(entry.lon_deg, ".1f"),
+             number(entry.lat_deg, ".1f"), number(entry.tilt_deg, ".1f"), number(entry.alpha_deg, ".1f"),
+             number(entry.kappa, ".2f"), number(entry.rms_arcsec, ".0f")]
+            for when, entry in sorted(gcs.fits.items())
+        ]
+        headers = ["UTC", "Height (R☉)", "Lon (°)", "Lat (°)", "Tilt (°)", "Half-angle (°)", "κ", "RMS (″)"]
+        notes = ["Every recorded fit, drawn on the images it was made on, is in the window's own report "
+                 "(File → Export fitting report)."] if (gcs.fits or shock.fits) else []
+        return ProjectReportSection(
+            "GCS CME Fitting", pairs=pairs, figures=figures, table=(headers, rows),
+            table_title="Recorded GCS Fits", notes=notes,
+        )
+
+    def _report_gcs_speed(self) -> float | None:
+        """The apex speed of a straight-line fit through the recorded GCS heights."""
+        fits = self._tracks[_GCS].fits
+        if len(fits) < 2:
+            return None
+        try:
+            from src.backend.gcs.gcs_figures import HeightTimeSeries, fit_series
+
+            times = sorted(fits)
+            fit = fit_series(HeightTimeSeries.build("GCS", times, [float(fits[t].apex_height_rsun) for t in times], order=1))
+        except Exception:
+            return None
+        speed = getattr(fit, "speed_km_s", None) if fit is not None else None
+        return float(speed) if speed is not None and speed == speed else None
+
     def _report_input(
         self,
         progress_cb: Callable[..., None] | None = None,
