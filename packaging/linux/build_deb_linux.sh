@@ -166,6 +166,7 @@ fpm -s dir -t deb \
   --architecture "$ARCH" \
   --maintainer "Sahan S Liyanage <sahanslst@gmail.com>" \
   --description "e-CALLISTO FITS Analyzer desktop application" \
+  --url "https://ecallistoanalyzer.org/" \
   --depends libgl1 \
   --depends libegl1 \
   --depends libxkbcommon-x11-0 \

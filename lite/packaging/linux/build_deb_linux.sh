@@ -70,7 +70,7 @@ Installed-Size: $SIZE_KB
 Depends: libc6, libgcc-s1, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libxcursor1, libxrandr2, libxi6, libwayland-client0, libgl1, libvulkan1 | mesa-vulkan-drivers, fontconfig
 Recommends: xdg-desktop-portal, fonts-dejavu-core
 Maintainer: Sahan S Liyanage <sahanslst@gmail.com>
-Homepage: https://github.com/SaanDev/e-Callisto_FITS_Analyzer
+Homepage: https://ecallistoanalyzer.org/
 Description: e-CALLISTO FITS Analyzer Lite
  The radio part of the e-CALLISTO FITS Analyzer: load, combine, clean and
  analyse e-CALLISTO solar radio spectra, download from the archive, and

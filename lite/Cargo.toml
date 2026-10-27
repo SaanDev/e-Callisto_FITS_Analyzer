@@ -6,6 +6,7 @@ members = ["crates/callisto-core", "crates/callisto-lite"]
 version = "3.2.0-lite"
 edition = "2024"
 license = "MIT"
+homepage = "https://ecallistoanalyzer.org/"
 repository = "https://github.com/SaanDev/e-Callisto_FITS_Analyzer"
 
 [workspace.dependencies]

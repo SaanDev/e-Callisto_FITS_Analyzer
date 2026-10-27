@@ -273,8 +273,9 @@ from src.ui.app.gui_workers import (
     UpdateDownloadWorker,
 )
 from src.ui.common.mpl_style import style_axes
+from src.ui.common.url_opener import open_url_robust
 from src.ui.cme.cme_helper_client import CMEHelperClient
-from src.version import APP_NAME, APP_ORG, APP_VERSION
+from src.version import APP_NAME, APP_ORG, APP_VERSION, APP_WEBSITE
 from src.ui.widgets.collapsible_sections import make_groups_collapsible
 
 SIDEBAR_SECTIONS_SETTINGS_KEY = "ui/sidebar_sections_main"
@@ -1511,6 +1512,10 @@ class MainWindow(QMainWindow):
         self.user_guide_action.setShortcut("F1")
         help_menu.addAction(self.user_guide_action)
         self.user_guide_action.triggered.connect(self.open_user_guide)
+        self.official_website_action = QAction("Official Website", self)
+        self.official_website_action.setMenuRole(QAction.NoRole)
+        help_menu.addAction(self.official_website_action)
+        self.official_website_action.triggered.connect(self.open_official_website)
 
         # (OPTIONAL) Connect them later like:
         # open_action.triggered.connect(self.open_file)
@@ -9885,7 +9890,19 @@ class MainWindow(QMainWindow):
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"
+            f"Website: {APP_WEBSITE.rstrip('/')}\n\n"
             "2026©Copyright, All Rights Reserved."
+        )
+
+    def open_official_website(self, *_):
+        """Help → Official Website: ecallistoanalyzer.org in the browser."""
+        result = open_url_robust(APP_WEBSITE)
+        if result.opened:
+            return
+        QMessageBox.warning(
+            self,
+            "Open URL Failed",
+            f"Could not open the website automatically.\n\nURL:\n{APP_WEBSITE}\n\n{result.error}",
         )
 
     def _bug_report_default_dir(self) -> str:

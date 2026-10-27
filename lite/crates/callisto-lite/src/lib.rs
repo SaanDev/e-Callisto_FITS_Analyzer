@@ -25,6 +25,8 @@ pub mod vector_export;
 
 pub const APP_NAME: &str = "e-CALLISTO FITS Analyzer Lite";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The official website (Help → Official Website, About).
+pub const APP_WEBSITE: &str = env!("CARGO_PKG_HOMEPAGE");
 
 /// When [`run`] started, for the start-up trace (`CALLISTO_LITE_TRACE_STARTUP`).
 pub static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();

@@ -21,11 +21,46 @@ pub fn default_download_dir() -> PathBuf {
 /// `show_about_dialog` (`QMessageBox.about`: the application icon).
 pub fn about_box() -> MessageBox {
     let (name, version) = (crate::APP_NAME, crate::APP_VERSION);
+    let website = crate::APP_WEBSITE.trim_end_matches('/');
     MessageBox::ok(
         Icon::App,
         &format!("About {name}"),
         &format!(
-            "{name} version {version}.\n\nDeveloped by Sahan S Liyanage\n\nAstronomical and Space Science Unit\nUniversity of Colombo, Sri Lanka\n\n2026©Copyright, All Rights Reserved."
+            "{name} version {version}.\n\nDeveloped by Sahan S Liyanage\n\nAstronomical and Space Science Unit\nUniversity of Colombo, Sri Lanka\n\nWebsite: {website}\n\n2026©Copyright, All Rights Reserved."
         ),
     )
+}
+
+/// Help → Official Website: the site in the browser, else a box saying why not.
+pub fn open_website() -> Option<MessageBox> {
+    let url = crate::APP_WEBSITE;
+    open::that_detached(url).err().map(|e| {
+        MessageBox::ok(
+            Icon::Warning,
+            "Open URL Failed",
+            &format!("Could not open the website automatically.\n\nURL:\n{url}\n\n{e}"),
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::menus::{Command, Item, MenuState, menu_bar};
+
+    #[test]
+    fn website_in_about_and_help() {
+        assert_eq!(crate::APP_WEBSITE, "https://ecallistoanalyzer.org/");
+        assert!(super::about_box().text.contains("\n\nWebsite: https://ecallistoanalyzer.org\n\n"));
+        let menus = menu_bar(&MenuState::default());
+        let help = menus.iter().find(|m| m.title == "Help").unwrap();
+        let items: Vec<_> = help
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Action { label, command, .. } => Some((label.as_ref(), *command)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(items, [("User Guide", Command::UserGuide), ("Official Website", Command::OfficialWebsite)]);
+    }
 }

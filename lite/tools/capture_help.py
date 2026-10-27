@@ -221,6 +221,7 @@ about = box(QMessageBox.Icon.Information, f"About {LITE_NAME}",
             "Developed by Sahan S Liyanage\n\n"
             "Astronomical and Space Science Unit\n"
             "University of Colombo, Sri Lanka\n\n"
+            "Website: https://ecallistoanalyzer.org\n\n"
             "2026©Copyright, All Rights Reserved.")
 about_icon = about.windowIcon()
 about.setIconPixmap(about_icon.pixmap(about_icon.actualSize(QtCore.QSize(64, 64))))

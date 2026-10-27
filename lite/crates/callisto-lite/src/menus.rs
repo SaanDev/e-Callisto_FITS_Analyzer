@@ -75,6 +75,7 @@ pub enum Command {
     ReportBug,
     About,
     UserGuide,
+    OfficialWebsite,
     // Toolbar and sidebar only.
     CiteSoftware,
     EstimateDriftRate,
@@ -381,6 +382,9 @@ pub fn menu_bar(s: &MenuState) -> Vec<Menu> {
                 a("About", C::About),
             ],
         },
-        Menu { title: "Help", items: vec![a("User Guide", C::UserGuide).shortcut("F1")] },
+        Menu {
+            title: "Help",
+            items: vec![a("User Guide", C::UserGuide).shortcut("F1"), a("Official Website", C::OfficialWebsite)],
+        },
     ]
 }

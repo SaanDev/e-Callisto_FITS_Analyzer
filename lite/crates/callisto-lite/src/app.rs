@@ -1441,6 +1441,11 @@ Please choose another folder such as Documents or Desktop."
                 self.focus_help = Some("report_bug");
             }
             Command::About => self.about = Some(crate::help::about_box()),
+            Command::OfficialWebsite => {
+                if let Some(failed) = crate::help::open_website() {
+                    self.about = Some(failed);
+                }
+            }
             Command::ViewFitsHeader => {
                 if let Some((title, default_name, text)) = s.fits_header_view() {
                     self.header_viewer = Some(dialogs::HeaderViewer { title, default_name, text });
