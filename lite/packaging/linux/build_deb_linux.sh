@@ -30,17 +30,13 @@ cargo build --release -p callisto-lite
 
 echo "==> Staging"
 rm -rf "$STAGE"
-mkdir -p "$STAGE/DEBIAN" "$STAGE/usr/bin" "$STAGE/usr/share/applications" \
-  "$STAGE/usr/share/icons/hicolor/256x256/apps" "$STAGE/usr/share/doc/$PKG"
+mkdir -p "$STAGE/DEBIAN" "$STAGE/usr/bin" "$STAGE/usr/share/applications" "$STAGE/usr/share/doc/$PKG"
 install -m 755 "$TARGET_DIR/release/callisto-lite" "$STAGE/usr/bin/$PKG"
 strip "$STAGE/usr/bin/$PKG" || true
-if command -v convert >/dev/null 2>&1; then
-  convert "$ROOT/assets/branding/FITS_analyzer.png" -resize 256x256 "$STAGE/usr/share/icons/hicolor/256x256/apps/$PKG.png"
-else
-  mkdir -p "$STAGE/usr/share/icons/hicolor/1024x1024/apps"
-  rmdir "$STAGE/usr/share/icons/hicolor/256x256/apps" "$STAGE/usr/share/icons/hicolor/256x256"
-  install -m 644 "$ROOT/assets/branding/FITS_analyzer.png" "$STAGE/usr/share/icons/hicolor/1024x1024/apps/$PKG.png"
-fi
+# The icon at hicolor's sizes (16 to 512): desktops look nowhere else, and
+# show a gear instead.
+cargo run --release -q -p callisto-lite --example export_icons -- \
+  "$ROOT/assets/branding/FITS_analyzer.png" "$STAGE/usr/share/icons/hicolor" "$PKG"
 install -m 644 "$ROOT/LICENSE" "$STAGE/usr/share/doc/$PKG/copyright"
 install -m 644 "$LITE/crates/callisto-core/assets/fonts/LICENSE_DEJAVU" "$STAGE/usr/share/doc/$PKG/LICENSE_DEJAVU_FONTS"
 
@@ -77,18 +73,12 @@ Description: e-CALLISTO FITS Analyzer Lite
  export figures, projects and reports. It installs beside the full app.
 EOF
 
-cat > "$STAGE/DEBIAN/postinst" <<'EOF'
-#!/bin/sh
-set -e
-if command -v update-desktop-database >/dev/null 2>&1; then
-  update-desktop-database /usr/share/applications || true
-fi
-if command -v gtk-update-icon-cache >/dev/null 2>&1; then
-  gtk-update-icon-cache -q /usr/share/icons/hicolor || true
-fi
-EOF
-cp "$STAGE/DEBIAN/postinst" "$STAGE/DEBIAN/postrm"
-chmod 755 "$STAGE/DEBIAN/postinst" "$STAGE/DEBIAN/postrm"
+# Line endings stripped: a checkout made on Windows has CRLF, which breaks
+# the #!/bin/sh line.
+for script in postinst postrm; do
+  tr -d '\r' < "$LITE/packaging/linux/$script.sh" > "$STAGE/DEBIAN/$script"
+  chmod 755 "$STAGE/DEBIAN/$script"
+done
 
 echo "==> Packaging"
 rm -f "$OUT"

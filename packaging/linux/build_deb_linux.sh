@@ -135,29 +135,15 @@ Categories=Science;Education;
 StartupNotify=true
 EOF
 
-cat > "$ROOT/packaging/linux/postinst.sh" <<'EOF'
-#!/bin/sh
-set -e
-if command -v update-desktop-database >/dev/null 2>&1; then
-  update-desktop-database /usr/share/applications || true
-fi
-if command -v gtk-update-icon-cache >/dev/null 2>&1; then
-  gtk-update-icon-cache -q /usr/share/icons/hicolor || true
-fi
-
-# Create desktop shortcut for sudo-invoking user (if available)
-if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
-  USER_HOME="$(getent passwd "${SUDO_USER}" | cut -d: -f6)"
-  if [ -n "${USER_HOME}" ] && [ -d "${USER_HOME}/Desktop" ]; then
-    install -Dm755 /usr/share/applications/e-callisto-fits-analyzer.desktop \
-      "${USER_HOME}/Desktop/e-callisto-fits-analyzer.desktop" || true
-    chown "${SUDO_USER}:${SUDO_USER}" \
-      "${USER_HOME}/Desktop/e-callisto-fits-analyzer.desktop" || true
-  fi
-fi
-exit 0
-EOF
-chmod 755 "$ROOT/packaging/linux/postinst.sh"
+# Install/remove scripts (postinst.sh, postrm.sh): caches, and the desktop
+# launcher. Line endings stripped: a checkout made on Windows has CRLF,
+# which breaks the #!/bin/sh line.
+SCRIPTS_DIR="$ROOT/build/deb-scripts"
+mkdir -p "$SCRIPTS_DIR"
+for script in postinst postrm; do
+  tr -d '\r' < "$ROOT/packaging/linux/$script.sh" > "$SCRIPTS_DIR/$script.sh"
+  chmod 755 "$SCRIPTS_DIR/$script.sh"
+done
 
 # 4) Build .deb with all files included
 fpm -s dir -t deb \
@@ -171,7 +157,8 @@ fpm -s dir -t deb \
   --depends libegl1 \
   --depends libxkbcommon-x11-0 \
   --depends libxcb-cursor0 \
-  --after-install "$ROOT/packaging/linux/postinst.sh" \
+  --after-install "$SCRIPTS_DIR/postinst.sh" \
+  --after-remove "$SCRIPTS_DIR/postrm.sh" \
   -p "$OUT_DEB" \
   "$ROOT/dist/e-callisto-fits-analyzer/=/opt/e-callisto-fits-analyzer/" \
   "$ROOT/packaging/linux/${APP_ID}.sh=/usr/bin/${APP_ID}" \
