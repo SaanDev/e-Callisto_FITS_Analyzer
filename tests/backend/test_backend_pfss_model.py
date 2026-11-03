@@ -387,6 +387,39 @@ def test_projection_agrees_with_a_direct_skycoord_oracle(disk_map, sub_observer_
     np.testing.assert_allclose(y, oracle.Ty.to_value(u.arcsec), rtol=1e-8, atol=1e-6)
 
 
+def test_open_field_boundaries_show_on_a_frame_with_a_larger_solar_sphere(sub_observer_lon):
+    """AIA's RSUN_REF is 696,000 km. Outlines at exactly 1 R_sun (695,700 km) would
+    be inside that sphere, and so hidden, on every AIA frame."""
+    u = pytest.importorskip("astropy.units")
+    from astropy.coordinates import SkyCoord
+    import sunpy.map
+    from sunpy.coordinates import get_earth
+    from sunpy.map.header_helper import make_fitswcs_header
+
+    data = np.zeros((128, 128))
+    ref = SkyCoord(
+        0 * u.arcsec, 0 * u.arcsec,
+        obstime=OBSTIME, observer=get_earth(OBSTIME), frame="helioprojective",
+        rsun=696000 * u.km,
+    )
+    frame = sunpy.map.Map(data, make_fitswcs_header(data, ref, scale=[20, 20] * u.arcsec / u.pix))
+    assert frame.coordinate_frame.rsun.to_value(u.km) == pytest.approx(696000)
+
+    # A small outline around disk centre, in plain view.
+    angle = np.linspace(0, 2 * np.pi, 20)
+    traced = TracedField(
+        lon_deg=np.zeros(0), lat_deg=np.zeros(0), radius_rsun=np.zeros(0),
+        offsets=np.zeros(1, dtype=np.int64), polarity=np.zeros(0),
+        open_mask=np.zeros(0, dtype=bool), obstime=OBSTIME,
+        boundary_lon_deg=sub_observer_lon + 10 * np.cos(angle),
+        boundary_lat_deg=10 * np.sin(angle),
+        boundary_offsets=np.array([0, 20], dtype=np.int64),
+    )
+    drawn = field_lines_arcsec(traced, frame).open_boundaries
+    assert drawn is not None
+    assert np.isfinite(drawn[0]).sum() == 20
+
+
 def test_overlay_dataclass_reports_emptiness():
     assert PfssOverlay().is_empty()
     assert not PfssOverlay(closed=(np.zeros(2), np.zeros(2))).is_empty()

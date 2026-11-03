@@ -838,6 +838,22 @@ def _near_side_mask(hpc: Any, frame_coord: Any) -> np.ndarray:
         return np.ones(np.atleast_1d(hpc.Tx).size, dtype=bool)
 
 
+def _surface_radius_rsun(frame: Any) -> float:
+    """Just above the solar sphere this frame uses, in R_sun.
+
+    Frames define that sphere themselves, and AIA's RSUN_REF (696,000 km) is larger
+    than R_sun (695,700 km). A point at exactly 1 R_sun is then inside the Sun as
+    far as ``is_visible`` is concerned, so an outline placed there would vanish.
+    """
+    import astropy.units as u
+
+    try:
+        sphere = float(frame.coordinate_frame.rsun.to_value(u.R_sun))
+    except Exception:
+        sphere = 1.0
+    return max(1.0, sphere) * 1.0001
+
+
 def _project_vertices(
     lon_deg: np.ndarray,
     lat_deg: np.ndarray,
@@ -979,7 +995,7 @@ def field_lines_arcsec(
         projected = _project_vertices(
             traced.boundary_lon_deg,
             traced.boundary_lat_deg,
-            np.full(traced.boundary_lon_deg.size, 1.0),
+            np.full(traced.boundary_lon_deg.size, _surface_radius_rsun(frame)),
             frame,
             traced.obstime,
             near_side_only=near_side_only,
