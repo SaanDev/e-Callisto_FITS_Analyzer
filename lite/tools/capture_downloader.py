@@ -140,11 +140,11 @@ class FakeSession:
 
 cache_dir = scratch / "callisto_cache"
 callisto_cache.cache_root = lambda: cache_dir
-archive_stations.fetch_stations_for_day = lambda day: list(STATIONS) if day == DAY else []
+archive_stations.fetch_stations_for_day = lambda day, source_id="ecallisto": list(STATIONS) if day == DAY else []
 for module in (cd, bf, callisto_cache):
     if hasattr(module, "build_archive_session"):
         module.build_archive_session = FakeSession
-cd.check_archive_server = lambda client=None: (True, "")
+cd.check_archive_server = lambda client=None, source_id="ecallisto": (True, "")
 _real_fetch_cached = callisto_cache.fetch_cached
 
 

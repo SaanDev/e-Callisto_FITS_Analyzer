@@ -28,7 +28,7 @@ def _offline_archive_stations(monkeypatch):
     """
     module = sys.modules.get("src.ui.downloads.archive_stations")
     if module is not None:
-        monkeypatch.setattr(module, "fetch_stations_for_day", lambda _day: [])
+        monkeypatch.setattr(module, "fetch_stations_for_day", lambda _day, _source_id="ecallisto": [])
         module.clear_station_cache()
     yield
 
@@ -84,6 +84,7 @@ def _isolate_qsettings(tmp_path, monkeypatch):
         "src.ui.space_weather.geomagnetic_response_window",
         "src.ui.space_weather.geomagnetic_controller",
         "src.ui.app.event_context_strip",
+        "src.ui.downloads.callisto_downloader",
     ):
         module = sys.modules.get(module_name)
         if module is not None and hasattr(module, "_make_settings"):

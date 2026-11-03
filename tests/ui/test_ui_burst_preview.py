@@ -175,7 +175,7 @@ def test_preview_cancel_during_transfer_cleans_partial_file_and_never_builds(
 def test_preview_cancel_while_building_discards_panels(isolated_cache, monkeypatch):
     candidate = _candidate()
     worker = BurstPreviewWorker([candidate])
-    monkeypatch.setattr(burst_preview, "build_archive_session", lambda: _Session({candidate.url: _Response(b"fits")}))
+    monkeypatch.setattr(burst_preview, "build_archive_session", lambda: _Session({candidate.url: _Response(_fits_bytes()[0])}))
 
     def build_panels(_files):
         worker.request_cancel()
@@ -232,6 +232,7 @@ def test_event_download_reports_transfer_progress_and_finishes_after_copy(
     candidate = _candidate()
     payload = b"fits" * 2048
     session = _Session({candidate.url: _Response(payload)})
+    monkeypatch.setattr(callisto_cache, "validate_fits_download", lambda _path: None)
     monkeypatch.setattr(callisto_cache, "build_archive_session", lambda: session)
 
     for index in range(2):
@@ -262,7 +263,7 @@ def test_event_download_reports_transfer_progress_and_finishes_after_copy(
 
 def test_event_download_copy_error_does_not_report_completion(isolated_cache, tmp_path, monkeypatch):
     candidate = _candidate()
-    monkeypatch.setattr(callisto_cache, "build_archive_session", lambda: _Session({candidate.url: _Response(b"fits")}))
+    monkeypatch.setattr(callisto_cache, "build_archive_session", lambda: _Session({candidate.url: _Response(_fits_bytes()[0])}))
 
     def fail_copy(*_args):
         raise OSError("Destination is read-only")

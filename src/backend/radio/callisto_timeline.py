@@ -22,13 +22,13 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from urllib.parse import urljoin
 
 from src.backend.radio.callisto_archive import (
-    REQUEST_TIMEOUT,
+    DEFAULT_SOURCE_ID,
+    ArchiveListingError,
     build_archive_session,
-    day_url,
-    extract_fits_links,
+    list_day,
+    source_label,
 )
 from src.backend.radio.callisto_naming import _FITS_SUFFIXES, parse_callisto_archive_filename
 from src.backend.radio.burst_processor import (
@@ -61,6 +61,8 @@ class TimelineState:
     focus_codes: tuple[str, ...]
     segments: tuple[TimelineSegment, ...]
     step_seconds: float
+    #: The server adjacent observations are looked up on.
+    source_id: str = DEFAULT_SOURCE_ID
 
     @property
     def start(self) -> datetime:
@@ -90,6 +92,17 @@ class TimelineUnavailable(Exception):
 
 def _station_key(value: str) -> str:
     return " ".join(str(value or "").strip().lower().split())
+
+
+def _source_of_paths(paths) -> str:
+    """The server named by a dataset's cached files; the default without such a file."""
+    from src.backend.radio import callisto_cache
+
+    for path in paths:
+        source_id = callisto_cache.source_id_for_path(path)
+        if source_id != DEFAULT_SOURCE_ID:
+            return source_id
+    return DEFAULT_SOURCE_ID
 
 
 def describe_timeline(paths) -> TimelineState:
@@ -142,6 +155,7 @@ def describe_timeline(paths) -> TimelineState:
         focus_codes=focus_codes,
         segments=segments,
         step_seconds=step,
+        source_id=_source_of_paths(cleaned),
     )
 
 
@@ -247,7 +261,7 @@ def find_local_segment(state: TimelineState, direction: str) -> list[str] | None
 # -----------------------------
 # Archive day listing
 # -----------------------------
-_DAY_CACHE: dict[date, tuple[float, list[ArchiveEntry]]] = {}
+_DAY_CACHE: dict[tuple[str, date], tuple[float, list[ArchiveEntry]]] = {}
 
 #: A finished day never gains files, so it is cached for the process.  The
 #: current UTC day is still being written to, so it expires quickly enough that
@@ -265,57 +279,42 @@ def _cache_is_fresh(observation_date: date, stored_at: float) -> bool:
     return (time.monotonic() - stored_at) < TODAY_CACHE_TTL_SECONDS
 
 
-def list_archive_day(observation_date: date, *, session=None, use_cache: bool = True) -> list[ArchiveEntry]:
-    """List one archive day, parsed into entries.
+def list_archive_day(
+    observation_date: date,
+    *,
+    session=None,
+    use_cache: bool = True,
+    source_id: str = DEFAULT_SOURCE_ID,
+) -> list[ArchiveEntry]:
+    """List one day of a server's archive, parsed into entries.
 
     Past days are cached for the life of the process; the current day expires
     after :data:`TODAY_CACHE_TTL_SECONDS` so live observations become visible.
     """
-    key = observation_date
+    key = (source_id, observation_date)
     if use_cache and key in _DAY_CACHE:
         stored_at, cached = _DAY_CACHE[key]
         if _cache_is_fresh(observation_date, stored_at):
             return cached
 
-    url = day_url(observation_date)
-    owns_session = session is None
-    if owns_session:
-        session = build_archive_session()
-
+    label = source_label(source_id)
     try:
-        with session.get(url, timeout=REQUEST_TIMEOUT) as response:
-            status = int(getattr(response, "status_code", 200))
-            if status == 404:
-                entries: list[ArchiveEntry] = []
-                _DAY_CACHE[key] = (time.monotonic(), entries)
-                return entries
-            if status >= 400:
-                raise TimelineUnavailable(f"Archive returned HTTP {status} for {observation_date}.")
-            hrefs = extract_fits_links(response.text)
-    except TimelineUnavailable:
-        raise
+        files = list_day(observation_date, source_id, session)
+    except ArchiveListingError as exc:
+        raise TimelineUnavailable(f"{label} archive: {exc}") from exc
     except Exception as exc:
-        raise TimelineUnavailable(f"Could not reach the archive: {exc}") from exc
-    finally:
-        if owns_session:
-            session.close()
+        raise TimelineUnavailable(f"Could not reach the archive ({label}): {exc}") from exc
 
-    entries = []
-    for href in hrefs:
-        filename = os.path.basename(href)
-        try:
-            station, observed_at, focus_code = parse_callisto_archive_filename(filename)
-        except ValueError:
-            continue
-        entries.append(
-            ArchiveEntry(
-                station=station,
-                observed_at=observed_at,
-                focus_code=_normalize_focus_code(focus_code),
-                filename=filename,
-                url=urljoin(url, href),
-            )
+    entries = [
+        ArchiveEntry(
+            station=entry.station,
+            observed_at=entry.observed_at_utc,
+            focus_code=_normalize_focus_code(entry.focus_code),
+            filename=entry.filename,
+            url=entry.download_url,
         )
+        for entry in files
+    ]
 
     _DAY_CACHE[key] = (time.monotonic(), entries)
     return entries
@@ -358,7 +357,7 @@ def find_archive_segment(
     try:
         found: dict[datetime, dict[str, ArchiveEntry]] = {}
         for day in _relevant_days(edge, direction):
-            for entry in list_archive_day(day, session=session):
+            for entry in list_archive_day(day, session=session, source_id=state.source_id):
                 if _station_key(entry.station) != station_key:
                     continue
                 if not _offset_is_consecutive(edge, entry.observed_at, direction):
@@ -373,7 +372,7 @@ def find_archive_segment(
     if not found:
         when = "after" if direction == DIRECTION_NEXT else "before"
         raise TimelineUnavailable(
-            f"No {state.station} data {when} {edge:%H:%M} in the archive."
+            f"No {state.station} data {when} {edge:%H:%M} in the {source_label(state.source_id)} archive."
         )
 
     complete = [stamp for stamp, cells in found.items() if set(cells) == wanted]

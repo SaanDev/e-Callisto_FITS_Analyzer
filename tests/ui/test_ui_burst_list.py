@@ -306,7 +306,7 @@ def test_find_fits_runs_real_qthread_and_keeps_search_progress_visible(tab, app,
         assert not tab.progress_bar.isHidden()
         assert tab.progress_bar.maximum() == 2
         assert tab.progress_detail.text() == "0%"
-        assert "Reading FITS archive" in tab.activity_label.text()
+        assert "Reading e-CALLISTO" in tab.activity_label.text()
         assert tab.cancel_button.isEnabled()
         assert not tab.find_button.isEnabled()
     finally:
@@ -479,7 +479,7 @@ def test_preview_uses_existing_window_and_reports_cache_and_partial_failures(tab
     panels = [{"title": "BIR preview"}]
     calls, cache_changes = [], []
 
-    def create_preview(received_panels, title, *, parent):
+    def create_preview(received_panels, title, *, parent, source_label=""):
         calls.append((received_panels, title, parent))
         preview = QDialog(parent)
         preview.setAttribute(Qt.WA_DeleteOnClose)
@@ -610,7 +610,7 @@ def test_download_uses_shared_tasks_cache_and_locks_actions_until_finished(tab, 
     assert busy_changes == [True, False]
     assert emitted == []
     assert len(messages) == int(failure)
-    status = f"Downloaded {1 if failure else 2} of 2 selected FITS file(s)."
+    status = f"Downloaded {1 if failure else 2} of 2 selected FITS file(s) from e-CALLISTO."
     if failure:
         status += " 1 failed."
     assert tab.fits_status.text() == status

@@ -13,19 +13,25 @@ import os
 import re
 import shutil
 import tempfile
-from urllib.parse import urljoin
+from urllib.parse import unquote, urljoin, urlsplit
 import numpy as np
 import requests
 from astropy.io import fits
 from src.backend.radio.batch_processing import PLOTUTIL_DISPLAY_LIMITS, subtract_background
 from src.backend.radio import callisto_cache
 from src.backend.radio.callisto_archive import (
-    BASE_URL,
+    ARCHIVE_SOURCES,
+    ArchiveListingError,
+    DEFAULT_SOURCE_ID,
     DOWNLOAD_TIMEOUT,
+    archive_source,
     day_url,
     REQUEST_TIMEOUT,
     build_archive_session,
-    extract_fits_links,
+    list_day,
+    normalize_source_id,
+    source_id_for_url,
+    source_label,
 )
 from src.backend.radio.callisto_naming import parse_callisto_archive_filename
 from src.backend.radio.fits_io import load_callisto_fits
@@ -48,9 +54,10 @@ from src.ui.downloads.archive_stations import (
     StationComboBinding,
 )
 from src.ui.radio.burst_list_tab import BurstListTab
+from src.version import APP_NAME, APP_ORG
 
 from PySide6.QtCore import (
-    Qt, QDate, QDateTime, QThread, QUrl, Signal, QObject, QRunnable, Slot,
+    Qt, QDate, QDateTime, QSettings, QThread, QUrl, Signal, QObject, QRunnable, Slot,
     QThreadPool, QMetaObject, Q_ARG
 )
 from PySide6.QtGui import QDesktopServices
@@ -72,6 +79,17 @@ _OVERVIEW_EXPORT_FILTERS = "PNG (*.png);;PDF (*.pdf);;EPS (*.eps);;SVG (*.svg);;
 # Listing the stations of a long event window reads one archive day per UTC day.
 MAX_EVENT_STATION_DAYS = 7
 
+ARCHIVE_SOURCE_SETTING_KEY = "callisto/archive_source"
+
+
+def _make_settings() -> QSettings:
+    """Factory kept separate so tests can redirect the settings store."""
+    return QSettings(APP_ORG, APP_NAME)
+
+
+def _saved_archive_source() -> str:
+    return normalize_source_id(_make_settings().value(ARCHIVE_SOURCE_SETTING_KEY, DEFAULT_SOURCE_ID))
+
 
 @dataclass(frozen=True)
 class CallistoEventCandidate:
@@ -81,9 +99,18 @@ class CallistoEventCandidate:
     url: str
     receiver_id: str
 
+    @property
+    def source_id(self) -> str:
+        """The server this file was listed on, which its URL always says."""
+        return source_id_for_url(self.url)
+
 
 def _station_key(value: str) -> str:
     return " ".join(str(value or "").strip().lower().split())
+
+
+def _href_filename(href) -> str:
+    return unquote(os.path.basename(urlsplit(str(href or "")).path))
 
 
 def _candidate_matches_station(
@@ -125,7 +152,7 @@ def filter_event_candidates(
     selected = [str(station or "").strip() for station in selected_stations if str(station or "").strip()]
 
     for href in hrefs:
-        filename = os.path.basename(str(href or ""))
+        filename = _href_filename(href)
         try:
             station, observed_at, receiver_id = parse_callisto_archive_filename(filename)
         except ValueError:
@@ -177,7 +204,7 @@ def filter_spectral_overview_candidates(
     selected_key = _station_key(station)
     candidates: list[CallistoEventCandidate] = []
     for href in hrefs:
-        filename = os.path.basename(str(href or ""))
+        filename = _href_filename(href)
         try:
             parsed_station, observed_at, receiver_id = parse_callisto_archive_filename(filename)
         except ValueError:
@@ -238,13 +265,19 @@ def _normalize_utc_datetime(dt: datetime) -> datetime:
     return dt.replace(tzinfo=None)
 
 
-def check_archive_server(client=None) -> tuple[bool, str]:
+def check_archive_server(client=None, source_id: str = DEFAULT_SOURCE_ID) -> tuple[bool, str]:
+    source = archive_source(source_id)
+    if source.listing_url:
+        # This server refuses its directory indexes, so a root probe proves
+        # nothing. The day listing that follows reports any failure itself.
+        return True, ""
+
     session = client or build_archive_session()
     close_session = client is None
 
     try:
         try:
-            response = session.head(BASE_URL, timeout=8, allow_redirects=True)
+            response = session.head(source.files_url, timeout=8, allow_redirects=True)
             try:
                 if response.status_code < 400:
                     return True, ""
@@ -253,7 +286,7 @@ def check_archive_server(client=None) -> tuple[bool, str]:
         except Exception:
             pass
 
-        response = session.get(BASE_URL, timeout=REQUEST_TIMEOUT, allow_redirects=True, stream=True)
+        response = session.get(source.files_url, timeout=REQUEST_TIMEOUT, allow_redirects=True, stream=True)
         try:
             if response.status_code >= 400:
                 return False, f"HTTP {response.status_code}"
@@ -275,16 +308,17 @@ class FetchWorker(QObject):
     progressMax = Signal(int)        # set progress bar maximum
     progressStep = Signal(int)       # set progress bar value
 
-    def __init__(self, date_py, station: str):
+    def __init__(self, date_py, station: str, source_id: str = DEFAULT_SOURCE_ID):
         super().__init__()
         self.date = date_py          # datetime.date
         self.station = station
+        self.source_id = archive_source(source_id).id
 
     def _check_server(self, client=None) -> tuple[bool, str]:
-        return check_archive_server(client)
+        return check_archive_server(client, self.source_id)
 
     def _day_url(self) -> str:
-        return day_url(self.date)
+        return day_url(self.date, self.source_id)
 
     def run(self):
         results: list[tuple[str, str]] = []
@@ -296,29 +330,18 @@ class FetchWorker(QObject):
                 self.finished.emit(results)
                 return
 
-            url_day = self._day_url()
-
             try:
-                with session.get(url_day, timeout=REQUEST_TIMEOUT) as page:
-                    if page.status_code >= 400:
-                        raise RuntimeError(f"HTTP {page.status_code} for {url_day}")
+                # Unreadable names stay in the list so the user can still see them.
+                files = list_day(self.date, self.source_id, session, include_unparsed=True)
 
-                    # Avoid DOM parsers here; a lightweight href scan is enough for the
-                    # Apache directory listings served by the e-CALLISTO archive.
-                    hrefs = extract_fits_links(page.text)
-
-                self.progressMax.emit(len(hrefs))
+                self.progressMax.emit(len(files))
 
                 station_key = self.station.strip().lower()
 
-                for i, href in enumerate(hrefs, start=1):
-                    # Build absolute URL safely (some listings use relative links)
-                    abs_url = urljoin(url_day, href)
-                    filename = os.path.basename(href)
-
+                for i, entry in enumerate(files, start=1):
                     # Filter by station for the whole day
-                    if station_key in filename.lower():
-                        results.append((filename, abs_url))
+                    if station_key in entry.filename.lower():
+                        results.append((entry.filename, entry.download_url))
 
                     self.progressStep.emit(i)
 
@@ -335,14 +358,21 @@ class EventFetchWorker(QObject):
     progressMax = Signal(int)
     progressStep = Signal(int)
 
-    def __init__(self, start_dt: datetime, stop_dt: datetime, stations: list[str]):
+    def __init__(
+        self,
+        start_dt: datetime,
+        stop_dt: datetime,
+        stations: list[str],
+        source_id: str = DEFAULT_SOURCE_ID,
+    ):
         super().__init__()
         self.start_dt = _normalize_utc_datetime(start_dt)
         self.stop_dt = _normalize_utc_datetime(stop_dt)
         self.stations = [str(station or "").strip() for station in stations if str(station or "").strip()]
+        self.source_id = archive_source(source_id).id
 
     def _day_url(self, date_py) -> str:
-        return day_url(date_py)
+        return day_url(date_py, self.source_id)
 
     def run(self):
         try:
@@ -353,35 +383,46 @@ class EventFetchWorker(QObject):
 
         candidates: list[CallistoEventCandidate] = []
         warnings: list[str] = []
+        server = source_label(self.source_id)
+        successful_days = 0
 
         with build_archive_session() as session:
-            ok, msg = check_archive_server(session)
+            ok, msg = check_archive_server(session, self.source_id)
             if not ok:
-                self.finished.emit({"error": f"FITS server is not responding: {msg}", "candidates": [], "warnings": []})
+                self.finished.emit(
+                    {"error": f"{server} FITS server is not responding: {msg}", "candidates": [], "warnings": []}
+                )
                 return
 
             self.progressMax.emit(len(dates))
             for index, date_py in enumerate(dates, start=1):
-                url_day = self._day_url(date_py)
                 try:
-                    with session.get(url_day, timeout=REQUEST_TIMEOUT) as page:
-                        if page.status_code >= 400:
-                            raise RuntimeError(f"HTTP {page.status_code} for {url_day}")
-                        hrefs = extract_fits_links(page.text)
+                    files = list_day(date_py, self.source_id, session)
                     candidates.extend(
                         filter_event_candidates(
-                            hrefs,
-                            day_url=url_day,
+                            [entry.download_url for entry in files],
+                            day_url=self._day_url(date_py),
                             selected_stations=self.stations,
                             start_dt=self.start_dt,
                             stop_dt=self.stop_dt,
                         )
                     )
+                    successful_days += 1
                 except requests.RequestException as exc:
                     warnings.append(f"{date_py:%Y-%m-%d}: {exc}")
                 except Exception as exc:
                     warnings.append(f"{date_py:%Y-%m-%d}: {exc}")
                 self.progressStep.emit(index)
+
+        if not successful_days:
+            self.finished.emit(
+                {
+                    "error": f"Could not read {server} for the selected window.\n\n" + "\n".join(warnings[:3]),
+                    "candidates": [],
+                    "warnings": warnings,
+                }
+            )
+            return
 
         candidates = sort_event_candidates(candidates)
         missing_stations = [
@@ -413,12 +454,15 @@ class SpectralOverviewWorker(QObject):
     finished = Signal(object)
     failed = Signal(str)
     cancelled = Signal()
+    #: Emitted just before ``failed`` when the server, not the request, is at fault.
+    serverFailed = Signal(str)
 
-    def __init__(self, date_py, station: str, focus_code: str = ""):
+    def __init__(self, date_py, station: str, focus_code: str = "", source_id: str = DEFAULT_SOURCE_ID):
         super().__init__()
         self.date = date_py
         self.station = str(station or "").strip()
         self.focus_code = str(focus_code or "").strip()
+        self.source_id = archive_source(source_id).id
         self._cancel_requested = False
 
     @Slot()
@@ -433,26 +477,24 @@ class SpectralOverviewWorker(QObject):
             raise SpectralOverviewCancelled("Spectral overview generation was cancelled.")
 
     def _day_url(self) -> str:
-        return day_url(self.date)
+        return day_url(self.date, self.source_id)
 
     @Slot()
     def run(self):
+        server = source_label(self.source_id)
         try:
             self._check_cancelled()
-            self.progressText.emit("Reading the selected archive day...")
-            day_url = self._day_url()
+            self.progressText.emit(f"Reading the selected day from {server}...")
+            url_day = self._day_url()
             with build_archive_session() as session:
-                ok, message = check_archive_server(session)
+                ok, message = check_archive_server(session, self.source_id)
                 if not ok:
-                    raise RuntimeError(f"FITS server is not responding: {message}")
-                with session.get(day_url, timeout=REQUEST_TIMEOUT) as page:
-                    if page.status_code >= 400:
-                        raise RuntimeError(f"HTTP {page.status_code} for {day_url}")
-                    hrefs = extract_fits_links(page.text)
+                    raise ArchiveListingError(f"{server} FITS server is not responding: {message}")
+                files = list_day(self.date, self.source_id, session)
 
                 candidates = filter_spectral_overview_candidates(
-                    hrefs,
-                    day_url=day_url,
+                    [entry.download_url for entry in files],
+                    day_url=url_day,
                     station=self.station,
                     observation_date=self.date,
                 )
@@ -515,7 +557,9 @@ class SpectralOverviewWorker(QObject):
                         self.progressValue.emit(index)
 
                     if not any(sources_by_focus.values()):
-                        raise ValueError("None of the selected focus-code FITS files could be downloaded.")
+                        raise ArchiveListingError(
+                            f"None of the selected focus-code FITS files could be downloaded from {server}."
+                        )
 
                     self.progressRange.emit(0, 0)
                     results: list[SpectralOverviewResult] = []
@@ -553,6 +597,10 @@ class SpectralOverviewWorker(QObject):
                     self.finished.emit({"results": results, "errors": build_errors})
         except SpectralOverviewCancelled:
             self.cancelled.emit()
+        except (ArchiveListingError, requests.RequestException) as exc:
+            message = str(exc) if server in str(exc) else f"{server}: {exc}"
+            self.serverFailed.emit(message)
+            self.failed.emit(message)
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -842,16 +890,22 @@ class PreviewPrepareWorker(QObject):
                 "errors": errors,
                 "cached_count": cached_count,
                 "total": len(self.candidates),
+                "source_label": source_label(self.candidates[0].source_id),
             }
         )
 
 
 class PreviewWindow(QDialog):
-    """Preview one or more spectrograms; the tab bar is hidden for a single panel."""
+    """Preview one or more spectrograms; the tab bar is hidden for a single panel.
 
-    def __init__(self, panels: list[dict], title: str = "", parent=None):
+    ``source_label`` names the server the files came from; the window keeps showing
+    that dataset, and that name, after the downloader moves on to another server.
+    """
+
+    def __init__(self, panels: list[dict], title: str = "", parent=None, source_label: str = ""):
         super().__init__(parent)
-        self.setWindowTitle(f"FITS Preview: {title}" if title else "FITS Preview")
+        window_title = f"FITS Preview: {title}" if title else "FITS Preview"
+        self.setWindowTitle(f"{window_title} ({source_label})" if source_label else window_title)
         fit_window_to_screen(self, 900, 600, min_width=640, min_height=480)
 
         self._figures: list[Figure] = []
@@ -949,6 +1003,11 @@ class CallistoDownloaderApp(QDialog):
     #: geomagnetic response while this dialog is open.
     event_time_selected = Signal(object, str, str)
 
+    _OVERVIEW_READY_TEXT = (
+        "Select a station and UTC date, then generate full-day Plotutil median-dB overviews "
+        "for every available focus code."
+    )
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.selected_files: list[str] = []
@@ -991,6 +1050,11 @@ class CallistoDownloaderApp(QDialog):
         self._event_checked_station_keys: set[str] = set()
         self._event_station_days: tuple | None = None
         self._event_station_list_updating = False
+        self._event_prune_checked_stations = False
+
+        # Restored first: the tabs look up their stations as they are built.
+        self._archive_source_id = _saved_archive_source()
+        self._server_retry = None
 
         self.setWindowTitle("e-CALLISTO FITS Downloader")
         self.setObjectName("CallistoDownloaderDialog")
@@ -1003,6 +1067,7 @@ class CallistoDownloaderApp(QDialog):
         """Return the observation dates/times that should survive a reopen."""
         return {
             "active_tab": int(self.tabs.currentIndex()),
+            "archive_source": self._archive_source_id,
             "single_station_date": self.date_edit.date(),
             "event_start_utc": self.event_start_dt_edit.dateTime(),
             "event_stop_utc": self.event_stop_dt_edit.dateTime(),
@@ -1014,6 +1079,8 @@ class CallistoDownloaderApp(QDialog):
         """Restore a state returned by :meth:`date_time_state`."""
         if not isinstance(state, dict):
             return
+        if "archive_source" in state:
+            self.set_archive_source(normalize_source_id(state.get("archive_source")))
         self.burst_list_tab.restore_date_time_state(state)
 
         single_date = state.get("single_station_date")
@@ -1043,6 +1110,7 @@ class CallistoDownloaderApp(QDialog):
         layout = QVBoxLayout()
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(8)
+        layout.addLayout(self._build_server_row())
 
         self.tabs = QTabWidget(self)
         self.tabs.setObjectName("DownloaderTabs")
@@ -1050,8 +1118,9 @@ class CallistoDownloaderApp(QDialog):
         self.tabs.addTab(self._build_single_station_tab(), "Single Station")
         self.tabs.addTab(self._build_event_tab(), "Multi-Station Event")
         self.tabs.addTab(self._build_spectral_overview_tab(), "Spectral Overview")
-        self.burst_list_tab = BurstListTab(parent=self)
+        self.burst_list_tab = BurstListTab(parent=self, source_id=self._archive_source_id)
         self.burst_list_tab.import_request.connect(self.import_request.emit)
+        self.burst_list_tab.server_failed.connect(self._report_server_failure)
         self.burst_list_tab.event_time_selected.connect(
             lambda when, label: self.event_time_selected.emit(when, label, "burst_list")
         )
@@ -1064,6 +1133,151 @@ class CallistoDownloaderApp(QDialog):
         layout.addLayout(self._build_cache_footer())
         self.setLayout(layout)
         self._apply_downloader_style()
+
+    # -----------------------------
+    # FITS server selection
+    # -----------------------------
+    def _build_server_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(8)
+
+        self.server_combo = QComboBox(self)
+        self.server_combo.setObjectName("DownloaderServerCombo")
+        self.server_combo.setToolTip(
+            "The server all four tabs search and download FITS files from. "
+            "It cannot be changed while a search or download is running."
+        )
+        for source in ARCHIVE_SOURCES:
+            self.server_combo.addItem(source.label, source.id)
+        self.server_combo.setCurrentIndex(self.server_combo.findData(self._archive_source_id))
+        self.server_combo.currentIndexChanged.connect(self._on_server_selected)
+
+        self.server_failure_label = QLabel("", self)
+        self.server_failure_label.setObjectName("DownloaderStatusLabel")
+        self.server_failure_label.setTextFormat(Qt.PlainText)
+        self.server_failure_label.setWordWrap(True)
+        self.server_failure_label.setVisible(False)
+        self.server_retry_btn = QPushButton("Retry", self)
+        self.server_retry_btn.setVisible(False)
+        self.server_retry_btn.clicked.connect(self._retry_after_server_failure)
+
+        row.addWidget(QLabel("Server:", self))
+        row.addWidget(self.server_combo)
+        row.addWidget(self.server_failure_label, 1)
+        row.addWidget(self.server_retry_btn)
+        row.addStretch(0)
+        return row
+
+    def archive_source_id(self) -> str:
+        return self._archive_source_id
+
+    def _server_label(self) -> str:
+        return source_label(self._archive_source_id)
+
+    def set_archive_source(self, source_id: str) -> None:
+        """Select a server as the user would; refused while its work is running."""
+        self.server_combo.setCurrentIndex(self.server_combo.findData(archive_source(source_id).id))
+
+    @Slot(int)
+    def _on_server_selected(self, index: int) -> None:
+        source_id = self.server_combo.itemData(index)
+        if source_id == self._archive_source_id:
+            return
+        if self._archive_work_active():
+            self.server_combo.blockSignals(True)
+            self.server_combo.setCurrentIndex(self.server_combo.findData(self._archive_source_id))
+            self.server_combo.blockSignals(False)
+            return
+
+        self._archive_source_id = source_id
+        settings = _make_settings()
+        settings.setValue(ARCHIVE_SOURCE_SETTING_KEY, source_id)
+        settings.sync()
+
+        self._clear_server_failure()
+        self._clear_results_of_previous_server()
+        # Dates and time windows stay. Nothing is searched until the user asks.
+        self.single_station_binding.remember_current()
+        self.overview_station_binding.remember_current()
+        self._event_prune_checked_stations = True
+        for loader in (self.single_station_loader, self.event_station_loader, self.overview_station_loader):
+            loader.set_source(source_id)
+        self.burst_list_tab.set_archive_source(source_id)
+
+    def _clear_results_of_previous_server(self) -> None:
+        self.file_tree.clear()
+        self.file_url_map.clear()
+        self.selected_files.clear()
+        self.status_label.setText("")
+
+        self._event_candidates = []
+        self.event_results_table.setRowCount(0)
+        self._sync_event_actions()
+        self.event_status_label.setText("Select stations and a UTC event time window.")
+
+        self._clear_overview_previews()
+        self._add_overview_placeholder()
+        self._reset_overview_focus_selector()
+        self.overview_export_btn.setEnabled(False)
+        self.overview_status_label.setText(self._OVERVIEW_READY_TEXT)
+        self.overview_status_label.setToolTip("")
+
+    def _archive_work_active(self) -> bool:
+        """True while a search, download, preview or overview is using the server."""
+        if self.burst_list_tab.is_busy():
+            return True
+        for thread in (self._fetch_thread, self._preview_thread, self._event_fetch_thread, self._overview_thread):
+            if thread is not None:
+                return True
+        return (
+            self._download_total > self._download_done
+            or self._event_download_total > self._event_download_done
+        )
+
+    def _sync_server_selector(self) -> None:
+        self.server_combo.setEnabled(not self._archive_work_active())
+
+    def _release_worker_thread(self, thread_attribute: str, worker_attribute: str) -> None:
+        """Free a finished worker and its thread from a ``QThread.finished`` slot.
+
+        finished() is emitted while the OS thread is still winding down, so join it
+        first, and free the worker here rather than through its own deleteLater:
+        two racing destructions of one wrapper hang or crash (see
+        ``BurstListTab._worker_finished``).
+        """
+        thread = getattr(self, thread_attribute)
+        if thread is not None:
+            thread.wait()
+        setattr(self, thread_attribute, None)
+        setattr(self, worker_attribute, None)
+        if thread is not None:
+            thread.deleteLater()
+        self._sync_server_selector()
+
+    @Slot(str, object)
+    def _report_server_failure(self, message: str, retry) -> None:
+        """Offer to repeat what failed. The server stays selected; the user may change it."""
+        text = str(message or "").strip()
+        self._server_retry = retry
+        self.server_failure_label.setText(text.splitlines()[0] if text else f"{self._server_label()} failed.")
+        self.server_failure_label.setToolTip(text)
+        self.server_failure_label.setVisible(True)
+        self.server_retry_btn.setVisible(True)
+
+    def _clear_server_failure(self) -> None:
+        self._server_retry = None
+        self.server_failure_label.clear()
+        self.server_failure_label.setToolTip("")
+        self.server_failure_label.setVisible(False)
+        self.server_retry_btn.setVisible(False)
+
+    @Slot()
+    def _retry_after_server_failure(self) -> None:
+        retry = self._server_retry
+        if retry is None or self._archive_work_active():
+            return
+        self._clear_server_failure()
+        retry()
 
     def _build_cache_footer(self) -> QHBoxLayout:
         row = QHBoxLayout()
@@ -1275,8 +1489,8 @@ class CallistoDownloaderApp(QDialog):
         self._configure_calendar_popup(self.calendar_popup)
 
         self.station_dropdown = self._new_station_combo()
-        self.single_station_loader = ArchiveStationLoader(self)
-        StationComboBinding(self.station_dropdown, self.single_station_loader)
+        self.single_station_loader = ArchiveStationLoader(self, source_id=self._archive_source_id)
+        self.single_station_binding = StationComboBinding(self.station_dropdown, self.single_station_loader)
         self.single_station_status = StationAvailabilityLabel(self.single_station_loader, page)
         self.date_edit.dateChanged.connect(self._request_single_stations)
         self.date_edit.dateChanged.connect(self._emit_day_selected)
@@ -1374,7 +1588,7 @@ class CallistoDownloaderApp(QDialog):
         self.event_station_list.setMinimumHeight(260)
         self.event_station_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.event_station_list.itemChanged.connect(self._on_event_station_item_changed)
-        self.event_station_loader = ArchiveStationLoader(self)
+        self.event_station_loader = ArchiveStationLoader(self, source_id=self._archive_source_id)
         self.event_station_status = StationAvailabilityLabel(self.event_station_loader, station_group)
         self.event_station_loader.loading.connect(self._on_event_stations_loading)
         self.event_station_loader.loaded.connect(self._on_event_stations_loaded)
@@ -1505,8 +1719,8 @@ class CallistoDownloaderApp(QDialog):
 
         self.overview_station_dropdown = self._new_station_combo()
         self.overview_station_dropdown.setMinimumWidth(180)
-        self.overview_station_loader = ArchiveStationLoader(self)
-        StationComboBinding(self.overview_station_dropdown, self.overview_station_loader)
+        self.overview_station_loader = ArchiveStationLoader(self, source_id=self._archive_source_id)
+        self.overview_station_binding = StationComboBinding(self.overview_station_dropdown, self.overview_station_loader)
         self.overview_station_status = StationAvailabilityLabel(self.overview_station_loader, controls_group)
         self.overview_date_edit.dateChanged.connect(self._request_overview_stations)
 
@@ -1540,11 +1754,7 @@ class CallistoDownloaderApp(QDialog):
 
         self.overview_progress_bar = QProgressBar(self)
         self.overview_progress_bar.setVisible(False)
-        self.overview_status_label = QLabel(
-            "Select a station and UTC date, then generate full-day Plotutil median-dB overviews "
-            "for every available focus code.",
-            self,
-        )
+        self.overview_status_label = QLabel(self._OVERVIEW_READY_TEXT, self)
         self.overview_status_label.setObjectName("DownloaderStatusLabel")
         self.overview_status_label.setWordWrap(True)
         controls_layout.addWidget(self.overview_progress_bar, 3, 0, 1, 6)
@@ -1555,6 +1765,15 @@ class CallistoDownloaderApp(QDialog):
         plot_layout = QVBoxLayout(plot_group)
         self.overview_preview_tabs = QTabWidget(self)
         self.overview_preview_tabs.currentChanged.connect(self._on_overview_preview_tab_changed)
+        self._add_overview_placeholder()
+        plot_layout.addWidget(self.overview_preview_tabs)
+
+        layout.addWidget(controls_group, 0)
+        layout.addWidget(plot_group, 1)
+        self._request_overview_stations()
+        return page
+
+    def _add_overview_placeholder(self) -> None:
         placeholder = Figure(figsize=(12, 8), facecolor="white")
         placeholder_ax = placeholder.add_subplot(111)
         placeholder_ax.axis("off")
@@ -1570,12 +1789,6 @@ class CallistoDownloaderApp(QDialog):
         self.overview_plot_scroll = SpectralOverviewScrollArea(self)
         self._configure_overview_canvas(self.overview_canvas, self.overview_plot_scroll)
         self.overview_preview_tabs.addTab(self.overview_plot_scroll, "Preview")
-        plot_layout.addWidget(self.overview_preview_tabs)
-
-        layout.addWidget(controls_group, 0)
-        layout.addWidget(plot_group, 1)
-        self._request_overview_stations()
-        return page
 
     def _configure_calendar_popup(self, calendar: QCalendarWidget):
         year_edit = calendar.findChild(QSpinBox, "qt_calendar_yearedit")
@@ -1669,6 +1882,10 @@ class CallistoDownloaderApp(QDialog):
 
     @Slot(object)
     def _on_event_stations_loaded(self, stations):
+        if self._event_prune_checked_stations:
+            # After a server change, only checked stations it also has stay checked.
+            self._event_prune_checked_stations = False
+            self._event_checked_station_keys &= {_station_key(station) for station in stations}
         self._fill_event_station_list(stations)
 
     def _fill_event_station_list(self, stations) -> None:
@@ -1727,14 +1944,15 @@ class CallistoDownloaderApp(QDialog):
             self._warn_no_station(self.overview_station_status)
             return
         focus_code = str(self.overview_focus_combo.currentData() or "")
+        self._clear_server_failure()
         self._set_overview_running(True)
         self.overview_progress_bar.setRange(0, 0)
         self.overview_progress_bar.setValue(0)
-        self.overview_status_label.setText("Preparing full-day spectral overview...")
+        self.overview_status_label.setText(f"Preparing full-day spectral overview from {self._server_label()}...")
         self.overview_status_label.setToolTip("")
 
         self._overview_thread = QThread(self)
-        self._overview_worker = SpectralOverviewWorker(date_py, station, focus_code)
+        self._overview_worker = SpectralOverviewWorker(date_py, station, focus_code, source_id=self._archive_source_id)
         self._overview_worker.moveToThread(self._overview_thread)
         self._overview_thread.started.connect(self._overview_worker.run)
         self._overview_worker.progressRange.connect(self.overview_progress_bar.setRange)
@@ -1742,6 +1960,7 @@ class CallistoDownloaderApp(QDialog):
         self._overview_worker.progressText.connect(self.overview_status_label.setText)
         self._overview_worker.focusCodesDiscovered.connect(self._update_overview_focus_codes)
         self._overview_worker.finished.connect(self._on_spectral_overview_finished)
+        self._overview_worker.serverFailed.connect(self._on_spectral_overview_server_failed)
         self._overview_worker.failed.connect(self._on_spectral_overview_failed)
         self._overview_worker.cancelled.connect(self._on_spectral_overview_cancelled)
         for terminal_signal in (
@@ -1750,13 +1969,9 @@ class CallistoDownloaderApp(QDialog):
             self._overview_worker.cancelled,
         ):
             terminal_signal.connect(self._overview_thread.quit)
-            terminal_signal.connect(self._overview_worker.deleteLater)
 
         def _cleanup_overview_thread():
-            if self._overview_thread is not None:
-                self._overview_thread.deleteLater()
-            self._overview_thread = None
-            self._overview_worker = None
+            self._release_worker_thread("_overview_thread", "_overview_worker")
             self._set_overview_running(False)
             if self._overview_close_after_finish:
                 self._overview_close_after_finish = False
@@ -1764,6 +1979,11 @@ class CallistoDownloaderApp(QDialog):
 
         self._overview_thread.finished.connect(_cleanup_overview_thread)
         self._overview_thread.start()
+        self._sync_server_selector()
+
+    @Slot(str)
+    def _on_spectral_overview_server_failed(self, message: str) -> None:
+        self._report_server_failure(message, self.generate_spectral_overview)
 
     @Slot()
     def cancel_spectral_overview(self):
@@ -1864,7 +2084,7 @@ class CallistoDownloaderApp(QDialog):
         focus_codes = ", ".join(result.focus_code for result in results)
         status = (
             f"Generated {len(results)} focus-code overview(s): {focus_codes}. "
-            f"Loaded {loaded_files}/{total_files} FITS file(s)."
+            f"Loaded {loaded_files}/{total_files} FITS file(s) from {self._server_label()}."
         )
         warning_details = errors + [
             f"Focus {result.focus_code}: {warning}"
@@ -1983,17 +2203,18 @@ class CallistoDownloaderApp(QDialog):
             QMessageBox.information(self, "Search In Progress", "An event search is already running.")
             return
 
+        self._clear_server_failure()
         self._event_candidates = []
         self.event_results_table.setRowCount(0)
         self._sync_event_actions()
-        self.event_status_label.setText("Searching archive listings...")
+        self.event_status_label.setText(f"Searching {self._server_label()} listings...")
         self.event_progress_bar.setVisible(True)
         self.event_progress_bar.setValue(0)
         self.event_progress_bar.setMaximum(0)
         self.event_search_btn.setEnabled(False)
 
         self._event_fetch_thread = QThread(self)
-        self._event_fetch_worker = EventFetchWorker(start_dt, stop_dt, stations)
+        self._event_fetch_worker = EventFetchWorker(start_dt, stop_dt, stations, source_id=self._archive_source_id)
         self._event_fetch_worker.moveToThread(self._event_fetch_thread)
         self._event_fetch_thread.started.connect(self._event_fetch_worker.run)
         self._event_fetch_worker.progressMax.connect(
@@ -2007,16 +2228,14 @@ class CallistoDownloaderApp(QDialog):
         self._event_fetch_worker.progressStep.connect(self.update_event_fetch_progress)
         self._event_fetch_worker.finished.connect(self.display_event_search_results)
         self._event_fetch_worker.finished.connect(self._event_fetch_thread.quit)
-        self._event_fetch_worker.finished.connect(self._event_fetch_worker.deleteLater)
 
         def _cleanup_event_thread():
-            self._event_fetch_thread.deleteLater()
-            self._event_fetch_thread = None
-            self._event_fetch_worker = None
+            self._release_worker_thread("_event_fetch_thread", "_event_fetch_worker")
             self.event_search_btn.setEnabled(True)
 
         self._event_fetch_thread.finished.connect(_cleanup_event_thread)
         self._event_fetch_thread.start()
+        self._sync_server_selector()
 
     def update_event_fetch_progress(self, step: int):
         QMetaObject.invokeMethod(
@@ -2034,7 +2253,10 @@ class CallistoDownloaderApp(QDialog):
             QMessageBox.critical(self, "Search Error", "Unexpected event search result.")
             return
         if payload.get("error"):
-            QMessageBox.critical(self, "Search Error", str(payload.get("error")))
+            error = str(payload.get("error"))
+            self.event_status_label.setText(error.splitlines()[0])
+            self._report_server_failure(error, self.search_event_fits)
+            QMessageBox.critical(self, "Search Error", error)
             return
 
         candidates = list(payload.get("candidates") or [])
@@ -2048,9 +2270,12 @@ class CallistoDownloaderApp(QDialog):
         warnings = list(payload.get("warnings") or [])
         missing = list(payload.get("missing_stations") or [])
         if candidates:
-            status = f"Found {len(candidates)} matching FITS file(s)."
+            status = f"Found {len(candidates)} matching FITS file(s) on {self._server_label()}."
         else:
-            status = "No matching FITS files were found for the selected stations and time window."
+            status = (
+                f"No matching FITS files were found on {self._server_label()} "
+                "for the selected stations and time window."
+            )
         if missing:
             shown = ", ".join(missing[:8])
             suffix = "..." if len(missing) > 8 else ""
@@ -2131,6 +2356,7 @@ class CallistoDownloaderApp(QDialog):
         if not output_dir:
             return
 
+        self._clear_server_failure()
         self._event_download_total = len(selected)
         self._event_download_done = 0
         self._event_download_success_paths = []
@@ -2140,7 +2366,8 @@ class CallistoDownloaderApp(QDialog):
         self.event_progress_bar.setVisible(True)
         self.event_progress_bar.setMaximum(len(selected))
         self.event_progress_bar.setValue(0)
-        self.event_status_label.setText("Downloading selected event FITS files...")
+        self.event_status_label.setText(f"Downloading selected event FITS files from {self._server_label()}...")
+        self._sync_server_selector()
 
         for candidate in selected:
             out_path = os.path.join(output_dir, candidate.filename)
@@ -2176,12 +2403,17 @@ class CallistoDownloaderApp(QDialog):
     def finish_event_download(self):
         self.event_download_btn.setEnabled(self.event_results_table.rowCount() > 0)
         self.event_search_btn.setEnabled(True)
+        self._sync_server_selector()
 
         success_count = len(self._event_download_success_paths)
         failed_count = len(self._event_download_failures)
-        status = f"Downloaded {success_count} of {self._event_download_total} selected FITS file(s)."
+        status = (
+            f"Downloaded {success_count} of {self._event_download_total} selected FITS file(s) "
+            f"from {self._server_label()}."
+        )
         if failed_count:
             status += f" {failed_count} failed."
+            self._report_server_failure(status, self.download_selected_event_files)
         self.event_status_label.setText(status)
 
         details = [status]
@@ -2208,6 +2440,7 @@ class CallistoDownloaderApp(QDialog):
             self._warn_no_station(self.single_station_status)
             return
 
+        self._clear_server_failure()
         self.file_tree.clear()
         self.file_url_map.clear()
 
@@ -2216,10 +2449,11 @@ class CallistoDownloaderApp(QDialog):
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.progress_bar.setMaximum(0)
+        self.status_label.setText(f"Searching {self._server_label()}...")
 
         # Always create a new thread
         self._fetch_thread = QThread(self)
-        self._fetch_worker = FetchWorker(date_py, station)
+        self._fetch_worker = FetchWorker(date_py, station, source_id=self._archive_source_id)
 
         self._fetch_worker.moveToThread(self._fetch_thread)
 
@@ -2237,17 +2471,15 @@ class CallistoDownloaderApp(QDialog):
 
         # Proper cleanup
         self._fetch_worker.finished.connect(self._fetch_thread.quit)
-        self._fetch_worker.finished.connect(self._fetch_worker.deleteLater)
 
         def _cleanup_thread():
-            self._fetch_thread.deleteLater()
-            self._fetch_thread = None
-            self._fetch_worker = None
+            self._release_worker_thread("_fetch_thread", "_fetch_worker")
 
         self._fetch_thread.finished.connect(_cleanup_thread)
 
         self._fetch_thread.started.connect(self._fetch_worker.run)
         self._fetch_thread.start()
+        self._sync_server_selector()
 
     @staticmethod
     def _focus_group_label(focus_code: str, candidates: list[CallistoEventCandidate]) -> str:
@@ -2279,22 +2511,32 @@ class CallistoDownloaderApp(QDialog):
         self.file_tree.clear()
         self.file_url_map.clear()
         self.progress_bar.setVisible(False)
+        self.status_label.setText("")
+        server = self._server_label()
 
         if files and files[0][0] == "__SERVER_UNREACHABLE__":
+            self._report_server_failure(
+                f"{server} FITS server is not responding.\n{files[0][1]}", self.show_available_fits
+            )
             QMessageBox.critical(self, "Server Error",
-                                 f"FITS server is not responding.\n\nDetails:\n{files[0][1]}")
+                                 f"{server} FITS server is not responding.\n\nDetails:\n{files[0][1]}")
             return
 
         if files and files[0][0] == "__FETCH_ERROR__":
+            self._report_server_failure(
+                f"Could not load the {server} listing for the selected date.\n{files[0][1]}", self.show_available_fits
+            )
             QMessageBox.critical(self, "Fetch Error",
-                                 f"Could not load FITS directory for selected date.\n\nDetails:\n{files[0][1]}")
+                                 f"Could not load the {server} listing for the selected date.\n\nDetails:\n{files[0][1]}")
             return
 
         valid_files = [(name, url) for (name, url) in files if name and url]
         if not valid_files:
             QMessageBox.information(self, "No Data Found",
-                                    "No FITS files were found for the selected station on that date.")
+                                    f"No FITS files were found on {server} for the selected station on that date.")
             return
+
+        self.status_label.setText(f"Found {len(valid_files)} FITS file(s) on {server}.")
 
         parsed: list[CallistoEventCandidate] = []
         unparsed: list[CallistoEventCandidate] = []
@@ -2424,13 +2666,16 @@ class CallistoDownloaderApp(QDialog):
         if not output_dir:
             return
 
+        self._clear_server_failure()
         self.progress_bar.setVisible(True)
         self.progress_bar.setMaximum(len(selected))
         self.progress_bar.setValue(0)
+        self.status_label.setText(f"Downloading {len(selected)} FITS file(s) from {self._server_label()}...")
         self._download_total = len(selected)
         self._download_done = 0
         self._download_cached = 0
         self._download_failures = []
+        self._sync_server_selector()
 
         for candidate in selected:
             out_path = os.path.join(output_dir, candidate.filename)
@@ -2468,10 +2713,13 @@ class CallistoDownloaderApp(QDialog):
         except Exception:
             pass
         self._update_cache_size_label()
+        self._sync_server_selector()
+        self.status_label.setText("")
 
         failed = len(self._download_failures)
         succeeded = max(0, self._download_total - failed)
         details = [
+            f"Server: {self._server_label()}",
             f"Files requested: {self._download_total}",
             f"Saved: {succeeded} ({self._download_cached} reused from cache)",
             f"Failed: {failed}",
@@ -2482,6 +2730,11 @@ class CallistoDownloaderApp(QDialog):
             details.extend(self._download_failures[:8])
             if failed > 8:
                 details.append("...")
+            self._report_server_failure(
+                f"{failed} of {self._download_total} downloads from {self._server_label()} failed.\n"
+                + "\n".join(self._download_failures[:8]),
+                self.download_selected_files,
+            )
             QMessageBox.warning(self, "Download Finished", "\n".join(details))
             return
         QMessageBox.information(self, "Download Complete", "\n".join(details))
@@ -2525,6 +2778,7 @@ class CallistoDownloaderApp(QDialog):
             )
             return
 
+        self._clear_server_failure()
         self.preview_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setMaximum(len(selected))
@@ -2546,18 +2800,14 @@ class CallistoDownloaderApp(QDialog):
 
         self._preview_worker.finished.connect(self._preview_thread.quit)
         self._preview_worker.failed.connect(self._preview_thread.quit)
-        self._preview_worker.finished.connect(self._preview_worker.deleteLater)
-        self._preview_worker.failed.connect(self._preview_worker.deleteLater)
 
         def _cleanup_thread():
-            if self._preview_thread is not None:
-                self._preview_thread.deleteLater()
-            self._preview_thread = None
-            self._preview_worker = None
+            self._release_worker_thread("_preview_thread", "_preview_worker")
 
         self._preview_thread.finished.connect(_cleanup_thread)
         self._preview_thread.started.connect(self._preview_worker.run)
         self._preview_thread.start()
+        self._sync_server_selector()
 
     @Slot(str)
     def _on_preview_progress_text(self, text: str):
@@ -2580,7 +2830,7 @@ class CallistoDownloaderApp(QDialog):
             return
 
         title = panels[0].get("title", "") if len(panels) == 1 else f"{len(panels)} panels"
-        window = PreviewWindow(panels, title, parent=self)
+        window = PreviewWindow(panels, title, parent=self, source_label=str((payload or {}).get("source_label") or ""))
         window.show()
         self._preview_windows.append(window)
         window.destroyed.connect(lambda *_args, ref=window: self._forget_preview_window(ref))
@@ -2599,6 +2849,9 @@ class CallistoDownloaderApp(QDialog):
     @Slot(str)
     def _on_preview_failed(self, message: str):
         self._finish_preview_run()
+        self._report_server_failure(
+            f"{self._server_label()}: {str(message).strip()}", self.preview_selected_files
+        )
         QMessageBox.critical(self, "Preview Error", str(message))
 
     # -----------------------------
@@ -2656,6 +2909,7 @@ class CallistoDownloaderApp(QDialog):
         for index in range(self.tabs.count()):
             if self.tabs.widget(index) is not self.burst_list_tab:
                 self.tabs.setTabEnabled(index, not running)
+        self._sync_server_selector()
 
     def _compare_burst_files(self, urls):
         self.comparison_request.emit(urls)

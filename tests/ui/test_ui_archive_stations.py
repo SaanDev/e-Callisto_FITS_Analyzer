@@ -40,7 +40,7 @@ def archive(monkeypatch):
     calls = []
     lock = threading.Lock()
 
-    def fetch(day):
+    def fetch(day, _source_id="ecallisto"):
         with lock:
             calls.append(day)
         result = listings.get(day, [])
@@ -147,7 +147,7 @@ def test_failed_lookup_offers_a_retry_that_reads_the_archive_again(app, archive)
 
     assert loaded == [["BIR"]]
     assert calls == [day, day]
-    assert label.summary() == "1 station has data on 2024-01-02 (UTC)."
+    assert label.summary() == "e-CALLISTO: 1 station has data on 2024-01-02 (UTC)."
 
 
 def test_single_station_list_follows_the_date_and_keeps_the_users_station(dialog, archive):
@@ -169,7 +169,7 @@ def test_single_station_list_follows_the_date_and_keeps_the_users_station(dialog
     dialog.date_edit.setDate(QDate(2024, 1, 3))
     _wait_until(lambda: _texts(combo) == ["BIR", "MRO", "UK-GLASGOW"])
     assert combo.currentText() == "MRO"
-    assert dialog.single_station_status.summary() == "3 stations have data on 2024-01-03 (UTC)."
+    assert dialog.single_station_status.summary() == "e-CALLISTO: 3 stations have data on 2024-01-03 (UTC)."
 
 
 def test_show_available_fits_needs_a_station_from_the_archive(dialog, archive, monkeypatch):
@@ -187,7 +187,7 @@ def test_show_available_fits_needs_a_station_from_the_archive(dialog, archive, m
     assert dialog.station_dropdown.count() == 0
     assert dialog.station_dropdown.placeholderText() == "No stations on this date"
     assert started == []
-    assert messages == ["No station is selected. No station has published data for 2024-01-05 (UTC)."]
+    assert messages == ["No station is selected. e-CALLISTO: no station has published data for 2024-01-05 (UTC)."]
 
 
 def test_spectral_overview_station_list_follows_its_date(dialog, archive):
@@ -198,7 +198,7 @@ def test_spectral_overview_station_list_follows_its_date(dialog, archive):
     _wait_until(lambda: _texts(dialog.overview_station_dropdown) == ["BIR", "SSRT"])
 
     assert dialog.overview_station_dropdown.currentText() == "BIR"
-    assert dialog.overview_station_status.summary() == "2 stations have data on 2024-01-02 (UTC)."
+    assert dialog.overview_station_status.summary() == "e-CALLISTO: 2 stations have data on 2024-01-02 (UTC)."
 
 
 def test_event_station_list_spans_the_window_and_keeps_checked_stations(dialog, archive):
@@ -211,7 +211,7 @@ def test_event_station_list_spans_the_window_and_keeps_checked_stations(dialog, 
     dialog.event_start_dt_edit.setDateTime(_typed(2024, 1, 1, 23, 30))
     dialog.event_stop_dt_edit.setDateTime(_typed(2024, 1, 2, 0, 30))
     _wait_until(lambda: _list_texts(station_list) == ["BIR", "GREENLAND", "MRO"])
-    assert dialog.event_station_status.summary() == "3 stations have data on 2024-01-01 to 2024-01-02 (UTC)."
+    assert dialog.event_station_status.summary() == "e-CALLISTO: 3 stations have data on 2024-01-01 to 2024-01-02 (UTC)."
     station_list.item(1).setCheckState(Qt.Checked)
     station_list.item(2).setCheckState(Qt.Checked)
 

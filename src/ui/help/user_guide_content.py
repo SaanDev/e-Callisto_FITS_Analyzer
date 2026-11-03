@@ -631,7 +631,20 @@ calibrated intensity measurements.</p>
 <h2>16. FITS Downloader</h2>
 <p>Open from <code>Download &#8594; Launch FITS Downloader</code> or
 <code>Solar Events &#8594; Radio Bursts</code>. Station lists are read from the archive whenever a date changes, so
-they offer only the stations with data on the chosen UTC days. It has three tabs:</p>
+they offer only the stations with data on the chosen UTC days.</p>
+<p><b>Server</b>: the selector above the tabs chooses where every tab finds and downloads FITS files,
+<b>e-CALLISTO</b> (the default) or <b>Astrodoncel</b>, and is remembered for the next session. Changing it keeps your
+dates and time windows, clears the results of the previous server and reloads the station lists. Nothing is searched
+until you ask, a station you chose stays selected if the new server has it, and the selector is locked while a search,
+download, preview or overview is running. The Burst List catalog keeps its own source; only its FITS search follows
+the selector.</p>
+<p>When the selected server fails, the error names it and a <b>Retry</b> button appears beside the selector. The app
+never switches servers by itself, so you can retry or choose the other server yourself. An open preview names the
+server its files came from. A file of the same name on both servers is cached separately, and files downloaded from
+Astrodoncel are kept under <code>sources/astrodoncel</code> in the cache folder. Extending the timeline of an imported
+observation continues on the server it came from; a file saved to your own folder has no server information, so its
+timeline uses e-CALLISTO. Every new download is checked to be a complete, readable FITS file before it is cached.</p>
+<p>It has these tabs:</p>
 <ul>
 <li><b>Single Station</b>: pick a date and one of its stations, show available files, then preview, download,
 compare, or import them into the analyzer.</li>

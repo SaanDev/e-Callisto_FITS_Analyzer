@@ -23,8 +23,8 @@ from matplotlib.figure import Figure
 
 from src.backend.radio.batch_processing import PLOTUTIL_DB_SCALE, PLOTUTIL_DISPLAY_LIMITS
 from src.backend.radio.spectral_overview import SpectralOverviewResult
+from src.backend.radio.callisto_archive import BASE_URL, extract_fits_links
 from src.ui.downloads.callisto_downloader import (
-    BASE_URL,
     CallistoEventCandidate,
     CallistoDownloaderApp,
     EventFetchWorker,
@@ -33,7 +33,6 @@ from src.ui.downloads.callisto_downloader import (
     SpectralOverviewWorker,
     _build_plotutil_preview_figure,
     build_preview_panels,
-    extract_fits_links,
     filter_event_candidates,
     filter_spectral_overview_candidates,
     parse_callisto_archive_filename,
@@ -744,7 +743,7 @@ def test_event_download_completion_does_not_open_comparison(monkeypatch, tmp_pat
     dlg.finish_event_download()
 
     assert emitted == []
-    assert dlg.event_status_label.text() == "Downloaded 2 of 2 selected FITS file(s)."
+    assert dlg.event_status_label.text() == "Downloaded 2 of 2 selected FITS file(s) from e-CALLISTO."
     dlg.close()
 
 

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import QObject, Signal, Slot
 
 from src.backend.radio import callisto_cache
-from src.backend.radio.callisto_archive import build_archive_session
+from src.backend.radio.callisto_archive import build_archive_session, source_label
 
 if TYPE_CHECKING:
     from src.ui.downloads.callisto_downloader import CallistoEventCandidate
@@ -115,6 +115,7 @@ class BurstPreviewWorker(QObject):
                 "errors": errors,
                 "cached_count": cached_count,
                 "total": count,
+                "source_label": source_label(self.candidates[0].source_id),
             })
         except _PreviewCancelled:
             self.finished.emit({"cancelled": True})

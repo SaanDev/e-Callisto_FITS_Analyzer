@@ -471,6 +471,7 @@ Open via **Solar Events → Radio Bursts → e-CALLISTO**.
 
 Features:
 
+- Choose the FITS server, **e-CALLISTO** (default) or **Astrodoncel**, for all downloader tabs; the choice is remembered, and a failing server offers **Retry** instead of switching by itself
 - Select station, date, and hour
 - Fetch available files from the server
 - Preview selected files

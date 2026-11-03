@@ -12,10 +12,12 @@ from urllib.parse import unquote, urljoin, urlsplit
 from PySide6.QtCore import QObject, Signal, Slot
 
 from src.backend.radio.callisto_archive import (
-    REQUEST_TIMEOUT,
+    DEFAULT_SOURCE_ID,
+    archive_source,
     build_archive_session,
     day_url,
-    extract_fits_links,
+    list_day,
+    source_label,
 )
 from src.backend.radio.callisto_naming import parse_callisto_archive_filename
 
@@ -146,7 +148,13 @@ class BurstFitsWorker(QObject):
     progress = Signal(int, int, str)
     finished = Signal(object)
 
-    def __init__(self, event: BurstEvent, stations: list[str], padding_minutes: int = 0):
+    def __init__(
+        self,
+        event: BurstEvent,
+        stations: list[str],
+        padding_minutes: int = 0,
+        source_id: str = DEFAULT_SOURCE_ID,
+    ):
         super().__init__()
         # QObject.event is a virtual method used when Qt changes thread
         # affinity; storing the catalog event there breaks moveToThread().
@@ -155,6 +163,7 @@ class BurstFitsWorker(QObject):
             str(station or "").strip() for station in stations if str(station or "").strip()
         ))
         self.padding_minutes = padding_minutes
+        self.source_id = archive_source(source_id).id
         self._cancel_requested = Event()
 
     @Slot()
@@ -191,20 +200,19 @@ class BurstFitsWorker(QObject):
                 for index, observation_date in enumerate(dates):
                     if cancelled():
                         return
-                    url = day_url(observation_date)
-                    self.progress.emit(index, len(dates), f"Reading FITS archive for {observation_date:%Y-%m-%d}...")
+                    self.progress.emit(
+                        index, len(dates),
+                        f"Reading {source_label(self.source_id)} for {observation_date:%Y-%m-%d}...",
+                    )
                     if cancelled():
                         return
                     try:
-                        with session.get(url, timeout=REQUEST_TIMEOUT) as response:
-                            if response.status_code >= 400:
-                                raise RuntimeError(f"HTTP {response.status_code} for {url}")
-                            hrefs = extract_fits_links(response.text)
+                        files = list_day(observation_date, self.source_id, session)
                         if cancelled():
                             return
                         candidates.extend(filter_burst_candidates(
-                            hrefs,
-                            day_url=url,
+                            [entry.download_url for entry in files],
+                            day_url=day_url(observation_date, self.source_id),
                             selected_stations=self.stations,
                             start_dt=start,
                             stop_dt=stop,
@@ -220,8 +228,8 @@ class BurstFitsWorker(QObject):
             candidates = sort_event_candidates(candidates)
             if not successful_days:
                 self.finished.emit({
-                    "candidates": [], "warnings": warnings,
-                    "error": "Unable to read the FITS archive for the selected burst.",
+                    "candidates": [], "warnings": warnings, "server_error": True,
+                    "error": f"Unable to read the {source_label(self.source_id)} FITS archive for the selected burst.",
                 })
                 return
             missing = [

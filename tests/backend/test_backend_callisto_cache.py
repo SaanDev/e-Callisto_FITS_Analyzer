@@ -14,11 +14,18 @@ from src.backend.radio import callisto_cache
 
 
 @pytest.fixture
-def cache_dir(tmp_path, monkeypatch):
+def validated_cache_dir(tmp_path, monkeypatch):
     root = tmp_path / "appdata"
     monkeypatch.setattr(callisto_cache, "_app_data_root", lambda: root)
     monkeypatch.setattr(callisto_cache, "max_cache_bytes", lambda: callisto_cache.DEFAULT_MAX_CACHE_BYTES)
     return root / callisto_cache.CACHE_DIR_NAME
+
+
+@pytest.fixture
+def cache_dir(validated_cache_dir, monkeypatch):
+    """A cache that accepts any payload, for tests about sizes and paths."""
+    monkeypatch.setattr(callisto_cache, "validate_fits_download", lambda _path: None)
+    return validated_cache_dir
 
 
 class FakeResponse:

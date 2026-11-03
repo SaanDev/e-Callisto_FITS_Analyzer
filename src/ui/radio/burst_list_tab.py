@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 from src.backend.radio.burst_list import (
     BurstEvent, BurstListCancelled, fetch_burst_events, filter_burst_events,
 )
+from src.backend.radio.callisto_archive import DEFAULT_SOURCE_ID, archive_source, source_label
 from src.ui.downloads.archive_stations import ArchiveStationLoader
 from src.ui.radio.burst_fits import BurstFitsWorker
 from src.ui.radio.burst_preview import BurstPreviewWorker
@@ -75,14 +76,19 @@ class BurstListTab(QWidget):
     #: A burst was selected: (start UTC, label). The main window's geomagnetic
     #: response and event context follow it.
     event_time_selected = Signal(object, str)
+    #: The FITS server failed an operation: (message, retry callable).
+    server_failed = Signal(str, object)
 
-    def __init__(self, stations=(), parent=None):
+    def __init__(self, stations=(), parent=None, *, source_id=DEFAULT_SOURCE_ID):
         super().__init__(parent)
         self.setObjectName("DownloaderTabPage")
         # Offered for every burst, besides its reported stations and the
         # stations the archive holds for the burst's UTC days.
         self._known_stations = tuple(stations)
-        self._station_loader = ArchiveStationLoader(self)
+        # Where FITS files are searched; the catalog has its own fixed source.
+        self._source_id = archive_source(source_id).id
+        self._wanted_fits_station = ""
+        self._station_loader = ArchiveStationLoader(self, source_id=self._source_id)
         self._station_loader.loaded.connect(self._add_archive_stations)
         self._events: list[BurstEvent] = []
         self._warnings: list[str] = []
@@ -285,6 +291,35 @@ class BurstListTab(QWidget):
     def is_busy(self):
         return self._thread is not None or bool(self._download_tasks)
 
+    def set_archive_source(self, source_id):
+        """Search another server for FITS files; the loaded catalog stays as it is."""
+        source_id = archive_source(source_id).id
+        if source_id == self._source_id:
+            return
+        previous = self.fits_station_combo.currentText().strip()
+        self._source_id = source_id
+        self._fill_fits_stations(self.selected_event())
+        self._wanted_fits_station = previous
+        self._select_wanted_fits_station()
+        self._clear_fits()
+        self.fits_status.setToolTip("")
+        self._station_loader.set_source(source_id)
+
+    def _select_wanted_fits_station(self):
+        """Select the station kept across a server change once the list offers it."""
+        if not self._wanted_fits_station:
+            return
+        if self.fits_station_combo.currentIndex() > 0:
+            # The user has chosen another station in the meantime.
+            self._wanted_fits_station = ""
+            return
+        index = self.fits_station_combo.findText(self._wanted_fits_station, Qt.MatchFixedString)
+        if index >= 0:
+            self._wanted_fits_station = ""
+            self.fits_station_combo.blockSignals(True)
+            self.fits_station_combo.setCurrentIndex(index)
+            self.fits_station_combo.blockSignals(False)
+
     def request_cancel(self):
         if self._worker is not None:
             self._worker.request_cancel()
@@ -364,7 +399,8 @@ class BurstListTab(QWidget):
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setFormat("%p%")
         self.progress_detail.setText("…")
-        self.activity_label.setText({"catalog": "Loading the event catalog…", "fits": "Searching the FITS archive…",
+        self.activity_label.setText({"catalog": "Loading the event catalog…",
+                                     "fits": f"Searching {source_label(self._source_id)} for FITS files…",
                                      "preview": "Preparing spectrogram preview…"}[self._job_kind])
         self._sync_actions()
         self.busy_changed.emit(True)
@@ -503,18 +539,12 @@ class BurstListTab(QWidget):
         item = self.catalog_table.item(rows[0].row(), 0)
         return item.data(Qt.UserRole) if item is not None else None
 
-    def _event_selected(self):
-        event = self.selected_event()
+    def _fill_fits_stations(self, event):
         self.fits_station_combo.blockSignals(True)
         self.fits_station_combo.clear()
         if event is None:
-            self.selection_label.setText("Select a burst above, then find the FITS files covering it.")
             self.fits_station_combo.addItem("Choose a station", "")
         else:
-            self.selection_label.setText(
-                f"{event.burst_type or 'Unknown type'} · {event.start_utc:%Y-%m-%d %H:%M:%S} – "
-                f"{event.end_utc:%Y-%m-%d %H:%M:%S} UTC"
-            )
             if event.stations:
                 self.fits_station_combo.addItem("All reported stations", "__reported__")
             else:
@@ -523,6 +553,18 @@ class BurstListTab(QWidget):
             for station in stations:
                 self.fits_station_combo.addItem(station, station)
         self.fits_station_combo.blockSignals(False)
+
+    def _event_selected(self):
+        event = self.selected_event()
+        self._wanted_fits_station = ""
+        self._fill_fits_stations(event)
+        if event is None:
+            self.selection_label.setText("Select a burst above, then find the FITS files covering it.")
+        else:
+            self.selection_label.setText(
+                f"{event.burst_type or 'Unknown type'} · {event.start_utc:%Y-%m-%d %H:%M:%S} – "
+                f"{event.end_utc:%Y-%m-%d %H:%M:%S} UTC"
+            )
         self._clear_fits()
         if event is not None:
             stations = ", ".join(event.stations[:3]) + (" …" if len(event.stations) > 3 else "")
@@ -548,6 +590,7 @@ class BurstListTab(QWidget):
             if station.casefold() not in present:
                 combo.addItem(station, station)
         combo.blockSignals(False)
+        self._select_wanted_fits_station()
 
     def find_fits(self):
         if self.is_busy():
@@ -563,8 +606,11 @@ class BurstListTab(QWidget):
             QMessageBox.warning(self, "No Station", "Choose or enter a station to search for this burst.")
             return
         self._clear_fits()
-        self.fits_status.setText("Searching archive listings for files covering the burst…")
-        self._start_worker(BurstFitsWorker(event, stations, self.padding_spin.value()), self.display_fits)
+        self.fits_status.setText(f"Searching {source_label(self._source_id)} for files covering the burst…")
+        self._start_worker(
+            BurstFitsWorker(event, stations, self.padding_spin.value(), source_id=self._source_id),
+            self.display_fits,
+        )
 
     @Slot(object)
     def display_fits(self, payload):
@@ -575,6 +621,9 @@ class BurstListTab(QWidget):
         if payload.get("error"):
             self._job_outcome = "error"
             self.fits_status.setText("Could not find FITS files: " + payload["error"])
+            self.fits_status.setToolTip("\n".join(payload.get("warnings") or []))
+            if payload.get("server_error"):
+                self.server_failed.emit(payload["error"], self.find_fits)
             return
         candidates = list(payload.get("candidates") or [])
         self.fits_table.blockSignals(True)
@@ -593,9 +642,10 @@ class BurstListTab(QWidget):
                     item.setData(Qt.UserRole, candidate)
                 self.fits_table.setItem(row, column, item)
         self.fits_table.blockSignals(False)
-        status = f"Found {len(candidates)} FITS file(s) covering the selected window."
+        server = source_label(self._source_id)
+        status = f"Found {len(candidates)} FITS file(s) on {server} covering the selected window."
         if not candidates:
-            status = "No matching FITS files. Try another station or increase the padding."
+            status = f"No matching FITS files on {server}. Try another station or increase the padding."
         warnings = list(payload.get("warnings") or [])
         if warnings:
             status += " " + " ".join(warnings[:2])
@@ -634,11 +684,15 @@ class BurstListTab(QWidget):
         panels = list(payload.get("panels") or [])
         if payload.get("error") or not panels:
             self._job_outcome = "error"
-            self.fits_status.setText("Could not preview FITS files: " + str(payload.get("error") or "No preview available."))
+            message = str(payload.get("error") or "No preview available.")
+            self.fits_status.setText("Could not preview FITS files: " + message)
+            self.server_failed.emit(message, self.preview_selected)
             return
         try:
             title = panels[0].get("title", "") if len(panels) == 1 else f"{len(panels)} panels"
-            preview = PreviewWindow(panels, title, parent=self.window())
+            preview = PreviewWindow(
+                panels, title, parent=self.window(), source_label=str(payload.get("source_label") or ""),
+            )
             self._preview_windows.append(preview)
             preview.destroyed.connect(lambda *_args, ref=preview: self._forget_preview(ref))
             preview.show()
@@ -689,7 +743,7 @@ class BurstListTab(QWidget):
         self.progress_bar.setFormat("%p%")
         self.progress_detail.setText("0%")
         self.activity_label.setText(f"Downloading {len(selected)} FITS file(s)…")
-        self.fits_status.setText("Downloading selected FITS files…")
+        self.fits_status.setText(f"Downloading selected FITS files from {source_label(self._source_id)}…")
         self._sync_actions()
         self.busy_changed.emit(True)
         for task in self._download_tasks:
@@ -719,9 +773,13 @@ class BurstListTab(QWidget):
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(100)
         self.progress_detail.setText("100%")
-        status = f"Downloaded {total - len(self._download_failures)} of {total} selected FITS file(s)."
+        status = (
+            f"Downloaded {total - len(self._download_failures)} of {total} selected FITS file(s) "
+            f"from {source_label(self._source_id)}."
+        )
         if self._download_failures:
             status += f" {len(self._download_failures)} failed."
+            self.server_failed.emit(status, self.download_selected)
         self.activity_label.setText(status)
         self.fits_status.setText(status)
         self.fits_status.setToolTip("\n".join(self._download_failures))
