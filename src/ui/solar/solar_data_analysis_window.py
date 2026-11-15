@@ -2402,7 +2402,8 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self.surface_panel.setEnabled(False)
         self.measure_side_tabs = QTabWidget()
         self.measure_side_tabs.setObjectName("SolarMeasureSideTabs")
-        self.measure_side_tabs.setDocumentMode(True)
+        self.measure_side_tabs.setDocumentMode(False)
+        self.measure_side_tabs.tabBar().setDrawBase(False)
         self.measure_side_tabs.addTab(self.tracking_panel, "CME Tracking")
         self.measure_side_tabs.addTab(self.surface_panel, "Surface")
         self.plot_splitter = QSplitter(Qt.Horizontal)
@@ -3087,6 +3088,48 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
                 border: 1px solid {border};
                 border-radius: 8px;
                 padding: 4px;
+            }}
+            /* Side panel tabs (CME Tracking / Surface): the measure bar's pills. */
+            QTabWidget#SolarMeasureSideTabs::pane {{
+                border: 0px;
+                background: transparent;
+                top: 2px;
+            }}
+            QTabWidget#SolarMeasureSideTabs QTabBar::tab {{
+                min-height: 22px;
+                padding: 3px 14px;
+                margin: 0px 6px 4px 6px;
+                border: 1px solid {field_border};
+                border-radius: 12px;
+                background: {card_bg};
+                color: {text};
+                font-weight: 500;
+            }}
+            QTabWidget#SolarMeasureSideTabs QTabBar::tab:hover {{
+                background: {hover};
+                border-color: {accent};
+            }}
+            QTabWidget#SolarMeasureSideTabs QTabBar::tab:selected {{
+                background: {accent};
+                border-color: {accent};
+                color: #ffffff;
+            }}
+            QTabWidget#SolarMeasureSideTabs QTabBar::tab:disabled {{
+                background: {disabled_bg};
+                color: {disabled_text};
+                border-color: {border};
+            }}
+            QScrollArea#SolarSurfaceScroll,
+            QWidget#SolarSurfaceContent {{
+                background: transparent;
+                border: 0px;
+            }}
+            QLabel#SolarSurfaceResult {{
+                background: {card_bg};
+                color: {text};
+                border: 1px solid {border};
+                border-radius: 8px;
+                padding: 6px 8px;
             }}
             QSplitter::handle {{
                 background: transparent;
@@ -4180,9 +4223,9 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self.surface_panel.finish_btn.clicked.connect(surface.finish)
         self.surface_panel.clear_shape_btn.clicked.connect(surface.clear_shape)
         self.surface_panel.record_btn.clicked.connect(surface.record)
-        self.surface_panel.delete_row_btn.clicked.connect(lambda: surface.delete_record())
-        self.surface_panel.export_btn.clicked.connect(lambda: surface.export_csv())
-        self.surface_panel.clear_table_btn.clicked.connect(self._confirm_clear_surface_table)
+        self.surface_panel.delete_row_action.triggered.connect(lambda: surface.delete_record())
+        self.surface_panel.export_action.triggered.connect(lambda: surface.export_csv())
+        self.surface_panel.clear_table_action.triggered.connect(self._confirm_clear_surface_table)
         self.surface_panel.recordSelected.connect(surface.select_record)
         self.surface_panel.recordRenamed.connect(surface.rename_record)
         self.surface_panel.track_btn.clicked.connect(lambda: surface.track_feature())

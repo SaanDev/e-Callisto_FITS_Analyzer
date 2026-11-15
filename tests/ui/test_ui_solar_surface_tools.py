@@ -577,7 +577,8 @@ def test_finished_shapes_add_named_rows(win):
     assert "Centroid: N" in table.item(1, 3).toolTip()
     assert table.item(1, 4).text() == f"{surface.records[1].values['mean_mu']:.2f}"
     assert win.surface_panel.selected_row() == 1  # the newest row is active
-    assert win.surface_panel.export_btn.isEnabled()
+    assert win.surface_panel.table_btn.isEnabled()
+    assert win.surface_panel.export_action.isEnabled()
     # Only the name is editable.
     assert table.item(1, 0).flags() & Qt.ItemIsEditable
     assert not table.item(1, 3).flags() & Qt.ItemIsEditable
@@ -678,17 +679,18 @@ def test_rename_delete_and_clear_rows(win, monkeypatch):
     assert table.item(1, 0).text() == "Length 2"
 
     table.selectRow(0)
-    win.surface_panel.delete_row_btn.click()
+    win.surface_panel.delete_row_action.trigger()
     assert [r.name for r in surface.records] == ["Length 2"]
 
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
-    win.surface_panel.clear_table_btn.click()
+    win.surface_panel.clear_table_action.trigger()
     assert len(surface.records) == 1
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
-    win.surface_panel.clear_table_btn.click()
+    win.surface_panel.clear_table_action.trigger()
     assert surface.records == []
     assert table.rowCount() == 0
-    assert not win.surface_panel.export_btn.isEnabled()
+    assert not win.surface_panel.export_action.isEnabled()
+    assert not win.surface_panel.table_btn.isEnabled()
 
 
 def test_export_csv_writes_every_row(win, tmp_path, monkeypatch):
@@ -704,7 +706,7 @@ def test_export_csv_writes_every_row(win, tmp_path, monkeypatch):
     _spot_box(win)
     target = tmp_path / "spots"  # no extension: one is added
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(target), "CSV files (*.csv)"))
-    win.surface_panel.export_btn.click()
+    win.surface_panel.export_action.trigger()
     path = tmp_path / "spots.csv"
     lines = path.read_text(encoding="utf-8").splitlines()[len(CSV_NOTES):]
     rows = list(csv.DictReader(lines))
@@ -961,11 +963,10 @@ def test_series_plot_follows_the_selected_feature(win):
     win._measure.on_canvas_click(-100.0, 150.0, "left")
     win.surface_panel.finish_btn.click()
     assert "1 frame" in win.surface_panel.series_label.text()
-    assert "Track Through Frames" in win.surface_panel.series_label.text()
+    assert "Track Frames" in win.surface_panel.series_label.text()
     win._measure.surface.track_feature()
     assert win.surface_panel.plot.getPlotItem().getAxis("left").labelText == "Length (Mm)"
     assert "2 frames" in win.surface_panel.series_label.text()
-    win.surface_panel.clear_table_btn.setEnabled(True)
     win._measure.surface.clear_records()
     xs, _ = win.surface_panel._series_main.getData()
     assert xs is None or len(xs) == 0
@@ -999,3 +1000,40 @@ def test_surface_tab_scrolls_vertically_and_never_clips_its_width(win):
     assert panel._content.minimumSizeHint().width() <= viewport
     # The tab's content height is not the window's floor.
     assert panel.minimumSizeHint().height() < panel._content.minimumSizeHint().height()
+
+
+def test_tab_shows_only_what_the_active_tool_uses(win):
+    _load(win, [DiskMap(_disk())])
+    panel = win.surface_panel
+    win.measure_side_tabs.setCurrentWidget(panel)
+    assert not panel.draw_section.isVisibleTo(panel)  # no tool: table and graph only
+    assert not panel.threshold_group.isVisibleTo(panel)
+    assert not panel.result_label.isVisibleTo(panel)
+    win.length_tool_btn.setChecked(True)
+    assert panel.draw_section.isVisibleTo(panel)
+    assert not panel.shape_combo.isVisibleTo(panel)
+    assert not panel.threshold_group.isVisibleTo(panel)
+    win.area_tool_btn.setChecked(True)
+    assert panel.shape_combo.isVisibleTo(panel)
+    assert panel.threshold_group.isVisibleTo(panel)
+    _spot_box(win)
+    assert panel.result_label.isVisibleTo(panel)
+    assert panel.result_text().splitlines()[0].startswith("Frame 1")
+    # Field captions use the window's own label roles.
+    assert panel.umbra_label.objectName() == "SolarFieldLabel"
+    assert panel.hint_label.objectName() == "SolarHintLabel"
+
+
+def test_table_actions_are_in_the_right_click_menu_too(win):
+    panel = win.surface_panel
+    assert panel.table.contextMenuPolicy() == Qt.ActionsContextMenu
+    assert panel.table.actions() == [panel.export_action, panel.delete_row_action, panel.clear_table_action]
+
+
+def test_quicklook_tooltip_is_restored_after_fits_frames(win):
+    panel = win.surface_panel
+    original = panel.threshold_group.toolTip()
+    panel.set_quicklook(True)
+    assert "quicklook" in panel.threshold_group.toolTip()
+    panel.set_quicklook(False)
+    assert panel.threshold_group.toolTip() == original

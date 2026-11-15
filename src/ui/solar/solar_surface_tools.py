@@ -22,7 +22,9 @@ subtracted.
 
 from __future__ import annotations
 
+import html
 import math
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import timezone
 from typing import Any
@@ -30,6 +32,7 @@ from typing import Any
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -38,17 +41,17 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QGridLayout,
-    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMenu,
     QMessageBox,
     QApplication,
     QProgressDialog,
     QPushButton,
     QSpinBox,
     QScrollArea,
-    QSplitter,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -200,6 +203,25 @@ class AreaResult:
     layers: tuple = ()
 
 
+def _plain(rich: str) -> str:
+    """Rich label text back to plain lines."""
+    return html.unescape(re.sub(r"<[^>]+>", "", rich.replace("<br>", "\n")))
+
+
+def _field_label(text: str) -> QLabel:
+    """The analysis window's small muted field caption (``SolarFieldLabel``)."""
+    label = QLabel(text)
+    label.setObjectName("SolarFieldLabel")
+    return label
+
+
+def _subheading(text: str) -> QLabel:
+    """The analysis window's uppercase section divider (``SolarSubheading``)."""
+    label = QLabel(str(text).upper())
+    label.setObjectName("SolarSubheading")
+    return label
+
+
 def _unix(when) -> float:
     """UTC Unix seconds; naive datetimes are taken as UTC (as frame times are)."""
     if when.tzinfo is None:
@@ -319,18 +341,25 @@ class SurfaceMeasurePanel(QWidget):
 
     def __init__(self, parent: Any = None):
         super().__init__(parent)
-        # Everything sits in a scroll area: the tab holds a lot, and its full
-        # height must never become the window's minimum (a short window would
-        # otherwise refuse to shrink and push the status bar off screen).
+        # Laid out like the CME Tracking tab beside it (table, one control
+        # row, graph, status line, one row of three buttons) and styled with
+        # the analysis window's own label roles, so the two tabs read as one
+        # panel. Everything sits in a borderless scroll area: the tab holds
+        # more than the tracking panel, and its full height must never become
+        # the window's minimum.
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         self.scroll_area = QScrollArea(self)
+        self.scroll_area.setObjectName("SolarSurfaceScroll")
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QFrame.NoFrame)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll_area.viewport().setAutoFillBackground(False)
         outer.addWidget(self.scroll_area)
         content = QWidget()
-        content.setMinimumHeight(560)  # below this the tab scrolls rather than squash the table
+        content.setObjectName("SolarSurfaceContent")
+        content.setAutoFillBackground(False)
+        content.setMinimumHeight(520)  # below this the tab scrolls rather than squash the table
         self.scroll_area.setWidget(content)
         self._content = content
         layout = QVBoxLayout(content)
@@ -338,11 +367,17 @@ class SurfaceMeasurePanel(QWidget):
         layout.setSpacing(6)
 
         self.hint_label = QLabel("Pick Length or Area in the toolbar, then draw on the image.")
+        self.hint_label.setObjectName("SolarHintLabel")
         self.hint_label.setWordWrap(True)
         layout.addWidget(self.hint_label)
 
-        shape_row = QHBoxLayout()
-        shape_row.addWidget(QLabel("Area shape:"))
+        # --- drawing: shape (Area only) and the in-progress line/polygon buttons
+        self.draw_section = QWidget()
+        draw = QGridLayout(self.draw_section)
+        draw.setContentsMargins(0, 0, 0, 0)
+        draw.setHorizontalSpacing(6)
+        draw.setVerticalSpacing(6)
+        self.shape_label = _field_label("Shape")
         self.shape_combo = QComboBox()
         for key in SHAPES:
             self.shape_combo.addItem(SHAPE_LABELS[key], key)
@@ -353,82 +388,87 @@ class SurfaceMeasurePanel(QWidget):
             "  Ellipse / Rectangle — drag from one corner to the opposite one."
         )
         self.shape_combo.currentIndexChanged.connect(lambda _i: self.shapeChanged.emit(self.shape()))
-        shape_row.addWidget(self.shape_combo, 1)
-        layout.addLayout(shape_row)
-
-        buttons = QHBoxLayout()
+        draw.addWidget(self.shape_label, 0, 0)
+        draw.addWidget(self.shape_combo, 0, 1, 1, 2)
         self.undo_btn = QPushButton("Undo Point")
         self.undo_btn.setToolTip("Remove the last clicked point of the line or polygon being drawn.")
         self.finish_btn = QPushButton("Finish")
         self.finish_btn.setToolTip("Finish the line or polygon being drawn (or double-click the last point).")
         self.clear_shape_btn = QPushButton("Clear Shape")
         self.clear_shape_btn.setToolTip("Remove the shape of the active tool.")
-        for btn in (self.undo_btn, self.finish_btn, self.clear_shape_btn):
-            buttons.addWidget(btn)
-        layout.addLayout(buttons)
+        for col, btn in enumerate((self.undo_btn, self.finish_btn, self.clear_shape_btn)):
+            draw.addWidget(btn, 1, col)
+        draw.setColumnStretch(1, 1)
+        draw.setColumnStretch(2, 1)
+        layout.addWidget(self.draw_section)
 
-        self.threshold_group = QGroupBox("Threshold (fraction of the quiet Sun)")
-        self.threshold_group.setToolTip(
+        # --- threshold (Area only): a subheading and field rows, as in the sidebar
+        self.threshold_group = QWidget()
+        self._threshold_tip = (
             "Measure only the pixels inside the shape that pass a threshold. Intensities\n"
             "are divided by the quiet-Sun level at the same distance from disk centre\n"
             "(fitted over the whole disk, so limb darkening or brightening cancels), and\n"
             "off-limb pixels by the level at the limb. Always uses the frame's own data,\n"
             "even when a difference image is displayed."
         )
-        # Two columns: one setting per row made this group the tallest thing
-        # in the tab and pushed the plot below the fold on laptop screens.
+        self.threshold_group.setToolTip(self._threshold_tip)
         grid = QGridLayout(self.threshold_group)
-        grid.setContentsMargins(6, 6, 6, 6)
+        grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(6)
-        grid.setVerticalSpacing(4)
+        grid.setVerticalSpacing(6)
+        grid.addWidget(_subheading("Threshold · fraction of quiet Sun"), 0, 0, 1, 4)
         self.threshold_combo = QComboBox()
         for key in THRESHOLDS:
             self.threshold_combo.addItem(THRESHOLD_LABELS[key], key)
-        grid.addWidget(QLabel("Select:"), 0, 0)
-        grid.addWidget(self.threshold_combo, 0, 1, 1, 3)
-
+        grid.addWidget(_field_label("Select"), 1, 0)
+        grid.addWidget(self.threshold_combo, 1, 1, 1, 3)
         self.umbra_spin = self._level_spin(DEFAULT_UMBRA_LEVEL, "Umbra: pixels below this fraction of the quiet Sun.")
         self.penumbra_spin = self._level_spin(
             DEFAULT_PENUMBRA_LEVEL, "Penumbra: pixels between the umbra level and this one."
         )
-        self.umbra_label = QLabel("Umbra <")
-        self.penumbra_label = QLabel("Penumbra <")
+        self.umbra_label = _field_label("Umbra <")
+        self.penumbra_label = _field_label("Penumbra <")
         self.level_spin = self._level_spin(DEFAULT_DARK_LEVEL, "Threshold as a fraction (or multiple) of the quiet Sun.")
         self.level_spin.setRange(0.01, 100.0)
-        self.level_label = QLabel("Level:")
-        # Sunspot levels and the dark/bright level share row 1; only one set shows.
-        grid.addWidget(self.umbra_label, 1, 0)
-        grid.addWidget(self.umbra_spin, 1, 1)
-        grid.addWidget(self.penumbra_label, 1, 2)
-        grid.addWidget(self.penumbra_spin, 1, 3)
-        grid.addWidget(self.level_label, 1, 0)
-        grid.addWidget(self.level_spin, 1, 1)
+        self.level_label = _field_label("Level")
+        # Sunspot levels and the dark/bright level share a row; only one set shows.
+        grid.addWidget(self.umbra_label, 2, 0)
+        grid.addWidget(self.umbra_spin, 2, 1)
+        grid.addWidget(self.penumbra_label, 2, 2)
+        grid.addWidget(self.penumbra_spin, 2, 3)
+        grid.addWidget(self.level_label, 2, 0)
+        grid.addWidget(self.level_spin, 2, 1)
         self.cluster_spin = QSpinBox()
         self.cluster_spin.setRange(0, 100_000)
         self.cluster_spin.setValue(DEFAULT_MIN_CLUSTER_PX)
         self.cluster_spin.setSuffix(" px")
         self.cluster_spin.setToolTip("Drop selected patches smaller than this (isolated noise pixels).")
-        self.cluster_label = QLabel("Min patch:")
+        self.cluster_label = _field_label("Min patch")
         self.cluster_label.setToolTip(self.cluster_spin.toolTip())
         self.tint_check = QCheckBox("Tint pixels")
         self.tint_check.setToolTip("Tint the selected pixels on the image.")
         self.tint_check.setChecked(True)
-        grid.addWidget(self.cluster_label, 2, 0)
-        grid.addWidget(self.cluster_spin, 2, 1)
-        grid.addWidget(self.tint_check, 2, 2, 1, 2)
+        grid.addWidget(self.cluster_label, 3, 0)
+        grid.addWidget(self.cluster_spin, 3, 1)
+        grid.addWidget(self.tint_check, 3, 2, 1, 2)
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(3, 1)
         layout.addWidget(self.threshold_group)
 
+        # --- live result, in a card like the Details panel; hidden when empty
         self.result_label = QLabel("")
+        self.result_label.setObjectName("SolarSurfaceResult")
         self.result_label.setWordWrap(True)
+        self.result_label.setTextFormat(Qt.RichText)
         self.result_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.result_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.result_label.setVisible(False)
+        self.result_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         layout.addWidget(self.result_label)
 
-        # Recorded measurements. A finished shape adds a row; Record adds the
-        # shape's measurement on the shown frame under the same name, which is
-        # how one feature is followed through a sequence.
+        # --- recorded measurements. A finished shape adds a row; Record adds
+        # the shape's measurement on the shown frame under the same name, which
+        # is how one feature is followed through a sequence.
         self.table = QTableWidget(0, len(self.COLUMNS))
         self.table.setHorizontalHeaderLabels(list(self.COLUMNS))
         header = self.table.horizontalHeader()
@@ -443,15 +483,28 @@ class SurfaceMeasurePanel(QWidget):
         # Only the name is editable (double-click it).
         self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         self.table.setMinimumWidth(300)
-        self.table.setMinimumHeight(90)
+        self.table.setMinimumHeight(110)
         self.table.setToolTip(
             "Recorded measurements. Click a row to go back to its frame and shape;\n"
-            "double-click a name to rename the feature. Rows that share a name are\n"
-            "the same feature measured on different frames."
+            "double-click a name to rename the feature; right-click for more. Rows\n"
+            "that share a name are the same feature on different frames."
         )
-        # Time series of the selected feature, under the table it is drawn from.
-        # Software viewport for the same reason as the tracking panel's plot:
-        # a GL view created hidden in a tab renders black on some drivers.
+        layout.addWidget(self.table, 1)
+
+        # The one control row between table and graph, as "Fit:" is next door.
+        self.rotate_check = QCheckBox("Rotate shapes with the Sun when tracking")
+        self.rotate_check.setChecked(True)
+        self.rotate_check.setToolTip(
+            "Track Frames carries the shape across frames with solar differential\n"
+            "rotation (Howard et al. 1990, as SunPy), so it stays on a sunspot or\n"
+            "filament as the disk turns. Off-limb corners stay put. Untick to measure\n"
+            "the same sky position on every frame, e.g. for an arcade at the limb."
+        )
+        layout.addWidget(self.rotate_check)
+
+        # Time series of the selected feature. Software viewport for the same
+        # reason as the tracking panel's graph: a GL view created hidden in a
+        # tab renders black on some drivers.
         self.plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(utcOffset=0)})
         try:
             self.plot.useOpenGL(False)
@@ -460,53 +513,31 @@ class SurfaceMeasurePanel(QWidget):
         self.plot.setMenuEnabled(False)
         self.plot.hideButtons()
         self.plot.showGrid(x=True, y=True, alpha=0.25)
-        self.plot.setMinimumHeight(100)
+        self.plot.setLabel("bottom", "Time (UT)")
+        self.plot.setLabel("left", "Area (MSH)")
+        self.plot.setMinimumHeight(110)
         self.plot.getViewBox().setMouseEnabled(x=False, y=False)
+        # Same orange / blue as the tracking graph's points and fit.
         self._series_main = pg.PlotDataItem(
-            pen=pg.mkPen("#e8a33d", width=1.6), symbol="o", symbolSize=7,
-            symbolBrush="#e8a33d", symbolPen=None,
+            pen=pg.mkPen("#e8a33d", width=1.6), symbol="o", symbolSize=8,
+            symbolBrush="#e8a33d", symbolPen=pg.mkPen("#e8a33d"),
         )
         self._series_second = pg.PlotDataItem(
-            pen=pg.mkPen("#5a8fd6", width=1.4), symbol="s", symbolSize=6,
-            symbolBrush="#5a8fd6", symbolPen=None,
+            pen=pg.mkPen("#5a8fd6", width=1.4), symbol="s", symbolSize=7,
+            symbolBrush="#5a8fd6", symbolPen=pg.mkPen("#5a8fd6"),
         )
-        self._series_fit = pg.PlotCurveItem(pen=pg.mkPen("#9a9a9a", width=1.2, style=Qt.DashLine))
+        self._series_fit = pg.PlotCurveItem(pen=pg.mkPen("#5a8fd6", width=1.6, style=Qt.DashLine))
         for item in (self._series_fit, self._series_main, self._series_second):
             self.plot.addItem(item)
         self.apply_theme(dark=self._detect_dark())
-        self.splitter = QSplitter(Qt.Vertical)
-        self.splitter.addWidget(self.table)
-        self.splitter.addWidget(self.plot)
-        self.splitter.setChildrenCollapsible(False)
-        self.splitter.setStretchFactor(0, 1)
-        self.splitter.setStretchFactor(1, 1)
-        layout.addWidget(self.splitter, 1)
+        layout.addWidget(self.plot, 1)
+
         self.series_label = QLabel("Select a row to plot its feature over time.")
         self.series_label.setWordWrap(True)
         layout.addWidget(self.series_label)
 
-        track_row = QHBoxLayout()
-        self.track_btn = QPushButton("Track Through Frames")
-        self.track_btn.setEnabled(False)
-        self.track_btn.setToolTip(
-            "Measure the selected row's feature on every loaded frame, with the same\n"
-            "shape and threshold, and plot it against time. Rows already recorded for\n"
-            "this feature on other frames are replaced."
-        )
-        self.rotate_check = QCheckBox("Rotate with the Sun")
-        self.rotate_check.setChecked(True)
-        self.rotate_check.setToolTip(
-            "Carry the shape across frames with solar differential rotation (Howard et\n"
-            "al. 1990, as SunPy), so it stays on a sunspot or filament as the disk turns.\n"
-            "Off-limb corners stay put. Untick to measure the same sky position on\n"
-            "every frame, e.g. for an arcade at the limb."
-        )
-        track_row.addWidget(self.track_btn)
-        track_row.addWidget(self.rotate_check)
-        track_row.addStretch(1)
-        layout.addLayout(track_row)
-
-        rows = QHBoxLayout()
+        # --- one row of three buttons, like Fit / Clear / Export next door
+        buttons = QHBoxLayout()
         self.record_btn = QPushButton("Record")
         self.record_btn.setEnabled(False)
         self.record_btn.setToolTip(
@@ -514,16 +545,35 @@ class SurfaceMeasurePanel(QWidget):
             "frame where the shape was drawn this updates its row; on another frame\n"
             "it adds a row for the same feature."
         )
-        self.delete_row_btn = QPushButton("Delete Row")
-        self.delete_row_btn.setEnabled(False)
-        self.export_btn = QPushButton("Export CSV…")
-        self.export_btn.setEnabled(False)
-        self.export_btn.setToolTip("Save every recorded measurement, with its shape and settings, as CSV.")
-        self.clear_table_btn = QPushButton("Clear Table")
-        self.clear_table_btn.setEnabled(False)
-        for btn in (self.record_btn, self.delete_row_btn, self.export_btn, self.clear_table_btn):
-            rows.addWidget(btn)
-        layout.addLayout(rows)
+        self.track_btn = QPushButton("Track Frames")
+        self.track_btn.setEnabled(False)
+        self.track_btn.setToolTip(
+            "Measure the selected row's feature on every loaded frame, with the same\n"
+            "shape and threshold, and plot it against time. Rows already recorded for\n"
+            "this feature on other frames are replaced."
+        )
+        # Table actions live in one menu (and the table's right-click menu), so
+        # the row stays three buttons wide.
+        self.table_btn = QPushButton("Table")
+        self.table_btn.setEnabled(False)
+        self.table_btn.setToolTip("Export the table as CSV, delete the selected row, or clear the table.")
+        table_menu = QMenu(self.table_btn)
+        self.export_action = table_menu.addAction("Export Table as CSV…")
+        self.export_action.setToolTip("Every recorded measurement, with its shape and settings.")
+        table_menu.addSeparator()
+        self.delete_row_action = table_menu.addAction("Delete Selected Row")
+        self.delete_row_action.setShortcut(QKeySequence.Delete)
+        self.delete_row_action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        self.clear_table_action = table_menu.addAction("Clear Table…")
+        self.table_btn.setMenu(table_menu)
+        self._table_menu = table_menu
+        for action in (self.export_action, self.delete_row_action, self.clear_table_action):
+            action.setEnabled(False)
+        self.table.setContextMenuPolicy(Qt.ActionsContextMenu)
+        self.table.addActions([self.export_action, self.delete_row_action, self.clear_table_action])
+        for btn in (self.record_btn, self.track_btn, self.table_btn):
+            buttons.addWidget(btn)
+        layout.addLayout(buttons)
 
         self._quicklook = False
         self._last_mode = "none"
@@ -569,7 +619,6 @@ class SurfaceMeasurePanel(QWidget):
         background = (12, 12, 12) if dark else (250, 252, 255)
         foreground = (220, 224, 228) if dark else (40, 44, 52)
         self.plot.setBackground(background)
-        self.plot.setTitle(self.plot.plotItem.titleLabel.text, color=foreground)
         for axis_name in ("left", "bottom"):
             axis = self.plot.getAxis(axis_name)
             axis.setPen(pg.mkPen(foreground))
@@ -623,14 +672,18 @@ class SurfaceMeasurePanel(QWidget):
             "Not available for JP2 quicklook frames: their pixels are 8-bit display "
             "values, not calibrated data. Load FITS to threshold."
             if self._quicklook
-            else self.threshold_group.toolTip()
+            else self._threshold_tip
         )
 
     def set_tool(self, mode: str | None) -> None:
         """Adapt the controls to the active tool (``"length"``, ``"area"`` or None)."""
         area = mode == "area"
-        self.shape_combo.setEnabled(mode != "length")
-        self.threshold_group.setVisible(mode != "length")
+        # Only what the active tool uses is shown; with no tool the tab is just
+        # the table and its graph, like the tracking tab.
+        self.draw_section.setVisible(mode in ("length", "area"))
+        self.shape_label.setVisible(area)
+        self.shape_combo.setVisible(area)
+        self.threshold_group.setVisible(area)
         if not self._quicklook:
             self.threshold_group.setEnabled(True)
         if mode == "length":
@@ -657,8 +710,28 @@ class SurfaceMeasurePanel(QWidget):
         self.clear_shape_btn.setEnabled(has_shape)
 
     def show_result(self, text: str, *, recordable: bool) -> None:
-        self.result_label.setText(text)
+        """Live result card: the first line is its heading, a ``●`` line a notice."""
+        lines = [line for line in str(text or "").splitlines() if line.strip()]
+        if not lines:
+            self.result_label.clear()
+            self.result_label.setVisible(False)
+        else:
+            parts = []
+            for i, line in enumerate(lines):
+                safe = html.escape(line)
+                if line.startswith("●"):
+                    parts.append(f"<b>{safe}</b>")
+                elif i == 0 or (i == 1 and lines[0].startswith("●")):
+                    parts.append(f"<span style='font-weight:600'>{safe}</span>")
+                else:
+                    parts.append(safe)
+            self.result_label.setText("<br>".join(parts))
+            self.result_label.setVisible(True)
         self.record_btn.setEnabled(recordable)
+
+    def result_text(self) -> str:
+        """The live result as plain text (what the card shows)."""
+        return self.result_label.text() and _plain(self.result_label.text())
 
     def apply_threshold_settings(self, settings: dict[str, Any]) -> None:
         """Set the threshold controls without emitting a change per widget."""
@@ -741,9 +814,10 @@ class SurfaceMeasurePanel(QWidget):
         finally:
             self.table.blockSignals(False)
         has_rows = bool(records)
-        self.export_btn.setEnabled(has_rows)
-        self.clear_table_btn.setEnabled(has_rows)
-        self.delete_row_btn.setEnabled(has_rows and active is not None)
+        self.table_btn.setEnabled(has_rows)
+        self.export_action.setEnabled(has_rows)
+        self.clear_table_action.setEnabled(has_rows)
+        self.delete_row_action.setEnabled(has_rows and active is not None)
         self.track_btn.setEnabled(has_rows and active is not None)
 
     def show_series(
@@ -759,8 +833,6 @@ class SurfaceMeasurePanel(QWidget):
         text: str = "",
     ) -> None:
         """Plot one feature against UTC time (``times`` in Unix seconds)."""
-        foreground = getattr(self, "_plot_foreground", None)
-        self.plot.setTitle(title, color=foreground) if foreground else self.plot.setTitle(title)
         self.plot.setLabel("left", y_label)
         self._series_main.setData(times, values)
         if second is not None:
@@ -772,11 +844,10 @@ class SurfaceMeasurePanel(QWidget):
         else:
             self._series_fit.setData([], [])
         self.plot.enableAutoRange()
-        legend = f"  ·  orange: {y_label}" + (f", blue: {second_label}" if second is not None else "")
-        self.series_label.setText(text + (legend if values else ""))
+        legend = f"  ·  blue: {second_label}" if second is not None and values else ""
+        self.series_label.setText(text + legend)
 
     def clear_series(self, text: str) -> None:
-        self.plot.setTitle("")
         for item in (self._series_main, self._series_second):
             item.setData([], [])
         self._series_fit.setData([], [])
@@ -788,7 +859,7 @@ class SurfaceMeasurePanel(QWidget):
 
     def _on_table_selection(self) -> None:
         row = self.selected_row()
-        self.delete_row_btn.setEnabled(row is not None)
+        self.delete_row_action.setEnabled(row is not None)
         if row is not None:
             self.recordSelected.emit(row)
 
@@ -1270,7 +1341,7 @@ class SurfaceTool:
                  intercept + rate.per_hour * series.seconds[-1] / 3600.0],
             )
         elif n == 1:
-            text += "  ·  Track Through Frames or Record on other frames to see it change."
+            text += "  ·  Track Frames, or Record on other frames, to see it change."
         if series.skipped:
             text += f"  ·  {series.skipped} row(s) without a time left out"
         panel.show_series(
@@ -1599,12 +1670,15 @@ class SurfaceTool:
         return format_length(result) if isinstance(result, SurfaceLength) else format_area(result)
 
     def _panel_text(self, result: SurfaceLength | AreaResult) -> str:
-        frame = self._current_frame()
-        idx = int(getattr(self.window, "_current_frame_index", 0))
-        when = getattr(frame, "date", None)
-        header = f"Frame {idx + 1}" + (f" · {when}" if when else "")
-        body = self._format(result).replace("  ·  ", "\n")
-        return f"{header}\n{body}"
+        """Three lines: frame and time; what was measured and its number; the rest."""
+        idx = self._frame_index()
+        when = self._frame_time(idx)
+        header = f"Frame {idx + 1}" + (f" · {when:%Y-%m-%d %H:%M:%S} UT" if when else "")
+        parts = self._format(result).split("  ·  ")
+        lines = [header, " — ".join(parts[:2])]
+        if len(parts) > 2:
+            lines.append(" · ".join(parts[2:]))
+        return "\n".join(lines)
 
     def _show_result(self, text: str, *, recordable: bool) -> None:
         panel = self._panel()
