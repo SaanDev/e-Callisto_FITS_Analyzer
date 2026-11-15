@@ -185,6 +185,45 @@ def _fallback_colormap(name: str) -> pg.ColorMap | None:
     return pg.ColorMap(stops, np.asarray(colors, dtype=np.ubyte))
 
 
+class _MapViewBox(pg.ViewBox):
+    """Map view box that can hand left-button drags to a drawing tool.
+
+    With no handler (or a handler that declines the drag) it behaves exactly
+    like a plain ``ViewBox``, so pan/zoom is unchanged. The freehand lasso and
+    the ellipse/rectangle area tools install a handler while they are armed.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        #: ``handler(phase, x_arcsec, y_arcsec) -> bool`` with phase in
+        #: {"start", "move", "finish"}; the return value of "start" says
+        #: whether the tool takes this drag.
+        self.drag_handler = None
+        self._routing_drag = False
+
+    def mouseDragEvent(self, ev, axis=None):  # noqa: N802 (pyqtgraph naming)
+        handler = self.drag_handler
+        if handler is not None and ev.button() == Qt.LeftButton:
+            if ev.isStart():
+                start = self.mapSceneToView(ev.buttonDownScenePos())
+                try:
+                    self._routing_drag = bool(handler("start", float(start.x()), float(start.y())))
+                except Exception:
+                    self._routing_drag = False
+            if self._routing_drag:
+                ev.accept()
+                pos = self.mapSceneToView(ev.scenePos())
+                phase = "finish" if ev.isFinish() else "move"
+                if ev.isFinish():
+                    self._routing_drag = False
+                try:
+                    handler(phase, float(pos.x()), float(pos.y()))
+                except Exception:
+                    pass
+                return
+        super().mouseDragEvent(ev, axis)
+
+
 class SunPyPlotCanvas(QWidget):
     def __init__(self, parent: QWidget | None = None, theme: Any | None = None, *, enable_colorbar: bool = False):
         super().__init__(parent)
@@ -222,7 +261,7 @@ class SunPyPlotCanvas(QWidget):
         self._stack = QStackedLayout()
         layout.addLayout(self._stack)
 
-        self.map_plot = pg.PlotWidget()
+        self.map_plot = pg.PlotWidget(viewBox=_MapViewBox())
         self.map_plot.setMenuEnabled(False)
         self.map_plot.hideButtons()
         map_vb = self.map_plot.getViewBox()
@@ -429,6 +468,14 @@ class SunPyPlotCanvas(QWidget):
                 button = "right"
             else:
                 button = "other"
+            # A double click arrives after the single click of its first press,
+            # so the single-click tools have already seen that point; the
+            # double only tells a polyline/polygon tool to finish.
+            double = getattr(self, "_double_click_callback", None)
+            if button == "left" and double is not None and bool(getattr(ev, "double", lambda: False)()):
+                double(float(view.x()), float(view.y()))
+                ev.accept()
+                return
             callback(float(view.x()), float(view.y()), button)
             ev.accept()
         except Exception:
@@ -484,6 +531,71 @@ class SunPyPlotCanvas(QWidget):
         if hasattr(self, "_measure_curve"):
             self._measure_curve.setData(x=[], y=[])
             self._measure_points.setData(x=[], y=[])
+
+    def set_double_click_callback(self, callback) -> None:
+        """``callback(x_arcsec, y_arcsec)`` on a left double click (finishes a polyline)."""
+        self._double_click_callback = callback
+
+    def set_drag_callback(self, callback) -> None:
+        """Route left-button drags to ``callback(phase, x_arcsec, y_arcsec) -> bool``.
+
+        ``None`` restores normal drag handling (pan when Pan / Zoom is on).
+        """
+        self.map_plot.getViewBox().drag_handler = callback
+
+    def set_surface_mask_overlay(self, layers, *, opacity: float = 0.45) -> None:
+        """Tint the pixels a threshold selected.
+
+        ``layers`` is a sequence of ``(mask, (r, g, b))`` with boolean masks the
+        shape of the plotted data, drawn in order (later layers on top). Only the
+        masks' bounding box is turned into an RGBA image, so a small region on a
+        4096^2 frame costs a small image rather than a 64 MB one.
+        """
+        masks = [(np.asarray(m, dtype=bool), c) for m, c in (layers or []) if m is not None]
+        masks = [(m, c) for m, c in masks if m.ndim == 2 and m.any()]
+        if not masks:
+            self.clear_surface_mask_overlay()
+            return
+        union = np.zeros(masks[0][0].shape, dtype=bool)
+        for mask, _ in masks:
+            if mask.shape == union.shape:
+                union |= mask
+        rows = np.nonzero(union.any(axis=1))[0]
+        cols = np.nonzero(union.any(axis=0))[0]
+        r0, r1 = int(rows[0]), int(rows[-1]) + 1
+        c0, c1 = int(cols[0]), int(cols[-1]) + 1
+        rgba = np.zeros((r1 - r0, c1 - c0, 4), dtype=np.uint8)
+        alpha = int(round(max(0.0, min(1.0, float(opacity))) * 255))
+        for mask, color in masks:
+            if mask.shape != union.shape:
+                continue
+            sub = mask[r0:r1, c0:c1]
+            rgba[sub, 0] = int(color[0])
+            rgba[sub, 1] = int(color[1])
+            rgba[sub, 2] = int(color[2])
+            rgba[sub, 3] = alpha
+        if not hasattr(self, "_surface_mask_item"):
+            self._surface_mask_item = pg.ImageItem(axisOrder="row-major")
+            self._surface_mask_item.setZValue(35)
+            self.map_plot.addItem(self._surface_mask_item)
+        tx = self._axis_transform
+        x_scale = float(tx.get("x_scale_arcsec_per_pix", 1.0))
+        y_scale = float(tx.get("y_scale_arcsec_per_pix", 1.0))
+        x0 = float(tx.get("x_ref_arcsec", 0.0)) + (c0 - 0.5 - float(tx.get("x_ref_pix", 0.0))) * x_scale
+        y0 = float(tx.get("y_ref_arcsec", 0.0)) + (r0 - 0.5 - float(tx.get("y_ref_pix", 0.0))) * y_scale
+        self._surface_mask_item.setImage(rgba, autoLevels=False, levels=(0, 255))
+        self._surface_mask_item.setRect(QRectF(x0, y0, (c1 - c0) * x_scale, (r1 - r0) * y_scale))
+        self._surface_mask_item.show()
+
+    def clear_surface_mask_overlay(self) -> None:
+        item = getattr(self, "_surface_mask_item", None)
+        if item is not None:
+            item.clear()
+            item.hide()
+
+    def has_surface_mask_overlay(self) -> bool:
+        item = getattr(self, "_surface_mask_item", None)
+        return item is not None and item.isVisible() and item.image is not None
 
     # ------------------------------------------------------------- GCS overlay
     #: The original model overlay; the GCS wireframe keeps its attributes.
@@ -1080,6 +1192,7 @@ class SunPyPlotCanvas(QWidget):
 
     def clear_plot(self):
         self.map_image.clear()
+        self.clear_surface_mask_overlay()
         self.set_aia_limb_overlay(None, None, visible=False)
         self.set_vector_field_overlay(None)
         self.clear_region_overlays()

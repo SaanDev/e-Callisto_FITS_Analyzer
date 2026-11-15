@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QStyle,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -2286,6 +2287,21 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             "Click two points to plot the intensity along the cut (e.g. across a\n"
             "loop, filament or CME front)."
         )
+        self.length_tool_btn = QPushButton("Length")
+        self.length_tool_btn.setCheckable(True)
+        self.length_tool_btn.setToolTip(
+            "Click along a feature (a filament, a loop) to measure its length over the\n"
+            "solar surface, corrected for foreshortening; double-click to finish.\n"
+            "Any part beyond the limb is measured in the plane of the sky."
+        )
+        self.area_tool_btn = QPushButton("Area")
+        self.area_tool_btn.setCheckable(True)
+        self.area_tool_btn.setToolTip(
+            "Outline a region (polygon, lasso, ellipse or rectangle — chosen in the\n"
+            "Surface tab) to measure its area in MSH and Mm², corrected for\n"
+            "foreshortening. A threshold can pick out a sunspot's umbra and penumbra\n"
+            "or a bright arcade inside the outline."
+        )
         self.stats_tool_btn = QPushButton("Region Stats")
         self.stats_tool_btn.setToolTip(
             "Summarise the crop rectangle: pixel count, mean/median/min/max/σ and\n"
@@ -2313,6 +2329,8 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         for btn in (
             self.ruler_tool_btn,
             self.profile_tool_btn,
+            self.length_tool_btn,
+            self.area_tool_btn,
             self.stats_tool_btn,
             self.height_time_btn,
             self.circle_tool_btn,
@@ -2323,13 +2341,15 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         # unavailable until this is ticked (the panel is greyed out, not hidden).
         self.measurements_check = QCheckBox("Measurements")
         self.measurements_check.setToolTip(
-            "Enable the measurement tools (ruler, profile, region stats, CME\n"
+            "Enable the measurement tools (ruler, profile, length, area, region stats, CME\n"
             "tracking) and make the CME tracking panel on the right available."
         )
         self.measurements_check.toggled.connect(self._on_measurements_toggled)
         measure_row.addWidget(self.measurements_check)
         measure_row.addWidget(self.ruler_tool_btn)
         measure_row.addWidget(self.profile_tool_btn)
+        measure_row.addWidget(self.length_tool_btn)
+        measure_row.addWidget(self.area_tool_btn)
         measure_row.addWidget(self.stats_tool_btn)
         measure_row.addWidget(self.height_time_btn)
         measure_row.addWidget(self.circle_tool_btn)
@@ -2368,9 +2388,20 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         # Coronagraph Tools group and are referenced by name elsewhere.
         self.ht_fit_btn = self.tracking_panel.fit_btn
         self.ht_clear_btn = self.tracking_panel.clear_btn
+        # Length / area tools get their own tab beside the tracking panel; the
+        # tab follows whichever kind of tool was picked up last.
+        from src.ui.solar.solar_surface_tools import SurfaceMeasurePanel
+
+        self.surface_panel = SurfaceMeasurePanel(self)
+        self.surface_panel.setEnabled(False)
+        self.measure_side_tabs = QTabWidget()
+        self.measure_side_tabs.setObjectName("SolarMeasureSideTabs")
+        self.measure_side_tabs.setDocumentMode(True)
+        self.measure_side_tabs.addTab(self.tracking_panel, "CME Tracking")
+        self.measure_side_tabs.addTab(self.surface_panel, "Surface")
         self.plot_splitter = QSplitter(Qt.Horizontal)
         self.plot_splitter.addWidget(self.plot_canvas_stack)
-        self.plot_splitter.addWidget(self.tracking_panel)
+        self.plot_splitter.addWidget(self.measure_side_tabs)
         # Both panes stretch with the window so no dead gutter is left on the
         # right; the map keeps the larger share.
         self.plot_splitter.setStretchFactor(0, 3)
@@ -4131,6 +4162,15 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         # Measurement tools (controller owns the click state machine).
         self.ruler_tool_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("ruler", on))
         self.profile_tool_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("profile", on))
+        self.length_tool_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("length", on))
+        self.area_tool_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("area", on))
+        surface = self._measure.surface
+        self.surface_panel.undo_btn.clicked.connect(surface.undo_point)
+        self.surface_panel.finish_btn.clicked.connect(surface.finish)
+        self.surface_panel.clear_shape_btn.clicked.connect(surface.clear_shape)
+        self.surface_panel.record_btn.clicked.connect(surface.record)
+        self.surface_panel.shapeChanged.connect(lambda _shape: surface.shape_changed())
+        self.surface_panel.thresholdChanged.connect(surface.threshold_changed)
         self.stats_tool_btn.clicked.connect(self._report_region_stats)
         self.height_time_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("height_time", on))
         self.circle_tool_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("circle_fit", on))
@@ -4348,6 +4388,8 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         for widget in (
             self.ruler_tool_btn,
             self.profile_tool_btn,
+            self.length_tool_btn,
+            self.area_tool_btn,
             self.stats_tool_btn,
             self.clear_measure_btn,
         ):
@@ -4367,12 +4409,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self._sync_nrgf_enabled()
         self._sync_aia_sun_control()
         if not loaded and hasattr(self, "_measure"):
-            for btn in (
-                self.ruler_tool_btn,
-                self.profile_tool_btn,
-                self.height_time_btn,
-                self.circle_tool_btn,
-                ):
+            for btn in self._measure_tool_buttons():
                 if btn.isChecked():
                     btn.blockSignals(True)
                     btn.setChecked(False)
@@ -4434,6 +4471,8 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
                 widget.setToolTip(self._quicklook_tooltips.get(widget, ""))
         if quicklook and self.stats_tool_btn.isCheckable() and self.stats_tool_btn.isChecked():
             self.stats_tool_btn.setChecked(False)
+        if hasattr(self, "surface_panel"):
+            self.surface_panel.set_quicklook(quicklook)
         self.quicklook_badge.setVisible(quicklook)
 
     def _refuse_for_quicklook(self, title: str) -> bool:
@@ -6442,12 +6481,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
     def _on_measure_tool_toggled(self, mode: str, on: bool) -> None:
         """Keep the checkable measurement tools mutually exclusive (and exclusive
         with the crop-ROI drag, which also consumes canvas mouse input)."""
-        buttons = {
-            "ruler": self.ruler_tool_btn,
-            "profile": self.profile_tool_btn,
-            "height_time": self.height_time_btn,
-            "circle_fit": self.circle_tool_btn,
-        }
+        buttons = dict(zip(self._MEASURE_TOOL_MODES, self._measure_tool_buttons()))
         if not on:
             if self._measure.mode == mode:
                 self._measure.set_mode(None)
@@ -6474,14 +6508,36 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
                 "Circle fit: click ≥3 points along the CME front, then Commit Circle "
                 "(Ctrl+Return) to record this frame."
             ),
+            "length": "Length: click along the feature, then double-click the last point.",
+            "area": self.surface_panel.hint_label.text(),
         }
         self.statusBar().showMessage(hints[mode], 8000)
 
+    #: Checkable measurement tools, in toolbar order (see _measure_tool_buttons).
+    _MEASURE_TOOL_MODES = ("ruler", "profile", "length", "area", "height_time", "circle_fit")
+
+    def _measure_tool_buttons(self) -> tuple[QPushButton, ...]:
+        return (
+            self.ruler_tool_btn,
+            self.profile_tool_btn,
+            self.length_tool_btn,
+            self.area_tool_btn,
+            self.height_time_btn,
+            self.circle_tool_btn,
+        )
+
     def _sync_tracking_panel_visibility(self) -> None:
-        """The tracking panel is a permanent part of the layout now; its
-        availability is gated by the Measurements switch, not by whether a
-        tracking mode is active or picks exist."""
-        self.tracking_panel.setVisible(True)
+        """Bring forward the side tab of the active tool.
+
+        Both panels are a permanent part of the layout, gated by the
+        Measurements switch. Length/Area show the Surface tab, the CME tools the
+        tracking tab; any other tool leaves whichever tab was last in front.
+        """
+        mode = getattr(getattr(self, "_measure", None), "mode", None)
+        if mode in ("length", "area"):
+            self.measure_side_tabs.setCurrentWidget(self.surface_panel)
+        elif mode in ("height_time", "circle_fit"):
+            self.measure_side_tabs.setCurrentWidget(self.tracking_panel)
 
     def _on_measurements_toggled(self, checked: bool) -> None:
         """Gate the measurement tools and the CME tracking panel behind one
@@ -6489,15 +6545,11 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         ticked."""
         checked = bool(checked)
         self.tracking_panel.setEnabled(checked)
+        self.surface_panel.setEnabled(checked)
         if not checked:
             # Leaving measurement mode: drop any active tool so stray canvas
             # clicks stop landing as picks/overlays.
-            for btn in (
-                self.ruler_tool_btn,
-                self.profile_tool_btn,
-                self.height_time_btn,
-                self.circle_tool_btn,
-                ):
+            for btn in self._measure_tool_buttons():
                 if btn.isChecked():
                     btn.blockSignals(True)
                     btn.setChecked(False)
@@ -6527,12 +6579,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
 
     def clear_all_measurements(self) -> None:
         """Clear and reset every measurement (toolbar Clear button)."""
-        for btn in (
-            self.ruler_tool_btn,
-            self.profile_tool_btn,
-            self.height_time_btn,
-            self.circle_tool_btn,
-        ):
+        for btn in self._measure_tool_buttons():
             if btn.isChecked():
                 btn.blockSignals(True)
                 btn.setChecked(False)

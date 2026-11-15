@@ -49,6 +49,34 @@ def _offline_event_context(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_sunpy_cache(tmp_path, monkeypatch):
+    """Point every default SunPy download cache at tmp_path.
+
+    The solar windows' Reset All and Clear Cache empty their cache folder, and
+    that folder defaults to the real ``<app data>/sunpy_cache``. A test that
+    confirmed Reset All without setting ``cache_dir`` deleted the developer's
+    downloaded FITS files (seen 2026-11-15). Patched in every module that holds
+    the function, including the name the analysis window imports, so even a
+    window built inside a test cannot reach the real folder.
+    """
+    cache = tmp_path / "_sunpy_cache"
+
+    def _cache_dir():
+        cache.mkdir(parents=True, exist_ok=True)
+        return cache
+
+    for module_name, attr in (
+        ("src.ui.solar.sunpy_solar_viewer", "_default_cache_dir"),
+        ("src.ui.solar.solar_data_analysis_window", "_default_cache_dir"),
+        ("src.ui.app.gui_workers", "_default_sunpy_cache_dir"),
+    ):
+        module = sys.modules.get(module_name)
+        if module is not None and hasattr(module, attr):
+            monkeypatch.setattr(module, attr, _cache_dir)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _isolate_qsettings(tmp_path, monkeypatch):
     """Redirect QSettings to a per-test temp location.
 

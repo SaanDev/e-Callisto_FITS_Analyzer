@@ -68,6 +68,7 @@ from src.backend.solar.image_measure import (
     spherical_bubble_height_rsun,
 )
 from src.backend.solar.solar_data_analysis import frame_observation_time
+from src.ui.solar.solar_surface_tools import SurfaceTool
 
 
 # Height-time polynomial degrees offered in the tracking panel.
@@ -1297,7 +1298,8 @@ class MeasurementController(QObject):
     re-measuring a frame replaces its entry.
     """
 
-    MODES = ("ruler", "profile", "height_time", "circle_fit")
+    MODES = ("ruler", "profile", "height_time", "circle_fit", "length", "area")
+    SURFACE_MODES = ("length", "area")
 
     def __init__(self, window: Any):
         super().__init__(window)
@@ -1315,6 +1317,8 @@ class MeasurementController(QObject):
         self._gcs_mesh_key: tuple[float, float, float] | None = None
         # Which store the shared tracking panel is currently showing.
         self._panel_source = "height_time"
+        # Length / area drawing (filaments, sunspots, arcades).
+        self.surface = SurfaceTool(self)
         self._escape = QShortcut(QKeySequence(Qt.Key_Escape), window)
         self._escape.setContext(Qt.WidgetWithChildrenShortcut)
         self._escape.activated.connect(self.cancel)
@@ -1323,9 +1327,14 @@ class MeasurementController(QObject):
     def set_mode(self, mode: str | None) -> None:
         if mode is not None and mode not in self.MODES:
             raise ValueError(f"Unknown measurement mode: {mode}")
+        previous = self.mode
         if mode != self.mode:
             self._pending = None
         self.mode = mode
+        if mode != previous and (mode in self.SURFACE_MODES or previous in self.SURFACE_MODES):
+            self.surface.activate(mode)
+            if mode not in self.SURFACE_MODES:
+                self._refresh_overlay()
         # The tracking panel follows the last tracking tool picked up; reaching
         # for the ruler leaves the table showing whatever it showed before.
         if mode in ("height_time", "circle_fit"):
@@ -1342,6 +1351,10 @@ class MeasurementController(QObject):
     def cancel(self) -> None:
         """Drop the in-progress pick (Esc / right click)."""
         self._pending = None
+        if self.mode in self.SURFACE_MODES:
+            self.surface.cancel()
+            self._status("Shape cancelled.")
+            return
         if self.mode == "circle_fit":
             # Only the arc being drawn goes; a committed circle survives, just
             # as Esc never removes a recorded height-time pick.
@@ -1374,9 +1387,14 @@ class MeasurementController(QObject):
             self._click_height_time(x_arc, y_arc)
         elif self.mode == "circle_fit":
             self._click_circle(x_arc, y_arc)
+        elif self.mode in self.SURFACE_MODES:
+            self.surface.on_click(x_arc, y_arc)
 
     def on_frame_changed(self) -> None:
         """Redraw pick markers for the newly shown frame."""
+        if self.mode in self.SURFACE_MODES:
+            self.surface.on_frame_changed()
+            return
         self._refresh_overlay()
 
     # ----------------------------------------------------------------- ruler
@@ -1743,6 +1761,7 @@ class MeasurementController(QObject):
         self.circles.clear()
         self._circle_points.clear()
         self._locked_center = None
+        self.surface.clear()
         self._sync_ht_buttons()
         self._refresh_tracking_panel()
         canvas = getattr(self.window, "pyqt_canvas", None)
@@ -1829,6 +1848,10 @@ class MeasurementController(QObject):
         canvas = getattr(self.window, "pyqt_canvas", None)
         if canvas is None:
             return
+        if self.mode in self.SURFACE_MODES:
+            self.surface.refresh_overlay()
+            return
+        canvas.clear_surface_mask_overlay()
         if self.mode == "circle_fit":
             idx = self._frame_index()
             points = self._circle_points.get(idx) or []
