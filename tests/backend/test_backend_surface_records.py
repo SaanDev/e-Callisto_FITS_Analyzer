@@ -218,3 +218,78 @@ def test_shapes_serialize_round_trip():
     assert back["area"] == ("ellipse", [(-5.0, -5.0), (5.0, 5.0)])
     assert deserialize_shapes({"area": {"kind": "polygon", "points": [[0, 0]]}}) == {}
     assert deserialize_shapes([]) == {}
+
+
+# ------------------------------------------------------------------ series
+from datetime import timedelta
+
+from src.backend.solar.surface_records import (
+    feature_series,
+    group_rows_by_feature,
+    linear_rate,
+)
+
+
+def _row(name, frame, hours, *, kind="area", msh=None, umbra=None, mm=None, off=None, mode="none"):
+    values = {}
+    if kind == "area":
+        values = {"area_msh": msh, "umbra_msh": umbra, "off_limb_mm2": off}
+    else:
+        values = {"length_total_mm": mm}
+    return SurfaceRecord(
+        name, kind, "polygon" if kind == "area" else "length", [(0.0, 0.0), (1.0, 1.0)], frame,
+        time=None if hours is None else datetime(2024, 5, 10) + timedelta(hours=hours),
+        threshold={"mode": mode}, values=values,
+    )
+
+
+def test_feature_series_orders_by_time_and_adds_umbra():
+    rows = [
+        _row("Spot", 2, 12.0, msh=90.0, umbra=20.0, mode="sunspot"),
+        _row("Other", 0, 0.0, msh=5.0),
+        _row("Spot", 0, 0.0, msh=100.0, umbra=25.0, mode="sunspot"),
+        _row("Spot", 1, 6.0, msh=95.0, umbra=22.0, mode="sunspot"),
+        _row("Spot", 3, None, msh=1.0, mode="sunspot"),  # no time: left out
+    ]
+    series = feature_series(rows, "Spot")
+    assert series.values == [100.0, 95.0, 90.0]
+    assert series.second == [25.0, 22.0, 20.0]
+    assert series.seconds == [0.0, 6 * 3600.0, 12 * 3600.0]
+    assert series.unit == "MSH"
+    assert series.skipped == 1
+    assert feature_series(rows, "Nobody") is None
+
+
+def test_feature_series_one_point_per_frame_and_off_limb_fallback():
+    rows = [
+        _row("Arcade", 0, 0.0, msh=0.0, off=500.0),
+        _row("Arcade", 1, 1.0, msh=0.0, off=700.0),
+        _row("Arcade", 1, 1.0, msh=0.0, off=750.0),  # re-recorded: the later row wins
+    ]
+    series = feature_series(rows, "Arcade")
+    assert series.values == [500.0, 750.0]
+    assert series.unit.startswith("Mm²")
+    assert series.second is None
+    lengths = feature_series([_row("F", 0, 0.0, kind="length", mm=120.0)], "F")
+    assert lengths.unit == "Mm" and lengths.values == [120.0]
+
+
+def test_linear_rate_slope_and_error():
+    hours = [0.0, 1.0, 2.0, 3.0]
+    rate = linear_rate([h * 3600 for h in hours], [10.0, 12.0, 14.0, 16.0])
+    assert rate.per_hour == pytest.approx(2.0)
+    assert rate.error_per_hour == pytest.approx(0.0, abs=1e-12)
+    noisy = linear_rate([h * 3600 for h in hours], [10.0, 12.5, 13.5, 16.0])
+    assert noisy.error_per_hour > 0.0
+    two = linear_rate([0.0, 7200.0], [5.0, 1.0])
+    assert two.per_hour == pytest.approx(-2.0)
+    assert two.error_per_hour is None
+    assert linear_rate([0.0, 0.0], [1.0, 2.0]) is None
+    assert linear_rate([0.0], [1.0]) is None
+    assert rate.text("MSH", span_hours=3.0) == "+2.00 ± 0.00 MSH/h"
+    assert two.text("Mm", span_hours=72.0) == "-48.00 Mm/day"
+
+
+def test_group_rows_by_feature():
+    rows = [_row("B", 2, 0.0, msh=1.0), _row("A", 1, 0.0, msh=1.0), _row("B", 0, 0.0, msh=1.0), _row("A", 0, 0.0, msh=1.0)]
+    assert [(r.name, r.frame_index) for r in group_rows_by_feature(rows)] == [("B", 0), ("B", 2), ("A", 0), ("A", 1)]

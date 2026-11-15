@@ -406,3 +406,123 @@ def _json_safe(mapping: Mapping[str, Any] | None) -> dict[str, Any]:
         else:
             out[str(key)] = _num(value)
     return out
+
+
+# ------------------------------------------------------------------ series
+@dataclass(frozen=True)
+class FeatureSeries:
+    """One feature's recorded values against time, ready to plot."""
+
+    name: str
+    kind: str
+    times: list[datetime]
+    values: list[float]
+    unit: str  # "Mm", "MSH" or "Mm² (plane of sky)"
+    label: str  # y-axis label
+    second: list[float] | None = None  # umbra, for sunspots
+    second_label: str = ""
+    skipped: int = 0  # rows of the feature with no observation time
+
+    @property
+    def seconds(self) -> list[float]:
+        """Seconds since the first time."""
+        if not self.times:
+            return []
+        t0 = self.times[0]
+        return [(t - t0).total_seconds() for t in self.times]
+
+
+def feature_series(records: Iterable[SurfaceRecord], name: str) -> FeatureSeries | None:
+    """The rows called ``name``, ordered by time (one point per frame).
+
+    Areas plot the corrected on-disk MSH; a feature that is entirely off-limb
+    (an arcade above the limb) plots its plane-of-sky Mm² instead. Sunspots add
+    the umbra as a second series.
+    """
+    rows = [r for r in records if r.name == name]
+    if not rows:
+        return None
+    kind = rows[0].kind
+    rows = [r for r in rows if r.kind == kind]
+    timed = sorted((r for r in rows if r.time is not None), key=lambda r: (r.time, r.frame_index))
+    skipped = len(rows) - len(timed)
+    # One point per frame: the last recorded row for a frame wins.
+    by_frame: dict[int, SurfaceRecord] = {}
+    for record in timed:
+        by_frame[record.frame_index] = record
+    timed = sorted(by_frame.values(), key=lambda r: (r.time, r.frame_index))
+    if kind == "length":
+        values = [_num(r.values.get("length_total_mm")) for r in timed]
+        unit, label = "Mm", "Length (Mm)"
+        second = None
+        second_label = ""
+    else:
+        disk = [_num(r.values.get("area_msh")) for r in timed]
+        if any(v for v in disk if v):
+            values, unit, label = disk, "MSH", "Area (MSH)"
+        else:
+            values = [_num(r.values.get("off_limb_mm2")) for r in timed]
+            unit, label = "Mm² (plane of sky)", "Off-limb area (Mm²)"
+        sunspot = any(r.threshold.get("mode") == "sunspot" for r in timed)
+        second = [_num(r.values.get("umbra_msh")) for r in timed] if sunspot and unit == "MSH" else None
+        second_label = "umbra (MSH)" if second is not None else ""
+    keep = [i for i, v in enumerate(values) if v is not None]
+    return FeatureSeries(
+        name=name,
+        kind=kind,
+        times=[timed[i].time for i in keep],
+        values=[float(values[i]) for i in keep],
+        unit=unit,
+        label=label,
+        second=[float(second[i]) if second[i] is not None else math.nan for i in keep] if second else None,
+        second_label=second_label,
+        skipped=skipped,
+    )
+
+
+@dataclass(frozen=True)
+class Rate:
+    """A straight-line growth rate with its 1-sigma error (None below 3 points)."""
+
+    per_hour: float
+    error_per_hour: float | None
+    n: int
+
+    def text(self, unit: str, *, span_hours: float) -> str:
+        """``+12.3 ± 1.1 MSH/day`` (per day once the series spans two days)."""
+        scale, per = (24.0, "day") if span_hours >= 48.0 else (1.0, "h")
+        value = self.per_hour * scale
+        out = f"{value:+,.2f}"
+        if self.error_per_hour is not None:
+            out += f" ± {self.error_per_hour * scale:,.2f}"
+        return f"{out} {unit}/{per}"
+
+
+def linear_rate(seconds: Sequence[float], values: Sequence[float]) -> Rate | None:
+    """Least-squares slope of ``values`` against time; None without two distinct times."""
+    pairs = [(float(t), float(v)) for t, v in zip(seconds, values) if math.isfinite(float(v))]
+    if len(pairs) < 2:
+        return None
+    ts = [p[0] / 3600.0 for p in pairs]
+    vs = [p[1] for p in pairs]
+    n = len(pairs)
+    mean_t = sum(ts) / n
+    mean_v = sum(vs) / n
+    sxx = sum((t - mean_t) ** 2 for t in ts)
+    if sxx <= 0.0:
+        return None
+    slope = sum((t - mean_t) * (v - mean_v) for t, v in zip(ts, vs)) / sxx
+    error = None
+    if n >= 3:
+        intercept = mean_v - slope * mean_t
+        residual = sum((v - (intercept + slope * t)) ** 2 for t, v in zip(ts, vs))
+        error = math.sqrt(residual / (n - 2) / sxx)
+    return Rate(per_hour=slope, error_per_hour=error, n=n)
+
+
+def group_rows_by_feature(records: list[SurfaceRecord]) -> list[SurfaceRecord]:
+    """Rows grouped by feature (in order of first appearance), each by frame."""
+    first: dict[str, int] = {}
+    for i, record in enumerate(records):
+        first.setdefault(record.name, i)
+    return sorted(records, key=lambda r: (first[r.name], r.frame_index))

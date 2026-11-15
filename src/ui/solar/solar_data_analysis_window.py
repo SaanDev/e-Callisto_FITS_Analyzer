@@ -2745,6 +2745,11 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
 
     def _on_theme_changed(self, _dark: bool = False) -> None:
         self._apply_sidebar_style()
+        # The side panels' graphs are pyqtgraph, which no stylesheet reaches.
+        dark = self._is_dark_ui()
+        for panel in (getattr(self, "tracking_panel", None), getattr(self, "surface_panel", None)):
+            if panel is not None and hasattr(panel, "apply_theme"):
+                panel.apply_theme(dark=dark)
 
     def _apply_sidebar_style(self) -> None:
         """Theme-aware stylesheet for the whole window (sidebar + viewer)."""
@@ -4180,6 +4185,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self.surface_panel.clear_table_btn.clicked.connect(self._confirm_clear_surface_table)
         self.surface_panel.recordSelected.connect(surface.select_record)
         self.surface_panel.recordRenamed.connect(surface.rename_record)
+        self.surface_panel.track_btn.clicked.connect(lambda: surface.track_feature())
         self.surface_panel.shapeChanged.connect(lambda _shape: surface.shape_changed())
         self.surface_panel.thresholdChanged.connect(surface.threshold_changed)
         self.stats_tool_btn.clicked.connect(self._report_region_stats)

@@ -793,3 +793,209 @@ def test_project_restore_drops_rows_on_missing_frames(win):
         assert warnings and "1 measurement(s) were dropped" in warnings[0]
     finally:
         win2.close()
+
+
+# ---------------------------------------------------------- tracking (Phase 4)
+from datetime import datetime, timedelta
+
+from src.backend.solar.surface_measure import (
+    stonyhurst_from_arcsec,
+    synodic_rotation_deg,
+)
+
+SPOT_LON0 = -20.0
+SPOT_LAT = 15.0
+
+
+def _rotating_disk(hours: float, *, lon0: float = SPOT_LON0) -> np.ndarray:
+    """A disk whose round spot (a cap on the sphere) has rotated for ``hours``."""
+    g = _geometry()
+    mu = mu_map((N, N), g)
+    image = 40_000.0 * (1.0 - 0.88 * (1.0 - mu) + 0.23 * (1.0 - mu * mu))
+    image = np.where(np.isfinite(mu), image, 5.0)
+    tx, ty = g.pixel_to_arcsec(np.arange(N)[None, :], np.arange(N)[:, None])
+    lon, lat = stonyhurst_from_arcsec(tx, ty, g)
+    lon_c = lon0 + float(synodic_rotation_deg(SPOT_LAT, hours * 3600.0))
+    l1, b1 = np.radians(lon), np.radians(lat)
+    cos_d = np.sin(b1) * math.sin(math.radians(SPOT_LAT)) + np.cos(b1) * math.cos(math.radians(SPOT_LAT)) * np.cos(
+        l1 - math.radians(lon_c)
+    )
+    dist = np.degrees(np.arccos(np.clip(np.nan_to_num(cos_d, nan=-1.0), -1.0, 1.0)))
+    image[dist < 4.0] *= 0.75
+    image[dist < 2.0] *= 0.3 / 0.75
+    return image
+
+
+def _sequence(hours=(0.0, 12.0, 24.0, 36.0), **kw):
+    t0 = datetime(2026, 2, 10, 0, 0, 0)
+    return [
+        DiskMap(_rotating_disk(h, **kw), date=(t0 + timedelta(hours=h)).isoformat())
+        for h in hours
+    ]
+
+
+def _spot_xy(hours: float, lon0: float = SPOT_LON0):
+    from src.backend.solar.surface_measure import arcsec_from_stonyhurst
+
+    tx, ty, _ = arcsec_from_stonyhurst(lon0 + float(synodic_rotation_deg(SPOT_LAT, hours * 3600.0)), SPOT_LAT, _geometry())
+    return float(tx), float(ty)
+
+
+def _box_on_spot(win, centre, margin=110.0):
+    surface = win._measure.surface
+    win.surface_panel.set_shape("rectangle")
+    surface.on_drag("start", centre[0] - margin, centre[1] - margin)
+    surface.on_drag("finish", centre[0] + margin, centre[1] + margin)
+
+
+def test_track_through_frames_follows_a_rotating_spot(win):
+    _load(win, _sequence())
+    win.area_tool_btn.setChecked(True)
+    win.surface_panel.set_threshold_mode("sunspot")
+    _box_on_spot(win, _spot_xy(0.0))
+    surface = win._measure.surface
+    assert win.surface_panel.track_btn.isEnabled()
+    first = surface.records[0].values["area_msh"]
+
+    assert surface.track_feature() == 3
+    rows = [r for r in surface.records if r.name == "Sunspot 1"]
+    assert [r.frame_index for r in rows] == [0, 1, 2, 3]
+    # The spot keeps its true size, so the tracked area stays put (pixel noise only).
+    for row in rows:
+        assert row.values["area_msh"] == pytest.approx(first, rel=0.12)
+        assert row.threshold["mode"] == "sunspot"
+    # Each tracked shape was carried west with the spot.
+    xs = [np.mean([p[0] for p in r.points]) for r in rows]
+    assert xs == sorted(xs)
+    assert xs[-1] - xs[0] > 200.0
+    assert "measured on 3 more frame(s), rotating with the Sun" in _last_line(win)
+    # The plot shows the four points and a near-zero rate.
+    xs_plot, ys_plot = win.surface_panel._series_main.getData()
+    assert len(xs_plot) == 4
+    assert xs_plot[1] - xs_plot[0] == pytest.approx(12 * 3600.0)
+    assert "4 frames" in win.surface_panel.series_label.text()
+    assert "MSH/h" in win.surface_panel.series_label.text()
+    _, umbra = win.surface_panel._series_second.getData()
+    assert len(umbra) == 4
+
+
+def test_track_without_rotation_loses_the_spot(win):
+    _load(win, _sequence())
+    win.area_tool_btn.setChecked(True)
+    win.surface_panel.set_threshold_mode("sunspot")
+    _box_on_spot(win, _spot_xy(0.0), margin=80.0)
+    win.surface_panel.rotate_check.setChecked(False)
+    surface = win._measure.surface
+    surface.track_feature()
+    areas = [r.values["area_msh"] for r in surface.records if r.name == "Sunspot 1"]
+    assert areas[0] > 0.0
+    assert areas[-1] < 0.2 * areas[0]  # the spot rotated out of the fixed box
+    assert all(r.points == surface.records[0].points for r in surface.records)
+
+
+def test_track_skips_frames_where_the_shape_goes_behind_the_limb(win):
+    frames = _sequence(hours=(0.0, 24.0, 48.0), lon0=62.0)
+    _load(win, frames)
+    win.area_tool_btn.setChecked(True)
+    _box_on_spot(win, _spot_xy(0.0, lon0=62.0), margin=60.0)
+    surface = win._measure.surface
+    written = surface.track_feature()
+    assert written == 1  # 24 h: lon ~75 deg, fine; 48 h: past the limb
+    assert "1 skipped (the shape rotated behind the limb)" in _last_line(win)
+
+
+def test_track_replaces_the_features_old_rows_only(win):
+    _load(win, _sequence(hours=(0.0, 12.0, 24.0)))
+    win.area_tool_btn.setChecked(True)
+    win.surface_panel.set_threshold_mode("sunspot")
+    _box_on_spot(win, _spot_xy(0.0))
+    win.frame_slider.setValue(1)
+    win.surface_panel.record_btn.click()  # an untracked row on frame 2
+    win.length_tool_btn.setChecked(True)
+    win._measure.on_canvas_click(-500.0, -500.0, "left")
+    win._measure.on_canvas_click(-400.0, -500.0, "left")
+    win.surface_panel.finish_btn.click()
+    surface = win._measure.surface
+    win.surface_panel.table.selectRow(0)
+    QApplication.processEvents()
+    surface.track_feature()
+    names = [(r.name, r.frame_index) for r in surface.records]
+    assert names == [("Sunspot 1", 0), ("Sunspot 1", 1), ("Sunspot 1", 2), ("Length 1", 1)]
+    assert surface.records[surface.active].frame_index == 0
+
+
+def test_stepping_frames_follows_the_tracked_shape(win):
+    _load(win, _sequence(hours=(0.0, 12.0, 24.0)))
+    win.area_tool_btn.setChecked(True)
+    win.surface_panel.set_threshold_mode("sunspot")
+    _box_on_spot(win, _spot_xy(0.0))
+    surface = win._measure.surface
+    surface.track_feature()
+    win.frame_slider.setValue(2)
+    QApplication.processEvents()
+    record = surface.records[surface.active]
+    assert record.frame_index == 2
+    assert surface.shapes["area"].points == record.points
+    assert win.surface_panel.selected_row() == surface.active
+    # The live result is the recorded one: nothing to Record.
+    assert "Not in the table" not in win.surface_panel.result_label.text()
+
+
+def test_track_needs_a_selected_row_and_a_sequence(win):
+    _load(win, [DiskMap(_disk())])
+    surface = win._measure.surface
+    assert surface.track_feature() == 0
+    assert "Select a row" in win.statusBar().currentMessage()
+    win.length_tool_btn.setChecked(True)
+    win._measure.on_canvas_click(0.0, 0.0, "left")
+    win._measure.on_canvas_click(100.0, 0.0, "left")
+    win.surface_panel.finish_btn.click()
+    assert surface.track_feature() == 0
+    assert "sequence" in win.statusBar().currentMessage()
+
+
+def test_series_plot_follows_the_selected_feature(win):
+    _load(win, _sequence(hours=(0.0, 12.0)))
+    win.length_tool_btn.setChecked(True)
+    win._measure.on_canvas_click(-300.0, 100.0, "left")
+    win._measure.on_canvas_click(-100.0, 150.0, "left")
+    win.surface_panel.finish_btn.click()
+    assert "1 frame" in win.surface_panel.series_label.text()
+    assert "Track Through Frames" in win.surface_panel.series_label.text()
+    win._measure.surface.track_feature()
+    assert win.surface_panel.plot.getPlotItem().getAxis("left").labelText == "Length (Mm)"
+    assert "2 frames" in win.surface_panel.series_label.text()
+    win.surface_panel.clear_table_btn.setEnabled(True)
+    win._measure.surface.clear_records()
+    xs, _ = win.surface_panel._series_main.getData()
+    assert xs is None or len(xs) == 0
+
+
+def test_series_plot_follows_the_theme(win):
+    panel = win.surface_panel
+    panel.apply_theme(dark=False)
+    assert panel.plot.backgroundBrush().color().lightness() > 200
+    panel.apply_theme(dark=True)
+    assert panel.plot.backgroundBrush().color().lightness() < 50
+    win._is_dark_ui = lambda: False
+    win._on_theme_changed()
+    assert panel.plot.backgroundBrush().color().lightness() > 200
+    assert win.tracking_panel.plot.backgroundBrush().color().lightness() > 200
+
+
+def test_surface_tab_scrolls_vertically_and_never_clips_its_width(win):
+    panel = win.surface_panel
+    win.show()
+    win.resize(1350, 800)
+    _load(win, _sequence(hours=(0.0, 12.0, 24.0)))
+    win.area_tool_btn.setChecked(True)
+    win.surface_panel.set_threshold_mode("sunspot")
+    _box_on_spot(win, _spot_xy(0.0))
+    win._measure.surface.track_feature()  # a filled table widens the content
+    for _ in range(5):
+        QApplication.processEvents()
+    viewport = panel.scroll_area.viewport().width()
+    assert panel._content.width() <= viewport
+    assert panel._content.minimumSizeHint().width() <= viewport
+    # The tab's content height is not the window's floor.
+    assert panel.minimumSizeHint().height() < panel._content.minimumSizeHint().height()

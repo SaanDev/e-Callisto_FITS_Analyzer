@@ -24,24 +24,31 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass, field
+from datetime import timezone
 from typing import Any
 
 import numpy as np
-from PySide6.QtCore import Qt, Signal
+import pyqtgraph as pg
+from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
-    QFormLayout,
+    QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QMessageBox,
+    QApplication,
+    QProgressDialog,
     QPushButton,
     QSpinBox,
+    QScrollArea,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -49,7 +56,15 @@ from PySide6.QtWidgets import (
 )
 
 from src.backend.solar.solar_data_analysis import frame_observation_time
-from src.backend.solar.surface_records import SurfaceRecord, area_values, length_values, write_csv
+from src.backend.solar.surface_records import (
+    SurfaceRecord,
+    area_values,
+    feature_series,
+    group_rows_by_feature,
+    length_values,
+    linear_rate,
+    write_csv,
+)
 from src.backend.solar.surface_measure import (
     DEFAULT_PENUMBRA_LEVEL,
     DEFAULT_UMBRA_LEVEL,
@@ -66,6 +81,7 @@ from src.backend.solar.surface_measure import (
     polygon_mask_from_arcsec,
     polyline_surface_length,
     rectangle_mask,
+    rotate_points,
     sunspot_masks,
     threshold_mask,
 )
@@ -184,6 +200,13 @@ class AreaResult:
     layers: tuple = ()
 
 
+def _unix(when) -> float:
+    """UTC Unix seconds; naive datetimes are taken as UTC (as frame times are)."""
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when.timestamp()
+
+
 # ------------------------------------------------------------------ formatting
 def format_lonlat(lonlat: tuple[float, float] | None) -> str:
     """Stonyhurst ``(lon, lat)`` as the usual ``N12.3° W45.6°``; east is negative."""
@@ -296,7 +319,21 @@ class SurfaceMeasurePanel(QWidget):
 
     def __init__(self, parent: Any = None):
         super().__init__(parent)
-        layout = QVBoxLayout(self)
+        # Everything sits in a scroll area: the tab holds a lot, and its full
+        # height must never become the window's minimum (a short window would
+        # otherwise refuse to shrink and push the status bar off screen).
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.NoFrame)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        outer.addWidget(self.scroll_area)
+        content = QWidget()
+        content.setMinimumHeight(560)  # below this the tab scrolls rather than squash the table
+        self.scroll_area.setWidget(content)
+        self._content = content
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(6, 0, 0, 0)
         layout.setSpacing(6)
 
@@ -338,12 +375,17 @@ class SurfaceMeasurePanel(QWidget):
             "off-limb pixels by the level at the limb. Always uses the frame's own data,\n"
             "even when a difference image is displayed."
         )
-        form = QFormLayout(self.threshold_group)
-        form.setContentsMargins(6, 6, 6, 6)
+        # Two columns: one setting per row made this group the tallest thing
+        # in the tab and pushed the plot below the fold on laptop screens.
+        grid = QGridLayout(self.threshold_group)
+        grid.setContentsMargins(6, 6, 6, 6)
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(4)
         self.threshold_combo = QComboBox()
         for key in THRESHOLDS:
             self.threshold_combo.addItem(THRESHOLD_LABELS[key], key)
-        form.addRow("Select:", self.threshold_combo)
+        grid.addWidget(QLabel("Select:"), 0, 0)
+        grid.addWidget(self.threshold_combo, 0, 1, 1, 3)
 
         self.umbra_spin = self._level_spin(DEFAULT_UMBRA_LEVEL, "Umbra: pixels below this fraction of the quiet Sun.")
         self.penumbra_spin = self._level_spin(
@@ -351,21 +393,31 @@ class SurfaceMeasurePanel(QWidget):
         )
         self.umbra_label = QLabel("Umbra <")
         self.penumbra_label = QLabel("Penumbra <")
-        form.addRow(self.umbra_label, self.umbra_spin)
-        form.addRow(self.penumbra_label, self.penumbra_spin)
         self.level_spin = self._level_spin(DEFAULT_DARK_LEVEL, "Threshold as a fraction (or multiple) of the quiet Sun.")
         self.level_spin.setRange(0.01, 100.0)
         self.level_label = QLabel("Level:")
-        form.addRow(self.level_label, self.level_spin)
+        # Sunspot levels and the dark/bright level share row 1; only one set shows.
+        grid.addWidget(self.umbra_label, 1, 0)
+        grid.addWidget(self.umbra_spin, 1, 1)
+        grid.addWidget(self.penumbra_label, 1, 2)
+        grid.addWidget(self.penumbra_spin, 1, 3)
+        grid.addWidget(self.level_label, 1, 0)
+        grid.addWidget(self.level_spin, 1, 1)
         self.cluster_spin = QSpinBox()
         self.cluster_spin.setRange(0, 100_000)
         self.cluster_spin.setValue(DEFAULT_MIN_CLUSTER_PX)
         self.cluster_spin.setSuffix(" px")
         self.cluster_spin.setToolTip("Drop selected patches smaller than this (isolated noise pixels).")
-        form.addRow("Ignore patches under:", self.cluster_spin)
-        self.tint_check = QCheckBox("Tint the selected pixels")
+        self.cluster_label = QLabel("Min patch:")
+        self.cluster_label.setToolTip(self.cluster_spin.toolTip())
+        self.tint_check = QCheckBox("Tint pixels")
+        self.tint_check.setToolTip("Tint the selected pixels on the image.")
         self.tint_check.setChecked(True)
-        form.addRow(self.tint_check)
+        grid.addWidget(self.cluster_label, 2, 0)
+        grid.addWidget(self.cluster_spin, 2, 1)
+        grid.addWidget(self.tint_check, 2, 2, 1, 2)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
         layout.addWidget(self.threshold_group)
 
         self.result_label = QLabel("")
@@ -391,13 +443,68 @@ class SurfaceMeasurePanel(QWidget):
         # Only the name is editable (double-click it).
         self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         self.table.setMinimumWidth(300)
-        self.table.setMinimumHeight(110)
+        self.table.setMinimumHeight(90)
         self.table.setToolTip(
             "Recorded measurements. Click a row to go back to its frame and shape;\n"
             "double-click a name to rename the feature. Rows that share a name are\n"
             "the same feature measured on different frames."
         )
-        layout.addWidget(self.table, 1)
+        # Time series of the selected feature, under the table it is drawn from.
+        # Software viewport for the same reason as the tracking panel's plot:
+        # a GL view created hidden in a tab renders black on some drivers.
+        self.plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(utcOffset=0)})
+        try:
+            self.plot.useOpenGL(False)
+        except Exception:
+            pass
+        self.plot.setMenuEnabled(False)
+        self.plot.hideButtons()
+        self.plot.showGrid(x=True, y=True, alpha=0.25)
+        self.plot.setMinimumHeight(100)
+        self.plot.getViewBox().setMouseEnabled(x=False, y=False)
+        self._series_main = pg.PlotDataItem(
+            pen=pg.mkPen("#e8a33d", width=1.6), symbol="o", symbolSize=7,
+            symbolBrush="#e8a33d", symbolPen=None,
+        )
+        self._series_second = pg.PlotDataItem(
+            pen=pg.mkPen("#5a8fd6", width=1.4), symbol="s", symbolSize=6,
+            symbolBrush="#5a8fd6", symbolPen=None,
+        )
+        self._series_fit = pg.PlotCurveItem(pen=pg.mkPen("#9a9a9a", width=1.2, style=Qt.DashLine))
+        for item in (self._series_fit, self._series_main, self._series_second):
+            self.plot.addItem(item)
+        self.apply_theme(dark=self._detect_dark())
+        self.splitter = QSplitter(Qt.Vertical)
+        self.splitter.addWidget(self.table)
+        self.splitter.addWidget(self.plot)
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 1)
+        layout.addWidget(self.splitter, 1)
+        self.series_label = QLabel("Select a row to plot its feature over time.")
+        self.series_label.setWordWrap(True)
+        layout.addWidget(self.series_label)
+
+        track_row = QHBoxLayout()
+        self.track_btn = QPushButton("Track Through Frames")
+        self.track_btn.setEnabled(False)
+        self.track_btn.setToolTip(
+            "Measure the selected row's feature on every loaded frame, with the same\n"
+            "shape and threshold, and plot it against time. Rows already recorded for\n"
+            "this feature on other frames are replaced."
+        )
+        self.rotate_check = QCheckBox("Rotate with the Sun")
+        self.rotate_check.setChecked(True)
+        self.rotate_check.setToolTip(
+            "Carry the shape across frames with solar differential rotation (Howard et\n"
+            "al. 1990, as SunPy), so it stays on a sunspot or filament as the disk turns.\n"
+            "Off-limb corners stay put. Untick to measure the same sky position on\n"
+            "every frame, e.g. for an arcade at the limb."
+        )
+        track_row.addWidget(self.track_btn)
+        track_row.addWidget(self.rotate_check)
+        track_row.addStretch(1)
+        layout.addLayout(track_row)
 
         rows = QHBoxLayout()
         self.record_btn = QPushButton("Record")
@@ -429,6 +536,45 @@ class SurfaceMeasurePanel(QWidget):
         self.table.itemChanged.connect(self._on_table_item_changed)
         self._sync_threshold_rows()
         self.set_tool(None)
+        # Only height may scroll: reserve the content's full width (plus the
+        # scrollbar) so nothing is ever clipped at the right edge. The content
+        # widens as the table fills, so this is re-measured on every relayout.
+        self._content.installEventFilter(self)
+        self._fit_scroll_width()
+
+    def _fit_scroll_width(self) -> None:
+        scrollbar = self.scroll_area.verticalScrollBar().sizeHint().width()
+        needed = self._content.minimumSizeHint().width() + scrollbar + 2
+        if self.scroll_area.minimumWidth() != needed:
+            self.scroll_area.setMinimumWidth(needed)
+
+    def eventFilter(self, watched, event):  # noqa: N802 (Qt naming)
+        if watched is getattr(self, "_content", None) and event.type() == QEvent.LayoutRequest:
+            self._fit_scroll_width()
+        return super().eventFilter(watched, event)
+
+    @staticmethod
+    def _detect_dark() -> bool:
+        """Match the app theme from the palette (as the tracking panel does)."""
+        app = QApplication.instance()
+        if app is None:
+            return False
+        try:
+            return app.palette().window().color().lightness() < 128
+        except Exception:
+            return False
+
+    def apply_theme(self, *, dark: bool) -> None:
+        """Light/dark plot colours, so the graph never shows pyqtgraph's black default."""
+        background = (12, 12, 12) if dark else (250, 252, 255)
+        foreground = (220, 224, 228) if dark else (40, 44, 52)
+        self.plot.setBackground(background)
+        self.plot.setTitle(self.plot.plotItem.titleLabel.text, color=foreground)
+        for axis_name in ("left", "bottom"):
+            axis = self.plot.getAxis(axis_name)
+            axis.setPen(pg.mkPen(foreground))
+            axis.setTextPen(pg.mkPen(foreground))
+        self._plot_foreground = foreground
 
     @staticmethod
     def _level_spin(value: float, tip: str) -> QDoubleSpinBox:
@@ -598,6 +744,43 @@ class SurfaceMeasurePanel(QWidget):
         self.export_btn.setEnabled(has_rows)
         self.clear_table_btn.setEnabled(has_rows)
         self.delete_row_btn.setEnabled(has_rows and active is not None)
+        self.track_btn.setEnabled(has_rows and active is not None)
+
+    def show_series(
+        self,
+        title: str,
+        times: list[float],
+        values: list[float],
+        *,
+        y_label: str,
+        second: list[float] | None = None,
+        second_label: str = "",
+        fit: tuple[list[float], list[float]] | None = None,
+        text: str = "",
+    ) -> None:
+        """Plot one feature against UTC time (``times`` in Unix seconds)."""
+        foreground = getattr(self, "_plot_foreground", None)
+        self.plot.setTitle(title, color=foreground) if foreground else self.plot.setTitle(title)
+        self.plot.setLabel("left", y_label)
+        self._series_main.setData(times, values)
+        if second is not None:
+            self._series_second.setData(times, second)
+        else:
+            self._series_second.setData([], [])
+        if fit is not None:
+            self._series_fit.setData(*fit)
+        else:
+            self._series_fit.setData([], [])
+        self.plot.enableAutoRange()
+        legend = f"  ·  orange: {y_label}" + (f", blue: {second_label}" if second is not None else "")
+        self.series_label.setText(text + (legend if values else ""))
+
+    def clear_series(self, text: str) -> None:
+        self.plot.setTitle("")
+        for item in (self._series_main, self._series_second):
+            item.setData([], [])
+        self._series_fit.setData([], [])
+        self.series_label.setText(text)
 
     def selected_row(self) -> int | None:
         rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
@@ -640,6 +823,7 @@ class SurfaceMeasurePanel(QWidget):
         self.level_label.setText("Below:" if mode == "dark" else "At least:")
         self.level_spin.setSuffix(" × I_qs")
         self.cluster_spin.setEnabled(mode != "none")
+        self.cluster_label.setEnabled(mode != "none")
         self.tint_check.setEnabled(mode != "none")
 
 
@@ -836,6 +1020,7 @@ class SurfaceTool:
         if self.mode is None:
             return
         timer = getattr(self.window, "_play_timer", None)
+        self._follow_feature_onto_frame()
         if timer is not None and timer.isActive():
             self.refresh_overlay()
             return
@@ -1056,6 +1241,153 @@ class SurfaceTool:
         panel = self._panel()
         if panel is not None:
             panel.show_records(self.records, self.active)
+        self._refresh_series()
+
+    def _refresh_series(self) -> None:
+        panel = self._panel()
+        if panel is None:
+            return
+        if self.active is None or not 0 <= self.active < len(self.records):
+            panel.clear_series("Select a row to plot its feature over time.")
+            return
+        name = self.records[self.active].name
+        series = feature_series(self.records, name)
+        if series is None or not series.values:
+            panel.clear_series(f"{name}: no observation times to plot.")
+            return
+        times = [_unix(t) for t in series.times]
+        rate = linear_rate(series.seconds, series.values)
+        n = len(series.values)
+        text = f"{name}  ·  {n} frame{'s' if n != 1 else ''}"
+        fit = None
+        if rate is not None:
+            span_h = (series.seconds[-1] - series.seconds[0]) / 3600.0
+            text += f"  ·  {rate.text(series.unit, span_hours=span_h)}"
+            intercept = sum(series.values) / n - rate.per_hour * sum(series.seconds) / n / 3600.0
+            fit = (
+                [times[0], times[-1]],
+                [intercept + rate.per_hour * series.seconds[0] / 3600.0,
+                 intercept + rate.per_hour * series.seconds[-1] / 3600.0],
+            )
+        elif n == 1:
+            text += "  ·  Track Through Frames or Record on other frames to see it change."
+        if series.skipped:
+            text += f"  ·  {series.skipped} row(s) without a time left out"
+        panel.show_series(
+            name,
+            times,
+            series.values,
+            y_label=series.label,
+            second=series.second,
+            second_label=series.second_label,
+            fit=fit,
+            text=text,
+        )
+
+    # ------------------------------------------------------- tracking
+    def track_feature(self) -> int:
+        """Measure the selected row's feature on every loaded frame; returns rows written."""
+        win = self.window
+        if self.active is None or not 0 <= self.active < len(self.records):
+            self.controller._status("Select a row in the table first.")
+            return 0
+        frames = getattr(win, "_map_frames", None) or []
+        if len(frames) < 2:
+            self.controller._status("Load a sequence of frames to track a feature through it.")
+            return 0
+        source = self.records[self.active]
+        try:
+            _frame, _raw, source_geometry = self._frame_context(source.frame_index)
+        except Exception as exc:
+            self.controller._status(f"Cannot read the row's own frame: {exc}")
+            return 0
+        settings = ThresholdSettings(**{k: v for k, v in source.threshold.items() if k in ThresholdSettings.__dataclass_fields__})
+        panel = self._panel()
+        rotate = bool(panel.rotate_check.isChecked()) if panel is not None else True
+        t0 = source.time
+        if rotate and t0 is None:
+            rotate = False
+
+        progress = QProgressDialog(f"Measuring {source.name} on {len(frames)} frames…", "Cancel", 0, len(frames), win)
+        progress.setWindowTitle("Track Through Frames")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(400)
+        written = 0
+        hidden = 0
+        failed: list[str] = []
+        cancelled = False
+        new_rows: dict[int, SurfaceRecord] = {}
+        try:
+            for index in range(len(frames)):
+                progress.setValue(index)
+                QApplication.processEvents()
+                if progress.wasCanceled():
+                    cancelled = True
+                    break
+                if index == source.frame_index:
+                    continue
+                try:
+                    _f, raw, geometry = self._frame_context(index)
+                    points = list(source.points)
+                    when = self._frame_time(index)
+                    if rotate and when is not None:
+                        moved = rotate_points(points, source_geometry, geometry, (when - t0).total_seconds())
+                        if moved.any_hidden:
+                            hidden += 1
+                            continue
+                        points = moved.points
+                    shape = SurfaceShape(kind=source.shape, points=points)
+                    if shape.kind == "length":
+                        result: SurfaceLength | AreaResult = polyline_surface_length(points, geometry)
+                    else:
+                        result = self._measure_area(shape, geometry, raw, settings, index)
+                    new_rows[index] = self._build_record(result, shape, source.name, frame_index=index, geometry=geometry)
+                    written += 1
+                except Exception as exc:
+                    failed.append(f"frame {index + 1}: {exc}")
+        finally:
+            progress.setValue(len(frames))
+            progress.close()
+
+        # Replace this feature's rows on the frames just measured, keep the rest.
+        kept = [r for r in self.records if not (r.name == source.name and r.frame_index in new_rows)]
+        self.records = group_rows_by_feature(kept + list(new_rows.values()))
+        self.active = self.records.index(source)
+        self._show_records()
+        self.controller._notify_modified()
+
+        message = f"{source.name}: measured on {written} more frame(s)"
+        if rotate:
+            message += ", rotating with the Sun"
+        if hidden:
+            message += f"; {hidden} skipped (the shape rotated behind the limb)"
+        if failed:
+            message += f"; {len(failed)} failed ({failed[0]})"
+        if cancelled:
+            message += "; cancelled"
+        message += "."
+        self.controller._append_analysis(f"[{source.name}] Track through frames  ·  {message}")
+        self.controller._status(message)
+        return written
+
+    def _follow_feature_onto_frame(self) -> None:
+        """On a frame change, switch to the active feature's row on that frame, if any."""
+        if self.active is None or not 0 <= self.active < len(self.records):
+            return
+        active = self.records[self.active]
+        if active.kind != self.mode:
+            return
+        index = self._frame_index()
+        for row, record in enumerate(self.records):
+            if record.name == active.name and record.frame_index == index and record.kind == active.kind:
+                shape = SurfaceShape(kind=record.shape, points=list(record.points))
+                self.shapes[record.kind] = shape
+                self.active = row
+                self._active_shape = shape
+                panel = self._panel()
+                if panel is not None:
+                    panel.show_records(self.records, self.active)
+                return
 
     def _is_recorded(self, result: SurfaceLength | AreaResult, shape: SurfaceShape) -> bool:
         """Whether the table already holds exactly this result (shape, frame, settings)."""
