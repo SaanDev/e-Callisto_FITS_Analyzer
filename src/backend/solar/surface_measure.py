@@ -1042,3 +1042,105 @@ def sunspot_masks(
         umbra_level=umbra_level,
         penumbra_level=penumbra_level,
     )
+
+
+# ---------------------------------------------------------- solar rotation
+#: Howard, Harvey & Forgach (1990) sidereal rates, microradians per second:
+#: ``omega = A + B sin^2(lat) + C sin^4(lat)``. SunPy's default model.
+HOWARD_RATES_URAD_PER_S = (2.894, -0.428, -0.370)
+#: Earth's mean orbital motion; subtracting it gives the synodic rate seen from
+#: Earth (and SDO), exactly as ``sunpy.sun.models.differential_rotation``
+#: does with ``frame_time="synodic"``.
+EARTH_ORBIT_DEG_PER_DAY = 0.9856
+
+
+def synodic_rotation_deg(latitude_deg: Any, seconds: float) -> np.ndarray:
+    """Stonyhurst longitude a surface point moves through in ``seconds``.
+
+    Howard et al. (1990) differential rotation, made synodic by removing
+    Earth's mean orbital motion. Negative ``seconds`` rotates backwards.
+    """
+    lat = np.radians(np.asarray(latitude_deg, dtype=float))
+    a, b, c = HOWARD_RATES_URAD_PER_S
+    s2 = np.sin(lat) ** 2
+    sidereal_rad = (a + b * s2 + c * s2 * s2) * 1e-6 * float(seconds)
+    return np.degrees(sidereal_rad) - EARTH_ORBIT_DEG_PER_DAY * float(seconds) / 86400.0
+
+
+def arcsec_from_stonyhurst(
+    lon_deg: Any, lat_deg: Any, geometry: SurfaceGeometry
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Stonyhurst -> helioprojective ``(Tx, Ty, visible)`` for this observer.
+
+    ``visible`` is False for points on the far side of the limb, whose
+    helioprojective position would land on the disk in front of them.
+    """
+    lon = np.radians(np.asarray(lon_deg, dtype=float) - float(geometry.observer_lon_deg))
+    lat = np.radians(np.asarray(lat_deg, dtype=float))
+    b0 = math.radians(float(geometry.b0_deg))
+    x = np.cos(lat) * np.sin(lon)
+    y = np.sin(lat) * math.cos(b0) - np.cos(lat) * np.cos(lon) * math.sin(b0)
+    z = np.sin(lat) * math.sin(b0) + np.cos(lat) * np.cos(lon) * math.cos(b0)
+    big_d = geometry.observer_distance_rsun
+    zeta = big_d - z
+    dist = np.sqrt(x * x + y * y + zeta * zeta)
+    tx = np.degrees(np.arctan2(x, zeta)) * 3600.0
+    ty = np.degrees(np.arcsin(y / dist)) * 3600.0
+    visible = z * big_d - 1.0 > 0.0
+    return tx, ty, visible
+
+
+@dataclass(frozen=True)
+class RotatedPoints:
+    """Points carried from one frame to another by solar rotation."""
+
+    points: list[tuple[float, float]]
+    #: Each point was on the disk and moved with the Sun (False: off-limb, kept fixed).
+    rotated: tuple[bool, ...]
+    #: Each point rotated onto the far side and could not be placed (its old position is kept).
+    hidden: tuple[bool, ...]
+
+    @property
+    def any_hidden(self) -> bool:
+        return any(self.hidden)
+
+    @property
+    def any_rotated(self) -> bool:
+        return any(self.rotated)
+
+
+def rotate_points(
+    points_arcsec: Sequence[Sequence[float]],
+    source: SurfaceGeometry,
+    target: SurfaceGeometry,
+    seconds: float,
+) -> RotatedPoints:
+    """Carry helioprojective points from ``source``'s view to ``target``'s ``seconds`` later.
+
+    On-disk points are put on the surface, rotated by :func:`synodic_rotation_deg`
+    at their own latitude, and projected for the target observer (whose B0 and
+    distance may differ). Off-limb points have no surface position and stay where
+    they are, which suits limb features over short sequences.
+    """
+    pts = np.asarray(points_arcsec, dtype=float).reshape(-1, 2)
+    lon, lat = stonyhurst_from_arcsec(pts[:, 0], pts[:, 1], source)
+    on_disk = np.isfinite(lon) & np.isfinite(lat)
+    new_lon = lon + synodic_rotation_deg(lat, seconds)
+    tx, ty, visible = arcsec_from_stonyhurst(new_lon, lat, target)
+    out: list[tuple[float, float]] = []
+    rotated: list[bool] = []
+    hidden: list[bool] = []
+    for i in range(pts.shape[0]):
+        if not on_disk[i]:
+            out.append((float(pts[i, 0]), float(pts[i, 1])))
+            rotated.append(False)
+            hidden.append(False)
+        elif not bool(visible[i]):
+            out.append((float(pts[i, 0]), float(pts[i, 1])))
+            rotated.append(False)
+            hidden.append(True)
+        else:
+            out.append((float(tx[i]), float(ty[i])))
+            rotated.append(True)
+            hidden.append(False)
+    return RotatedPoints(points=out, rotated=tuple(rotated), hidden=tuple(hidden))

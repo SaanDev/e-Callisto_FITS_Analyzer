@@ -23,25 +23,33 @@ subtracted.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import numpy as np
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
+    QMessageBox,
     QPushButton,
     QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
+from src.backend.solar.solar_data_analysis import frame_observation_time
+from src.backend.solar.surface_records import SurfaceRecord, area_values, length_values, write_csv
 from src.backend.solar.surface_measure import (
     DEFAULT_PENUMBRA_LEVEL,
     DEFAULT_UMBRA_LEVEL,
@@ -273,10 +281,18 @@ def format_area(result: AreaResult) -> str:
 
 # ----------------------------------------------------------------------- panel
 class SurfaceMeasurePanel(QWidget):
-    """The "Surface" tab: shape choice, threshold settings and the live result."""
+    """The "Surface" tab: shape choice, threshold settings, live result and the table."""
 
     shapeChanged = Signal(str)
     thresholdChanged = Signal()
+    #: A table row was picked by the user (row index).
+    recordSelected = Signal(int)
+    #: A feature name was edited: (row index, new name).
+    recordRenamed = Signal(int, str)
+
+    # The centroid rides in each row's tooltip (and the CSV): six columns do
+    # not fit the panel beside the map without squeezing the name to nothing.
+    COLUMNS = ("Name", "Time (UT)", "Measure", "Result", "μ")
 
     def __init__(self, parent: Any = None):
         super().__init__(parent)
@@ -356,15 +372,51 @@ class SurfaceMeasurePanel(QWidget):
         self.result_label.setWordWrap(True)
         self.result_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.result_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        layout.addWidget(self.result_label, 1)
+        layout.addWidget(self.result_label)
 
-        self.record_btn = QPushButton("Record to Details")
+        # Recorded measurements. A finished shape adds a row; Record adds the
+        # shape's measurement on the shown frame under the same name, which is
+        # how one feature is followed through a sequence.
+        self.table = QTableWidget(0, len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels(list(self.COLUMNS))
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(0, QHeaderView.Interactive)
+        header.setSectionResizeMode(3, QHeaderView.Stretch)
+        header.setStretchLastSection(False)
+        self.table.setColumnWidth(0, 96)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        # Only the name is editable (double-click it).
+        self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
+        self.table.setMinimumWidth(300)
+        self.table.setMinimumHeight(110)
+        self.table.setToolTip(
+            "Recorded measurements. Click a row to go back to its frame and shape;\n"
+            "double-click a name to rename the feature. Rows that share a name are\n"
+            "the same feature measured on different frames."
+        )
+        layout.addWidget(self.table, 1)
+
+        rows = QHBoxLayout()
+        self.record_btn = QPushButton("Record")
         self.record_btn.setEnabled(False)
         self.record_btn.setToolTip(
-            "Write the current result to the Details panel, e.g. after adjusting the\n"
-            "threshold. A finished shape is written there automatically."
+            "Add the current result to the table (and the Details panel). On the\n"
+            "frame where the shape was drawn this updates its row; on another frame\n"
+            "it adds a row for the same feature."
         )
-        layout.addWidget(self.record_btn)
+        self.delete_row_btn = QPushButton("Delete Row")
+        self.delete_row_btn.setEnabled(False)
+        self.export_btn = QPushButton("Export CSV…")
+        self.export_btn.setEnabled(False)
+        self.export_btn.setToolTip("Save every recorded measurement, with its shape and settings, as CSV.")
+        self.clear_table_btn = QPushButton("Clear Table")
+        self.clear_table_btn.setEnabled(False)
+        for btn in (self.record_btn, self.delete_row_btn, self.export_btn, self.clear_table_btn):
+            rows.addWidget(btn)
+        layout.addLayout(rows)
 
         self._quicklook = False
         self._last_mode = "none"
@@ -373,6 +425,8 @@ class SurfaceMeasurePanel(QWidget):
             spin.valueChanged.connect(lambda _v: self.thresholdChanged.emit())
         self.cluster_spin.valueChanged.connect(lambda _v: self.thresholdChanged.emit())
         self.tint_check.toggled.connect(lambda _on: self.thresholdChanged.emit())
+        self.table.itemSelectionChanged.connect(self._on_table_selection)
+        self.table.itemChanged.connect(self._on_table_item_changed)
         self._sync_threshold_rows()
         self.set_tool(None)
 
@@ -460,6 +514,105 @@ class SurfaceMeasurePanel(QWidget):
         self.result_label.setText(text)
         self.record_btn.setEnabled(recordable)
 
+    def apply_threshold_settings(self, settings: dict[str, Any]) -> None:
+        """Set the threshold controls without emitting a change per widget."""
+        widgets = (
+            self.threshold_combo,
+            self.umbra_spin,
+            self.penumbra_spin,
+            self.level_spin,
+            self.cluster_spin,
+        )
+        for widget in widgets:
+            widget.blockSignals(True)
+        try:
+            index = self.threshold_combo.findData(str(settings.get("mode", "none")))
+            if index >= 0:
+                self.threshold_combo.setCurrentIndex(index)
+            self._last_mode = str(settings.get("mode", "none"))
+            for spin, key in (
+                (self.umbra_spin, "umbra_level"),
+                (self.penumbra_spin, "penumbra_level"),
+                (self.level_spin, "level"),
+            ):
+                if settings.get(key) is not None:
+                    spin.setValue(float(settings[key]))
+            if settings.get("min_cluster_px") is not None:
+                self.cluster_spin.setValue(int(settings["min_cluster_px"]))
+        finally:
+            for widget in widgets:
+                widget.blockSignals(False)
+        self._sync_threshold_rows()
+
+    def set_shape_silently(self, shape: str) -> None:
+        self.shape_combo.blockSignals(True)
+        self.set_shape(shape)
+        self.shape_combo.blockSignals(False)
+
+    def show_records(self, records: list[SurfaceRecord], active: int | None) -> None:
+        """Refill the table; ``active`` is the selected row."""
+        self.table.blockSignals(True)
+        try:
+            self.table.setRowCount(len(records))
+            for row, record in enumerate(records):
+                when = record.time.strftime("%H:%M:%S") if record.time else f"frame {record.frame_index + 1}"
+                v = record.values
+                if record.kind == "length":
+                    centroid = format_lonlat(
+                        (v["start_lon_deg"], v["start_lat_deg"])
+                        if v.get("start_lon_deg") is not None and v.get("start_lat_deg") is not None
+                        else None
+                    )
+                    mu = v.get("min_mu")
+                else:
+                    centroid = format_lonlat(
+                        (v["centroid_lon_deg"], v["centroid_lat_deg"])
+                        if v.get("centroid_lon_deg") is not None and v.get("centroid_lat_deg") is not None
+                        else None
+                    )
+                    mu = v.get("mean_mu")
+                cells = (
+                    record.name,
+                    when,
+                    record.measure_label,
+                    record.headline,
+                    "—" if mu is None else f"{float(mu):.2f}",
+                )
+                where = "start" if record.kind == "length" else "centroid"
+                tooltip = f"{record.line}\n{where.capitalize()}: {centroid}"
+                for col, text in enumerate(cells):
+                    item = QTableWidgetItem(str(text))
+                    flags = item.flags()
+                    if col != 0:
+                        flags &= ~Qt.ItemIsEditable
+                    item.setFlags(flags)
+                    item.setToolTip(tooltip)
+                    self.table.setItem(row, col, item)
+            if active is not None and 0 <= active < len(records):
+                self.table.selectRow(active)
+            else:
+                self.table.clearSelection()
+        finally:
+            self.table.blockSignals(False)
+        has_rows = bool(records)
+        self.export_btn.setEnabled(has_rows)
+        self.clear_table_btn.setEnabled(has_rows)
+        self.delete_row_btn.setEnabled(has_rows and active is not None)
+
+    def selected_row(self) -> int | None:
+        rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
+        return int(rows[0].row()) if rows else None
+
+    def _on_table_selection(self) -> None:
+        row = self.selected_row()
+        self.delete_row_btn.setEnabled(row is not None)
+        if row is not None:
+            self.recordSelected.emit(row)
+
+    def _on_table_item_changed(self, item: QTableWidgetItem) -> None:
+        if item.column() == 0:
+            self.recordRenamed.emit(item.row(), item.text())
+
     def _on_threshold_mode_changed(self, _index: int) -> None:
         mode = str(self.threshold_combo.currentData() or "none")
         # Each mode wants a different default level; keep the user's value when
@@ -504,8 +657,15 @@ class SurfaceTool:
         self.shapes: dict[str, SurfaceShape] = {}
         self.drawing: SurfaceShape | None = None
         self.last_result: SurfaceLength | AreaResult | None = None
+        self._last_geometry: SurfaceGeometry | None = None
         self._profile_cache: dict[tuple[int, int], QuietSunProfile] = {}
         self._dragging = False
+        # Recorded measurements (the Surface tab's table).
+        self.records: list[SurfaceRecord] = []
+        #: Row the current shape belongs to; threshold edits update it in place.
+        self.active: int | None = None
+        self._active_shape: SurfaceShape | None = None
+        self._name_counts: dict[str, int] = {}
 
     # ---------------------------------------------------------------- state
     @property
@@ -647,6 +807,7 @@ class SurfaceTool:
         canvas = self._canvas()
         if canvas is not None:
             canvas.clear_surface_mask_overlay()
+        self.clear_records()
         self._sync_panel()
 
     def finish(self) -> None:
@@ -665,7 +826,7 @@ class SurfaceTool:
             return
         self.drawing = None
         self.shapes["length" if shape.kind == "length" else "area"] = shape
-        self.remeasure(record=True)
+        self.remeasure(record=True, new_feature=True)
         self.refresh_overlay()
         self._sync_panel()
 
@@ -682,17 +843,229 @@ class SurfaceTool:
         self.refresh_overlay()
 
     def threshold_changed(self) -> None:
+        # Only the live result follows the settings: the table changes on an
+        # explicit Record, so adjusting the threshold for the next shape can
+        # never rewrite a row already recorded.
         if self.mode == "area" and "area" in self.shapes:
             self.remeasure(record=False)
             self.refresh_overlay()
 
     def record(self) -> None:
-        if self.last_result is None:
+        """Record button: update the shape's own row, or add one on this frame."""
+        result = self.last_result
+        mode = self.mode
+        shape = self.shapes.get(mode) if mode is not None else None
+        if result is None or shape is None:
             return
-        self.controller._append_analysis(self._format(self.last_result))
-        self.controller._status("Result written to the Details panel.")
+        if self._active_updatable(shape):
+            self._update_active(result, shape)
+            verb = "updated"
+        else:
+            name = None
+            if self.active is not None and self._active_shape is shape:
+                name = self.records[self.active].name  # same feature, another frame
+            self._append_record(result, shape, name=name)
+            verb = "added"
+        self.controller._append_analysis(self.records[self.active].line)
+        self.controller._status(f"{self.records[self.active].name}: row {verb}.")
+        self._show_result(self._panel_text(result), recordable=True)
 
-    def remeasure(self, *, record: bool) -> None:
+    # -------------------------------------------------------------- records
+    def _active_updatable(self, shape: SurfaceShape) -> bool:
+        """Whether the active row is this shape's measurement on this frame."""
+        if self.active is None or not 0 <= self.active < len(self.records):
+            return False
+        record = self.records[self.active]
+        return self._active_shape is shape and record.frame_index == self._frame_index()
+
+    def _frame_index(self) -> int:
+        return int(getattr(self.window, "_current_frame_index", 0))
+
+    def _new_name(self, result: SurfaceLength | AreaResult) -> str:
+        if isinstance(result, SurfaceLength):
+            label = "Length"
+        elif result.threshold.mode == "sunspot":
+            label = "Sunspot"
+        else:
+            label = "Area"
+        count = self._name_counts.get(label, 0) + 1
+        taken = {r.name for r in self.records}
+        while f"{label} {count}" in taken:
+            count += 1
+        self._name_counts[label] = count
+        return f"{label} {count}"
+
+    def _build_record(
+        self,
+        result: SurfaceLength | AreaResult,
+        shape: SurfaceShape,
+        name: str,
+        *,
+        frame_index: int | None = None,
+        geometry: SurfaceGeometry | None = None,
+    ) -> SurfaceRecord:
+        index = self._frame_index() if frame_index is None else int(frame_index)
+        geometry = self._last_geometry if geometry is None else geometry
+        if isinstance(result, SurfaceLength):
+            values = length_values(result, geometry)
+            threshold: dict[str, Any] = {}
+        else:
+            values = area_values(result, geometry)
+            threshold = asdict(result.threshold)
+        return SurfaceRecord(
+            name=name,
+            kind="length" if shape.kind == "length" else "area",
+            shape=shape.kind,
+            points=list(shape.points),
+            frame_index=index,
+            time=self._frame_time(index),
+            threshold=threshold,
+            values=values,
+            summary=self._format(result),
+        )
+
+    def _frame_time(self, index: int):
+        frames = getattr(self.window, "_map_frames", None) or []
+        if not 0 <= index < len(frames):
+            return None
+        try:
+            return frame_observation_time(frames[index])
+        except Exception:
+            return None
+
+    def _append_record(self, result, shape: SurfaceShape, *, name: str | None = None) -> None:
+        record = self._build_record(result, shape, name or self._new_name(result))
+        self.records.append(record)
+        self.active = len(self.records) - 1
+        self._active_shape = shape
+        self._show_records()
+        self.controller._notify_modified()
+
+    def _update_active(self, result, shape: SurfaceShape) -> None:
+        old = self.records[self.active]
+        self.records[self.active] = self._build_record(result, shape, old.name)
+        self._show_records()
+        self.controller._notify_modified()
+
+    def rename_record(self, row: int, name: str) -> None:
+        name = str(name).strip()
+        if not 0 <= row < len(self.records) or not name:
+            self._show_records()
+            return
+        old = self.records[row].name
+        if name == old:
+            return
+        self.records[row].name = name
+        self._show_records()
+        self.controller._notify_modified()
+
+    def delete_record(self, row: int | None = None) -> None:
+        if row is None:
+            panel = self._panel()
+            row = panel.selected_row() if panel is not None else None
+        if row is None or not 0 <= row < len(self.records):
+            return
+        del self.records[row]
+        if self.active is not None:
+            if self.active == row:
+                self.active = None
+                self._active_shape = None
+            elif self.active > row:
+                self.active -= 1
+        self._show_records()
+        self.controller._notify_modified()
+
+    def clear_records(self) -> None:
+        had = bool(self.records)
+        self.records = []
+        self.active = None
+        self._active_shape = None
+        self._name_counts = {}
+        self._show_records()
+        if had:
+            self.controller._notify_modified()
+
+    def restore_records(self, records: list[SurfaceRecord]) -> None:
+        """Replace the table with saved records (project open)."""
+        self.records = list(records)
+        self.active = None
+        self._active_shape = None
+        self._name_counts = {}
+        for record in self.records:
+            label, _, number = record.name.rpartition(" ")
+            if label and number.isdigit():
+                self._name_counts[label] = max(self._name_counts.get(label, 0), int(number))
+        self._show_records()
+
+    def restore_shapes(self, shapes: dict[str, tuple[str, list[tuple[float, float]]]]) -> None:
+        self.shapes = {tool: SurfaceShape(kind=kind, points=list(points)) for tool, (kind, points) in shapes.items()}
+        self.drawing = None
+        self.remeasure(record=False)
+        self.refresh_overlay()
+        self._sync_panel()
+
+    def select_record(self, row: int) -> None:
+        """Go back to a recorded row: its tool, settings, shape and frame."""
+        if not 0 <= row < len(self.records):
+            return
+        record = self.records[row]
+        win = self.window
+        shape = SurfaceShape(kind=record.shape, points=list(record.points))
+        self.shapes[record.kind] = shape
+        self.drawing = None
+        self.active = row
+        self._active_shape = shape
+        panel = self._panel()
+        if panel is not None and record.kind == "area":
+            panel.apply_threshold_settings(record.threshold)
+            panel.set_shape_silently(record.shape)
+        # Switching the tool re-measures the shape just put in place.
+        button = getattr(win, f"{record.kind}_tool_btn", None)
+        if self.mode != record.kind and button is not None:
+            button.setChecked(True)
+        n_frames = len(getattr(win, "_map_frames", []) or [])
+        if record.frame_index != self._frame_index() and 0 <= record.frame_index < n_frames:
+            setter = getattr(win, "_set_frame_index", None)
+            if setter is not None:
+                setter(record.frame_index)  # renders, and re-measures through on_frame_changed
+        else:
+            self.remeasure(record=False)
+            self.refresh_overlay()
+        self._sync_panel()
+
+    def export_csv(self, path: str | None = None) -> str | None:
+        if not self.records:
+            return None
+        if path is None:
+            path, _ = QFileDialog.getSaveFileName(
+                self.window, "Export Surface Measurements", "surface_measurements.csv", "CSV files (*.csv)"
+            )
+            if not path:
+                return None
+            if not path.lower().endswith(".csv"):
+                path += ".csv"
+        try:
+            count = write_csv(path, self.records)
+        except OSError as exc:
+            QMessageBox.warning(self.window, "Export Surface Measurements", f"Could not write the file:\n{exc}")
+            return None
+        self.controller._status(f"Exported {count} measurement(s) to {path}.")
+        return path
+
+    def _show_records(self) -> None:
+        panel = self._panel()
+        if panel is not None:
+            panel.show_records(self.records, self.active)
+
+    def _is_recorded(self, result: SurfaceLength | AreaResult, shape: SurfaceShape) -> bool:
+        """Whether the table already holds exactly this result (shape, frame, settings)."""
+        if not self._active_updatable(shape):
+            return False
+        record = self.records[self.active]
+        live = self._build_record(result, shape, record.name)
+        return live.values == record.values and live.threshold == record.threshold
+
+    def remeasure(self, *, record: bool, new_feature: bool = False) -> None:
         mode = self.mode
         shape = self.shapes.get(mode) if mode is not None else None
         if shape is None:
@@ -702,12 +1075,11 @@ class SurfaceTool:
         win = self.window
         if getattr(win, "_current_map_data", None) is None:
             return
+        panel = self._panel()
+        settings = panel.threshold_settings() if panel is not None else ThresholdSettings()
         try:
-            geometry = self._geometry()
-            if shape.kind == "length":
-                result: SurfaceLength | AreaResult = polyline_surface_length(shape.points, geometry)
-            else:
-                result = self._measure_area(shape, geometry)
+            result, geometry = self.measure_on_frame(shape, self._frame_index(), settings)
+            self._last_geometry = geometry
         except Exception as exc:
             self.last_result = None
             self._show_result(f"Could not measure: {exc}", recordable=False)
@@ -715,28 +1087,81 @@ class SurfaceTool:
             return
         self.last_result = result
         text = self._format(result)
-        self._show_result(self._panel_text(result), recordable=True)
+        if new_feature:
+            self._append_record(result, shape)
+            text = self.records[self.active].line
+        panel_text = self._panel_text(result)
+        if not new_feature and not self._is_recorded(result, shape):
+            panel_text = "● Not in the table — press Record to add it.\n" + panel_text
+        self._show_result(panel_text, recordable=True)
         if record:
             self.controller._append_analysis(text)
         self.controller._status(text)
 
-    def _measure_area(self, shape: SurfaceShape, geometry: SurfaceGeometry) -> AreaResult:
+    # ----------------------------------------------------- any-frame measuring
+    def measure_on_frame(
+        self, shape: SurfaceShape, index: int, settings: ThresholdSettings
+    ) -> tuple[SurfaceLength | AreaResult, SurfaceGeometry]:
+        """Measure ``shape`` on loaded frame ``index`` (not necessarily the shown one)."""
+        frame, raw, geometry = self._frame_context(index)
+        if shape.kind == "length":
+            return polyline_surface_length(shape.points, geometry), geometry
+        return self._measure_area(shape, geometry, raw, settings, index), geometry
+
+    def _frame_context(self, index: int) -> tuple[Any, np.ndarray, SurfaceGeometry]:
+        """``(frame, raw data, geometry)`` of loaded frame ``index``.
+
+        The shown frame uses the window's own axis transform and display shape,
+        so the numbers match what is on screen; any other frame derives them
+        from its own header exactly as the window would when showing it.
+        """
         win = self.window
-        data = np.asarray(win._current_map_data)
-        region = shape.mask(data.shape[:2], geometry)
+        frames = getattr(win, "_map_frames", None) or []
+        if not 0 <= index < len(frames):
+            raise ValueError(f"no frame {index + 1}")
+        frame = frames[index]
+        current = index == self._frame_index() and getattr(win, "_current_map_data", None) is not None
+        raw: np.ndarray | None = None
+        try:
+            raw = np.asarray(win._prepare_map_array(getattr(frame, "data"), "frame"), dtype=float)
+        except Exception:
+            raw = None
+        if current:
+            display = np.asarray(win._current_map_data)
+            if raw is None or raw.shape[:2] != display.shape[:2]:
+                raw = np.asarray(display, dtype=float)
+            transform = dict(getattr(win, "_current_axis_transform", None) or {})
+        else:
+            if raw is None:
+                raise ValueError(f"frame {index + 1} has no readable data")
+            transform = dict(win._axis_transform_for_arcsec(frame=frame, data_shape=raw.shape))
+        try:
+            rsun = float(win._solar_radius_arcsec(frame))
+        except Exception:
+            rsun = 960.0
+        geometry = geometry_from_meta(getattr(frame, "meta", None), transform, rsun_arcsec=rsun)
+        return frame, raw, geometry
+
+    def _measure_area(
+        self,
+        shape: SurfaceShape,
+        geometry: SurfaceGeometry,
+        raw: np.ndarray,
+        settings: ThresholdSettings,
+        index: int,
+    ) -> AreaResult:
+        win = self.window
+        region = shape.mask(raw.shape[:2], geometry)
         if not region.any():
             raise ValueError("the shape covers no pixel centres; draw it larger")
-        panel = self._panel()
-        settings = panel.threshold_settings() if panel is not None else ThresholdSettings()
         quicklook = bool(getattr(win, "_loaded_is_quicklook", lambda: False)())
-        raw = self._raw_data(data.shape)
         intensity = None if quicklook else raw
         unit = "DN"
         region_area = mask_surface_area(region, geometry, image=intensity)
         if settings.mode == "none" or quicklook:
             return AreaResult(shape.kind, region_area, settings, intensity_unit=unit, quicklook=quicklook)
 
-        profile = self._quiet_sun(raw, geometry)
+        profile = self._quiet_sun(raw, geometry, index)
         normalized = normalize_to_quiet_sun(raw, geometry, profile, region=region)
         if settings.mode == "sunspot":
             masks = sunspot_masks(
@@ -767,30 +1192,19 @@ class SurfaceTool:
             layers=((selected, DARK_COLOR if settings.mode == "dark" else BRIGHT_COLOR),),
         )
 
-    def _quiet_sun(self, raw: np.ndarray, geometry: SurfaceGeometry) -> QuietSunProfile:
-        key = (int(getattr(self.window, "_current_frame_index", 0)), id(self._current_frame()))
+    def _quiet_sun(self, raw: np.ndarray, geometry: SurfaceGeometry, index: int) -> QuietSunProfile:
+        frames = getattr(self.window, "_map_frames", None) or []
+        frame = frames[index] if 0 <= index < len(frames) else None
+        key = (int(index), id(frame))
         profile = self._profile_cache.get(key)
         if profile is None:
             try:
                 profile = fit_quiet_sun_profile(raw, geometry)
             except ValueError as exc:
-                raise ValueError(f"no quiet-Sun level for this frame ({exc})") from exc
-            # One frame's fit is all that is ever needed at a time.
+                raise ValueError(f"no quiet-Sun level for frame {index + 1} ({exc})") from exc
+            # Keep the shown frame's fit; a track through frames refits each.
             self._profile_cache = {key: profile}
         return profile
-
-    def _raw_data(self, shape: tuple[int, ...]) -> np.ndarray:
-        """The frame's own data (not a difference image), the shape of the display."""
-        frame = self._current_frame()
-        win = self.window
-        if frame is not None:
-            try:
-                raw = win._prepare_map_array(getattr(frame, "data"), "current frame")
-                if raw.shape[:2] == tuple(shape[:2]):
-                    return np.asarray(raw, dtype=float)
-            except Exception:
-                pass
-        return np.asarray(win._current_map_data, dtype=float)
 
     def threshold_layers(self) -> list[tuple[np.ndarray, tuple[int, int, int]]]:
         """Masks to tint for the current area result."""
@@ -811,9 +1225,7 @@ class SurfaceTool:
             return 960.0
 
     def _geometry(self) -> SurfaceGeometry:
-        frame = self._current_frame()
-        transform = dict(getattr(self.window, "_current_axis_transform", None) or {})
-        return geometry_from_meta(getattr(frame, "meta", None), transform, rsun_arcsec=self._rsun_arcsec())
+        return self._frame_context(self._frame_index())[2]
 
     # -------------------------------------------------------------- display
     def _canvas(self) -> Any | None:

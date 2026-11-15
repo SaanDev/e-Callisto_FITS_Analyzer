@@ -158,7 +158,7 @@ def test_length_tool_measures_along_the_surface(win):
 
     expected = polyline_surface_length(points, _geometry())
     line = _last_line(win)
-    assert line.startswith("Length")
+    assert line.startswith("[Length 1] Length")
     assert f"{expected.total_km / 1000.0:,.1f} Mm along the surface" in line
     assert "4 points" in line
     assert expected.total_km > expected.plane_of_sky_km
@@ -204,7 +204,7 @@ def test_polygon_area_at_disk_centre(win):
     win.surface_panel.finish_btn.click()
 
     line = _last_line(win)
-    assert line.startswith("Area (polygon)")
+    assert line.startswith("[Area 1] Area (polygon)")
     result = win._measure.surface.last_result
     # 40 x 40 pixel centres of 25 arcsec² at disk centre.
     assert result.region.n_pixels == 1600
@@ -228,7 +228,7 @@ def test_drag_shapes_ellipse_rectangle_and_lasso(win):
     surface.on_drag("finish", 100.0, 50.0)
     ellipse = surface.last_result.region
     assert ellipse.n_pixels == pytest.approx(math.pi * 20 * 10, rel=0.05)
-    assert _last_line(win).startswith("Area (ellipse)")
+    assert "] Area (ellipse)" in _last_line(win)
 
     win.surface_panel.set_shape("rectangle")
     surface.on_drag("start", -100.0, -50.0)
@@ -289,7 +289,7 @@ def test_sunspot_threshold_splits_umbra_and_penumbra(win):
     expected_umbra_px = math.pi * (UMBRA_R / SCALE) ** 2
     assert result.umbra.n_pixels == pytest.approx(expected_umbra_px, rel=0.15)
     line = _last_line(win)
-    assert line.startswith("Sunspot (rectangle)")
+    assert line.startswith("[Sunspot 1] Sunspot (rectangle)")
     assert f"umbra {umbra.on_disk_msh:,.1f} MSH" in line
     lon, lat = result.selected.centroid_lonlat
     assert format_lonlat((lon, lat)).startswith("N")
@@ -544,3 +544,252 @@ def test_mask_overlay_covers_only_the_bounding_box(win):
 def test_test_suite_never_points_the_window_at_the_real_cache(win, tmp_path):
     """Reset All deletes the cache folder; under pytest that must be a temp folder."""
     assert str(win.cache_dir).startswith(str(tmp_path))
+
+
+# ----------------------------------------------------------------- the table
+def _two_frames(*, second_scale: float = 1.4):
+    return [
+        DiskMap(_disk(spot_scale=1.0), date="2026-02-10T01:00:00"),
+        DiskMap(_disk(spot_scale=second_scale), date="2026-02-10T01:12:00"),
+    ]
+
+
+def test_finished_shapes_add_named_rows(win):
+    _load(win, [DiskMap(_disk())])
+    table = win.surface_panel.table
+    win.length_tool_btn.setChecked(True)
+    for x in (-200.0, 0.0, 200.0):
+        win._measure.on_canvas_click(x, 0.0, "left")
+    win.surface_panel.finish_btn.click()
+    win.area_tool_btn.setChecked(True)
+    win.surface_panel.set_threshold_mode("sunspot")
+    _spot_box(win)
+
+    surface = win._measure.surface
+    assert [r.name for r in surface.records] == ["Length 1", "Sunspot 1"]
+    assert table.rowCount() == 2
+    assert table.item(0, 0).text() == "Length 1"
+    assert table.item(0, 2).text() == "Length"
+    assert table.item(0, 3).text().endswith(" Mm")
+    assert table.item(1, 2).text() == "Sunspot"
+    assert "MSH (U " in table.item(1, 3).text()
+    assert table.item(1, 1).text() == "01:00:00"
+    assert "Centroid: N" in table.item(1, 3).toolTip()
+    assert table.item(1, 4).text() == f"{surface.records[1].values['mean_mu']:.2f}"
+    assert win.surface_panel.selected_row() == 1  # the newest row is active
+    assert win.surface_panel.export_btn.isEnabled()
+    # Only the name is editable.
+    assert table.item(1, 0).flags() & Qt.ItemIsEditable
+    assert not table.item(1, 3).flags() & Qt.ItemIsEditable
+
+
+def test_threshold_edits_never_rewrite_a_recorded_row(win):
+    _load(win, [DiskMap(_disk())])
+    win.area_tool_btn.setChecked(True)
+    win.surface_panel.set_threshold_mode("sunspot")
+    _spot_box(win)
+    surface = win._measure.surface
+    recorded = dict(surface.records[0].values)
+    assert "Not in the table" not in win.surface_panel.result_label.text()
+
+    # Getting the settings ready for the next shape leaves the row alone...
+    win.surface_panel.set_threshold_mode("none")
+    win.surface_panel.umbra_spin.setValue(0.2)
+    assert surface.records[0].values == recorded
+    assert surface.records[0].threshold["mode"] == "sunspot"
+    assert "Not in the table" in win.surface_panel.result_label.text()
+
+    # ...until Record, which updates the row in place on the same frame.
+    win.surface_panel.set_threshold_mode("sunspot")
+    win.surface_panel.record_btn.click()
+    assert len(surface.records) == 1
+    assert surface.records[0].values["umbra_msh"] == 0.0 < recorded["umbra_msh"]
+    assert surface.records[0].threshold["umbra_level"] == pytest.approx(0.2)
+    assert "Not in the table" not in win.surface_panel.result_label.text()
+
+
+def test_record_on_another_frame_continues_the_feature(win):
+    _load(win, _two_frames())
+    win.area_tool_btn.setChecked(True)
+    win.surface_panel.set_threshold_mode("sunspot")
+    _spot_box(win)
+    win.frame_slider.setValue(1)
+    QApplication.processEvents()
+    surface = win._measure.surface
+    assert len(surface.records) == 1  # moving frames only measures live
+    win.surface_panel.record_btn.click()
+    assert [(r.name, r.frame_index) for r in surface.records] == [("Sunspot 1", 0), ("Sunspot 1", 1)]
+    first, second = (r.values["area_msh"] for r in surface.records)
+    assert second == pytest.approx(first * 1.4**2, rel=0.15)
+    assert _last_line(win).startswith("[Sunspot 1]")
+    # A brand-new shape starts a new feature.
+    _spot_box(win, margin=80.0)
+    assert surface.records[-1].name == "Sunspot 2"
+
+
+def test_selecting_a_row_returns_to_its_frame_tool_and_settings(win):
+    _load(win, _two_frames())
+    win.area_tool_btn.setChecked(True)
+    win.surface_panel.set_threshold_mode("sunspot")
+    win.surface_panel.umbra_spin.setValue(0.5)
+    _spot_box(win)
+    win.frame_slider.setValue(1)
+    win.length_tool_btn.setChecked(True)
+    for x in (-200.0, 200.0):
+        win._measure.on_canvas_click(x, 0.0, "left")
+    win.surface_panel.finish_btn.click()
+    win.area_tool_btn.setChecked(True)
+    win.surface_panel.set_threshold_mode("none")
+    QApplication.processEvents()
+
+    win.surface_panel.table.selectRow(0)
+    QApplication.processEvents()
+    surface = win._measure.surface
+    assert win._current_frame_index == 0
+    assert win._measure.mode == "area"
+    assert win.surface_panel.threshold_settings().mode == "sunspot"
+    assert win.surface_panel.umbra_spin.value() == pytest.approx(0.5)
+    assert win.surface_panel.shape() == "rectangle"
+    assert surface.shapes["area"].points == surface.records[0].points
+    assert surface.last_result.umbra.on_disk_msh == pytest.approx(surface.records[0].values["umbra_msh"])
+
+    win.surface_panel.table.selectRow(1)
+    QApplication.processEvents()
+    assert win._measure.mode == "length"
+    assert win._current_frame_index == 1
+    assert win.length_tool_btn.isChecked()
+
+
+def test_rename_delete_and_clear_rows(win, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    _load(win, [DiskMap(_disk())])
+    win.length_tool_btn.setChecked(True)
+    surface = win._measure.surface
+    for start in (0.0, 300.0):
+        win._measure.on_canvas_click(start, 0.0, "left")
+        win._measure.on_canvas_click(start + 100.0, 0.0, "left")
+        win.surface_panel.finish_btn.click()
+    table = win.surface_panel.table
+    table.item(0, 0).setText("Filament A")
+    assert surface.records[0].name == "Filament A"
+    assert surface.records[0].line.startswith("[Filament A] Length")
+    table.item(1, 0).setText("   ")  # blank names are refused
+    assert table.item(1, 0).text() == "Length 2"
+
+    table.selectRow(0)
+    win.surface_panel.delete_row_btn.click()
+    assert [r.name for r in surface.records] == ["Length 2"]
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
+    win.surface_panel.clear_table_btn.click()
+    assert len(surface.records) == 1
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    win.surface_panel.clear_table_btn.click()
+    assert surface.records == []
+    assert table.rowCount() == 0
+    assert not win.surface_panel.export_btn.isEnabled()
+
+
+def test_export_csv_writes_every_row(win, tmp_path, monkeypatch):
+    import csv
+
+    from PySide6.QtWidgets import QFileDialog
+
+    from src.backend.solar.surface_records import CSV_NOTES
+
+    _load(win, [DiskMap(_disk())])
+    win.area_tool_btn.setChecked(True)
+    win.surface_panel.set_threshold_mode("sunspot")
+    _spot_box(win)
+    target = tmp_path / "spots"  # no extension: one is added
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(target), "CSV files (*.csv)"))
+    win.surface_panel.export_btn.click()
+    path = tmp_path / "spots.csv"
+    lines = path.read_text(encoding="utf-8").splitlines()[len(CSV_NOTES):]
+    rows = list(csv.DictReader(lines))
+    assert len(rows) == 1
+    assert rows[0]["name"] == "Sunspot 1"
+    assert rows[0]["threshold"] == "sunspot"
+    umbra, _ = _expected_spot()
+    assert float(rows[0]["umbra_msh"]) == pytest.approx(umbra.on_disk_msh, rel=1e-5)
+    assert "Exported 1" in win.statusBar().currentMessage()
+
+
+def test_clear_all_measurements_empties_the_table(win):
+    _load(win, [DiskMap(_disk())])
+    win.length_tool_btn.setChecked(True)
+    win._measure.on_canvas_click(0.0, 0.0, "left")
+    win._measure.on_canvas_click(100.0, 0.0, "left")
+    win.surface_panel.finish_btn.click()
+    win.clear_all_measurements()
+    assert win._measure.surface.records == []
+    assert win.surface_panel.table.rowCount() == 0
+
+
+# ------------------------------------------------------------------ projects
+def test_project_round_trip_restores_table_shapes_and_settings(win):
+    _load(win, _two_frames())
+    win.area_tool_btn.setChecked(True)
+    win.surface_panel.set_threshold_mode("sunspot")
+    win.surface_panel.penumbra_spin.setValue(0.85)
+    win.surface_panel.tint_check.setChecked(False)
+    _spot_box(win)
+    win.frame_slider.setValue(1)
+    win.surface_panel.record_btn.click()
+    win.surface_panel.table.item(0, 0).setText("AR 13664")
+    saved = [(r.name, r.frame_index, r.values["area_msh"]) for r in win._measure.surface.records]
+    meta = win._collect_session_meta()
+    assert len(meta["measurements"]["surface_records"]) == 2
+
+    win2 = SolarDataAnalysisWindow()
+    try:
+        win2._pending_session_restore = meta
+        win2._apply_loaded_frames(_two_frames(), paths=["a.fits", "b.fits"], metadata={})
+        QApplication.processEvents()
+        surface = win2._measure.surface
+        assert [(r.name, r.frame_index, r.values["area_msh"]) for r in surface.records] == saved
+        assert win2.surface_panel.table.rowCount() == 2
+        assert win2.surface_panel.table.item(0, 0).text() == "AR 13664"
+        assert win2.measurements_check.isChecked()
+        assert win2.measure_side_tabs.currentWidget() is win2.surface_panel
+        assert surface.shapes["area"].kind == "rectangle"
+        assert win2.surface_panel.threshold_settings().mode == "sunspot"
+        assert win2.surface_panel.penumbra_spin.value() == pytest.approx(0.85)
+        assert not win2.surface_panel.tint_enabled()
+        assert "2 surface measurement(s)" in win2.statusBar().currentMessage()
+        # New features keep counting after the restored names.
+        win2.area_tool_btn.setChecked(True)
+        _spot_box(win2, margin=90.0)
+        assert surface.records[-1].name == "Sunspot 2"
+    finally:
+        win2.close()
+
+
+def test_project_restore_drops_rows_on_missing_frames(win):
+    _load(win, _two_frames())
+    win.length_tool_btn.setChecked(True)
+    win._measure.on_canvas_click(0.0, 0.0, "left")
+    win._measure.on_canvas_click(100.0, 0.0, "left")
+    win.surface_panel.finish_btn.click()
+    meta = win._collect_session_meta()
+    meta["measurements"]["surface_records"][0]["frame_index"] = 7
+    meta["source"]["frame_times"] = []  # no time remap: indices are taken as saved
+
+    win2 = SolarDataAnalysisWindow()
+    try:
+        import src.ui.solar.solar_data_analysis_window as mod
+
+        warnings = []
+        orig = mod.QMessageBox.warning
+        mod.QMessageBox.warning = staticmethod(lambda *a, **k: warnings.append(a[2]))
+        try:
+            win2._pending_session_restore = meta
+            win2._apply_loaded_frames(_two_frames(), paths=["a.fits", "b.fits"], metadata={})
+            QApplication.processEvents()
+        finally:
+            mod.QMessageBox.warning = orig
+        assert win2._measure.surface.records == []
+        assert warnings and "1 measurement(s) were dropped" in warnings[0]
+    finally:
+        win2.close()

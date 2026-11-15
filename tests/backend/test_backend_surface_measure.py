@@ -17,6 +17,7 @@ from src.backend.solar.surface_measure import (
     DEFAULT_UMBRA_LEVEL,
     LIMB_WARNING_MU,
     SurfaceGeometry,
+    arcsec_from_stonyhurst,
     ellipse_mask,
     fit_quiet_sun_profile,
     geometry_from_map,
@@ -32,8 +33,10 @@ from src.backend.solar.surface_measure import (
     project_to_sphere,
     rectangle_mask,
     remove_small_clusters,
+    rotate_points,
     stonyhurst_from_arcsec,
     sunspot_masks,
+    synodic_rotation_deg,
     threshold_mask,
 )
 
@@ -603,3 +606,82 @@ def test_small_clusters_are_removed():
     assert int(remove_small_clusters(mask, 2).sum()) == 18
     assert np.array_equal(remove_small_clusters(mask, 1), mask)
     assert int(threshold_mask(mask.astype(float), above=0.5, min_cluster_px=3).sum()) == 16
+
+
+# ------------------------------------------------------------- solar rotation
+def test_synodic_rotation_matches_sunpy():
+    pytest.importorskip("sunpy")
+    import astropy.units as u
+    from sunpy.sun.models import differential_rotation
+
+    lats = np.array([-60.0, -20.0, 0.0, 15.0, 45.0, 75.0])
+    for seconds in (3600.0, 2.5 * 86400.0, -86400.0):
+        expected = differential_rotation(seconds * u.s, lats * u.deg, model="howard", frame_time="synodic")
+        expected = (expected.to_value(u.deg) + 180.0) % 360.0 - 180.0
+        np.testing.assert_allclose(synodic_rotation_deg(lats, seconds), expected, atol=1e-9)
+    # Howard's equator: 2.894 urad/s = 14.33 deg/day sidereal, 13.34 deg/day from Earth.
+    assert float(synodic_rotation_deg(0.0, 86400.0)) == pytest.approx(13.34, abs=0.01)
+
+
+def test_rotate_points_moves_disk_points_with_the_sun():
+    g = SurfaceGeometry(rsun_arcsec=RSUN, b0_deg=4.0)
+    lons = np.array([-30.0, 10.0])
+    lats = np.array([20.0, -35.0])
+    tx, ty = _hgs_to_arcsec(lons, lats, g)
+    seconds = 86400.0
+    out = rotate_points(np.column_stack((tx, ty)), g, g, seconds)
+    assert out.rotated == (True, True)
+    assert not out.any_hidden
+    lon2, lat2 = stonyhurst_from_arcsec(np.array(out.points)[:, 0], np.array(out.points)[:, 1], g)
+    np.testing.assert_allclose(lat2, lats, atol=1e-6)
+    np.testing.assert_allclose(lon2 - lons, synodic_rotation_deg(lats, seconds), atol=1e-6)
+
+
+def test_rotate_points_keeps_off_limb_and_flags_far_side():
+    g = SurfaceGeometry(rsun_arcsec=RSUN)
+    near_west_limb = _hgs_to_arcsec(np.array([85.0]), np.array([0.0]), g)
+    pts = [(1200.0, 0.0), (float(near_west_limb[0][0]), float(near_west_limb[1][0]))]
+    out = rotate_points(pts, g, g, 2 * 86400.0)  # ~26 deg further: behind the limb
+    assert out.rotated == (False, False)
+    assert out.hidden == (False, True)
+    assert out.points[0] == (1200.0, 0.0)
+    assert out.points[1] == pts[1]  # kept where it was, flagged
+
+
+def test_rotate_points_handles_a_different_observer():
+    source = SurfaceGeometry(rsun_arcsec=RSUN, b0_deg=0.0)
+    target = SurfaceGeometry(rsun_arcsec=RSUN * 1.02, b0_deg=6.0, observer_lon_deg=-10.0)
+    tx, ty = _hgs_to_arcsec(np.array([5.0]), np.array([10.0]), source)
+    out = rotate_points([(float(tx[0]), float(ty[0]))], source, target, 0.0)
+    lon, lat = stonyhurst_from_arcsec(out.points[0][0], out.points[0][1], target)
+    assert float(lon) == pytest.approx(5.0, abs=1e-6)
+    assert float(lat) == pytest.approx(10.0, abs=1e-6)
+    tx2, ty2, visible = arcsec_from_stonyhurst(5.0, 10.0, target)
+    assert bool(visible)
+    assert float(tx2) == pytest.approx(out.points[0][0])
+
+
+def test_rotation_agrees_with_sunpy_rotated_frame():
+    pytest.importorskip("sunpy")
+    import astropy.units as u
+    from astropy.coordinates import SkyCoord
+    from sunpy.coordinates import RotatedSunFrame, frames
+
+    t0 = "2024-05-10T00:00:00"
+    t1 = "2024-05-11T00:00:00"
+    observer0 = SkyCoord(0 * u.deg, 0 * u.deg, 1 * u.AU, frame=frames.HeliographicStonyhurst, obstime=t0)
+    observer1 = SkyCoord(0 * u.deg, 0 * u.deg, 1 * u.AU, frame=frames.HeliographicStonyhurst, obstime=t1)
+    rsun_arcsec = math.degrees(math.asin(RSUN_KM / 1.495978707e8)) * 3600.0
+    g = SurfaceGeometry(rsun_arcsec=rsun_arcsec, rsun_km=RSUN_KM)
+    start = SkyCoord(
+        -200 * u.arcsec, 300 * u.arcsec,
+        frame=frames.Helioprojective(observer=observer0, obstime=t0, rsun=RSUN_KM * u.km),
+    )
+    rotated = SkyCoord(RotatedSunFrame(base=start, rotated_time=t1)).transform_to(
+        frames.Helioprojective(observer=observer1, obstime=t1, rsun=RSUN_KM * u.km)
+    )
+    out = rotate_points([(-200.0, 300.0)], g, g, 86400.0)
+    # SunPy follows Earth's true orbital speed rather than its mean, so the
+    # two agree to a few arcsec over a day.
+    assert out.points[0][0] == pytest.approx(rotated.Tx.to_value(u.arcsec), abs=3.0)
+    assert out.points[0][1] == pytest.approx(rotated.Ty.to_value(u.arcsec), abs=3.0)

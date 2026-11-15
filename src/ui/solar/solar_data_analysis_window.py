@@ -16,7 +16,7 @@ import re
 import shutil
 import threading
 import traceback
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 from matplotlib import colormaps as mpl_colormaps
@@ -119,6 +119,12 @@ from src.backend.session.solar_session import (
     serialize_picks,
     deserialize_pfss_state,
     serialize_pfss_state,
+)
+from src.backend.solar.surface_records import (
+    deserialize_records,
+    deserialize_shapes,
+    serialize_records,
+    serialize_shapes,
 )
 from src.backend.solar.solar_grid import (
     FRAME_DISPLAY_NAMES as SOLAR_FRAME_DISPLAY_NAMES,
@@ -4169,6 +4175,11 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self.surface_panel.finish_btn.clicked.connect(surface.finish)
         self.surface_panel.clear_shape_btn.clicked.connect(surface.clear_shape)
         self.surface_panel.record_btn.clicked.connect(surface.record)
+        self.surface_panel.delete_row_btn.clicked.connect(lambda: surface.delete_record())
+        self.surface_panel.export_btn.clicked.connect(lambda: surface.export_csv())
+        self.surface_panel.clear_table_btn.clicked.connect(self._confirm_clear_surface_table)
+        self.surface_panel.recordSelected.connect(surface.select_record)
+        self.surface_panel.recordRenamed.connect(surface.rename_record)
         self.surface_panel.shapeChanged.connect(lambda _shape: surface.shape_changed())
         self.surface_panel.thresholdChanged.connect(surface.threshold_changed)
         self.stats_tool_btn.clicked.connect(self._report_region_stats)
@@ -6526,6 +6537,20 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             self.circle_tool_btn,
         )
 
+    def _confirm_clear_surface_table(self) -> None:
+        surface = self._measure.surface
+        if not surface.records:
+            return
+        reply = QMessageBox.question(
+            self,
+            "Clear Table",
+            f"Remove all {len(surface.records)} recorded surface measurement(s)?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            surface.clear_records()
+
     def _sync_tracking_panel_visibility(self) -> None:
         """Bring forward the side tab of the active tool.
 
@@ -8602,8 +8627,53 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
                     if locked_center is not None
                     else None
                 ),
+                # Length / area tools: the recorded table, the shapes still on
+                # the tools, and the panel settings that measured them.
+                "surface_records": serialize_records(self._measure.surface.records)
+                if hasattr(self, "_measure")
+                else [],
+                "surface_shapes": serialize_shapes(self._measure.surface.shapes)
+                if hasattr(self, "_measure")
+                else {},
+                "surface_settings": self._surface_panel_settings(),
             },
         }
+
+    def _surface_panel_settings(self) -> dict[str, Any]:
+        panel = self.surface_panel
+        return {
+            "shape": panel.shape(),
+            "threshold": asdict(panel.threshold_settings()) | {
+                "mode": str(panel.threshold_combo.currentData() or "none")
+            },
+            "tint": bool(panel.tint_enabled()),
+        }
+
+    def _restore_surface_measurements(
+        self, measurements: Mapping[str, Any], remap: dict[int, int] | None, n: int
+    ) -> tuple[int, int]:
+        """Put the length/area table, shapes and settings back; returns ``(kept, dropped)``."""
+        settings = measurements.get("surface_settings")
+        if isinstance(settings, Mapping):
+            panel = self.surface_panel
+            if settings.get("shape"):
+                panel.set_shape_silently(str(settings["shape"]))
+            if isinstance(settings.get("threshold"), Mapping):
+                panel.apply_threshold_settings(dict(settings["threshold"]))
+            panel.tint_check.setChecked(bool(settings.get("tint", True)))
+        kept: list[Any] = []
+        dropped = 0
+        for record in deserialize_records(measurements.get("surface_records")):
+            new_index = record.frame_index if remap is None else remap.get(record.frame_index)
+            if new_index is None or not 0 <= new_index < n:
+                dropped += 1
+                continue
+            record.frame_index = int(new_index)
+            kept.append(record)
+        surface = self._measure.surface
+        surface.restore_records(kept)
+        surface.restore_shapes(deserialize_shapes(measurements.get("surface_shapes")))
+        return len(kept), dropped
 
     def project_has_content(self) -> bool:
         """Loaded frames are what makes this window part of a project."""
@@ -8969,8 +9039,12 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         circle_points, _dropped = self._remap_indexed(
             deserialize_circle_points(measurements.get("circle_points")), remap, n
         )
+        surface_kept = 0
+        if hasattr(self, "_measure"):
+            surface_kept, dropped = self._restore_surface_measurements(measurements, remap, n)
+            unmatched += dropped
         self._last_restore_unmatched = unmatched
-        if (picks or circles) and not self.measurements_check.isChecked():
+        if (picks or circles or surface_kept) and not self.measurements_check.isChecked():
             # Restored measurements need the tracking panel available to be seen.
             self.measurements_check.setChecked(True)
         if hasattr(self, "_measure"):
@@ -8988,6 +9062,8 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
                 self.tracking_panel.lock_center_check.setChecked(locked)
                 self.tracking_panel.lock_center_check.blockSignals(False)
         self._sync_tracking_panel_visibility()
+        if surface_kept and not (picks or circles):
+            self.measure_side_tabs.setCurrentWidget(self.surface_panel)
 
         # Land on the saved frame and render with the restored display state.
         target = int(view.get("current_frame_index", 0) or 0)
@@ -9007,6 +9083,8 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         restored = f"{len(picks)} CME pick(s)"
         if circles:
             restored += f", {len(circles)} circle fit(s)"
+        if surface_kept:
+            restored += f", {surface_kept} surface measurement(s)"
         message = f"Solar analysis restored: {n} frame(s), {restored}."
         if unmatched:
             message += (

@@ -3823,9 +3823,12 @@ def test_reset_frames_also_returns_to_the_downloaded_level(monkeypatch):
     win.close()
 
 
-def test_reset_all_clears_the_processing_state(monkeypatch):
+def test_reset_all_clears_the_processing_state(monkeypatch, tmp_path):
     _app()
     win = SolarDataAnalysisWindow()
+    # Reset All empties the cache folder; never let it reach the real one
+    # (conftest also isolates it, but this test must be safe on its own).
+    win.cache_dir = tmp_path
     _load_frames(
         win, monkeypatch, [FakeWorldMap(np.ones((8, 8))), FakeWorldMap(np.ones((8, 8)))]
     )

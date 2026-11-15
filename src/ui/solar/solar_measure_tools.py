@@ -1900,6 +1900,15 @@ class MeasurementController(QObject):
         except Exception:
             pass
 
+    def _notify_modified(self) -> None:
+        """Tell the project the analysis changed (recorded measurements)."""
+        notify = getattr(self.window, "_notify_project_modified", None)
+        if notify is not None:
+            try:
+                notify()
+            except Exception:
+                pass
+
     def _append_analysis(self, text: str) -> None:
         panel = getattr(self.window, "analysis_text", None)
         if panel is None:
