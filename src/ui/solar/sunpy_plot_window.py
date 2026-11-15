@@ -17,7 +17,7 @@ from typing import Any, Sequence
 import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.exporters import SVGExporter
-from PySide6.QtCore import QTimer, Qt, QRectF, Signal
+from PySide6.QtCore import QSize, QTimer, Qt, QRectF, Signal
 from PySide6.QtGui import QAction, QGuiApplication, QPainter, QPalette, QPdfWriter
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -68,6 +68,14 @@ def _safe_text(value: Any) -> str:
 # macOS fullscreen transition), where it stops the reflow from re-arming a
 # zero-delay timer indefinitely and freezing the window.
 _MAX_SQUARE_REFLOW_PASSES = 8
+
+# Smallest size the canvas asks its parent layout for. The squared map is pinned
+# with setFixedSize, and a widget's layout reports its children's fixed sizes
+# as its own minimum, so without this floor the canvas's minimum would always be
+# the square it was last given. That ratchets: maximise the window, the square
+# grows, and the grown square becomes a minimum that the splitters, the window
+# and a later un-maximise can no longer go below.
+_CANVAS_MIN_SIZE = QSize(160, 160)
 
 
 def _opengl_capable() -> bool:
@@ -827,6 +835,16 @@ class SunPyPlotCanvas(QWidget):
         app = QGuiApplication.instance()
         palette = app.palette() if app is not None else self.palette()
         return palette.color(QPalette.Window).lightness() < 128
+
+    def minimumSizeHint(self) -> QSize:
+        # The map follows the canvas, never the other way round. Reporting the
+        # map plot's fixed size here (the QWidget default) would make every
+        # square the canvas was ever given a floor for the whole window: after a
+        # maximise the splitter handles stop moving, the window cannot shrink
+        # back, and with the window held at its minimum the progress panel and
+        # status bar sit below the screen edge, so running work looks frozen.
+        # The map is re-squared to whatever space it is given in resizeEvent.
+        return QSize(_CANVAS_MIN_SIZE)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

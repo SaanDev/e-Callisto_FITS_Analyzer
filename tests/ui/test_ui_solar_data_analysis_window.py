@@ -1204,6 +1204,48 @@ def test_solar_data_window_loads_local_fake_maps(monkeypatch):
     win.close()
 
 
+def test_solar_data_window_growing_never_raises_its_minimum_size():
+    """Maximising must not turn the grown square map into a layout floor.
+
+    The map is squared with setFixedSize; if the canvas reported that as its
+    minimum, a maximise would pin the splitters (details drawer, tracking
+    panel), stop the window shrinking back, and push the progress panel and
+    status bar below the screen edge so running work looked frozen.
+    """
+    _app()
+    win = SolarDataAnalysisWindow()
+    win.show()
+    win.resize(1350, 800)
+    win.pyqt_canvas.plot_map_data(np.random.default_rng(0).random((64, 64)), "test")
+    for _ in range(5):
+        QApplication.processEvents()
+    small_min = win.minimumSizeHint()
+
+    win.resize(1900, 1250)
+    for _ in range(5):
+        QApplication.processEvents()
+    assert win.pyqt_canvas.map_plot.height() > 300
+    assert win.minimumSizeHint().height() <= small_min.height()
+    assert win.minimumSizeHint().width() <= small_min.width()
+
+    # The details drawer can still be dragged tall, and the map follows.
+    splitter = win.content_splitter
+    total = sum(splitter.sizes())
+    splitter.setSizes([total - 400, 400])
+    for _ in range(5):
+        QApplication.processEvents()
+    assert splitter.sizes()[1] >= 360
+    assert win.pyqt_canvas.map_plot.height() <= splitter.sizes()[0]
+
+    # And the window shrinks back to where it was.
+    win.resize(1350, 800)
+    for _ in range(5):
+        QApplication.processEvents()
+    assert win.size().width() == 1350
+    assert win.size().height() == 800
+    win.close()
+
+
 def test_solar_data_window_matplotlib_renderer_is_light_and_square(monkeypatch):
     _app()
 

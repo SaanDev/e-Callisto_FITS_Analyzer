@@ -251,7 +251,9 @@ class TrackingPanel(QWidget):
         self.plot.showGrid(x=True, y=True, alpha=0.25)
         self.plot.setMenuEnabled(False)
         self.plot.hideButtons()
-        self.plot.setMinimumHeight(160)
+        # Kept small so the details drawer under the canvas can be dragged tall;
+        # the panel min height is what bounds how far that divider moves.
+        self.plot.setMinimumHeight(110)
         self._scatter = pg.ScatterPlotItem(
             symbol="o", size=8, pen=pg.mkPen("#e8a33d"), brush=pg.mkBrush("#e8a33d")
         )
