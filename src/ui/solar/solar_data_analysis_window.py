@@ -4251,6 +4251,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self.surface_panel.record_btn.clicked.connect(surface.record)
         self.surface_panel.delete_row_action.triggered.connect(lambda: surface.delete_record())
         self.surface_panel.export_action.triggered.connect(lambda: surface.export_csv())
+        self.surface_panel.export_json_action.triggered.connect(lambda: surface.export_json())
         self.surface_panel.clear_table_action.triggered.connect(self._confirm_clear_surface_table)
         self.surface_panel.recordSelected.connect(surface.select_record)
         self.surface_panel.recordRenamed.connect(surface.rename_record)
@@ -4258,6 +4259,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self.surface_panel.shapeChanged.connect(lambda _shape: surface.shape_changed())
         self.surface_panel.thresholdChanged.connect(surface.threshold_changed)
         self.surface_panel.curvatureChanged.connect(surface.curvature_changed)
+        self.surface_panel.areaSettingsChanged.connect(surface.area_settings_changed)
         self.stats_tool_btn.clicked.connect(self._report_region_stats)
         self.height_time_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("height_time", on))
         self.circle_tool_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("circle_fit", on))
@@ -5837,6 +5839,11 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         # them north-up before anything else sees them: levels, derotation,
         # crops, region detection, labels and measurements all then work in
         # true solar coordinates.
+        # Check each frame's header against its pixels (4096² / 2048² / 1024²,
+        # plate scale and limb) before anything is measured; a header left at
+        # full resolution on binned pixels is corrected here.
+        frames, pixel_note = self._pixel_checked_frames(frames)
+        dropped_note += pixel_note
         self._stored_frames = list(frames)
         frames, turned = self._oriented_frames(frames)
         if turned:
@@ -6620,6 +6627,32 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             self.height_time_btn,
             self.circle_tool_btn,
         )
+
+    def _pixel_checked_frames(self, frames: list[Any]) -> tuple[list[Any], str]:
+        """Run the pixel-geometry check on every frame; returns ``(frames, note for the load summary)``."""
+        from src.backend.solar.image_check import apply_check, check_frame
+
+        out: list[Any] = []
+        checks = []
+        for frame in frames:
+            try:
+                check = check_frame(frame)
+                out.append(apply_check(frame, check))
+                checks.append(check)
+            except Exception:
+                out.append(frame)
+        if not checks:
+            return out, ""
+        note = f"\nPixel check: {checks[0].summary()}"
+        fixed = sum(1 for c in checks if c.binning_fix)
+        errors = [c for c in checks if c.error]
+        if len(checks) > 1:
+            note += f" (first of {len(checks)} frames)"
+        if fixed:
+            note += f"\nCorrected the header of {fixed} frame(s): pixels binned but CDELT/CRPIX left at full resolution."
+        if errors:
+            note += f"\n⚠ {len(errors)} frame(s) fail the pixel check and cannot be measured: {errors[0].error}."
+        return out, note
 
     def _oriented_frames(self, frames: list[Any]) -> tuple[list[Any], int]:
         """``frames`` turned north-up when North Up is on; returns ``(frames, how many turned)``."""
@@ -8818,6 +8851,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             },
             "tint": bool(panel.tint_enabled()),
             "corrected": bool(panel.corrected()),
+            "area_method": asdict(panel.area_settings()),
         }
 
     def _restore_surface_measurements(
@@ -8833,6 +8867,8 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
                 panel.apply_threshold_settings(dict(settings["threshold"]))
             panel.tint_check.setChecked(bool(settings.get("tint", True)))
             panel.set_corrected(bool(settings.get("corrected", True)))
+            if isinstance(settings.get("area_method"), Mapping):
+                panel.apply_area_settings(dict(settings["area_method"]))
         kept: list[Any] = []
         dropped = 0
         for record in deserialize_records(measurements.get("surface_records")):

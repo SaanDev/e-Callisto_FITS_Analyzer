@@ -16,8 +16,10 @@ from src.backend.solar.surface_measure import (
     DEFAULT_PENUMBRA_LEVEL,
     DEFAULT_UMBRA_LEVEL,
     LIMB_WARNING_MU,
+    MAX_BACKGROUND_SPREAD,
     SurfaceGeometry,
     arcsec_from_stonyhurst,
+    background_spread,
     ellipse_mask,
     fit_quiet_sun_profile,
     geometry_from_map,
@@ -199,7 +201,8 @@ def test_geometry_from_map_reads_header():
         "crval1": 0.0,
         "crval2": 0.0,
         "date-obs": "2024-05-10T12:00:00",
-        "rsun_obs": 950.0,
+        # A consistent header: RSUN_OBS = asin(RSUN_REF / DSUN_OBS).
+        "rsun_obs": math.degrees(math.asin(696_000_000.0 / 1.473e11)) * 3600.0,
         "rsun_ref": 696_000_000.0,
         "hgln_obs": 0.0,
         "hglt_obs": -3.2,
@@ -805,7 +808,11 @@ def test_geometry_for_frame_matches_sunpy_on_a_rotated_map(tmp_path):
     g = geometry_for_frame(frame, transform)
     assert g.rotation_deg == pytest.approx(179.93)
     assert g.b0_deg == pytest.approx(-3.2)
-    assert g.rsun_arcsec == pytest.approx(949.9)
+    # The limb follows from R and D; RSUN_OBS (949.9") is a cross-check.
+    assert g.rsun_arcsec == pytest.approx(math.degrees(math.asin(696e6 / 1.5115e11)) * 3600.0)
+    assert g.rsun_arcsec == pytest.approx(949.9, abs=0.2)
+    assert g.dsun_km == pytest.approx(1.5115e8)
+    assert g.metadata_valid and g.metadata_notes == ()
     cols = np.array([60.0, 128.0, 190.0])
     rows = np.array([90.0, 140.0, 170.0])
     world = frame.pixel_to_world(cols * u.pix, rows * u.pix)
@@ -899,3 +906,59 @@ def test_quiet_sun_noise_adds_no_sunspot_area():
     clean = sunspot_masks(norm, inner)
     assert mask_surface_area(noisy.spot, g).on_disk_msh > 0.0  # noise alone dips below 0.9
     assert int(clean.spot.sum()) == 0
+
+
+
+# ------------------------------------------------ header geometry checks (plan section 3)
+def test_inconsistent_radius_metadata_is_refused(tmp_path):
+    frame = _write_map(tmp_path, "bad.fits", dict(
+        _BASE_HEADER, TELESCOP="SDO/HMI", INSTRUME="HMI_FRONT2", WAVELNTH=6173.0,
+        DSUN_OBS=1.473e11, RSUN_OBS=950.0,  # asin(R/D) is 974.6": 2.6% apart
+    ))
+    g = geometry_for_frame(frame, {})
+    assert not g.metadata_valid
+    assert any("inconsistent metadata" in note for note in g.metadata_notes)
+
+
+def test_missing_header_values_are_recorded_as_fallbacks():
+    plain = SimpleNamespace(meta={"RSUN_OBS": 960.0})
+    g = geometry_for_frame(plain, {})
+    assert g.metadata_valid
+    assert g.rsun_km == RSUN_KM
+    assert g.dsun_km is None
+    assert any("RSUN_REF missing" in note for note in g.metadata_notes)
+    assert any("DSUN_OBS missing" in note for note in g.metadata_notes)
+    flagged = geometry_for_frame(SimpleNamespace(meta={"RSUN_OBS": 960.0, "QUALITY": 1024}), {})
+    assert flagged.quality_flag == 1024
+    assert any("QUALITY" in note for note in flagged.metadata_notes)
+
+
+def test_background_spread_is_small_for_a_radially_symmetric_disk():
+    g, image, _, _, _ = _limb_darkened_disk(800, 2.6)  # with a sunspot
+    profile = fit_quiet_sun_profile(image, g)
+    spread = background_spread(image, g, profile)
+    assert spread is not None and spread < 0.01 < MAX_BACKGROUND_SPREAD
+
+
+def test_background_spread_flags_a_non_radial_background():
+    """AIA 4500-like: a brightness gradient across the disk that I_qs(mu) cannot remove.
+
+    On real data HMI continuum measured 0.011-0.017 and AIA 4500 0.28-0.29;
+    a +-15% tilt is what made 35% of the 4500 disk read as penumbra.
+    """
+    g, image, _, _, _ = _limb_darkened_disk(800, 2.6, spot=False)
+    tx, ty = g.pixel_to_arcsec(np.arange(800)[None, :], np.arange(800)[:, None])
+    tilted = image * (1.0 + 0.15 * (tx + ty) / (2 * RSUN))
+    profile = fit_quiet_sun_profile(tilted, g)
+    spread = background_spread(tilted, g, profile)
+    assert spread is not None and spread > MAX_BACKGROUND_SPREAD
+    # Sampling on a stride (large frames) gives the same answer.
+    assert background_spread(tilted, g, profile, max_side=200) == pytest.approx(spread, abs=0.02)
+
+
+def test_background_spread_needs_the_disk():
+    g = SurfaceGeometry(rsun_arcsec=RSUN, x_ref_pix=-5000.0, y_ref_pix=0.0)
+    _, image, _, _, _ = _limb_darkened_disk(400, 5.2, spot=False)
+    g_ok, img_ok, _, _, _ = _limb_darkened_disk(400, 5.2, spot=False)
+    profile = fit_quiet_sun_profile(img_ok, g_ok)
+    assert background_spread(image, g, profile) is None

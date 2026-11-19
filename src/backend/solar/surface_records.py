@@ -187,8 +187,10 @@ def area_values(result: Any, geometry: Any | None = None) -> dict[str, Any]:
 
     def seen(area: Any) -> float | None:
         # The on-disk area as it appears on the image, in MSH, with no
-        # correction for the curvature of the Sun.
-        return _msh_from_km2(area.on_disk_plane_of_sky_km2, rsun_km)
+        # correction for the curvature of the Sun: the line-of-sight projected
+        # area (plan section 4.4), else the legacy fixed-distance one.
+        projected = getattr(area, "projected_km2", None)
+        return _msh_from_km2(projected if projected is not None else area.on_disk_plane_of_sky_km2, rsun_km)
 
     values = {
         "area_msh": _num(focus.on_disk_msh),
@@ -215,7 +217,26 @@ def area_values(result: Any, geometry: Any | None = None) -> dict[str, Any]:
         "mean_intensity": None if getattr(result, "quicklook", False) else _num(focus.mean_intensity),
         "intensity_unit": str(getattr(result, "intensity_unit", "") or ""),
         "near_limb": bool(focus.near_limb),
+        # Quality and method (plan section 8).
+        "status": str(getattr(result, "status", getattr(focus, "status", "ok"))),
+        "selected_px": int(getattr(focus, "selected_px", focus.n_pixels)),
+        "valid_px": _num(getattr(focus, "valid_px", None)),
+        "off_disc_px": _num(getattr(focus, "off_disc_px", None)),
+        "near_limb_px": _num(getattr(focus, "near_limb_px", None)),
+        "projected_mm2": _num((getattr(focus, "projected_km2", None) or 0.0) / 1e6) if getattr(focus, "projected_km2", None) is not None else None,
+        "correction_factor": _num(getattr(focus, "correction_factor", None)),
     }
+    settings = getattr(result, "area_settings", None)
+    if settings is not None:
+        values["method"] = str(getattr(settings, "method", "finite_distance"))
+        values["mu_cutoff"] = _num(getattr(settings, "mu_min", None))
+        values["subsamples"] = int(getattr(settings, "subsamples", 1))
+    sensitivity = getattr(result, "sensitivity", None)
+    if sensitivity:
+        values["sensitivity_low_msh"] = _num(sensitivity[0])
+        values["sensitivity_high_msh"] = _num(sensitivity[1])
+        values["sensitivity_method"] = str(sensitivity[2])
+    values["background_spread"] = _num(getattr(result, "background_spread", None))
     umbra = getattr(result, "umbra", None)
     penumbra = getattr(result, "penumbra", None)
     if umbra is not None:
@@ -233,10 +254,18 @@ def area_values(result: Any, geometry: Any | None = None) -> dict[str, Any]:
 def _geometry_values(geometry: Any | None) -> dict[str, Any]:
     if geometry is None:
         return {}
+    notes = getattr(geometry, "metadata_notes", ()) or ()
     return {
         "rsun_arcsec": _num(getattr(geometry, "rsun_arcsec", None)),
         "b0_deg": _num(getattr(geometry, "b0_deg", None)),
         "observer_lon_deg": _num(getattr(geometry, "observer_lon_deg", None)),
+        "rsun_km": _num(getattr(geometry, "rsun_km", None)),
+        "dsun_km": _num(getattr(geometry, "dsun_km", None)),
+        "rsun_obs_header_arcsec": _num(getattr(geometry, "rsun_obs_header_arcsec", None)),
+        "rotation_deg": _num(getattr(geometry, "rotation_deg", None)),
+        "pixel_check": getattr(geometry, "image_check", None),
+        "quality_flag": getattr(geometry, "quality_flag", None),
+        "metadata_notes": "; ".join(str(n) for n in notes),
     }
 
 
@@ -285,9 +314,31 @@ CSV_COLUMNS = (
     "near_limb",
     "mean_intensity",
     "intensity_unit",
+    "status",
+    "selected_px",
+    "valid_px",
+    "off_disc_px",
+    "near_limb_px",
+    "mu_cutoff",
+    "method",
+    "subsamples",
+    "projected_mm2",
+    "correction_factor",
+    "sensitivity_low_msh",
+    "sensitivity_high_msh",
+    "sensitivity_method",
+    "background_spread",
     "rsun_arcsec",
+    "rsun_obs_header_arcsec",
+    "rsun_km",
+    "dsun_km",
     "b0_deg",
     "observer_lon_deg",
+    "rotation_deg",
+    "quality_flag",
+    "metadata_notes",
+    "pixel_check",
+    "source_file",
     "vertices_arcsec",
 )
 
@@ -300,6 +351,10 @@ CSV_NOTES = (
     "# area_* = thresholded pixels when a threshold was used, else the whole shape (region_*).",
     "# *_as_seen_msh = the same area as it appears on the image, NOT corrected for curvature, in MSH.",
     "# frame is 1-based; vertices_arcsec are helioprojective (Tx Ty) pairs separated by ';'.",
+    "# status: ok / partial (pixels off the disc or below mu_cutoff excluded; area of the valid part) / invalid.",
+    "# projected_mm2: sum of line-of-sight projected elements d^2 dOmega; correction_factor = surface / projected.",
+    "# background_spread: p5-p95 range of the limb-darkening-corrected disk background (HMI ~0.02); above 0.05",
+    "#   the quiet Sun is not radially symmetric and threshold areas are unreliable.",
 )
 
 
@@ -344,6 +399,28 @@ def write_csv(path: str, records: Iterable[SurfaceRecord]) -> int:
         writer = csv.DictWriter(handle, fieldnames=list(CSV_COLUMNS))
         writer.writeheader()
         writer.writerows(rows)
+    return len(rows)
+
+
+def write_json(path: str, records: Iterable[SurfaceRecord], *, provenance: Mapping[str, Any] | None = None) -> int:
+    """Full provenance export (plan section 8): every record with all its values."""
+    import json
+
+    rows = serialize_records(records)
+    document = {
+        "format": "e-callisto-solar-surface-measurements",
+        "version": 1,
+        "provenance": dict(provenance or {}),
+        "units": {
+            "area_msh": "millionths of the solar hemisphere (2 pi R^2), corrected for foreshortening",
+            "area_mm2": "Mm^2 on the photosphere",
+            "projected_mm2": "Mm^2, sum of line-of-sight projected elements d^2 dOmega",
+            "length_total_mm": "Mm along the surface",
+        },
+        "measurements": rows,
+    }
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(document, handle, indent=2, allow_nan=False)
     return len(rows)
 
 

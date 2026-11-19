@@ -1027,7 +1027,9 @@ def test_tab_shows_only_what_the_active_tool_uses(win):
 def test_table_actions_are_in_the_right_click_menu_too(win):
     panel = win.surface_panel
     assert panel.table.contextMenuPolicy() == Qt.ActionsContextMenu
-    assert panel.table.actions() == [panel.export_action, panel.delete_row_action, panel.clear_table_action]
+    assert panel.table.actions() == [
+        panel.export_action, panel.export_json_action, panel.delete_row_action, panel.clear_table_action,
+    ]
 
 
 def test_quicklook_tooltip_is_restored_after_fits_frames(win):
@@ -1262,7 +1264,8 @@ def test_values_control_switches_between_corrected_and_as_seen(win):
     seen_cell = panel.table.item(surface.active, 3).text()
     assert seen_cell == record.headline_for(corrected=False) != corrected_cell
     assert "as seen" in panel.result_text()
-    assert "not corrected for curvature" in panel.result_text()
+    assert "(corrected " in panel.result_text()
+    assert "not corrected for curvature" in record.summary or "not corrected for curvature" in surface._format(surface.last_result)
     assert "as seen" in panel.plot.getPlotItem().getAxis("left").labelText
     _, ys = panel._series_main.getData()
     assert list(ys) == pytest.approx([r.value("area_msh", corrected=False) for r in surface.records if r.name == record.name])
@@ -1306,3 +1309,283 @@ def test_toolbar_north_up_follows_the_display_option(win, tmp_path, monkeypatch)
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
     win.north_up_bar_check.setChecked(False)
     assert win.north_up_check.isChecked() and win.north_up_bar_check.isChecked()
+
+
+# ------------------------------------------- HMI area plan (sections 5-8)
+def test_area_method_controls_default_to_the_plan(win):
+    _load(win, [DiskMap(_disk())])
+    panel = win.surface_panel
+    win.measure_side_tabs.setCurrentWidget(panel)
+    assert not panel.area_method_group.isVisibleTo(panel)
+    win.area_tool_btn.setChecked(True)
+    assert panel.area_method_group.isVisibleTo(panel)
+    settings = panel.area_settings()
+    assert (settings.method, settings.mu_min, settings.subsamples) == ("finite_distance", pytest.approx(0.30), 1)
+    assert panel.threshold_combo.itemText(0).startswith("Selected region")
+
+
+def test_near_limb_pixels_are_excluded_tinted_and_reported_partial(win):
+    _load(win, [DiskMap(_disk())])
+    win.area_tool_btn.setChecked(True)
+    win.surface_panel.set_shape("rectangle")
+    surface = win._measure.surface
+    surface.on_drag("start", 700.0, -100.0)
+    surface.on_drag("finish", 950.0, 100.0)  # runs to mu ~0.2
+    result = surface.last_result
+    assert result.status == "partial"
+    assert result.region.near_limb_px > 0
+    assert result.region.min_mu >= 0.30
+    report = win.surface_panel.result_text()
+    assert report.startswith("● PARTIAL:")
+    assert "below μ 0.30" in report and "quality PARTIAL" in report
+    assert "Method: Finite-distance WCS integration, pixel centres" in report
+    # Measured and excluded pixels get distinct tints.
+    colors = [color for _mask, color in result.layers]
+    from src.ui.solar.solar_surface_tools import EXCLUDED_COLOR, REGION_COLOR
+
+    assert colors == [REGION_COLOR, EXCLUDED_COLOR]
+    assert result.layers[1][0].any()
+    # Lowering the cutoff brings them back in.
+    win.surface_panel.cutoff_spin.setValue(0.1)
+    assert surface.last_result.region.on_disk_msh > result.region.on_disk_msh
+    assert surface.last_result.region.near_limb_px < result.region.near_limb_px
+    assert win.surface_panel.table.item(surface.active, 3).text().endswith("⚠")
+
+
+def test_off_disc_selection_is_invalid_not_zero(win):
+    _load(win, [DiskMap(_disk())])
+    win.area_tool_btn.setChecked(True)
+    win.surface_panel.set_shape("rectangle")
+    surface = win._measure.surface
+    surface.on_drag("start", 1000.0, 300.0)
+    surface.on_drag("finish", 1100.0, 400.0)  # entirely beyond the limb
+    assert surface.last_result.status == "invalid"
+    assert "no valid area" in win.surface_panel.result_text()
+    assert win.surface_panel.table.item(surface.active, 3).text() == "invalid"
+    assert surface.records[surface.active].values["status"] == "invalid"
+
+
+def test_spotless_region_is_a_valid_zero(win):
+    _load(win, [DiskMap(_disk())])
+    win.area_tool_btn.setChecked(True)
+    win.surface_panel.set_threshold_mode("sunspot")
+    win.surface_panel.set_shape("rectangle")
+    surface = win._measure.surface
+    surface.on_drag("start", -400.0, -300.0)
+    surface.on_drag("finish", -200.0, -100.0)  # quiet Sun, no spot
+    result = surface.last_result
+    assert result.status == "ok"
+    assert "none detected: 0 MSH (valid)" in win.surface_panel.result_text()
+    assert "no sunspot detected" in _last_line(win)
+
+
+def test_orthographic_comparison_and_subpixel_refinement(win):
+    _load(win, [DiskMap(_disk())])
+    win.area_tool_btn.setChecked(True)
+    win.surface_panel.set_shape("ellipse")
+    surface = win._measure.surface
+    surface.on_drag("start", -52.0, -27.0)
+    surface.on_drag("finish", 52.0, 27.0)
+    finite = surface.last_result.region.on_disk_msh
+    win.surface_panel.geometry_combo.setCurrentIndex(win.surface_panel.geometry_combo.findData("orthographic"))
+    ortho = surface.last_result
+    assert ortho.area_settings.method == "orthographic"
+    assert "Orthographic approximation (comparison)" in win.surface_panel.result_text()
+    # At disc centre parallel rays overestimate by 1/(1 - R/D)^2, about 0.9%.
+    assert ortho.region.on_disk_msh / finite == pytest.approx(1.0095, abs=0.002)
+    win.surface_panel.geometry_combo.setCurrentIndex(0)
+    win.surface_panel.boundary_combo.setCurrentIndex(win.surface_panel.boundary_combo.findData(4))
+    refined = surface.last_result
+    assert refined.area_settings.subsamples == 4
+    assert "subpixel 4×4" in win.surface_panel.result_text()
+    # Fractional coverage follows the drawn ellipse (52" x 27" semi-axes, 5"/px).
+    expected_px = math.pi * (52.0 / SCALE) * (27.0 / SCALE)
+    assert refined.region.selected_weight == pytest.approx(expected_px, rel=0.02)
+
+
+def test_sensitivity_range_brackets_the_area(win):
+    _load(win, [DiskMap(_disk())])
+    win.area_tool_btn.setChecked(True)
+    win.surface_panel.set_threshold_mode("sunspot")
+    _spot_box(win)
+    result = win._measure.surface.last_result
+    low, high, how = result.sensitivity
+    assert low <= result.selected.on_disk_msh <= high
+    assert how == "penumbra level ±0.02"
+    assert "Sensitivity" in win.surface_panel.result_text()
+    win.surface_panel.set_threshold_mode("none")
+    low, high, how = win._measure.surface.last_result.sensitivity
+    assert how == "mask ±1 px" and low < high
+
+
+def test_inconsistent_header_refuses_measurement(win, tmp_path):
+    bad = dict(_HMI_ROTATED, RSUN_OBS=990.0)  # asin(R/D) is 949.8": 4% apart
+    _load_fits_map(win, tmp_path, bad)
+    win.area_tool_btn.setChecked(True)
+    win.surface_panel.set_shape("rectangle")
+    surface = win._measure.surface
+    surface.on_drag("start", -100.0, -100.0)
+    surface.on_drag("finish", 100.0, 100.0)
+    assert surface.last_result is None
+    assert "inconsistent metadata" in win.surface_panel.result_text()
+
+
+def test_json_export_carries_the_provenance(win, tmp_path, monkeypatch):
+    import json
+
+    from PySide6.QtWidgets import QFileDialog
+
+    _load_fits_map(win, tmp_path, _HMI_ROTATED)
+    win.area_tool_btn.setChecked(True)
+    win.surface_panel.set_shape("rectangle")
+    surface = win._measure.surface
+    surface.on_drag("start", -150.0, -150.0)
+    surface.on_drag("finish", 150.0, 150.0)
+    target = tmp_path / "provenance"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(target), "JSON files (*.json)"))
+    win.surface_panel.export_json_action.trigger()
+    document = json.loads((tmp_path / "provenance.json").read_text(encoding="utf-8"))
+    values = document["measurements"][0]["values"]
+    assert values["method"] == "finite_distance"
+    assert values["mu_cutoff"] == pytest.approx(0.30)
+    assert values["status"] == "ok"
+    assert values["dsun_km"] == pytest.approx(1.5115e8)
+    assert values["rsun_km"] == pytest.approx(696000.0)
+    assert values["rsun_obs_header_arcsec"] == pytest.approx(949.9)
+    assert values["source_file"] == "frame.fits"
+    assert values["hdr_telescop"] == "SDO/HMI"
+    assert values["north_up"] is True
+    assert values["projected_mm2"] > 0 and values["correction_factor"] >= 1.0
+    assert document["measurements"][0]["points"]  # the original ROI vertices
+
+
+def test_area_method_travels_with_the_project(win):
+    _load(win, [DiskMap(_disk())])
+    panel = win.surface_panel
+    panel.cutoff_spin.setValue(0.4)
+    panel.boundary_combo.setCurrentIndex(panel.boundary_combo.findData(4))
+    meta = win._collect_session_meta()
+    saved = meta["measurements"]["surface_settings"]["area_method"]
+    assert saved == {"method": "finite_distance", "mu_min": pytest.approx(0.4), "subsamples": 4}
+    panel.apply_area_settings({"method": "orthographic", "mu_min": 0.2, "subsamples": 1})
+    assert panel.area_settings().method == "orthographic"
+    assert panel.cutoff_spin.value() == pytest.approx(0.2)
+
+
+# ------------------------------------------------------ pixel-geometry check
+def _write_hmi_continuum(tmp_path, n, true_cdelt, header_cdelt, name="hmi.fits"):
+    """An HMI-like continuum disc whose header may be left at a finer (unbinned) grid."""
+    pytest.importorskip("sunpy")
+    from astropy.io import fits
+
+    dsun, rsun_ref = 1.4746e11, 696_000_000.0
+    rsun_arcsec = math.degrees(math.asin(rsun_ref / dsun)) * 3600.0
+    c = (n - 1) / 2.0
+    yy, xx = np.mgrid[0:n, 0:n]
+    rr = np.hypot(xx - c, yy - c) / (rsun_arcsec / true_cdelt)
+    mu = np.sqrt(np.clip(1 - rr**2, 0, 1))
+    image = np.where(rr <= 1.0, 50000.0 * (1 - 0.88 * (1 - mu) + 0.23 * (1 - mu**2)), 300.0)
+    image[rr > 1.05] = np.nan
+    f = true_cdelt / header_cdelt
+    header = {
+        "CTYPE1": "HPLN-TAN", "CTYPE2": "HPLT-TAN", "CUNIT1": "arcsec", "CUNIT2": "arcsec",
+        "CDELT1": header_cdelt, "CDELT2": header_cdelt,
+        "CRPIX1": (c + 0.5) * f + 0.5, "CRPIX2": (c + 0.5) * f + 0.5, "CRVAL1": 0.0, "CRVAL2": 0.0,
+        "DATE-OBS": "2025-12-03T00:00:00", "T_OBS": "2025-12-03T00:00:00", "DSUN_OBS": dsun, "RSUN_REF": rsun_ref,
+        "RSUN_OBS": rsun_arcsec, "HGLN_OBS": 0.0, "HGLT_OBS": 0.6, "CRLT_OBS": 0.6, "CRLN_OBS": 100.0,
+        "TELESCOP": "SDO/HMI", "INSTRUME": "HMI_FRONT2", "WAVELNTH": 6173.0, "CONTENT": "CONTINUUM INTENSITY",
+    }
+    path = tmp_path / name
+    fits.writeto(path, image.astype("float32"), fits.Header(header), overwrite=True)
+    return str(path), rsun_arcsec
+
+
+def _load_path(win, path):
+    from src.backend.solar.solar_data_analysis import load_aia_maps_streaming
+
+    frames = load_aia_maps_streaming([path])
+    win._apply_loaded_frames(list(frames.maps), paths=list(frames.paths), metadata=dict(frames.metadata))
+    win.measurements_check.setChecked(True)
+    QApplication.processEvents()
+
+
+def test_binned_frame_with_a_stale_header_is_corrected_at_load(win, tmp_path):
+    path, rsun_arcsec = _write_hmi_continuum(tmp_path, 1024, true_cdelt=2.016, header_cdelt=0.504)
+    _load_path(win, path)
+    frame = win._map_frames[0]
+    assert float(frame.scale.axis1.value) == pytest.approx(2.016)
+    text = win.analysis_text.toPlainText()
+    assert "Pixel check: 1024² (binned ¼ or synoptic)" in text
+    assert "Corrected the header of 1 frame(s)" in text
+    # A centred disc-centre box now measures the true area, and the card says what was checked.
+    win.area_tool_btn.setChecked(True)
+    win.surface_panel.set_shape("rectangle")
+    surface = win._measure.surface
+    surface.on_drag("start", -100.0, -100.0)
+    surface.on_drag("finish", 100.0, 100.0)
+    result = surface.last_result
+    assert result.status == "ok"
+    report = win.surface_panel.result_text()
+    assert "Image: 1024² (binned ¼ or synoptic) · 2.016″/px" in report
+    assert "header corrected for 4× binning" in report
+    # 200" x 200" at disc centre is ~ (200/rsun)^2 R^2 of disc: about 6,700 MSH, not 16 times off.
+    expected = (200.0 / rsun_arcsec) ** 2 / (2 * math.pi) * 1e6
+    assert result.region.on_disk_msh == pytest.approx(expected, rel=0.05)
+
+
+def test_correctly_binned_frames_measure_the_same_at_every_size(win, tmp_path):
+    areas = {}
+    for n, cdelt in ((1024, 2.016), (2048, 1.008)):
+        path, _ = _write_hmi_continuum(tmp_path, n, true_cdelt=cdelt, header_cdelt=cdelt, name=f"hmi{n}.fits")
+        _load_path(win, path)
+        assert win._map_frames[0].meta["ECA_PIXCHK"].endswith("✓")
+        win.area_tool_btn.setChecked(True)
+        win.surface_panel.set_shape("ellipse")
+        surface = win._measure.surface
+        surface.on_drag("start", -300.0, -150.0)
+        surface.on_drag("finish", 300.0, 150.0)
+        areas[n] = surface.last_result.region.on_disk_msh
+    assert areas[2048] == pytest.approx(areas[1024], rel=0.01)
+
+
+def test_unexplained_plate_scale_mismatch_blocks_measurement(win, tmp_path):
+    path, _ = _write_hmi_continuum(tmp_path, 1024, true_cdelt=2.016, header_cdelt=2.016 * 1.3)
+    _load_path(win, path)
+    assert "fail the pixel check" in win.analysis_text.toPlainText()
+    win.area_tool_btn.setChecked(True)
+    win.surface_panel.set_shape("rectangle")
+    surface = win._measure.surface
+    surface.on_drag("start", -100.0, -100.0)
+    surface.on_drag("finish", 100.0, 100.0)
+    assert surface.last_result is None
+    assert "pixel geometry" in win.surface_panel.result_text()
+
+
+def test_a_non_radial_background_warns_that_thresholds_are_unreliable(win):
+    """AIA 4500 / 1700 on real data: the quiet Sun is not radially symmetric, so a
+    fixed fraction of I_qs(mu) reads background as spot. The result says so."""
+    from src.backend.solar.surface_records import area_values
+
+    _load(win, [DiskMap(_disk())])
+    win.area_tool_btn.setChecked(True)
+    win.surface_panel.set_threshold_mode("sunspot")
+    _spot_box(win)
+    flat = win._measure.surface.last_result
+    assert flat.background_spread is not None and flat.background_spread < 0.02
+    assert not any("radially symmetric" in n for n in flat.notes)
+
+    xs = np.arange(N, dtype=float)[None, :] - (N - 1) / 2.0
+    tilted = _disk() * (1.0 + 0.3 * xs / N)
+    win2 = SolarDataAnalysisWindow()
+    try:
+        _load(win2, [DiskMap(tilted)])
+        win2.area_tool_btn.setChecked(True)
+        win2.surface_panel.set_threshold_mode("sunspot")
+        _spot_box(win2)
+        result = win2._measure.surface.last_result
+        assert result.background_spread > 0.05
+        assert any("radially symmetric" in n for n in result.notes)
+        assert "radially symmetric" in win2.surface_panel.result_label.text()
+        assert area_values(result)["background_spread"] == pytest.approx(result.background_spread)
+    finally:
+        win2.close()

@@ -103,6 +103,20 @@ class SurfaceGeometry:
     observer_lon_deg: float = 0.0
     rsun_km: float = RSUN_KM
     rotation_deg: float = 0.0
+    #: Observer-to-Sun-centre distance from the header (DSUN_OBS), km; None
+    #: when the header has none and the distance follows from the apparent radius.
+    dsun_km: float | None = None
+    #: The header's RSUN_OBS (arcsec), kept for the consistency check and export.
+    rsun_obs_header_arcsec: float | None = None
+    #: Problems or fallbacks met while reading the header, for the result to show.
+    metadata_notes: tuple[str, ...] = ()
+    #: False when the header geometry is inconsistent beyond tolerance: precision
+    #: measurement is then refused until it is resolved (plan section 3).
+    metadata_valid: bool = True
+    #: HMI QUALITY word (or None when the header has none).
+    quality_flag: int | None = None
+    #: The load-time pixel-geometry check of this frame (size class, plate scale, limb).
+    image_check: str | None = None
 
     def __post_init__(self) -> None:
         rsun = float(self.rsun_arcsec)
@@ -129,6 +143,12 @@ class SurfaceGeometry:
         observer_lon_deg: float = 0.0,
         rsun_km: float = RSUN_KM,
         rotation_deg: float = 0.0,
+        dsun_km: float | None = None,
+        rsun_obs_header_arcsec: float | None = None,
+        metadata_notes: tuple[str, ...] = (),
+        metadata_valid: bool = True,
+        quality_flag: int | None = None,
+        image_check: str | None = None,
     ) -> "SurfaceGeometry":
         """Build from the analysis window's ``axis_transform`` dict."""
         return cls(
@@ -143,6 +163,12 @@ class SurfaceGeometry:
             observer_lon_deg=float(observer_lon_deg),
             rsun_km=float(rsun_km),
             rotation_deg=float(rotation_deg),
+            dsun_km=None if dsun_km is None else float(dsun_km),
+            rsun_obs_header_arcsec=None if rsun_obs_header_arcsec is None else float(rsun_obs_header_arcsec),
+            metadata_notes=tuple(metadata_notes),
+            metadata_valid=bool(metadata_valid),
+            quality_flag=quality_flag,
+            image_check=image_check,
         )
 
     # Observer distance from Sun centre, in solar radii.
@@ -274,38 +300,96 @@ def frame_observer_deg(frame: Any) -> tuple[float, float] | None:
     return None
 
 
+#: RSUN_OBS and asin(RSUN_REF / DSUN_OBS) must agree to this fraction; a larger
+#: disagreement means inconsistent radius conventions or metadata.
+RADIUS_CONSISTENCY_TOLERANCE = 0.01
+
+
+def _frame_km(frame: Any, attr: str) -> float | None:
+    try:
+        value = float(getattr(frame, attr).to_value("km"))
+    except Exception:
+        return None
+    return value if math.isfinite(value) and value > 0.0 else None
+
+
 def geometry_for_frame(
     frame: Any,
     axis_transform: Mapping[str, float],
     *,
     rsun_arcsec: float | None = None,
 ) -> SurfaceGeometry:
-    """The geometry of a loaded frame: radius, observer, rotation and scale.
+    """The geometry of a loaded frame: radius, distance, observer, rotation and scale.
 
-    ``rsun_arcsec`` overrides the radius (the window resolves it the same way
-    for all its tools); otherwise it comes from the map, then the header. The
-    observer comes from the map's coordinates when it has them, else from the
-    header, and the rotation from :func:`frame_rotation_deg`.
+    Following the measurement plan (section 3): the physical radius R comes
+    from the map (``RSUN_REF``) and the observer distance D from ``DSUN_OBS``;
+    with both, the limb is placed at ``asin(R / D)`` and ``RSUN_OBS`` is only a
+    cross-check -- a disagreement beyond :data:`RADIUS_CONSISTENCY_TOLERANCE`
+    marks the geometry invalid instead of silently picking one. Without D the
+    apparent radius (``rsun_arcsec``, else the map's) sets the distance, and a
+    missing R falls back to the nominal 695,700 km; both fallbacks are recorded
+    in ``metadata_notes``. The observer comes from the map's coordinates when it
+    has them, else from the header, and the rotation from :func:`frame_rotation_deg`.
     """
     meta = dict(getattr(frame, "meta", None) or {})
-    radius = rsun_arcsec
-    if radius is None:
+    notes: list[str] = []
+    valid = True
+
+    rsun_km = _frame_km(frame, "rsun_meters")
+    if rsun_km is None:
+        rsun_ref_m = _meta_float(meta, "rsun_ref")
+        rsun_km = rsun_ref_m / 1000.0 if rsun_ref_m and rsun_ref_m > 0 else None
+    if rsun_km is None:
+        rsun_km = RSUN_KM
+        notes.append("RSUN_REF missing: nominal solar radius 695,700 km used")
+
+    dsun_km = _meta_float(meta, "dsun_obs")
+    dsun_km = dsun_km / 1000.0 if dsun_km and dsun_km > 0 else _frame_km(frame, "dsun")
+
+    header_radius = _meta_float(meta, "rsun_obs", "solar_r")
+    if header_radius is None:
         try:
-            radius = float(frame.rsun_obs.to_value("arcsec"))
+            header_radius = float(frame.rsun_obs.to_value("arcsec"))
         except Exception:
+            header_radius = None
+
+    if dsun_km is not None and dsun_km > rsun_km:
+        radius = math.degrees(math.asin(rsun_km / dsun_km)) * 3600.0
+        if header_radius is not None and header_radius > 0:
+            mismatch = abs(header_radius - radius) / radius
+            if mismatch > RADIUS_CONSISTENCY_TOLERANCE:
+                valid = False
+                notes.append(
+                    f"inconsistent metadata: RSUN_OBS {header_radius:.1f}\" but asin(R/D) gives "
+                    f"{radius:.1f}\" ({100 * mismatch:.1f}% apart)"
+                )
+    else:
+        if dsun_km is not None:
+            valid = False
+            notes.append("invalid metadata: DSUN_OBS is not larger than the solar radius")
+        radius = rsun_arcsec if rsun_arcsec is not None else header_radius
+        if radius is None:
             radius = solar_radius_arcsec_from_meta(meta)
-    if radius is None or not math.isfinite(float(radius)) or float(radius) <= 0.0:
-        raise ValueError("This map has no apparent solar radius (RSUN_OBS or DSUN_OBS), so its pixels cannot be placed on the Sun.")
+        if radius is None or not math.isfinite(float(radius)) or float(radius) <= 0.0:
+            raise ValueError("This map has no apparent solar radius (RSUN_OBS or DSUN_OBS), so its pixels cannot be placed on the Sun.")
+        dsun_km = None
+        notes.append("DSUN_OBS missing: observer distance taken from the apparent radius")
+
     base = geometry_from_meta(meta, axis_transform, rsun_arcsec=float(radius))
     observer = frame_observer_deg(frame)
     b0, lon = (observer if observer is not None else (base.b0_deg, base.observer_lon_deg))
-    rsun_km = base.rsun_km
-    try:
-        value = float(frame.rsun_meters.to_value("km"))
-        if math.isfinite(value) and value > 0.0:
-            rsun_km = value
-    except Exception:
-        pass
+    quality = _meta_float(meta, "quality")
+    quality_flag = int(quality) if quality is not None else None
+    # The load-time pixel check (image_check.py) leaves its verdict in the meta.
+    pixel_error = meta.get("ECA_PIXERR") or meta.get("eca_pixerr")
+    pixel_fix = meta.get("ECA_PIXFIX") or meta.get("eca_pixfix")
+    if pixel_error:
+        valid = False
+        notes.append(f"pixel geometry: {pixel_error}")
+    if pixel_fix:
+        notes.append(f"pixel geometry corrected at load: {pixel_fix}")
+    if quality_flag:
+        notes.append(f"HMI QUALITY flag 0x{quality_flag & 0xFFFFFFFF:08X} is set: check the data quality")
     return SurfaceGeometry.from_axis_transform(
         axis_transform,
         rsun_arcsec=float(radius),
@@ -313,6 +397,12 @@ def geometry_for_frame(
         observer_lon_deg=lon,
         rsun_km=rsun_km,
         rotation_deg=frame_rotation_deg(frame),
+        dsun_km=dsun_km,
+        rsun_obs_header_arcsec=header_radius,
+        metadata_notes=tuple(notes),
+        metadata_valid=valid,
+        quality_flag=quality_flag,
+        image_check=meta.get("ECA_PIXCHK") or meta.get("eca_pixchk"),
     )
 
 
@@ -698,6 +788,32 @@ class SurfaceArea:
     centroid_lonlat: tuple[float, float] | None  # Stonyhurst, surface-area-weighted
     mean_intensity: float | None = None
     total_intensity: float | None = None
+    #: "ok", "partial" (some selected samples excluded: off the disc or below the
+    #: mu cutoff), "invalid" (selection made but no valid sample) or "empty".
+    status: str = "ok"
+    selected_px: int = 0  # selected pixels (weight > 0)
+    selected_weight: float = 0.0  # sum of mask weights (fractional coverage)
+    valid_px: float = 0.0  # pixel-equivalents that were integrated
+    off_disc_px: float = 0.0  # excluded: the ray misses the photosphere
+    near_limb_px: float = 0.0  # excluded: on the disc but mu below the cutoff
+    mu_cutoff: float = 0.0
+    method: str = "finite_distance"  # or "orthographic"
+    subsamples: int = 1  # per pixel side
+    #: Sum of local line-of-sight projected elements d^2 dOmega over the valid
+    #: samples (plan section 4.4), km^2. ``on_disk_plane_of_sky_km2`` is the
+    #: legacy convention (pixel count x one image-plane area at Sun centre).
+    projected_km2: float | None = None
+
+    @property
+    def correction_factor(self) -> float | None:
+        """Surface / projected area, when the projected area is positive."""
+        if self.projected_km2 and self.projected_km2 > 0.0 and self.status in ("ok", "partial"):
+            return self.on_disk_km2 / self.projected_km2
+        return None
+
+    @property
+    def is_valid(self) -> bool:
+        return self.status in ("ok", "partial")
 
     @property
     def on_disk_mm2(self) -> float:
@@ -805,16 +921,17 @@ def _surface_weights(
     return disk_fraction, area, proj.mu, xyz
 
 
-def mask_surface_area(
+def _legacy_mask_area(
     mask: np.ndarray,
     geometry: SurfaceGeometry,
     *,
     image: np.ndarray | None = None,
 ) -> SurfaceArea:
-    """Area of the ``True`` pixels of ``mask``, corrected for foreshortening on the disk.
+    """No-cutoff integration with the exact limb-strip refinement (mu_min = 0).
 
-    ``image`` (same shape) adds the mean and summed intensity of the masked
-    pixels, ignoring non-finite values.
+    Kept for full-disc and limb-aware validation: it integrates right up to the
+    limb (sub-pixels near it are exact annular sectors), which the routine,
+    cutoff-limited measurement deliberately does not.
     """
     mask = np.asarray(mask, dtype=bool)
     if mask.ndim != 2:
@@ -873,6 +990,8 @@ def mask_surface_area(
         lon, lat = stonyhurst_from_cartesian(*(surf_vec / norm), geometry)
         centroid_lonlat = (float(lon), float(lat))
 
+    los_km2 = _los_projected_km2(rows_all, cols_all, geometry)
+    status = "empty" if n_pixels == 0 else ("invalid" if disk_px <= 0.0 else ("partial" if off_px > 1e-9 else "ok"))
     return SurfaceArea(
         n_pixels=n_pixels,
         on_disk_pixels=disk_px,
@@ -888,7 +1007,296 @@ def mask_surface_area(
         centroid_lonlat=centroid_lonlat,
         mean_intensity=(intensity_sum / intensity_n) if intensity_n else None,
         total_intensity=intensity_sum if image is not None else None,
+        status=status,
+        selected_px=n_pixels,
+        selected_weight=float(n_pixels),
+        valid_px=disk_px,
+        off_disc_px=max(0.0, off_px),
+        near_limb_px=0.0,
+        mu_cutoff=0.0,
+        method="finite_distance",
+        subsamples=1,
+        projected_km2=los_km2 if disk_px > 0.0 else None,
     )
+
+
+METHODS = ("finite_distance", "orthographic")
+#: Proposed routine limb cutoff (plan section 6.2): incidence ~72.5 deg, at most x3.33.
+DEFAULT_MU_MIN = 0.30
+
+
+def mask_surface_area(
+    mask: np.ndarray,
+    geometry: SurfaceGeometry,
+    *,
+    image: np.ndarray | None = None,
+    mu_min: float = 0.0,
+    method: str = "finite_distance",
+    subsamples: int = 1,
+) -> SurfaceArea:
+    """Photospheric area of a mask, corrected for foreshortening.
+
+    ``mask`` is boolean or fractional coverage weights in [0, 1] (plan section
+    5.2). Each selected pixel is split into ``subsamples`` x ``subsamples``
+    samples; every sample is one integration element with its own ray, solid
+    angle and validity (plan section 6.1):
+
+    * ``finite_distance`` (default): the ray meets the spherical photosphere at
+      distance d with local incidence cosine mu; it contributes
+      ``d^2 dOmega / mu`` of surface and ``d^2 dOmega`` of projected area;
+    * ``orthographic``: the legacy parallel-ray approximation, ``A_p / mu``
+      with ``A_p = R^2 / R_p^2`` per pixel -- a labelled comparison only.
+
+    Samples whose ray misses the disc, or whose mu is below ``mu_min``, are
+    excluded and counted by cause; the status is then "partial". With no valid
+    sample it is "invalid" (never a silent zero), and "empty" with nothing
+    selected. ``mu_min = 0`` with no subsampling keeps the exact limb-strip
+    integration used for full-disc validation.
+
+    ``image`` (same shape) adds the mean and summed intensity of the valid part.
+    """
+    weights = np.asarray(mask)
+    if weights.ndim != 2:
+        raise ValueError(f"The area mask must be 2-D, got shape {weights.shape}.")
+    if image is not None:
+        image = np.asarray(image)
+        if image.shape != weights.shape:
+            raise ValueError(f"Image shape {image.shape} does not match mask shape {weights.shape}.")
+    if method not in METHODS:
+        raise ValueError(f"Unknown area method {method!r}; use one of {METHODS}.")
+    mu_min = float(mu_min)
+    if not 0.0 <= mu_min < 1.0:
+        raise ValueError("mu_min must be in [0, 1).")
+    n = max(1, int(subsamples))
+    is_bool = weights.dtype == bool
+    if not is_bool:
+        weights = weights.astype(float)
+        if not np.all(np.isfinite(weights) & (weights >= 0.0) & (weights <= 1.0)):
+            raise ValueError("Mask weights must be finite and between 0 and 1.")
+    if mu_min <= 0.0 and method == "finite_distance" and n == 1 and (is_bool or np.all((weights == 0) | (weights == 1))):
+        return _legacy_mask_area(weights.astype(bool), geometry, image=image)
+    return _sampled_area(weights.astype(float), geometry, image=image, mu_min=mu_min, method=method, subsamples=n)
+
+
+def _los_projected_km2(rows: np.ndarray, cols: np.ndarray, geometry: SurfaceGeometry) -> float:
+    """Sum of d^2 dOmega over on-disc pixel centres (line-of-sight projected area), km^2."""
+    omega = geometry.pixel_area_arcsec2 * _ARCSEC_TO_RAD * _ARCSEC_TO_RAD
+    total = 0.0
+    for start in range(0, rows.size, _CHUNK):
+        tx, ty = geometry.pixel_to_arcsec(cols[start : start + _CHUNK].astype(float), rows[start : start + _CHUNK].astype(float))
+        proj = project_to_sphere(tx, ty, geometry)
+        total += float(np.where(proj.on_disk, omega * proj.distance**2, 0.0).sum())
+    return total * float(geometry.rsun_km) ** 2
+
+
+def _sampled_area(
+    weights: np.ndarray,
+    geometry: SurfaceGeometry,
+    *,
+    image: np.ndarray | None,
+    mu_min: float,
+    method: str,
+    subsamples: int,
+) -> SurfaceArea:
+    rows_all, cols_all = np.nonzero(weights > 0.0)
+    n_pixels = int(rows_all.size)
+    pix_arcsec2 = geometry.pixel_area_arcsec2
+    km2_per_arcsec2 = geometry.km_per_arcsec**2
+    omega = pix_arcsec2 * _ARCSEC_TO_RAD * _ARCSEC_TO_RAD
+    rho = float(geometry.rsun_arcsec) * _ARCSEC_TO_RAD
+    n = int(subsamples)
+    offsets = (np.arange(n, dtype=float) + 0.5) / n - 0.5
+    oc, orow = np.meshgrid(offsets, offsets)
+    oc = oc.ravel()
+    orow = orow.ravel()
+    per_sample = omega / (n * n)
+
+    selected_weight = 0.0
+    valid_w = off_w = near_w = 0.0
+    area_r2 = proj_r2 = 0.0
+    mu_proj_sum = 0.0
+    min_mu = math.inf
+    sum_tx = sum_ty = 0.0
+    surf_vec = np.zeros(3)
+    intensity_sum = 0.0
+    intensity_w = 0.0
+    per_chunk = max(1, _CHUNK // (n * n))
+
+    for start in range(0, n_pixels, per_chunk):
+        r = rows_all[start : start + per_chunk]
+        c = cols_all[start : start + per_chunk]
+        w = weights[r, c]
+        selected_weight += float(w.sum())
+        ctx, cty = geometry.pixel_to_arcsec(c.astype(float), r.astype(float))
+        sum_tx += float((w * ctx).sum())
+        sum_ty += float((w * cty).sum())
+        stx, sty = geometry.pixel_to_arcsec(c[:, None] + oc[None, :], r[:, None] + orow[None, :])
+        proj = project_to_sphere(stx, sty, geometry)
+        if method == "finite_distance":
+            on = proj.on_disk
+            mu = proj.mu
+            with np.errstate(invalid="ignore", divide="ignore"):
+                valid = on & (mu >= mu_min) & (mu > 0.0)
+                d2 = np.where(valid, proj.distance**2, 0.0)
+                proj_el = per_sample * d2
+                surf_el = np.where(valid, proj_el / np.where(valid, mu, 1.0), 0.0)
+        else:
+            hx, hy = geometry.to_helioprojective(stx, sty)
+            theta = np.arccos(np.clip(np.cos(hx * _ARCSEC_TO_RAD) * np.cos(hy * _ARCSEC_TO_RAD), -1.0, 1.0))
+            q = theta / rho
+            on = q < 1.0
+            with np.errstate(invalid="ignore"):
+                mu = np.where(on, np.sqrt(np.clip(1.0 - q * q, 0.0, 1.0)), np.nan)
+                valid = on & (mu >= mu_min) & (mu > 0.0)
+            # Parallel rays: every pixel covers R^2 / R_p^2 of the disc plane.
+            proj_el = np.where(valid, per_sample / (rho * rho), 0.0)
+            surf_el = np.where(valid, proj_el / np.where(valid, mu, 1.0), 0.0)
+        wv = w[:, None] * valid / (n * n)
+        valid_w += float(wv.sum())
+        off_w += float((w[:, None] * (~on) / (n * n)).sum())
+        near_w += float((w[:, None] * (on & ~valid) / (n * n)).sum())
+        surf_w = w[:, None] * surf_el
+        area_r2 += float(surf_w.sum())
+        proj_r2 += float((w[:, None] * proj_el).sum())
+        if valid.any():
+            mu_proj_sum += float((w[:, None] * proj_el * np.where(valid, mu, 0.0)).sum())
+            min_mu = min(min_mu, float(np.nanmin(np.where(valid, mu, np.nan))))
+            pos = np.stack((proj.x, proj.y, proj.z), axis=-1)
+            surf_vec += np.nansum(np.where(valid[..., None], pos * surf_w[..., None], 0.0), axis=(0, 1))
+        if image is not None:
+            vals = np.asarray(image[r, c], dtype=float)
+            frac = wv.sum(axis=1)
+            finite = np.isfinite(vals) & (frac > 0)
+            intensity_sum += float((vals[finite] * frac[finite]).sum())
+            intensity_w += float(frac[finite].sum())
+
+    if n_pixels == 0:
+        status = "empty"
+    elif valid_w <= 0.0:
+        status = "invalid"
+    elif off_w + near_w > 1e-9:
+        status = "partial"
+    else:
+        status = "ok"
+    centroid_lonlat: tuple[float, float] | None = None
+    norm = float(np.linalg.norm(surf_vec))
+    if norm > 0.0:
+        lon, lat = stonyhurst_from_cartesian(*(surf_vec / norm), geometry)
+        centroid_lonlat = (float(lon), float(lat))
+    rsun_km2 = float(geometry.rsun_km) ** 2
+    return SurfaceArea(
+        n_pixels=n_pixels,
+        on_disk_pixels=valid_w,
+        off_limb_pixels=off_w,
+        on_disk_msh=area_r2 * _MSH_PER_R2,
+        on_disk_km2=area_r2 * rsun_km2,
+        on_disk_plane_of_sky_km2=valid_w * pix_arcsec2 * km2_per_arcsec2,
+        off_limb_km2=off_w * pix_arcsec2 * km2_per_arcsec2,
+        total_arcsec2=selected_weight * pix_arcsec2,
+        mean_mu=(mu_proj_sum / proj_r2) if proj_r2 > 0 else None,
+        min_mu=None if not math.isfinite(min_mu) else min_mu,
+        centroid_arcsec=(sum_tx / selected_weight, sum_ty / selected_weight) if selected_weight > 0 else None,
+        centroid_lonlat=centroid_lonlat,
+        mean_intensity=(intensity_sum / intensity_w) if intensity_w > 0 else None,
+        total_intensity=intensity_sum if image is not None else None,
+        status=status,
+        selected_px=n_pixels,
+        selected_weight=selected_weight,
+        valid_px=valid_w,
+        off_disc_px=off_w,
+        near_limb_px=near_w,
+        mu_cutoff=mu_min,
+        method=method,
+        subsamples=n,
+        projected_km2=proj_r2 * rsun_km2 if valid_w > 0 else None,
+    )
+
+
+def excluded_pixel_mask(
+    mask: np.ndarray,
+    geometry: SurfaceGeometry,
+    *,
+    mu_min: float = DEFAULT_MU_MIN,
+    method: str = "finite_distance",
+) -> np.ndarray:
+    """Selected pixels whose centre sample is not integrated (off the disc or mu < cutoff).
+
+    For the overlay: measured and excluded pixels are tinted differently.
+    """
+    selected = np.asarray(mask) > 0
+    out = np.zeros(selected.shape, dtype=bool)
+    rows, cols = np.nonzero(selected)
+    rho = float(geometry.rsun_arcsec) * _ARCSEC_TO_RAD
+    for start in range(0, rows.size, _CHUNK):
+        r = rows[start : start + _CHUNK]
+        c = cols[start : start + _CHUNK]
+        tx, ty = geometry.pixel_to_arcsec(c.astype(float), r.astype(float))
+        if method == "orthographic":
+            hx, hy = geometry.to_helioprojective(tx, ty)
+            q = np.arccos(np.clip(np.cos(hx * _ARCSEC_TO_RAD) * np.cos(hy * _ARCSEC_TO_RAD), -1.0, 1.0)) / rho
+            with np.errstate(invalid="ignore"):
+                mu = np.where(q < 1.0, np.sqrt(np.clip(1.0 - q * q, 0.0, 1.0)), np.nan)
+            ok = (q < 1.0) & (mu >= mu_min) & (mu > 0.0)
+        else:
+            proj = project_to_sphere(tx, ty, geometry)
+            with np.errstate(invalid="ignore"):
+                ok = proj.on_disk & (proj.mu >= mu_min) & (proj.mu > 0.0)
+        out[r, c] = ~ok
+    return out
+
+
+# ------------------------------------------------------------- solid angles
+def _unit_vectors(tx_arcsec: np.ndarray, ty_arcsec: np.ndarray) -> np.ndarray:
+    """Observer-centred unit vectors (cos Ty cos Tx, cos Ty sin Tx, sin Ty)."""
+    tx = np.asarray(tx_arcsec, dtype=float) * _ARCSEC_TO_RAD
+    ty = np.asarray(ty_arcsec, dtype=float) * _ARCSEC_TO_RAD
+    return np.stack((np.cos(ty) * np.cos(tx), np.cos(ty) * np.sin(tx), np.sin(ty)), axis=-1)
+
+
+def _triangle_solid_angle(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
+    """Van Oosterom & Strackee: 2 atan2(|a.(b x c)|, 1 + a.b + b.c + c.a)."""
+    triple = np.abs(np.einsum("...i,...i->...", a, np.cross(b, c)))
+    denom = 1.0 + np.einsum("...i,...i->...", a, b) + np.einsum("...i,...i->...", b, c) + np.einsum("...i,...i->...", c, a)
+    return 2.0 * np.arctan2(triple, denom)
+
+
+def corner_solid_angles(corners_tx: np.ndarray, corners_ty: np.ndarray) -> np.ndarray:
+    """Solid angle (sr) of quadrilateral pixels from their four corner directions.
+
+    ``corners_tx/ty`` have a last axis of 4 corners in boundary order (arcsec).
+    The quadrilateral is split into two spherical triangles (plan section 4.3).
+    """
+    u = _unit_vectors(corners_tx, corners_ty)
+    a, b, c, d = u[..., 0, :], u[..., 1, :], u[..., 2, :], u[..., 3, :]
+    return _triangle_solid_angle(a, b, c) + _triangle_solid_angle(a, c, d)
+
+
+def pixel_solid_angles(geometry: SurfaceGeometry, cols: Any, rows: Any) -> np.ndarray:
+    """Corner-method solid angle of each pixel (sr) under the geometry's transform.
+
+    The routine measurement uses the documented fast path
+    ``|s_x s_y| (pi / 648000)^2``; this is the reference it is checked against.
+    """
+    cols = np.asarray(cols, dtype=float)
+    rows = np.asarray(rows, dtype=float)
+    dc = np.array([-0.5, 0.5, 0.5, -0.5])
+    dr = np.array([-0.5, -0.5, 0.5, 0.5])
+    tx, ty = geometry.pixel_to_arcsec(cols[..., None] + dc, rows[..., None] + dr)
+    tx, ty = geometry.to_helioprojective(tx, ty)
+    return corner_solid_angles(tx, ty)
+
+
+def wcs_pixel_solid_angles(wcs: Any, cols: Any, rows: Any) -> np.ndarray:
+    """Corner-method solid angles (sr) from an astropy WCS (full projection, any skew)."""
+    cols = np.asarray(cols, dtype=float)
+    rows = np.asarray(rows, dtype=float)
+    dc = np.array([-0.5, 0.5, 0.5, -0.5])
+    dr = np.array([-0.5, -0.5, 0.5, 0.5])
+    cc = cols[..., None] + dc
+    rr = rows[..., None] + dr
+    lon, lat = wcs.pixel_to_world_values(cc, rr)
+    lon = (np.asarray(lon, dtype=float) + 180.0) % 360.0 - 180.0
+    return corner_solid_angles(lon * 3600.0, np.asarray(lat, dtype=float) * 3600.0)
 
 
 def msh_to_km2(msh: float, *, rsun_km: float = RSUN_KM) -> float:
@@ -1058,6 +1466,57 @@ def normalize_to_quiet_sun(
         with np.errstate(invalid="ignore", divide="ignore"):
             out[r, c] = image[r, c] / level
     return out
+
+
+#: Largest acceptable spread (p95 - p5) of the quiet-Sun-normalised disk
+#: background, block by block. The intensity thresholds assume the background
+#: is radially symmetric, so that dividing by I_qs(mu) leaves it flat: HMI
+#: continuum comes out flat to ~1.7%; AIA 4500 (scattered light, streaks) to
+#: ~29% and AIA 1700 (chromospheric plage) to ~15%, where a fixed fraction of
+#: the quiet Sun no longer separates spots from background.
+MAX_BACKGROUND_SPREAD = 0.05
+
+
+def background_spread(
+    image: np.ndarray,
+    geometry: SurfaceGeometry,
+    profile: QuietSunProfile,
+    *,
+    mu_min: float = DEFAULT_MU_MIN,
+    grid: int = 32,
+    max_side: int = 1024,
+) -> float | None:
+    """How far the normalised disk background departs from flat (p95 - p5).
+
+    The image is cut into ``grid`` x ``grid`` blocks; each block lying (90%)
+    on the disk at ``mu >= mu_min`` contributes the median of ``I / I_qs``.
+    Medians and the 5-95% range keep real sunspots and plage, which cover few
+    blocks, from counting. Pixels are sampled on a stride so a 4096^2 frame
+    costs no more than a 1024^2 one. None when too few blocks are on the disk.
+    """
+    image = np.asarray(image, dtype=float)
+    if image.ndim != 2:
+        return None
+    ny, nx = image.shape
+    stride = max(1, int(math.ceil(max(ny, nx) / float(max_side))))
+    sample = np.zeros(image.shape, dtype=bool)
+    sample[::stride, ::stride] = True
+    sample = disk_interior_mask(sample, geometry, mu_min=mu_min)
+    normalized = normalize_to_quiet_sun(image, geometry, profile, region=sample)
+    by, bx = max(1, ny // grid), max(1, nx // grid)
+    medians = []
+    for i in range(0, ny - by + 1, by):
+        for j in range(0, nx - bx + 1, bx):
+            block_sample = sample[i : i + by, j : j + bx]
+            expected = block_sample.size / float(stride * stride)
+            values = normalized[i : i + by, j : j + bx][block_sample]
+            values = values[np.isfinite(values)]
+            if expected > 0 and values.size >= 0.9 * expected and values.size >= 4:
+                medians.append(float(np.median(values)))
+    if len(medians) < 20:
+        return None
+    medians_arr = np.asarray(medians)
+    return float(np.percentile(medians_arr, 95) - np.percentile(medians_arr, 5))
 
 
 # ------------------------------------------------------------------- thresholds

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import html
 import math
+import os
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import timezone
@@ -31,6 +32,7 @@ from typing import Any
 
 import numpy as np
 import pyqtgraph as pg
+from scipy import ndimage
 from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
@@ -67,6 +69,7 @@ from src.backend.solar.surface_records import (
     length_values,
     linear_rate,
     write_csv,
+    write_json,
 )
 from src.backend.solar.surface_measure import (
     DEFAULT_PENUMBRA_LEVEL,
@@ -83,7 +86,11 @@ from src.backend.solar.surface_measure import (
     normalize_to_quiet_sun,
     polygon_mask_from_arcsec,
     polyline_surface_length,
+    DEFAULT_MU_MIN,
+    MAX_BACKGROUND_SPREAD,
+    background_spread,
     disk_interior_mask,
+    excluded_pixel_mask,
     rectangle_mask,
     rotate_points,
     sunspot_masks,
@@ -104,8 +111,8 @@ DRAG_SHAPES = ("lasso", "ellipse", "rectangle")
 # Threshold modes.
 THRESHOLDS = ("none", "sunspot", "dark", "bright")
 THRESHOLD_LABELS = {
-    "none": "Whole shape",
-    "sunspot": "Sunspot: umbra / penumbra",
+    "none": "Selected region (whole shape)",
+    "sunspot": "Sunspot only: umbra / penumbra",
     "dark": "Darker than",
     "bright": "Brighter than",
 }
@@ -115,6 +122,10 @@ DEFAULT_MIN_CLUSTER_PX = 3
 
 # Mask tints (RGB).
 UMBRA_COLOR = (70, 130, 255)
+REGION_COLOR = (90, 200, 255)  # measured pixels of a whole-region measurement
+EXCLUDED_COLOR = (235, 60, 60)  # selected but not integrated: off the disc or below the mu cutoff
+#: Threshold step used for the segmentation sensitivity range (plan section 9).
+SENSITIVITY_LEVEL_STEP = 0.02
 PENUMBRA_COLOR = (255, 170, 50)
 DARK_COLOR = (60, 210, 255)
 BRIGHT_COLOR = (110, 255, 110)
@@ -165,6 +176,44 @@ class SurfaceShape:
         (x0, y0), (x1, y1) = self.points[0], self.points[-1]
         return abs(x1 - x0) > 0.0 and abs(y1 - y0) > 0.0
 
+    def weights(self, shape: tuple[int, int], geometry: SurfaceGeometry, subsamples: int = 1) -> np.ndarray:
+        """Fractional pixel coverage of the shape (plan section 5.2).
+
+        ``subsamples = 1`` is the pixel-centre mask (0 or 1). Larger values
+        rasterize the shape on an ``n x n`` finer grid -- only around the shape,
+        never the whole frame -- and average back to pixels, so a boundary pixel
+        counts by how much of it the shape covers.
+        """
+        base = self.mask(shape, geometry)
+        n = max(1, int(subsamples))
+        if n == 1:
+            return base.astype(float)
+        ny, nx = int(shape[0]), int(shape[1])
+        pts = np.asarray(self.points, dtype=float).reshape(-1, 2)
+        cols, rows = geometry.arcsec_to_pixel(pts[:, 0], pts[:, 1])
+        c0 = max(0, int(math.floor(float(np.min(cols)))) - 1)
+        c1 = min(nx - 1, int(math.ceil(float(np.max(cols)))) + 1)
+        r0 = max(0, int(math.floor(float(np.min(rows)))) - 1)
+        r1 = min(ny - 1, int(math.ceil(float(np.max(rows)))) + 1)
+        if c1 < c0 or r1 < r0:
+            return base.astype(float)
+        hi_shape = ((r1 - r0 + 1) * n, (c1 - c0 + 1) * n)
+        # Pixel coordinates on the fine local grid: centre of pixel p is (p - origin + 0.5) n - 0.5.
+        hc = (cols - c0 + 0.5) * n - 0.5
+        hr = (rows - r0 + 0.5) * n - 0.5
+        if self.kind in ("polygon", "lasso"):
+            hi = polygon_mask(hi_shape, np.column_stack((hc, hr)))
+        elif self.kind == "rectangle":
+            hi = rectangle_mask(hi_shape, (float(hc[0]), float(hr[0])), (float(hc[-1]), float(hr[-1])))
+        else:
+            centre = ((float(hc[0]) + float(hc[-1])) / 2.0, (float(hr[0]) + float(hr[-1])) / 2.0)
+            semi = (abs(float(hc[-1]) - float(hc[0])) / 2.0, abs(float(hr[-1]) - float(hr[0])) / 2.0)
+            hi = ellipse_mask(hi_shape, centre, semi)
+        local = hi.reshape(r1 - r0 + 1, n, c1 - c0 + 1, n).mean(axis=(1, 3))
+        out = np.zeros((ny, nx), dtype=float)
+        out[r0 : r1 + 1, c0 : c1 + 1] = local
+        return out
+
     def mask(self, shape: tuple[int, int], geometry: SurfaceGeometry) -> np.ndarray:
         """Pixel mask of the shape on an image of ``shape``."""
         if self.kind in ("polygon", "lasso"):
@@ -188,6 +237,21 @@ class ThresholdSettings:
     min_cluster_px: int = DEFAULT_MIN_CLUSTER_PX
 
 
+AREA_METHOD_LABELS = {
+    "finite_distance": "Finite-distance WCS integration",
+    "orthographic": "Orthographic approximation (comparison)",
+}
+
+
+@dataclass(frozen=True)
+class AreaSettings:
+    """How areas are integrated (plan sections 4, 5.2 and 6.2)."""
+
+    method: str = "finite_distance"
+    mu_min: float = DEFAULT_MU_MIN
+    subsamples: int = 1  # 1 = pixel centres, 4 = 4 x 4 subpixel coverage
+
+
 @dataclass(frozen=True)
 class AreaResult:
     """Everything one area measurement reports."""
@@ -205,6 +269,33 @@ class AreaResult:
     #: Pixels of the shape a dark threshold left out: off the disk or within
     #: the outermost limb (mu below the quiet-Sun fit), where nothing is a spot.
     limb_excluded_px: int = 0
+    area_settings: AreaSettings = field(default_factory=AreaSettings)
+    #: Sensitivity range of the main area (MSH): (low, high, how it was varied).
+    sensitivity: tuple[float, float, str] | None = None
+    #: Header fallbacks and warnings met while reading the geometry.
+    notes: tuple[str, ...] = ()
+    #: The load-time pixel check of the frame (size, plate scale, limb).
+    image_check: str | None = None
+    #: Spread (p95 - p5) of the quiet-Sun-normalised disk background; a
+    #: threshold result on a frame above MAX_BACKGROUND_SPREAD is unreliable.
+    background_spread: float | None = None
+
+    @property
+    def focus(self) -> SurfaceArea:
+        """The area being reported: the thresholded pixels, else the whole region."""
+        return self.selected if self.selected is not None else self.region
+
+    @property
+    def status(self) -> str:
+        """OK / PARTIAL / INVALID for the reported area.
+
+        A valid region with no detected spot is a valid zero, not an invalid
+        measurement (plan section 10.1).
+        """
+        focus = self.focus
+        if self.selected is not None and focus.status == "empty":
+            return "invalid" if self.region.status in ("invalid", "empty") else "ok"
+        return "invalid" if focus.status == "empty" else focus.status
 
 
 def _plain(rich: str) -> str:
@@ -259,17 +350,26 @@ def _foreshortening(area: SurfaceArea) -> str:
     solar radius nearer than the plane of sky the image scale refers to), which
     would read as a confusing "×0.99 foreshortening".
     """
-    if area.on_disk_plane_of_sky_km2 <= 0.0:
-        return ""
-    factor = area.on_disk_km2 / area.on_disk_plane_of_sky_km2
+    factor = area.correction_factor
+    if factor is None:
+        if area.on_disk_plane_of_sky_km2 <= 0.0:
+            return ""
+        factor = area.on_disk_km2 / area.on_disk_plane_of_sky_km2
     return f" (×{factor:.2f} foreshortening)" if factor >= 1.05 else ""
+
+
+def _seen_km2(area: SurfaceArea) -> float:
+    """Projected (line-of-sight) area of the valid part, km^2 (plan section 4.4)."""
+    if area.projected_km2 is not None:
+        return float(area.projected_km2)
+    return float(area.on_disk_plane_of_sky_km2)
 
 
 def _seen_msh(area: SurfaceArea) -> float:
     """The on-disk area as it appears on the image (no curvature correction), in MSH."""
     from src.backend.solar.surface_measure import km2_to_msh
 
-    return km2_to_msh(area.on_disk_plane_of_sky_km2)
+    return km2_to_msh(_seen_km2(area))
 
 
 def _area_core(area: SurfaceArea, *, corrected: bool = True) -> str:
@@ -285,7 +385,7 @@ def _area_core(area: SurfaceArea, *, corrected: bool = True) -> str:
             parts.append(f"{area.on_disk_msh:,.1f} MSH · {_mm2(area.on_disk_km2)}{_foreshortening(area)}")
         else:
             parts.append(
-                f"{_seen_msh(area):,.1f} MSH as seen · {_mm2(area.on_disk_plane_of_sky_km2)}"
+                f"{_seen_msh(area):,.1f} MSH as seen · {_mm2(_seen_km2(area))}"
                 f" (not corrected for curvature; corrected {area.on_disk_msh:,.1f} MSH)"
             )
     if area.has_off_limb:
@@ -320,9 +420,37 @@ def format_length(result: SurfaceLength, *, corrected: bool = True) -> str:
     return text
 
 
+def _status_text(result: AreaResult) -> str:
+    """``PARTIAL: 120 px below mu 0.30, 4 px off the disc excluded`` etc."""
+    focus = result.focus
+    status = result.status
+    cutoff = result.area_settings.mu_min
+    if status == "invalid":
+        if result.selected is not None and result.region.is_valid:
+            return "INVALID: no valid pixels in the detected mask"
+        return f"INVALID: no valid pixels (off the disc or below μ {cutoff:.2f})"
+    if status != "partial":
+        return "OK"
+    parts = []
+    if focus.near_limb_px > 0:
+        parts.append(f"{focus.near_limb_px:,.0f} px below μ {cutoff:.2f}")
+    if focus.off_disc_px > 0:
+        parts.append(f"{focus.off_disc_px:,.0f} px off the disc")
+    return "PARTIAL: " + " and ".join(parts) + " excluded; area of the valid part only"
+
+
 def format_area(result: AreaResult, *, corrected: bool = True) -> str:
     """One-line Details entry for an area (corrected for curvature, or as seen)."""
     region = result.region
+    if result.status == "invalid":
+        label = result.shape_kind
+        return f"Area ({label})  ·  no valid area  ·  {_status_text(result)}"
+    if result.selected is not None and result.selected.status == "empty":
+        word = {"sunspot": "sunspot", "dark": "dark pixel", "bright": "bright pixel"}.get(result.threshold.mode, "pixel")
+        return (
+            f"Area ({result.shape_kind})  ·  no {word} detected: 0 MSH (valid, in {region.on_disk_msh:,.1f} MSH "
+            f"of measured region)  ·  {_status_text(result) if region.status == 'partial' else 'OK'}"
+        )
     label = {"polygon": "polygon", "lasso": "lasso", "ellipse": "ellipse", "rectangle": "rectangle"}.get(
         result.shape_kind, result.shape_kind
     )
@@ -355,11 +483,82 @@ def format_area(result: AreaResult, *, corrected: bool = True) -> str:
             text += f", μ={focus.mean_mu:.2f}"
     if focus.mean_intensity is not None and not result.quicklook:
         text += f"  ·  mean {focus.mean_intensity:,.1f} {result.intensity_unit}"
-    if focus.near_limb and corrected:
-        text += f"  ·  ⚠ reaches μ<{LIMB_WARNING_MU:.1f}: close to the limb, the correction is large"
+    if result.status == "partial":
+        text += f"  ·  ⚠ {_status_text(result)}"
     if result.limb_excluded_px and mode in ("sunspot", "dark"):
         text += f"  ·  {result.limb_excluded_px:,} px off the disk or at the extreme limb left out of the threshold"
+    if result.sensitivity is not None:
+        low, high, how = result.sensitivity
+        text += f"  ·  range {low:,.1f}–{high:,.1f} MSH ({how})"
+    if result.area_settings.method != "finite_distance":
+        text += f"  ·  {AREA_METHOD_LABELS[result.area_settings.method]}"
+    for note in result.notes:
+        text += f"  ·  ⚠ {note}"
     return text
+
+
+_SUPERSCRIPT = str.maketrans("-0123456789", "⁻⁰¹²³⁴⁵⁶⁷⁸⁹")
+
+
+def _sci_km2(km2: float) -> str:
+    """``5.55 × 10⁹ km²``."""
+    if km2 <= 0.0 or not math.isfinite(km2):
+        return "0 km²"
+    exponent = int(math.floor(math.log10(km2)))
+    return f"{km2 / 10**exponent:.2f} × 10{str(exponent).translate(_SUPERSCRIPT)} km²"
+
+
+def area_report(result: AreaResult, *, corrected: bool = True) -> list[str]:
+    """The result card, laid out as in the plan's section 7."""
+    focus = result.focus
+    lines: list[str] = []
+    status = result.status
+    if status != "ok":
+        lines.append("● " + _status_text(result))
+    mode = result.threshold.mode
+    what = {"sunspot": "Sunspot", "dark": "Dark area", "bright": "Bright area"}.get(mode, "Selected region")
+    if status == "invalid":
+        lines.append(f"{what} ({result.shape_kind}) — no valid area")
+    elif result.selected is not None and result.selected.status == "empty":
+        lines.append(f"{what} ({result.shape_kind}) — none detected: 0 MSH (valid)")
+    else:
+        if corrected:
+            lines.append(
+                f"{what} ({result.shape_kind}) — corrected {focus.on_disk_msh:,.1f} MSH · "
+                f"{_mm2(focus.on_disk_km2)} · {_sci_km2(focus.on_disk_km2)}"
+            )
+        else:
+            lines.append(
+                f"{what} ({result.shape_kind}) — as seen {_seen_msh(focus):,.1f} MSH · {_mm2(_seen_km2(focus))} "
+                f"(corrected {focus.on_disk_msh:,.1f} MSH)"
+            )
+        if mode == "sunspot" and result.umbra is not None and result.penumbra is not None:
+            u = result.umbra.on_disk_msh if corrected else _seen_msh(result.umbra)
+            p = result.penumbra.on_disk_msh if corrected else _seen_msh(result.penumbra)
+            lines.append(f"Umbra {u:,.1f} MSH · penumbra {p:,.1f} MSH")
+        factor = focus.correction_factor
+        detail = f"Projected {_mm2(_seen_km2(focus))}"
+        if factor is not None:
+            detail += f" · correction ×{factor:.2f}"
+        if focus.min_mu is not None:
+            detail += f" · min μ {focus.min_mu:.2f}"
+        lines.append(detail)
+        if result.sensitivity is not None:
+            low, high, how = result.sensitivity
+            lines.append(f"Sensitivity {low:,.1f}–{high:,.1f} MSH ({how})")
+        if focus.centroid_lonlat is not None:
+            lines.append(f"Centroid {format_lonlat(focus.centroid_lonlat)}")
+    lines.append(
+        f"Pixels {focus.selected_px:,} selected / {focus.valid_px:,.0f} valid · μ ≥ {result.area_settings.mu_min:.2f} · "
+        f"quality {status.upper()}"
+    )
+    refine = "pixel centres" if result.area_settings.subsamples == 1 else f"subpixel {result.area_settings.subsamples}×{result.area_settings.subsamples}"
+    lines.append(f"Method: {AREA_METHOD_LABELS[result.area_settings.method]}, {refine}")
+    if result.image_check:
+        lines.append(f"Image: {result.image_check}")
+    for note in result.notes:
+        lines.append(f"⚠ {note}")
+    return lines
 
 
 # ----------------------------------------------------------------------- panel
@@ -370,6 +569,8 @@ class SurfaceMeasurePanel(QWidget):
     thresholdChanged = Signal()
     #: The corrected / as-seen choice changed.
     curvatureChanged = Signal()
+    #: The area method (geometry, mu cutoff, boundary refinement) changed.
+    areaSettingsChanged = Signal()
     #: A table row was picked by the user (row index).
     recordSelected = Signal(int)
     #: A feature name was edited: (row index, new name).
@@ -527,6 +728,60 @@ class SurfaceMeasurePanel(QWidget):
         grid.setColumnStretch(3, 1)
         layout.addWidget(self.threshold_group)
 
+        # --- area method (Area only): plan sections 4, 5.2 and 6.2
+        self.area_method_group = QWidget()
+        method_grid = QGridLayout(self.area_method_group)
+        method_grid.setContentsMargins(0, 0, 0, 0)
+        method_grid.setHorizontalSpacing(6)
+        method_grid.setVerticalSpacing(6)
+        method_grid.addWidget(_subheading("Area method"), 0, 0, 1, 4)
+        self.geometry_label = _field_label("Geometry")
+        self.geometry_combo = QComboBox()
+        self.geometry_combo.addItem("Finite-distance (default)", "finite_distance")
+        self.geometry_combo.addItem("Orthographic (comparison)", "orthographic")
+        self.geometry_combo.setToolTip(
+            "Finite-distance: every pixel's line of sight is followed from the spacecraft\n"
+            "to the spherical photosphere (D from DSUN_OBS, R from RSUN_REF), and its area\n"
+            "is d²·ΔΩ/μ. This is the correct method and the default.\n"
+            "Orthographic: the old parallel-ray approximation (pixel area R²/R_p² ÷ μ),\n"
+            "kept only for comparison."
+        )
+        self.cutoff_label = _field_label("Limb cutoff")
+        self.cutoff_spin = QDoubleSpinBox()
+        self.cutoff_spin.setRange(0.0, 0.9)
+        self.cutoff_spin.setDecimals(2)
+        self.cutoff_spin.setSingleStep(0.05)
+        self.cutoff_spin.setPrefix("μ ≥ ")
+        self.cutoff_spin.setValue(DEFAULT_MU_MIN)
+        self.cutoff_spin.setToolTip(
+            "Pixels closer to the limb than this (μ = cos of the viewing angle) are not\n"
+            "integrated; they are counted, tinted red and the result is marked PARTIAL.\n"
+            "0.30 is ~72.5° from disc centre, at most ×3.33 correction. A quality limit,\n"
+            "not the edge of the disc; lower it only with care."
+        )
+        self.boundary_label = _field_label("Boundary")
+        self.boundary_combo = QComboBox()
+        self.boundary_combo.addItem("Pixel centres", 1)
+        self.boundary_combo.addItem("Subpixel 4×4 (slower)", 4)
+        self.boundary_combo.setToolTip(
+            "Pixel centres: a pixel counts if its centre is inside the shape.\n"
+            "Subpixel 4×4: boundary pixels count by how much of them the shape covers,\n"
+            "and the geometry is integrated per subpixel. Better for small spots and\n"
+            "irregular outlines; slower on very large shapes."
+        )
+        method_grid.addWidget(self.geometry_label, 1, 0)
+        method_grid.addWidget(self.geometry_combo, 1, 1, 1, 3)
+        method_grid.addWidget(self.cutoff_label, 2, 0)
+        method_grid.addWidget(self.cutoff_spin, 2, 1)
+        method_grid.addWidget(self.boundary_label, 2, 2)
+        method_grid.addWidget(self.boundary_combo, 2, 3)
+        method_grid.setColumnStretch(1, 1)
+        method_grid.setColumnStretch(3, 1)
+        layout.addWidget(self.area_method_group)
+        for widget in (self.geometry_combo, self.boundary_combo):
+            widget.currentIndexChanged.connect(lambda _i: self.areaSettingsChanged.emit())
+        self.cutoff_spin.valueChanged.connect(lambda _v: self.areaSettingsChanged.emit())
+
         # --- live result, in a card like the Details panel; hidden when empty
         self.result_label = QLabel("")
         self.result_label.setObjectName("SolarSurfaceResult")
@@ -632,6 +887,11 @@ class SurfaceMeasurePanel(QWidget):
         table_menu = QMenu(self.table_btn)
         self.export_action = table_menu.addAction("Export Table as CSV…")
         self.export_action.setToolTip("Every recorded measurement, with its shape and settings.")
+        self.export_json_action = table_menu.addAction("Export with Provenance (JSON)…")
+        self.export_json_action.setToolTip(
+            "Full provenance: geometry (R, D, RSUN_OBS), method, cutoff, counts by exclusion\n"
+            "cause, thresholds, ROI vertices, source file and WCS summary."
+        )
         table_menu.addSeparator()
         self.delete_row_action = table_menu.addAction("Delete Selected Row")
         self.delete_row_action.setShortcut(QKeySequence.Delete)
@@ -639,10 +899,10 @@ class SurfaceMeasurePanel(QWidget):
         self.clear_table_action = table_menu.addAction("Clear Table…")
         self.table_btn.setMenu(table_menu)
         self._table_menu = table_menu
-        for action in (self.export_action, self.delete_row_action, self.clear_table_action):
+        for action in (self.export_action, self.export_json_action, self.delete_row_action, self.clear_table_action):
             action.setEnabled(False)
         self.table.setContextMenuPolicy(Qt.ActionsContextMenu)
-        self.table.addActions([self.export_action, self.delete_row_action, self.clear_table_action])
+        self.table.addActions([self.export_action, self.export_json_action, self.delete_row_action, self.clear_table_action])
         for btn in (self.record_btn, self.track_btn, self.table_btn):
             buttons.addWidget(btn)
         layout.addLayout(buttons)
@@ -659,7 +919,10 @@ class SurfaceMeasurePanel(QWidget):
         self._sync_threshold_rows()
         self.set_tool(None)
         # One caption column for every row, so the fields start in one line.
-        captions = (self.values_label, self.shape_label, self.select_label, self.umbra_label, self.level_label, self.cluster_label)
+        captions = (
+            self.values_label, self.shape_label, self.select_label, self.umbra_label, self.level_label,
+            self.cluster_label, self.geometry_label, self.cutoff_label,
+        )
         width = max(label.sizeHint().width() for label in captions)
         for label in captions:
             label.setFixedWidth(width)
@@ -741,6 +1004,31 @@ class SurfaceMeasurePanel(QWidget):
     def tint_enabled(self) -> bool:
         return self.tint_check.isChecked()
 
+    def area_settings(self) -> AreaSettings:
+        return AreaSettings(
+            method=str(self.geometry_combo.currentData() or "finite_distance"),
+            mu_min=float(self.cutoff_spin.value()),
+            subsamples=int(self.boundary_combo.currentData() or 1),
+        )
+
+    def apply_area_settings(self, settings: dict[str, Any]) -> None:
+        """Set the area-method controls without a change signal per widget."""
+        widgets = (self.geometry_combo, self.cutoff_spin, self.boundary_combo)
+        for widget in widgets:
+            widget.blockSignals(True)
+        try:
+            index = self.geometry_combo.findData(str(settings.get("method", "finite_distance")))
+            if index >= 0:
+                self.geometry_combo.setCurrentIndex(index)
+            if settings.get("mu_min") is not None:
+                self.cutoff_spin.setValue(float(settings["mu_min"]))
+            index = self.boundary_combo.findData(int(settings.get("subsamples", 1) or 1))
+            if index >= 0:
+                self.boundary_combo.setCurrentIndex(index)
+        finally:
+            for widget in widgets:
+                widget.blockSignals(False)
+
     def corrected(self) -> bool:
         """Whether values are shown corrected for curvature (else as seen)."""
         return str(self.curvature_combo.currentData() or "corrected") == "corrected"
@@ -768,6 +1056,7 @@ class SurfaceMeasurePanel(QWidget):
         self.shape_label.setVisible(area)
         self.shape_combo.setVisible(area)
         self.threshold_group.setVisible(area)
+        self.area_method_group.setVisible(area)
         if not self._quicklook:
             self.threshold_group.setEnabled(True)
         if mode == "length":
@@ -875,11 +1164,17 @@ class SurfaceMeasurePanel(QWidget):
                         else None
                     )
                     mu = v.get("mean_mu")
+                status = str(record.values.get("status", "ok"))
+                result_text = record.headline_for(corrected=corrected)
+                if status == "partial":
+                    result_text += " ⚠"
+                elif status == "invalid":
+                    result_text = "invalid"
                 cells = (
                     record.name,
                     when,
                     record.measure_label,
-                    record.headline_for(corrected=corrected),
+                    result_text,
                     "—" if mu is None else f"{float(mu):.2f}",
                 )
                 where = "start" if record.kind == "length" else "centroid"
@@ -901,6 +1196,7 @@ class SurfaceMeasurePanel(QWidget):
         has_rows = bool(records)
         self.table_btn.setEnabled(has_rows)
         self.export_action.setEnabled(has_rows)
+        self.export_json_action.setEnabled(has_rows)
         self.clear_table_action.setEnabled(has_rows)
         self.delete_row_action.setEnabled(has_rows and active is not None)
         self.track_btn.setEnabled(has_rows and active is not None)
@@ -980,7 +1276,8 @@ class SurfaceMeasurePanel(QWidget):
         self.level_spin.setSuffix(" × I_qs")
         self.cluster_spin.setEnabled(mode != "none")
         self.cluster_label.setEnabled(mode != "none")
-        self.tint_check.setEnabled(mode != "none")
+        # The tint also shows a whole-region measurement: measured vs excluded pixels.
+        self.tint_check.setEnabled(True)
 
 
 # ------------------------------------------------------------------------ tool
@@ -1183,6 +1480,11 @@ class SurfaceTool:
         self.remeasure(record=False)
         self.refresh_overlay()
 
+    def area_settings_changed(self) -> None:
+        if self.mode == "area" and "area" in self.shapes:
+            self.remeasure(record=False)
+            self.refresh_overlay()
+
     def threshold_changed(self) -> None:
         # Only the live result follows the settings: the table changes on an
         # explicit Record, so adjusting the threshold for the next shape can
@@ -1253,6 +1555,7 @@ class SurfaceTool:
         else:
             values = area_values(result, geometry)
             threshold = asdict(result.threshold)
+        values.update(self._frame_provenance(index))
         return SurfaceRecord(
             name=name,
             kind="length" if shape.kind == "length" else "area",
@@ -1264,6 +1567,47 @@ class SurfaceTool:
             values=values,
             summary=self._format(result),
         )
+
+    def _frame_provenance(self, index: int) -> dict[str, Any]:
+        """Source file, series, time and WCS summary of a frame, for export."""
+        win = self.window
+        frames = getattr(win, "_map_frames", None) or []
+        out: dict[str, Any] = {}
+        paths = list(getattr(win, "_loaded_paths", None) or [])
+        if 0 <= index < len(paths):
+            out["source_file"] = os.path.basename(str(paths[index]))
+        if 0 <= index < len(frames):
+            meta = dict(getattr(frames[index], "meta", None) or {})
+            lower = {str(k).lower(): v for k, v in meta.items()}
+            for key in ("telescop", "instrume", "content", "t_obs", "t_rec", "date-obs", "ctype1", "ctype2",
+                        "crpix1", "crpix2", "crval1", "crval2", "cdelt1", "cdelt2", "crota2"):
+                value = lower.get(key)
+                if value is not None:
+                    out[f"hdr_{key.replace('-', '_')}"] = value if isinstance(value, (int, float, str)) else str(value)
+        north_up = getattr(win, "north_up_check", None)
+        if north_up is not None:
+            out["north_up"] = bool(north_up.isChecked())
+        out["algorithm"] = "surface_measure finite-distance WCS integration (plan 2026-11-19)"
+        return out
+
+    def export_json(self, path: str | None = None) -> str | None:
+        if not self.records:
+            return None
+        if path is None:
+            path, _ = QFileDialog.getSaveFileName(
+                self.window, "Export Surface Measurements (JSON)", "surface_measurements.json", "JSON files (*.json)"
+            )
+            if not path:
+                return None
+            if not path.lower().endswith(".json"):
+                path += ".json"
+        try:
+            count = write_json(path, self.records, provenance={"application": "e-CALLISTO FITS Analyzer"})
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self.window, "Export Surface Measurements", f"Could not write the file:\n{exc}")
+            return None
+        self.controller._status(f"Exported {count} measurement(s) with provenance to {path}.")
+        return path
 
     def _frame_time(self, index: int):
         frames = getattr(self.window, "_map_frames", None) or []
@@ -1633,6 +1977,10 @@ class SurfaceTool:
         geometry = geometry_for_frame(frame, transform, rsun_arcsec=rsun)
         return frame, raw, geometry
 
+    def _area_settings(self) -> AreaSettings:
+        panel = self._panel()
+        return panel.area_settings() if panel is not None else AreaSettings()
+
     def _measure_area(
         self,
         shape: SurfaceShape,
@@ -1640,57 +1988,129 @@ class SurfaceTool:
         raw: np.ndarray,
         settings: ThresholdSettings,
         index: int,
+        area: AreaSettings | None = None,
     ) -> AreaResult:
+        """Measure one shape following the area plan.
+
+        Selected region: every on-disc pixel the shape covers. Sunspot only (or
+        dark / bright): the shape intersected with an intensity mask from the
+        quiet-Sun-normalised frame. Both are integrated sample by sample with
+        the finite-distance geometry (or the orthographic comparison), with
+        samples below the mu cutoff excluded and counted.
+        """
+        if not geometry.metadata_valid:
+            raise ValueError("; ".join(geometry.metadata_notes) + " -- fix the header before measuring")
+        area = area or self._area_settings()
         win = self.window
-        region = shape.mask(raw.shape[:2], geometry)
+        weights = shape.weights(raw.shape[:2], geometry, area.subsamples)
+        region = weights > 0.0
         if not region.any():
             raise ValueError("the shape covers no pixel centres; draw it larger")
         quicklook = bool(getattr(win, "_loaded_is_quicklook", lambda: False)())
         intensity = None if quicklook else raw
         unit = "DN"
-        region_area = mask_surface_area(region, geometry, image=intensity)
+        # Subpixel refinement integrates the geometry per subpixel as well as the
+        # coverage (plan section 5.2), not the parent-centre correction.
+        integrate = dict(mu_min=area.mu_min, method=area.method, subsamples=area.subsamples)
+
+        def measure(w: np.ndarray, image: np.ndarray | None = intensity) -> SurfaceArea:
+            return mask_surface_area(w, geometry, image=image, **integrate)
+
+        region_area = measure(weights)
+        notes = tuple(geometry.metadata_notes)
+        image_check = geometry.image_check
         if settings.mode == "none" or quicklook:
-            return AreaResult(shape.kind, region_area, settings, intensity_unit=unit, quicklook=quicklook)
+            excluded = excluded_pixel_mask(region, geometry, mu_min=area.mu_min, method=area.method)
+            layers = ((region & ~excluded, REGION_COLOR), (excluded, EXCLUDED_COLOR))
+            hard = weights > 0.5
+            low = measure(ndimage.binary_erosion(hard).astype(float), None).on_disk_msh
+            high = measure(ndimage.binary_dilation(hard).astype(float), None).on_disk_msh
+            return AreaResult(
+                shape.kind, region_area, settings, intensity_unit=unit, quicklook=quicklook,
+                layers=layers, area_settings=area, sensitivity=(min(low, high), max(low, high), "mask ±1 px"), notes=notes,
+                image_check=image_check,
+            )
 
         profile = self._quiet_sun(raw, geometry, index)
+        spread = self._background_spread(raw, geometry, index, profile)
+        if spread is not None and spread > MAX_BACKGROUND_SPREAD:
+            notes = notes + (
+                f"the quiet-Sun background is not radially symmetric on this image (it varies by "
+                f"{100 * spread:.0f}% across the disk after limb-darkening correction; HMI continuum: ~2%), "
+                f"so threshold areas here are unreliable -- use an HMI continuum image",
+            )
         normalized = normalize_to_quiet_sun(raw, geometry, profile, region=region)
-        # Dark thresholds only look where a spot can be and the quiet-Sun level
-        # is known: on the disk, inside the profile's mu range. Bright ones keep
-        # off-limb pixels (an arcade above the limb is exactly what they are for).
+        # Thresholds only look where the quiet-Sun level is known and a spot can
+        # be: on the disc, inside the profile's mu range. Bright ones keep
+        # off-limb pixels (an arcade above the limb is what they are for).
         dark_region = region
-        excluded = 0
+        excluded_px = 0
         if settings.mode in ("sunspot", "dark"):
             dark_region = disk_interior_mask(region, geometry, mu_min=profile.mu_min)
-            excluded = int(region.sum() - dark_region.sum())
-        if settings.mode == "sunspot":
-            masks = sunspot_masks(
-                normalized,
-                dark_region,
-                umbra_level=settings.umbra_level,
-                penumbra_level=settings.penumbra_level,
-                min_cluster_px=settings.min_cluster_px,
+            excluded_px = int(region.sum() - dark_region.sum())
+
+        def segment(level_shift: float = 0.0):
+            if settings.mode == "sunspot":
+                return sunspot_masks(
+                    normalized,
+                    dark_region,
+                    umbra_level=settings.umbra_level,
+                    penumbra_level=settings.penumbra_level + level_shift,
+                    min_cluster_px=settings.min_cluster_px,
+                )
+            bounds = (
+                {"below": settings.level + level_shift} if settings.mode == "dark" else {"above": settings.level + level_shift}
             )
+            return threshold_mask(normalized, dark_region, min_cluster_px=settings.min_cluster_px, **bounds)
+
+        def spot_weights(mask: np.ndarray) -> np.ndarray:
+            return np.where(mask, weights, 0.0)
+
+        # Sensitivity: the documented threshold range (plan section 9).
+        variants = []
+        for shift in (-SENSITIVITY_LEVEL_STEP, SENSITIVITY_LEVEL_STEP):
+            seg = segment(shift)
+            mask = seg.spot if settings.mode == "sunspot" else seg
+            variants.append(measure(spot_weights(mask), None).on_disk_msh)
+        word = "penumbra level" if settings.mode == "sunspot" else "threshold"
+        sensitivity = (min(variants), max(variants), f"{word} ±{SENSITIVITY_LEVEL_STEP:.2f}")
+
+        if settings.mode == "sunspot":
+            masks = segment()
+            spot_area = measure(spot_weights(masks.spot))
+            excluded = excluded_pixel_mask(masks.spot, geometry, mu_min=area.mu_min, method=area.method)
             return AreaResult(
                 shape.kind,
                 region_area,
                 settings,
-                selected=mask_surface_area(masks.spot, geometry, image=intensity),
-                umbra=mask_surface_area(masks.umbra, geometry, image=intensity),
-                penumbra=mask_surface_area(masks.penumbra, geometry, image=intensity),
+                selected=spot_area,
+                umbra=measure(spot_weights(masks.umbra)),
+                penumbra=measure(spot_weights(masks.penumbra)),
                 intensity_unit=unit,
-                layers=((masks.penumbra, PENUMBRA_COLOR), (masks.umbra, UMBRA_COLOR)),
-                limb_excluded_px=excluded,
+                layers=((masks.penumbra & ~excluded, PENUMBRA_COLOR), (masks.umbra & ~excluded, UMBRA_COLOR), (excluded, EXCLUDED_COLOR)),
+                limb_excluded_px=excluded_px,
+                area_settings=area,
+                sensitivity=sensitivity,
+                notes=notes,
+                image_check=image_check,
+                background_spread=spread,
             )
-        bounds = {"below": settings.level} if settings.mode == "dark" else {"above": settings.level}
-        selected = threshold_mask(normalized, dark_region, min_cluster_px=settings.min_cluster_px, **bounds)
+        selected = segment()
+        excluded = excluded_pixel_mask(selected, geometry, mu_min=area.mu_min, method=area.method)
+        color = DARK_COLOR if settings.mode == "dark" else BRIGHT_COLOR
         return AreaResult(
             shape.kind,
             region_area,
             settings,
-            selected=mask_surface_area(selected, geometry, image=intensity),
+            selected=measure(spot_weights(selected)),
             intensity_unit=unit,
-            layers=((selected, DARK_COLOR if settings.mode == "dark" else BRIGHT_COLOR),),
-            limb_excluded_px=excluded,
+            layers=((selected & ~excluded, color), (excluded, EXCLUDED_COLOR)),
+            limb_excluded_px=excluded_px,
+            area_settings=area,
+            sensitivity=sensitivity,
+            notes=notes,
+            image_check=image_check,
+            background_spread=spread,
         )
 
     def _quiet_sun(self, raw: np.ndarray, geometry: SurfaceGeometry, index: int) -> QuietSunProfile:
@@ -1706,6 +2126,22 @@ class SurfaceTool:
             # Keep the shown frame's fit; a track through frames refits each.
             self._profile_cache = {key: profile}
         return profile
+
+    def _background_spread(
+        self, raw: np.ndarray, geometry: SurfaceGeometry, index: int, profile: QuietSunProfile
+    ) -> float | None:
+        """Flatness of the normalised background of frame ``index`` (cached with its fit)."""
+        # The profile object identifies the frame's fit (it is refitted, so a
+        # new object, whenever the frame changes); keep a reference, not an id.
+        cached = getattr(self, "_spread_cache", None)
+        if cached is not None and cached[0] is profile:
+            return cached[1]
+        try:
+            value = background_spread(raw, geometry, profile)
+        except Exception:
+            value = None
+        self._spread_cache = (profile, value)
+        return value
 
     def threshold_layers(self) -> list[tuple[np.ndarray, tuple[int, int, int]]]:
         """Masks to tint for the current area result."""
@@ -1786,10 +2222,15 @@ class SurfaceTool:
         self._show_records()
 
     def _panel_text(self, result: SurfaceLength | AreaResult) -> str:
-        """Three lines: frame and time; what was measured and its number; the rest."""
+        """Frame and time, then the plan's area report (areas) or three lines (lengths)."""
         idx = self._frame_index()
         when = self._frame_time(idx)
         header = f"Frame {idx + 1}" + (f" · {when:%Y-%m-%d %H:%M:%S} UT" if when else "")
+        if isinstance(result, AreaResult):
+            report = area_report(result, corrected=self._corrected())
+            notices = [line for line in report if line.startswith("●")]
+            body = [line for line in report if not line.startswith("●")]
+            return "\n".join(notices + [header] + body)
         parts = self._format(result).split("  ·  ")
         lines = [header, " — ".join(parts[:2])]
         if len(parts) > 2:

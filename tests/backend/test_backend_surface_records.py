@@ -301,9 +301,12 @@ def test_area_values_keep_the_as_seen_area_in_msh():
 
     record, result = _sunspot_record()
     v = record.values
-    assert v["area_as_seen_msh"] == pytest.approx(km2_to_msh(result.selected.on_disk_plane_of_sky_km2, rsun_km=G.rsun_km))
-    assert v["umbra_as_seen_msh"] == pytest.approx(km2_to_msh(result.umbra.on_disk_plane_of_sky_km2, rsun_km=G.rsun_km))
-    assert v["region_as_seen_msh"] == pytest.approx(km2_to_msh(result.region.on_disk_plane_of_sky_km2, rsun_km=G.rsun_km))
+    # As seen = the line-of-sight projected area, sum of d^2 dOmega (plan section 4.4).
+    assert v["area_as_seen_msh"] == pytest.approx(km2_to_msh(result.selected.projected_km2, rsun_km=G.rsun_km))
+    assert v["umbra_as_seen_msh"] == pytest.approx(km2_to_msh(result.umbra.projected_km2, rsun_km=G.rsun_km))
+    assert v["region_as_seen_msh"] == pytest.approx(km2_to_msh(result.region.projected_km2, rsun_km=G.rsun_km))
+    assert v["projected_mm2"] == pytest.approx(result.selected.projected_km2 / 1e6)
+    assert v["correction_factor"] == pytest.approx(result.selected.on_disk_km2 / result.selected.projected_km2)
     # Seen near disk centre the two barely differ; the corrected one is the true size.
     assert record.value("area_msh", corrected=False) == pytest.approx(v["area_as_seen_msh"])
     assert record.headline_for(corrected=False).startswith(f"{v['area_as_seen_msh']:,.0f} MSH")
