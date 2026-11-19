@@ -832,3 +832,70 @@ def test_geometry_for_frame_without_rsun_obs_uses_the_distance(tmp_path):
     assert geometry_for_frame(crop, {}).rsun_arcsec == pytest.approx(999.6, abs=0.1)
     with pytest.raises(ValueError, match="solar radius"):
         geometry_for_frame(SimpleNamespace(meta={}), {})
+
+
+def test_disk_interior_mask_drops_sky_and_extreme_limb():
+    from src.backend.solar.surface_measure import disk_interior_mask
+
+    n = 401
+    g = _centred(n, 6.0)
+    everything = np.ones((n, n), dtype=bool)
+    inner = disk_interior_mask(everything, g, mu_min=0.1)
+    mu = mu_map((n, n), g)
+    assert not inner[~np.isfinite(mu)].any()  # no sky
+    assert not inner[np.isfinite(mu) & (mu < 0.1)].any()  # no extreme limb
+    assert inner[np.isfinite(mu) & (mu >= 0.1)].all()
+    part = np.zeros((n, n), dtype=bool)
+    part[190:210, 190:210] = True
+    assert np.array_equal(disk_interior_mask(part, g, mu_min=0.1), part)
+
+
+# ------------------------------------------------ standard noise rejection
+def test_granulation_dips_are_not_spots_but_pores_are():
+    from src.backend.solar.surface_measure import DEFAULT_CORE_DEPTH, reject_shallow_patches
+
+    norm = np.ones((60, 60))
+    norm[5:8, 5:8] = 0.88  # granulation dip: below 0.9 but shallow
+    norm[20:25, 20:25] = 0.86
+    norm[22, 22] = 0.75  # a small pore: one pixel is a real depression
+    norm[40:50, 40:50] = 0.7  # penumbra-like
+    norm[44:46, 44:46] = 0.4  # with an umbra
+    masks = sunspot_masks(norm)
+    assert not masks.spot[5:8, 5:8].any()
+    assert masks.spot[20:25, 20:25].all()  # the whole pore patch, not just its core
+    assert masks.spot[40:50, 40:50].all()
+    assert int(masks.umbra.sum()) == 4
+    # The rule follows the penumbra level, and can be switched off.
+    assert DEFAULT_CORE_DEPTH == pytest.approx(0.10)
+    loose = sunspot_masks(norm, core_depth=None)
+    assert loose.spot[5:8, 5:8].all()
+    shallow = reject_shallow_patches(norm < 0.9, norm, core_below=0.8)
+    assert np.array_equal(shallow, masks.spot)
+    assert not reject_shallow_patches(np.zeros((4, 4), bool), norm[:4, :4], core_below=0.8).any()
+
+
+def test_quiet_sun_noise_adds_no_sunspot_area():
+    """A spotless limb-darkened disk with HMI-like granulation noise has no spots."""
+    n = 512
+    g = _centred(n, 4.0)
+    mu = mu_map((n, n), g)
+    rng = np.random.default_rng(7)
+    image = 40_000.0 * (1.0 - 0.88 * (1.0 - mu) + 0.23 * (1.0 - mu * mu))
+    # Granulation is spatially correlated (granules span a few pixels), so
+    # smooth white noise to that scale and rescale it to the 2.9% rms measured
+    # on HMI quiet Sun.
+    from scipy.ndimage import gaussian_filter
+
+    granulation = gaussian_filter(rng.standard_normal(image.shape), 1.5)
+    granulation *= 0.029 / granulation.std()
+    image = image * (1.0 + granulation)
+    image = np.where(np.isfinite(mu), image, 0.0)
+    profile = fit_quiet_sun_profile(image, g)
+    norm = normalize_to_quiet_sun(image, g, profile)
+    from src.backend.solar.surface_measure import disk_interior_mask
+
+    inner = disk_interior_mask(np.ones((n, n), dtype=bool), g, mu_min=profile.mu_min)
+    noisy = sunspot_masks(norm, inner, core_depth=None, min_cluster_px=3)
+    clean = sunspot_masks(norm, inner)
+    assert mask_surface_area(noisy.spot, g).on_disk_msh > 0.0  # noise alone dips below 0.9
+    assert int(clean.spot.sum()) == 0

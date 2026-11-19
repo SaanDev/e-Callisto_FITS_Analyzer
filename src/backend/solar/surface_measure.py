@@ -1061,6 +1061,28 @@ def normalize_to_quiet_sun(
 
 
 # ------------------------------------------------------------------- thresholds
+def disk_interior_mask(region: np.ndarray, geometry: SurfaceGeometry, *, mu_min: float) -> np.ndarray:
+    """``region`` restricted to on-disk pixels with ``mu >= mu_min``.
+
+    Dark features (sunspots, filaments) can only be measured on the disk, and
+    only where the quiet-Sun profile was actually fitted: below its ``mu_min``
+    the profile is held at the limb value while real limb darkening keeps
+    falling, so ordinary photosphere in the outermost limb, and the dark sky
+    beyond it, would read as "darker than the quiet Sun" and be counted as
+    spot. On a full-disk HMI frame that ring alone came to ~65,000 MSH.
+    """
+    region = np.asarray(region, dtype=bool)
+    out = np.zeros_like(region)
+    rows, cols = np.nonzero(region)
+    for start in range(0, rows.size, _CHUNK):
+        r = rows[start : start + _CHUNK]
+        c = cols[start : start + _CHUNK]
+        tx, ty = geometry.pixel_to_arcsec(c.astype(float), r.astype(float))
+        proj = project_to_sphere(tx, ty, geometry)
+        out[r, c] = proj.on_disk & (proj.mu >= float(mu_min))
+    return out
+
+
 def threshold_mask(
     values: np.ndarray,
     region: np.ndarray | None = None,
@@ -1124,6 +1146,29 @@ class SunspotMasks:
 
 DEFAULT_UMBRA_LEVEL = 0.6
 DEFAULT_PENUMBRA_LEVEL = 0.9
+#: A dark patch counts as a sunspot (or pore) only if its darkest pixel is at
+#: least this far below the penumbra boundary, in units of I_qs. Quiet-Sun
+#: granulation at HMI resolution has sigma ~0.03, so with the 0.9 boundary a
+#: core below 0.8 is ~7 sigma: no granulation dip reaches it, every real pore
+#: and spot does. This is the "real depression" test of automated detections
+#: (e.g. Hanaoka 2022, Sol. Phys.); without it a full-disk HMI image on a
+#: spotless day picks up ~300 MSH of granulation (measured 2019-04-03).
+DEFAULT_CORE_DEPTH = 0.10
+
+
+def reject_shallow_patches(mask: np.ndarray, normalized: np.ndarray, *, core_below: float) -> np.ndarray:
+    """Keep only 8-connected patches of ``mask`` whose darkest pixel is ``< core_below``."""
+    from scipy import ndimage
+
+    mask = np.asarray(mask, dtype=bool)
+    if not mask.any():
+        return mask.copy()
+    labels, n = ndimage.label(mask, structure=np.ones((3, 3), dtype=bool))
+    values = np.where(mask, np.nan_to_num(np.asarray(normalized, dtype=float), nan=np.inf), np.inf)
+    darkest = ndimage.minimum(values, labels, index=np.arange(1, n + 1))
+    keep = np.zeros(n + 1, dtype=bool)
+    keep[1:] = np.asarray(darkest) < float(core_below)
+    return keep[labels]
 
 
 def sunspot_masks(
@@ -1133,18 +1178,26 @@ def sunspot_masks(
     umbra_level: float = DEFAULT_UMBRA_LEVEL,
     penumbra_level: float = DEFAULT_PENUMBRA_LEVEL,
     min_cluster_px: int = 0,
+    core_depth: float | None = DEFAULT_CORE_DEPTH,
 ) -> SunspotMasks:
     """Split a region into umbra (``I/I_qs < umbra_level``) and penumbra.
 
-    The defaults, 0.6 and 0.9 of the quiet Sun, are the usual cuts for HMI
-    continuum. Small clusters are removed from the whole spot first, then the
-    umbra is taken inside what is left, so the two always add up to the spot.
+    The standard intensity-threshold method on a limb-darkening-normalised
+    image: the whole spot is ``I/I_qs < penumbra_level`` (0.9, the usual
+    penumbra/quiet-Sun boundary for HMI continuum), the umbra the part below
+    ``umbra_level`` (0.6). Patches that are not a real depression -- darkest
+    pixel not at least ``core_depth`` below the penumbra boundary -- are
+    granulation, not spots, and are dropped (``None`` keeps every patch).
+    Small clusters are removed first, then the umbra is taken inside what is
+    left, so umbra + penumbra always equals the spot.
     """
     umbra_level = float(umbra_level)
     penumbra_level = float(penumbra_level)
     if not umbra_level < penumbra_level:
         raise ValueError("The umbra level must be below the penumbra level.")
     spot = threshold_mask(normalized, region, below=penumbra_level, min_cluster_px=min_cluster_px)
+    if core_depth is not None and float(core_depth) > 0.0:
+        spot = reject_shallow_patches(spot, normalized, core_below=penumbra_level - float(core_depth))
     with np.errstate(invalid="ignore"):
         umbra = spot & (np.asarray(normalized, dtype=float) < umbra_level)
     penumbra = spot & ~umbra
