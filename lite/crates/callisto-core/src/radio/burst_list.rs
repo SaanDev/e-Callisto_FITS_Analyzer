@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime};
 
-use super::archive::{REQUEST_TIMEOUT_S, agent, day_url, extract_fits_links, get_with_retries, join_url};
+use super::archive::{REQUEST_TIMEOUT_S, Source, agent, get_with_retries, join_url, list_day};
 use super::cache::percent_decode;
 use super::downloader::{Candidate, sort_event_candidates};
 use super::naming::{basename, parse_archive_filename, strip_fits_suffix};
@@ -66,13 +66,15 @@ pub struct BurstListResult {
 pub enum BurstListError {
     Cancelled,
     Failed(String),
+    /// The FITS server could not be read for any day (`server_error`).
+    Server(String),
 }
 
 impl std::fmt::Display for BurstListError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             BurstListError::Cancelled => f.write_str("Burst list retrieval cancelled."),
-            BurstListError::Failed(m) => f.write_str(m),
+            BurstListError::Failed(m) | BurstListError::Server(m) => f.write_str(m),
         }
     }
 }
@@ -892,8 +894,9 @@ pub struct BurstFits {
     pub warnings: Vec<String>,
 }
 
-/// `BurstFitsWorker.run`: read the archive days around the (padded) burst.
+/// `BurstFitsWorker.run`: read `source`'s days around the (padded) burst.
 pub fn find_burst_fits(
+    source: Source,
     event: &BurstEvent,
     stations: &[String],
     padding_minutes: i64,
@@ -921,19 +924,14 @@ pub fn find_burst_fits(
     let mut candidates = Vec::new();
     let mut warnings = Vec::new();
     let mut successful = 0;
-    let agent = agent(REQUEST_TIMEOUT_S);
+    let server = source.label();
     for (index, date) in dates.iter().enumerate() {
         check()?;
-        let url = day_url(*date);
-        progress(index, dates.len(), format!("Reading FITS archive for {}...", date.format("%Y-%m-%d")));
+        progress(index, dates.len(), format!("Reading {server} for {}...", date.format("%Y-%m-%d")));
         check()?;
         let listing = (|| -> anyhow::Result<Vec<Candidate>> {
-            let (status, mut resp) = get_with_retries(&agent, &url)?;
-            if status >= 400 {
-                anyhow::bail!("HTTP {status} for {url}");
-            }
-            let html = resp.body_mut().with_config().limit(64 * 1024 * 1024).read_to_string()?;
-            filter_burst_candidates(&extract_fits_links(&html), &url, &stations_unique, start, stop)
+            let urls: Vec<String> = list_day(source, *date, false)?.into_iter().map(|f| f.download_url).collect();
+            filter_burst_candidates(&urls, &source.day_url(*date), &stations_unique, start, stop)
                 .map_err(anyhow::Error::msg)
         })();
         check()?;
@@ -949,7 +947,9 @@ pub fn find_burst_fits(
     check()?;
     let candidates = sort_event_candidates(candidates);
     if successful == 0 {
-        return Err(BurstListError::Failed("Unable to read the FITS archive for the selected burst.".into()));
+        return Err(BurstListError::Server(format!(
+            "Unable to read the {server} FITS archive for the selected burst."
+        )));
     }
     let missing: Vec<&str> = stations_unique
         .iter()
@@ -1053,5 +1053,49 @@ mod tests {
         .unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].filename, "BIR_20230105_101000_01.fit.gz");
+    }
+
+    use super::super::archive::test_mock::{install, record};
+    use super::super::archive::{ASTRODONCEL_FILES_URL, ASTRODONCEL_LISTING_URL};
+
+    fn burst() -> BurstEvent {
+        BurstEvent {
+            start_utc: dt("2024-01-02 12:00:00"),
+            end_utc: dt("2024-01-02 12:00:00"),
+            burst_type: "III".into(),
+            frequency_min_mhz: None,
+            frequency_max_mhz: None,
+            stations: vec!["BIR".into()],
+            remarks: String::new(),
+            source_url: String::new(),
+            raw_line: String::new(),
+        }
+    }
+
+    #[test]
+    fn burst_fits_are_found_on_the_selected_server() {
+        let _m = install(|u| {
+            Some(if u == format!("{ASTRODONCEL_LISTING_URL}?path=2024%2F01%2F02") {
+                (200, format!("[{}]", record("BIR_20240102_115500_01.fit.gz")).into_bytes())
+            } else if u.starts_with(ASTRODONCEL_LISTING_URL) {
+                (200, b"[]".to_vec())
+            } else {
+                (404, Vec::new())
+            })
+        });
+        let found = find_burst_fits(Source::Astrodoncel, &burst(), &["BIR".into()], 0, |_, _, _| {}, || false).unwrap();
+        assert_eq!(found.candidates.len(), 1);
+        assert_eq!(found.candidates[0].url, format!("{ASTRODONCEL_FILES_URL}2024/01/02/BIR_20240102_115500_01.fit.gz"));
+    }
+
+    #[test]
+    fn an_unreadable_server_is_a_server_error() {
+        let _m = install(|_| Some((503, Vec::new())));
+        let err =
+            find_burst_fits(Source::Astrodoncel, &burst(), &["BIR".into()], 0, |_, _, _| {}, || false).unwrap_err();
+        assert_eq!(
+            err,
+            BurstListError::Server("Unable to read the Astrodoncel FITS archive for the selected burst.".into())
+        );
     }
 }

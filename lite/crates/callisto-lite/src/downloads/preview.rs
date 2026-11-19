@@ -49,6 +49,15 @@ impl PreviewWindow {
         }
     }
 
+    /// Names the server the files came from in the title; the window keeps
+    /// that name after the downloader moves on to another server.
+    pub fn with_source(mut self, source_label: &str) -> Self {
+        if !source_label.is_empty() {
+            self.title = format!("{} ({source_label})", self.title);
+        }
+        self
+    }
+
     /// Draws the window; returns true once it was closed.
     pub fn show(&mut self, ctx: &egui::Context, p: &Palette) -> bool {
         let mut closed = false;

@@ -91,8 +91,10 @@ def lite_body() -> str:
 
     # 4. Edit menu.
     b = once(b, """readouts and undo history are cleared, and the analysis, Geomagnetic Response, Event Figure, Solar Image Analysis
-and GCS windows are closed. If the Solar Image Analysis or GCS window holds work, you are asked first. Your
-preferences and the download cache are kept.</li>""",
+and GCS windows are closed. With unsaved changes you are asked to <b>Save</b>, <b>Discard</b> or
+<b>Cancel</b>, as when opening or closing; with everything saved but work in the Solar Image Analysis or GCS
+window, you are asked to confirm. Your preferences (including the View menu's event-strip choices) and the
+download cache are kept.</li>""",
              """readouts and undo history are cleared, and the analysis windows are closed. Your preferences and the download
 cache are kept.</li>""")
 

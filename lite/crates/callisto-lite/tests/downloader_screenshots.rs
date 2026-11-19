@@ -225,7 +225,7 @@ fn downloader_matches_full_app() {
             burst_start: NaiveDate::from_ymd_opt(2026, 9, 7).unwrap(),
             burst_end: day,
         };
-        let dialog = DownloaderDialog::new(cache.clone(), &mut svc, Some(&state));
+        let dialog = DownloaderDialog::new(cache.clone(), &mut svc, Some(&state), Default::default());
         let st = Downloader { dialog, svc, p, ready: false };
         let mut h = harness([1540.0, 980.0], st, |ui, s| {
             if !s.ready {

@@ -8,9 +8,9 @@ use std::path::Path;
 
 use chrono::{NaiveDate, NaiveDateTime};
 
-use super::archive::{ListingError, check_archive_server, day_url, extract_fits_links, fetch_listing, join_url};
+use super::archive::{ListingError, Source, check_archive_server, join_url, list_day};
 use super::array::Array2;
-use super::cache::{self, DEFAULT_MAX_CACHE_BYTES, fetch_cached};
+use super::cache::{self, DEFAULT_MAX_CACHE_BYTES, fetch_cached, percent_decode};
 use super::combine::{self, CombineOptions, CombineType, Combined, FrequencyRelation, group_combinable_paths};
 use super::fits_io::{FitsLoadResult, load_callisto_fits};
 use super::naming::{basename, parse_archive_filename};
@@ -40,11 +40,21 @@ impl Candidate {
     pub fn utc_text(&self) -> String {
         self.observed_at.map_or_else(|| "\u{2014}".to_owned(), |t| t.format("%Y-%m-%d %H:%M:%S").to_string())
     }
+
+    /// The server this file was listed on, which its URL always says.
+    pub fn source(&self) -> Source {
+        Source::for_url(&self.url)
+    }
 }
 
 /// `_station_key`: whitespace collapsed, lower case.
 pub fn station_key(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+/// `_href_filename`: the decoded basename of a listing link or file URL.
+fn href_filename(href: &str) -> String {
+    percent_decode(basename(href.split(['?', '#']).next().unwrap_or("")))
 }
 
 /// `_candidate_matches_station`.
@@ -85,13 +95,13 @@ pub fn filter_event_candidates(
     let selected: Vec<&str> = selected_stations.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
     let mut out = Vec::new();
     for href in hrefs {
-        let filename = basename(href);
-        let Some(c) = Candidate::parse(filename, join_url(day_url, href)) else { continue };
+        let filename = href_filename(href);
+        let Some(c) = Candidate::parse(&filename, join_url(day_url, href)) else { continue };
         let observed = c.observed_at.unwrap();
         if observed < start || observed > stop {
             continue;
         }
-        if !selected.iter().any(|s| candidate_matches_station(&c.station, filename, s)) {
+        if !selected.iter().any(|s| candidate_matches_station(&c.station, &filename, s)) {
             continue;
         }
         out.push(c);
@@ -120,7 +130,7 @@ pub fn filter_spectral_overview_candidates(
     let wanted = station_key(station);
     let out = hrefs
         .iter()
-        .filter_map(|href| Candidate::parse(basename(href), join_url(day_url, href)))
+        .filter_map(|href| Candidate::parse(&href_filename(href), join_url(day_url, href)))
         .filter(|c| station_key(&c.station) == wanted && c.observed_at.unwrap().date() == date)
         .collect();
     sort_event_candidates(out)
@@ -171,28 +181,27 @@ pub fn describe_days(days: &[NaiveDate]) -> String {
 
 // ------------------------------------------------------------- workers
 
-/// `FetchWorker`'s result: the whole day's files whose name contains the
-/// station, as `(filename, url)`.
+/// `FetchWorker`'s result: the whole day's files on `source` whose name
+/// contains the station, as `(filename, url)`. Names the naming rules
+/// cannot read stay in, so the user can still see them.
 pub fn fetch_station_day(
+    source: Source,
     date: NaiveDate,
     station: &str,
     mut progress: impl FnMut(usize, usize),
 ) -> Result<Vec<(String, String)>, ListingError> {
-    let (ok, message) = check_archive_server();
+    let (ok, message) = check_archive_server(source);
     if !ok {
         return Err(ListingError::Unreachable(message));
     }
-    let url = day_url(date);
-    let html = fetch_listing(&url)?;
-    let hrefs = extract_fits_links(&html);
+    let files = list_day(source, date, true)?;
     let key = station.trim().to_lowercase();
     let mut out = Vec::new();
-    for (i, href) in hrefs.iter().enumerate() {
-        let filename = basename(href);
-        if filename.to_lowercase().contains(&key) {
-            out.push((filename.to_owned(), join_url(&url, href)));
+    for (i, f) in files.iter().enumerate() {
+        if f.filename.to_lowercase().contains(&key) {
+            out.push((f.filename.clone(), f.download_url.clone()));
         }
-        progress(i + 1, hrefs.len());
+        progress(i + 1, files.len());
     }
     Ok(out)
 }
@@ -205,8 +214,9 @@ pub struct EventSearch {
     pub missing_stations: Vec<String>,
 }
 
-/// `EventFetchWorker.run`.
+/// `EventFetchWorker.run`. Every day failing is an error naming the server.
 pub fn search_event(
+    source: Source,
     start: NaiveDateTime,
     stop: NaiveDateTime,
     stations: &[String],
@@ -214,19 +224,30 @@ pub fn search_event(
 ) -> Result<EventSearch, String> {
     let dates = utc_archive_dates_for_window(start, stop)?;
     let stations: Vec<String> = stations.iter().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect();
-    let (ok, message) = check_archive_server();
+    let server = source.label();
+    let (ok, message) = check_archive_server(source);
     if !ok {
-        return Err(format!("FITS server is not responding: {message}"));
+        return Err(format!("{server} FITS server is not responding: {message}"));
     }
     let mut found = Vec::new();
     let mut warnings = Vec::new();
+    let mut successful_days = 0;
     for (i, date) in dates.iter().enumerate() {
-        let url = day_url(*date);
-        match fetch_listing(&url) {
-            Ok(html) => found.extend(filter_event_candidates(&extract_fits_links(&html), &url, &stations, start, stop)),
+        match list_day(source, *date, false) {
+            Ok(files) => {
+                let urls: Vec<String> = files.into_iter().map(|f| f.download_url).collect();
+                found.extend(filter_event_candidates(&urls, &source.day_url(*date), &stations, start, stop));
+                successful_days += 1;
+            }
             Err(e) => warnings.push(format!("{}: {e}", date.format("%Y-%m-%d"))),
         }
         progress(i + 1, dates.len());
+    }
+    if successful_days == 0 {
+        return Err(format!(
+            "Could not read {server} for the selected window.\n\n{}",
+            warnings.iter().take(3).cloned().collect::<Vec<_>>().join("\n")
+        ));
     }
     let candidates = sort_event_candidates(found);
     let missing_stations = stations
@@ -672,5 +693,96 @@ mod tests {
         assert!(utc_archive_dates_for_window(dt("2026-10-07 01:00:00"), dt("2026-10-06 23:00:00")).is_err());
         assert_eq!(import_label(&["https://a".into()]), "Downloading selected FITS files...");
         assert_eq!(import_label(&["C:/a.fit".into()]), "Preparing selected FITS files...");
+    }
+
+    use super::super::archive::test_mock::{install, record};
+    use super::super::archive::{ASTRODONCEL_FILES_URL, ASTRODONCEL_LISTING_URL};
+
+    fn listing(d: &str) -> String {
+        format!("{ASTRODONCEL_LISTING_URL}?path={d}")
+    }
+
+    #[test]
+    fn event_search_on_astrodoncel_crosses_midnight_and_keeps_its_server() {
+        let _m = install(|u| {
+            let names: &[&str] = if u == listing("2024%2F01%2F01") {
+                &["BIR_20240101_234503_01.fit.gz", "BIR_20240101_120000_01.fit.gz"]
+            } else if u == listing("2024%2F01%2F02") {
+                &["BIR_20240102_000002_059.fit.gz", "BIR_20240102_120000_01.fit.gz"]
+            } else {
+                return Some((404, Vec::new()));
+            };
+            Some((200, format!("[{}]", names.iter().map(|n| record(n)).collect::<Vec<_>>().join(",")).into_bytes()))
+        });
+        let found = search_event(
+            Source::Astrodoncel,
+            dt("2024-01-01 23:30:00"),
+            dt("2024-01-02 00:30:00"),
+            &["BIR".into()],
+            |_, _| {},
+        )
+        .unwrap();
+        let names: Vec<&str> = found.candidates.iter().map(|c| c.filename.as_str()).collect();
+        assert_eq!(names, ["BIR_20240101_234503_01.fit.gz", "BIR_20240102_000002_059.fit.gz"]);
+        assert_eq!(found.candidates[1].receiver_id, "059");
+        assert!(found.candidates.iter().all(|c| c.source() == Source::Astrodoncel));
+        assert_eq!(
+            found.candidates[1].url,
+            format!("{ASTRODONCEL_FILES_URL}2024/01/02/BIR_20240102_000002_059.fit.gz")
+        );
+    }
+
+    #[test]
+    fn event_search_with_every_day_failing_is_an_error_naming_the_server() {
+        let _m = install(|_| Some((200, b"not json".to_vec())));
+        let err = search_event(
+            Source::Astrodoncel,
+            dt("2024-01-02 00:00:00"),
+            dt("2024-01-02 01:00:00"),
+            &["BIR".into()],
+            |_, _| {},
+        )
+        .unwrap_err();
+        assert!(err.starts_with("Could not read Astrodoncel for the selected window."), "{err}");
+        drop(_m);
+        let _m = install(|_| Some((200, b"[]".to_vec())));
+        let empty = search_event(
+            Source::Astrodoncel,
+            dt("2024-01-02 00:00:00"),
+            dt("2024-01-02 01:00:00"),
+            &["BIR".into()],
+            |_, _| {},
+        )
+        .unwrap();
+        assert!(empty.candidates.is_empty());
+        assert_eq!(empty.missing_stations, ["BIR"]);
+    }
+
+    #[test]
+    fn single_station_day_lists_the_selected_server() {
+        let _m = install(|u| {
+            Some(if u == listing("2024%2F01%2F02") {
+                (
+                    200,
+                    format!(
+                        "[{},{}]",
+                        record("BIR_20240102_000000_01.fit.gz"),
+                        record("MRO_20240102_000000_01.fit.gz")
+                    )
+                    .into_bytes(),
+                )
+            } else {
+                (404, Vec::new())
+            })
+        });
+        let date = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        let files = fetch_station_day(Source::Astrodoncel, date, "BIR", |_, _| {}).unwrap();
+        assert_eq!(
+            files,
+            [(
+                "BIR_20240102_000000_01.fit.gz".to_owned(),
+                format!("{ASTRODONCEL_FILES_URL}2024/01/02/BIR_20240102_000000_01.fit.gz")
+            )]
+        );
     }
 }

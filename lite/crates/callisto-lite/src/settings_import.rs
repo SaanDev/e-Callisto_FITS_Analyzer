@@ -41,6 +41,9 @@ pub fn import(values: &HashMap<String, String>) -> Settings {
     if let Some(scale) = get("ui/frequency_axis_scale") {
         s.frequency_axis_log = scale.eq_ignore_ascii_case("log");
     }
+    if let Some(id) = get("callisto/archive_source") {
+        s.archive_source = callisto_core::radio::archive::Source::from_id(id).id().to_owned();
+    }
     if let Some(v) = get("processing/max_auto_clean_isolated") {
         s.auto_clean_max_outliers = !matches!(v.to_lowercase().as_str(), "false" | "0");
     }
@@ -331,10 +334,20 @@ mod tests {
         v.insert("processing/presets_json".to_owned(), "not json".to_owned());
         v.insert("ui/theme_mode".to_owned(), "LIGHT".to_owned());
         let s = import(&v);
+        assert_eq!(s.archive_source, "ecallisto", "no saved server keeps the default");
         assert_eq!(s.recent_fits, vec![vec!["a.fit".to_owned(), "b.fit".to_owned()], vec!["c.fit".to_owned()]]);
         assert_eq!(s.display_range_presets.len(), 1);
         assert_eq!(s.display_range_presets[0].name, "Burst");
         assert_eq!(s.presets_json, Settings::default().presets_json);
         assert_eq!(s.theme_mode, ThemeMode::Light);
+    }
+
+    #[test]
+    fn takes_over_the_full_apps_fits_server() {
+        let mut v = HashMap::new();
+        v.insert("callisto/archive_source".to_owned(), "astrodoncel".to_owned());
+        assert_eq!(import(&v).archive_source, "astrodoncel");
+        v.insert("callisto/archive_source".to_owned(), "some-old-server".to_owned());
+        assert_eq!(import(&v).archive_source, "ecallisto");
     }
 }

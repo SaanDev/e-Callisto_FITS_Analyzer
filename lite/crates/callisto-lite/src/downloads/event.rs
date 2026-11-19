@@ -1,6 +1,7 @@
 //! The Multi-Station Event tab: several stations' files that start inside
 //! a UTC window (`CallistoDownloaderApp._build_event_tab` and handlers).
 
+use callisto_core::radio::archive::Source;
 use callisto_core::radio::downloader::{self, Candidate, EventSearch, MAX_EVENT_STATION_DAYS, station_key};
 use chrono::{NaiveDateTime, Utc};
 use egui::{Id, Rect, Ui};
@@ -9,7 +10,9 @@ use super::batch::{DownloadBatch, pick_folder};
 use super::jobs::Job;
 use super::single::section;
 use super::stations::{LoaderEvent, StationLoader, StationService};
-use super::{Shared, at, lay_out};
+use super::{Retry, Shared, at, lay_out};
+
+const READY_STATUS: &str = "Select stations and a UTC event time window.";
 use crate::session::NoticeKind;
 use crate::ui::itemview::{self, Check, Event, Row, Style, ViewState};
 use crate::ui::qlayout::{BoxLayout, Container, GridLayout, Item, Layout, Policy, Size, WidgetSpec};
@@ -26,6 +29,8 @@ pub struct EventTab {
     /// Station names and whether each is checked.
     stations: Vec<(String, bool)>,
     checked_keys: std::collections::HashSet<String>,
+    /// After a server change, only checked stations it also has stay checked.
+    prune_checked: bool,
     station_view: ViewState,
     results: Vec<(Candidate, bool)>,
     results_view: ViewState,
@@ -54,18 +59,35 @@ impl EventTab {
             station_days: None,
             stations: Vec::new(),
             checked_keys: Default::default(),
+            prune_checked: false,
             station_view: ViewState::default(),
             results: Vec::new(),
             results_view: ViewState::default(),
             search: None,
             downloads: None,
             progress: None,
-            status: "Select stations and a UTC event time window.".into(),
+            status: READY_STATUS.into(),
         }
     }
 
     pub fn is_busy(&self) -> bool {
         self.search.is_some() || self.downloads.is_some()
+    }
+
+    /// The server the tab starts on, before its first station lookup.
+    pub(crate) fn start_on(&mut self, source: Source) {
+        self.loader.source = source;
+    }
+
+    /// The selected server changed: its results go and the stations reload.
+    pub(crate) fn set_source(&mut self, svc: &StationService, source: Source) {
+        self.results.clear();
+        self.results_view = ViewState::default();
+        self.status = READY_STATUS.into();
+        self.prune_checked = true;
+        if let Some(e) = self.loader.set_source(svc, source) {
+            self.apply(e);
+        }
     }
 
     /// `_request_event_stations`.
@@ -98,7 +120,13 @@ impl EventTab {
     fn apply(&mut self, e: LoaderEvent) {
         match e {
             LoaderEvent::Loading => self.fill(&[]),
-            LoaderEvent::Loaded(s) => self.fill(&s),
+            LoaderEvent::Loaded(s) => {
+                if std::mem::take(&mut self.prune_checked) {
+                    let listed: std::collections::HashSet<String> = s.iter().map(|x| station_key(x)).collect();
+                    self.checked_keys.retain(|k| listed.contains(k));
+                }
+                self.fill(&s)
+            }
             LoaderEvent::Failed(_) => {}
         }
     }
@@ -143,9 +171,14 @@ impl EventTab {
                 // `finish_event_download`.
                 let ok = batch.success_paths.len();
                 let failed = batch.failures.len();
-                let mut status = format!("Downloaded {ok} of {} selected FITS file(s).", batch.total);
+                let mut status = format!(
+                    "Downloaded {ok} of {} selected FITS file(s) from {}.",
+                    batch.total,
+                    self.loader.source.label()
+                );
                 if failed > 0 {
                     status.push_str(&format!(" {failed} failed."));
+                    sh.out.server_failed(status.clone(), Retry::EventDownload);
                 }
                 self.status = status.clone();
                 let mut details = vec![status];
@@ -173,14 +206,19 @@ impl EventTab {
         self.progress = None;
         let res = match r {
             Ok(r) => r,
-            Err(e) => return sh.out.notice(NoticeKind::Critical, "Search Error", e),
+            Err(e) => {
+                self.status = e.lines().next().unwrap_or("").to_owned();
+                sh.out.server_failed(e.clone(), Retry::EventSearch);
+                return sh.out.notice(NoticeKind::Critical, "Search Error", e);
+            }
         };
         self.results = res.candidates.iter().map(|c| (c.clone(), true)).collect();
         self.results_view = ViewState::default();
+        let server = self.loader.source.label();
         let mut status = if res.candidates.is_empty() {
-            "No matching FITS files were found for the selected stations and time window.".to_owned()
+            format!("No matching FITS files were found on {server} for the selected stations and time window.")
         } else {
-            format!("Found {} matching FITS file(s).", res.candidates.len())
+            format!("Found {} matching FITS file(s) on {server}.", res.candidates.len())
         };
         if !res.missing_stations.is_empty() {
             let shown = res.missing_stations.iter().take(8).cloned().collect::<Vec<_>>().join(", ");
@@ -421,7 +459,7 @@ impl EventTab {
     }
 
     /// `search_event_fits`.
-    fn search_fits(&mut self, sh: &mut Shared) {
+    pub(crate) fn search_fits(&mut self, sh: &mut Shared) {
         let stations: Vec<String> = self.stations.iter().filter(|s| s.1).map(|s| s.0.clone()).collect();
         if stations.is_empty() {
             return sh.out.notice(NoticeKind::Warning, "No Stations", "Please select at least one station.");
@@ -432,15 +470,18 @@ impl EventTab {
         if self.search.is_some() {
             return sh.out.notice(NoticeKind::Information, "Search In Progress", "An event search is already running.");
         }
+        sh.out.clear_server_failure = true;
         self.results.clear();
-        self.status = "Searching archive listings...".into();
+        let source = self.loader.source;
+        self.status = format!("Searching {} listings...", source.label());
         self.progress = Some(qt::Progress::busy());
         let (start, stop) = (self.start, self.stop);
-        self.search =
-            Some(Job::spawn(&sh.ctx, move |r| downloader::search_event(start, stop, &stations, |v, m| r.send((v, m)))));
+        self.search = Some(Job::spawn(&sh.ctx, move |r| {
+            downloader::search_event(source, start, stop, &stations, |v, m| r.send((v, m)))
+        }));
     }
 
-    fn action(&mut self, id: &str, sh: &mut Shared) {
+    pub(crate) fn action(&mut self, id: &str, sh: &mut Shared) {
         match id {
             "res_all" | "res_clear" => {
                 for r in &mut self.results {
@@ -467,8 +508,9 @@ impl EventTab {
                     return sh.out.notice(NoticeKind::Warning, "No Selection", "Please select files to download.");
                 }
                 let Some(dir) = pick_folder("Select Download Folder") else { return };
+                sh.out.clear_server_failure = true;
                 self.progress = Some(qt::Progress::range(sel.len() as i64));
-                self.status = "Downloading selected event FITS files...".into();
+                self.status = format!("Downloading selected event FITS files from {}...", self.loader.source.label());
                 self.downloads = Some(DownloadBatch::start(&sh.ctx, sh.cache_root, &sel, &dir));
             }
             _ => {}

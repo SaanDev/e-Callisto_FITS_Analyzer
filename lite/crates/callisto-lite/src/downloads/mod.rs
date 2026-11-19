@@ -16,6 +16,7 @@ pub mod stations;
 
 use std::path::{Path, PathBuf};
 
+use callisto_core::radio::archive::Source;
 use callisto_core::radio::cache;
 use chrono::NaiveDate;
 use egui::{Id, Pos2, Rect, Sense, Ui, ViewportBuilder, ViewportId, pos2, vec2};
@@ -129,6 +130,24 @@ pub struct Outbox {
     pub compare: Option<Vec<String>>,
     pub previews: Vec<preview::PreviewWindow>,
     pub cache_changed: bool,
+    /// The FITS server failed: the message, and what Retry repeats.
+    pub server_failure: Option<(String, Retry)>,
+    /// A new operation started, so an earlier failure no longer applies.
+    pub clear_server_failure: bool,
+}
+
+/// What the Retry button beside the Server selector repeats.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Retry {
+    SingleShow,
+    SinglePreview,
+    SingleDownload,
+    EventSearch,
+    EventDownload,
+    OverviewGenerate,
+    BurstFind,
+    BurstPreview,
+    BurstDownload,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,6 +159,12 @@ impl Outbox {
     pub fn notice(&mut self, kind: NoticeKind, title: &str, text: impl Into<String>) {
         self.notices.push(Notice { kind, title: title.into(), text: text.into() });
     }
+
+    /// `_report_server_failure`: offer to repeat what failed. The server stays
+    /// selected; the user may change it.
+    pub fn server_failed(&mut self, message: impl Into<String>, retry: Retry) {
+        self.server_failure = Some((message.into(), retry));
+    }
 }
 
 /// What a tab sees each frame.
@@ -147,7 +172,7 @@ pub struct Shared<'a> {
     pub p: &'a Palette,
     pub ctx: egui::Context,
     pub svc: &'a mut StationService,
-    pub resolved: &'a [NaiveDate],
+    pub resolved: &'a [stations::DayKey],
     pub cache_root: &'a Path,
     pub out: &'a mut Outbox,
 }
@@ -192,6 +217,10 @@ pub struct DownloaderDialog {
     pub event: event::EventTab,
     pub overview: overview::OverviewTab,
     pub burst: burst::BurstTab,
+    /// The server every tab searches and downloads from.
+    source: Source,
+    /// The last server failure: its message and what Retry repeats.
+    server_failure: Option<(String, Retry)>,
     cache_root: PathBuf,
     cache_label: String,
     notices: Vec<Notice>,
@@ -209,13 +238,17 @@ pub struct DownloaderDialog {
 const TABS: [&str; 4] = ["Single Station", "Multi-Station Event", "Spectral Overview", "Burst List"];
 
 impl DownloaderDialog {
-    pub fn new(cache_root: PathBuf, svc: &mut StationService, state: Option<&DateTimeState>) -> Self {
+    /// The dialog on `source` (the remembered server, restored before the
+    /// first station lookups).
+    pub fn new(cache_root: PathBuf, svc: &mut StationService, state: Option<&DateTimeState>, source: Source) -> Self {
         let mut d = DownloaderDialog {
             tab: 0,
             single: single::SingleTab::new(),
             event: event::EventTab::new(),
             overview: overview::OverviewTab::new(),
             burst: burst::BurstTab::new(),
+            source: Source::Ecallisto,
+            server_failure: None,
             cache_label: String::new(),
             cache_root,
             notices: Vec::new(),
@@ -240,6 +273,11 @@ impl DownloaderDialog {
                 d.burst.dates_changed();
             }
         }
+        d.source = source;
+        d.single.start_on(source);
+        d.event.start_on(source);
+        d.overview.start_on(source);
+        d.burst.start_on(source);
         d.single.request_stations(svc);
         d.overview.request_stations(svc);
         d.event.request_stations(svc);
@@ -261,6 +299,52 @@ impl DownloaderDialog {
 
     pub fn cache_root(&self) -> &Path {
         &self.cache_root
+    }
+
+    /// The selected server.
+    pub fn source(&self) -> Source {
+        self.source
+    }
+
+    /// The last server failure's message, while its Retry is offered (for tests).
+    pub fn server_failure(&self) -> Option<&str> {
+        self.server_failure.as_ref().map(|f| f.0.as_str())
+    }
+
+    /// `_on_server_selected`: switches every tab to `source`, unless work is
+    /// running. Dates and time windows stay, results of the previous server
+    /// are cleared, and nothing is searched until the user asks. Returns
+    /// whether the server changed.
+    pub fn set_source(&mut self, svc: &mut StationService, source: Source) -> bool {
+        if source == self.source || self.cache_busy() {
+            return false;
+        }
+        self.source = source;
+        self.server_failure = None;
+        self.single.set_source(svc, source);
+        self.event.set_source(svc, source);
+        self.overview.set_source(svc, source);
+        self.burst.set_source(svc, source);
+        true
+    }
+
+    /// Repeats what failed (`_retry_after_server_failure`); waits for running work.
+    fn retry(&mut self, sh: &mut Shared) {
+        if self.cache_busy() {
+            return;
+        }
+        let Some((_, retry)) = self.server_failure.take() else { return };
+        match retry {
+            Retry::SingleShow => self.single.show_available(sh),
+            Retry::SinglePreview => self.single.action("preview", sh),
+            Retry::SingleDownload => self.single.action("download", sh),
+            Retry::EventSearch => self.event.search_fits(sh),
+            Retry::EventDownload => self.event.action("download", sh),
+            Retry::OverviewGenerate => self.overview.generate(sh),
+            Retry::BurstFind => self.burst.find_fits(sh),
+            Retry::BurstPreview => self.burst.file_action("preview", sh),
+            Retry::BurstDownload => self.burst.file_action("download", sh),
+        }
     }
 
     fn update_cache_label(&mut self) {
@@ -324,6 +408,12 @@ impl DownloaderDialog {
         windows: bool,
     ) -> Option<DownloaderAction> {
         let mut action = None;
+        if out.clear_server_failure {
+            self.server_failure = None;
+        }
+        if out.server_failure.is_some() {
+            self.server_failure = out.server_failure.take();
+        }
         // Message boxes and questions belong to the dialog.
         self.notices.append(&mut out.notices);
         if out.question.is_some() {
@@ -393,6 +483,10 @@ impl DownloaderDialog {
         let parts: Vec<&str> = cmd.split('|').collect();
         match parts.as_slice() {
             ["tab", n] => self.tab = n.parse().unwrap_or(0),
+            ["server", id] => {
+                self.set_source(sh.svc, Source::from_id(id));
+            }
+            ["retry"] => self.retry(sh),
             ["single", rest @ ..] => self.single.script(rest, sh),
             ["event", rest @ ..] => self.event.script(rest, sh),
             ["overview", rest @ ..] => self.overview.script(rest, sh),
@@ -414,7 +508,18 @@ impl DownloaderDialog {
     fn body(&mut self, ui: &mut Ui, sh: &mut Shared) {
         let full = ui.max_rect();
         let p = sh.p;
-        // QVBoxLayout(14, 8): the tab widget, then the cache footer.
+        // QVBoxLayout(14, 8): the Server row, the tab widget, the cache footer.
+        let labels: Vec<&str> = Source::ALL.iter().map(|s| s.label()).collect();
+        let failure = self.server_failure.as_ref().map(|f| f.0.lines().next().unwrap_or("").to_owned());
+        let mut server_row = BoxLayout::h([0; 4], 8)
+            .widget(qt::label_spec(ui, "server_label", "Server:"))
+            .widget(qt::combo_spec(ui, "server", &labels));
+        server_row = match &failure {
+            Some(text) => server_row
+                .add_stretched(crate::ui::qlayout::Item::Widget(qt::status_spec(ui, "server_failure", text)), 1)
+                .widget(qt::button_spec(ui, "server_retry", "Retry", false)),
+            None => server_row.stretch(1),
+        };
         let footer = BoxLayout::h([0; 4], 8)
             .widget(qt::status_spec(ui, "cache_label", &self.cache_label))
             .stretch(1)
@@ -426,9 +531,31 @@ impl DownloaderDialog {
             crate::ui::qlayout::Policy::Expanding,
             crate::ui::qlayout::Policy::Expanding,
         );
-        let root: Layout = BoxLayout::v([14; 4], 8).widget(tabs).add(footer.into_item()).into();
+        let root: Layout =
+            BoxLayout::v([14; 4], 8).add(server_row.into_item()).widget(tabs).add(footer.into_item()).into();
         let (g, o) = lay_out(&root, full);
         let tabs_rect = at(&g, o, "tabs");
+
+        // The selector stays locked while any search, download, preview or
+        // overview is using the server.
+        let busy = self.cache_busy();
+        qt::label(ui, at(&g, o, "server_label"), "Server:", p.text);
+        let items: Vec<String> = labels.iter().map(|s| s.to_string()).collect();
+        let current = Source::ALL.iter().position(|s| *s == self.source);
+        if let Some(i) = qt::combo(ui, at(&g, o, "server"), Id::new("downloader_server"), &items, current, "", !busy, p)
+        {
+            self.set_source(sh.svc, Source::ALL[i]);
+        }
+        if let Some(text) = &failure {
+            let rect = at(&g, o, "server_failure");
+            qt::status(ui, rect, text, p);
+            if let Some((full_text, _)) = &self.server_failure {
+                ui.interact(rect, Id::new("server_failure_tip"), Sense::hover()).on_hover_text(full_text);
+            }
+            if qt::button(ui, at(&g, o, "server_retry"), Id::new("server_retry"), "Retry", false, !busy, p).clicked() {
+                self.retry(sh);
+            }
+        }
 
         // Tab bar and page (`::pane { top: 6px }`).
         let enabled = [

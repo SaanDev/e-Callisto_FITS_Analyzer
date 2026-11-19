@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering;
 use callisto_core::mpl::figures::overview_figure;
 use callisto_core::mpl::{Axes, AxesText, AxisSpec, Figure, HAlign, Label, Ticks, VAlign, WHITE, hex};
 use callisto_core::radio::archive::{
-    DOWNLOAD_TIMEOUT_S, agent, check_archive_server, day_url, extract_fits_links, fetch_listing, get_with_retries,
+    DOWNLOAD_TIMEOUT_S, Source, agent, check_archive_server, get_with_retries, list_day,
 };
 use callisto_core::radio::downloader::{self, Candidate};
 use callisto_core::radio::spectral_overview::{
@@ -22,7 +22,7 @@ use egui::{Id, Rect, Sense, Ui, pos2, vec2};
 use super::jobs::{Job, Reporter};
 use super::single::section;
 use super::stations::{StationCombo, StationLoader, StationService};
-use super::{Shared, at, lay_out};
+use super::{Retry, Shared, at, lay_out};
 use crate::figure_view::FigureView;
 use crate::session::NoticeKind;
 use crate::ui::qlayout::{BoxLayout, GridLayout, Layout, Policy, Size, WidgetSpec};
@@ -38,7 +38,26 @@ pub enum Msg {
     FocusCodes(Vec<String>),
 }
 
-type OverviewOutcome = Result<(Vec<OverviewResult>, Vec<String>), OverviewError>;
+/// How a generation ended without results. A `Server` failure (the listing
+/// or every file transfer failed) offers Retry (`serverFailed`).
+enum Stop {
+    Cancelled,
+    Failed(String),
+    Server(String),
+}
+
+impl From<OverviewError> for Stop {
+    fn from(e: OverviewError) -> Self {
+        match e {
+            OverviewError::Cancelled => Stop::Cancelled,
+            OverviewError::Failed(m) => Stop::Failed(m),
+        }
+    }
+}
+
+type OverviewOutcome = Result<(Vec<OverviewResult>, Vec<String>), Stop>;
+
+const READY_STATUS: &str = "Select a station and UTC date, then generate full-day Plotutil median-dB overviews for every available focus code.";
 
 struct Preview {
     title: String,
@@ -129,7 +148,7 @@ impl OverviewTab {
             focus_current: 0,
             job: None,
             progress: qt::Progress::busy(),
-            status: "Select a station and UTC date, then generate full-day Plotutil median-dB overviews for every available focus code.".into(),
+            status: READY_STATUS.into(),
             tooltip: String::new(),
             previews: vec![placeholder()],
             current: 0,
@@ -150,6 +169,26 @@ impl OverviewTab {
     pub fn request_stations(&mut self, svc: &StationService) {
         if let Some(e) = self.loader.request(svc, &[self.date]) {
             self.combo.apply(&e);
+        }
+    }
+
+    /// The server the tab starts on, before its first station lookup.
+    pub(crate) fn start_on(&mut self, source: Source) {
+        self.loader.source = source;
+    }
+
+    /// The selected server changed: the overviews of the previous one go,
+    /// the station list reloads, and a listed station stays selected.
+    pub(crate) fn set_source(&mut self, svc: &StationService, source: Source) {
+        self.combo.remember_current();
+        self.previews = vec![placeholder()];
+        self.current = 0;
+        self.reset_focus();
+        self.status = READY_STATUS.into();
+        self.tooltip.clear();
+        if let Some(e) = self.loader.set_source(svc, source) {
+            self.combo.apply(&e);
+            self.reset_focus();
         }
     }
 
@@ -192,14 +231,23 @@ impl OverviewTab {
         self.job = None;
         self.cancelling = false;
         match outcome {
-            Err(OverviewError::Cancelled) => self.status = "Spectral overview generation cancelled.".into(),
-            Err(OverviewError::Failed(m)) => {
+            Err(Stop::Cancelled) => self.status = "Spectral overview generation cancelled.".into(),
+            Err(Stop::Failed(m) | Stop::Server(m)) if m.is_empty() => {
                 self.status = "Spectral overview generation failed.".into();
                 sh.out.notice(
                     NoticeKind::Critical,
                     "Spectral Overview Failed",
-                    if m.is_empty() { "Could not generate the spectral overview.".to_owned() } else { m },
+                    "Could not generate the spectral overview.",
                 );
+            }
+            Err(Stop::Failed(m)) => {
+                self.status = "Spectral overview generation failed.".into();
+                sh.out.notice(NoticeKind::Critical, "Spectral Overview Failed", m);
+            }
+            Err(Stop::Server(m)) => {
+                self.status = "Spectral overview generation failed.".into();
+                sh.out.server_failed(m.clone(), Retry::OverviewGenerate);
+                sh.out.notice(NoticeKind::Critical, "Spectral Overview Failed", m);
             }
             Ok((results, errors)) => {
                 let total: usize = results.iter().map(|r| r.total_sources).sum();
@@ -207,8 +255,9 @@ impl OverviewTab {
                 let warnings: usize = results.iter().map(|r| r.warnings.len()).sum::<usize>() + errors.len();
                 let codes = results.iter().map(|r| r.focus_code.clone()).collect::<Vec<_>>().join(", ");
                 let mut status = format!(
-                    "Generated {} focus-code overview(s): {codes}. Loaded {loaded}/{total} FITS file(s).",
-                    results.len()
+                    "Generated {} focus-code overview(s): {codes}. Loaded {loaded}/{total} FITS file(s) from {}.",
+                    results.len(),
+                    self.loader.source.label()
                 );
                 let mut details = errors.clone();
                 details.extend(
@@ -419,7 +468,7 @@ impl OverviewTab {
     }
 
     /// `generate_spectral_overview`.
-    fn generate(&mut self, sh: &mut Shared) {
+    pub(crate) fn generate(&mut self, sh: &mut Shared) {
         if self.job.is_some() {
             return sh.out.notice(
                 NoticeKind::Information,
@@ -436,11 +485,13 @@ impl OverviewTab {
             );
         }
         let focus = self.focus[self.focus_current].1.clone();
+        sh.out.clear_server_failure = true;
         self.progress = qt::Progress::busy();
-        self.status = "Preparing full-day spectral overview...".into();
+        let source = self.loader.source;
+        self.status = format!("Preparing full-day spectral overview from {}...", source.label());
         self.tooltip.clear();
         let date = self.date;
-        self.job = Some(Job::spawn(&sh.ctx, move |r| run(date, &station, &focus, r)));
+        self.job = Some(Job::spawn(&sh.ctx, move |r| run(source, date, &station, &focus, r)));
     }
 
     /// `export_spectral_overview`.
@@ -490,21 +541,27 @@ impl OverviewTab {
     }
 }
 
-/// `SpectralOverviewWorker.run`.
-fn run(date: NaiveDate, station: &str, focus_code: &str, r: &Reporter<Msg>) -> OverviewOutcome {
+/// `SpectralOverviewWorker.run`, on the server it was started with.
+fn run(source: Source, date: NaiveDate, station: &str, focus_code: &str, r: &Reporter<Msg>) -> OverviewOutcome {
     let flag = r.cancel_flag();
     let cancelled = move || flag.load(Ordering::Relaxed);
-    let check = |c: &dyn Fn() -> bool| if c() { Err(OverviewError::Cancelled) } else { Ok(()) };
-    let fail = |m: String| OverviewError::Failed(m);
+    let check = |c: &dyn Fn() -> bool| if c() { Err(Stop::Cancelled) } else { Ok(()) };
+    let fail = |m: String| Stop::Failed(m);
+    let server = source.label();
+    // A server message names the server once (`serverFailed`).
+    let server_failed = |m: String| Stop::Server(if m.contains(server) { m } else { format!("{server}: {m}") });
     check(&cancelled)?;
-    r.send(Msg::Text("Reading the selected archive day...".into()));
-    let (ok, message) = check_archive_server();
+    r.send(Msg::Text(format!("Reading the selected day from {server}...")));
+    let (ok, message) = check_archive_server(source);
     if !ok {
-        return Err(fail(format!("FITS server is not responding: {message}")));
+        return Err(server_failed(format!("{server} FITS server is not responding: {message}")));
     }
-    let url = day_url(date);
-    let html = fetch_listing(&url).map_err(|e| fail(e.to_string()))?;
-    let candidates = downloader::filter_spectral_overview_candidates(&extract_fits_links(&html), &url, station, date);
+    let urls: Vec<String> = list_day(source, date, false)
+        .map_err(|e| server_failed(e.to_string()))?
+        .into_iter()
+        .map(|f| f.download_url)
+        .collect();
+    let candidates = downloader::filter_spectral_overview_candidates(&urls, &source.day_url(date), station, date);
     if candidates.is_empty() {
         return Err(fail("No FITS files were found for the selected station on that UTC date.".into()));
     }
@@ -580,7 +637,9 @@ fn run(date: NaiveDate, station: &str, focus_code: &str, r: &Reporter<Msg>) -> O
         r.send(Msg::Value(i as i64 + 1));
     }
     if sources.values().all(Vec::is_empty) {
-        return Err(fail("None of the selected focus-code FITS files could be downloaded.".into()));
+        return Err(server_failed(format!(
+            "None of the selected focus-code FITS files could be downloaded from {server}."
+        )));
     }
     r.send(Msg::Range(0, 0));
     let mut results = Vec::new();
@@ -605,7 +664,7 @@ fn run(date: NaiveDate, station: &str, focus_code: &str, r: &Reporter<Msg>) -> O
                 result.warnings = w;
                 results.push(result);
             }
-            Err(OverviewError::Cancelled) => return Err(OverviewError::Cancelled),
+            Err(OverviewError::Cancelled) => return Err(Stop::Cancelled),
             Err(OverviewError::Failed(e)) => errors.push(format!("Focus code {code}: {e}")),
         }
     }

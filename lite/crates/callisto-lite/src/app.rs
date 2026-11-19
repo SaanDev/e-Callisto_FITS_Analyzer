@@ -52,6 +52,8 @@ pub struct Settings {
     pub presets_json: String,
     /// `processing/default_preset_name`.
     pub default_preset_name: String,
+    /// `callisto/archive_source`: the FITS downloader's server, by id.
+    pub archive_source: String,
 }
 
 /// The light-curve settings with the full app's keys.
@@ -122,6 +124,7 @@ impl Default for Settings {
             clean_exit: true,
             presets_json: String::new(),
             default_preset_name: String::new(),
+            archive_source: callisto_core::radio::archive::Source::default().id().to_owned(),
         }
     }
 }
@@ -388,7 +391,7 @@ impl LiteApp {
         let stations = if online {
             StationService::online()
         } else {
-            StationService::new(std::sync::Arc::new(|_| {
+            StationService::new(std::sync::Arc::new(|_, _| {
                 Err("The archive is offline (CALLISTO_LITE_OFFLINE).".to_owned())
             }))
         };
@@ -1458,8 +1461,14 @@ Please choose another folder such as Documents or Desktop."
             Command::LaunchDownloader => {
                 if self.downloader.is_none() {
                     let state = self.downloader_state.clone();
-                    self.downloader =
-                        Some(DownloaderDialog::new(self.cache_root.clone(), &mut self.stations, state.as_ref()));
+                    // An unknown saved server falls back to e-CALLISTO.
+                    let source = callisto_core::radio::archive::Source::from_id(&self.settings.archive_source);
+                    self.downloader = Some(DownloaderDialog::new(
+                        self.cache_root.clone(),
+                        &mut self.stations,
+                        state.as_ref(),
+                        source,
+                    ));
                 }
             }
             Command::LaunchLearmonthDownloader => {
@@ -1632,7 +1641,13 @@ Please choose another folder such as Documents or Desktop."
         let importing = self.importing.is_some();
         if let Some(d) = &mut self.downloader {
             d.blocked = importing;
-            match d.show(ctx, &mut self.stations, palette) {
+            let action = d.show(ctx, &mut self.stations, palette);
+            // Remembered for the next reopening and the next run.
+            let source = d.source().id();
+            if self.settings.archive_source != source {
+                self.settings.archive_source = source.to_owned();
+            }
+            match action {
                 Some(DownloaderAction::Import(urls)) => {
                     self.process_imported_files(ctx, urls, ImportSource::Downloader)
                 }

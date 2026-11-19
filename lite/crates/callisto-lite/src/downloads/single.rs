@@ -2,7 +2,7 @@
 //! code, to download, preview, compare or import
 //! (`CallistoDownloaderApp._build_single_station_tab` and its handlers).
 
-use callisto_core::radio::archive::ListingError;
+use callisto_core::radio::archive::{ListingError, Source};
 use callisto_core::radio::cache;
 use callisto_core::radio::downloader::{self, Candidate, PreviewResult};
 use chrono::NaiveDate;
@@ -10,8 +10,8 @@ use egui::{Id, Rect, Ui};
 
 use super::batch::{DownloadBatch, pick_folder};
 use super::jobs::Job;
-use super::stations::{StationCombo, StationLoader};
-use super::{Shared, at, lay_out};
+use super::stations::{StationCombo, StationLoader, StationService};
+use super::{Retry, Shared, at, lay_out};
 use crate::session::NoticeKind;
 use crate::ui::itemview::{self, Check, Event, Row, Style, ViewState};
 use crate::ui::qlayout::{BoxLayout, Container, Item, Layout, Policy, Size, WidgetSpec};
@@ -94,8 +94,25 @@ impl SingleTab {
         self.fetch.is_some() || self.preview.is_some() || self.downloads.is_some()
     }
 
-    pub fn request_stations(&mut self, svc: &super::stations::StationService) {
+    pub fn request_stations(&mut self, svc: &StationService) {
         if let Some(e) = self.loader.request(svc, &[self.date]) {
+            self.combo.apply(&e);
+        }
+    }
+
+    /// The server the tab starts on, before its first station lookup.
+    pub(crate) fn start_on(&mut self, source: Source) {
+        self.loader.source = source;
+    }
+
+    /// The selected server changed: the files of the previous one go, the
+    /// station list reloads, and a listed station stays selected.
+    pub(crate) fn set_source(&mut self, svc: &StationService, source: Source) {
+        self.combo.remember_current();
+        self.groups.clear();
+        self.view = ViewState::default();
+        self.status.clear();
+        if let Some(e) = self.loader.set_source(svc, source) {
             self.combo.apply(&e);
         }
     }
@@ -133,19 +150,26 @@ impl SingleTab {
         self.groups.clear();
         self.view = ViewState::default();
         self.progress = None;
+        self.status.clear();
+        let server = self.loader.source.label();
         let files = match result {
             Err(ListingError::Unreachable(m)) => {
+                sh.out.server_failed(format!("{server} FITS server is not responding.\n{m}"), Retry::SingleShow);
                 return sh.out.notice(
                     NoticeKind::Critical,
                     "Server Error",
-                    format!("FITS server is not responding.\n\nDetails:\n{m}"),
+                    format!("{server} FITS server is not responding.\n\nDetails:\n{m}"),
                 );
             }
             Err(ListingError::Http(m)) => {
+                sh.out.server_failed(
+                    format!("Could not load the {server} listing for the selected date.\n{m}"),
+                    Retry::SingleShow,
+                );
                 return sh.out.notice(
                     NoticeKind::Critical,
                     "Fetch Error",
-                    format!("Could not load FITS directory for selected date.\n\nDetails:\n{m}"),
+                    format!("Could not load the {server} listing for the selected date.\n\nDetails:\n{m}"),
                 );
             }
             Ok(f) => f,
@@ -155,9 +179,10 @@ impl SingleTab {
             return sh.out.notice(
                 NoticeKind::Information,
                 "No Data Found",
-                "No FITS files were found for the selected station on that date.",
+                format!("No FITS files were found on {server} for the selected station on that date."),
             );
         }
+        self.status = format!("Found {} FITS file(s) on {server}.", valid.len());
         let mut parsed = Vec::new();
         let mut unparsed = Vec::new();
         for (name, url) in valid {
@@ -233,8 +258,14 @@ impl SingleTab {
                 self.status.clear();
                 sh.out.cache_changed = true;
                 match r {
-                    Ok(res) => open_preview(res, sh),
-                    Err(m) => sh.out.notice(NoticeKind::Critical, "Preview Error", m),
+                    Ok(res) => open_preview(res, self.loader.source, sh),
+                    Err(m) => {
+                        sh.out.server_failed(
+                            format!("{}: {}", self.loader.source.label(), m.trim()),
+                            Retry::SinglePreview,
+                        );
+                        sh.out.notice(NoticeKind::Critical, "Preview Error", m)
+                    }
                 }
             }
         }
@@ -246,11 +277,14 @@ impl SingleTab {
             if batch.finished() {
                 let batch = self.downloads.take().unwrap();
                 self.progress = None;
+                self.status.clear();
                 cache::enforce_cache_limit(sh.cache_root, cache::DEFAULT_MAX_CACHE_BYTES);
                 sh.out.cache_changed = true;
                 // `show_download_complete_message`.
                 let failed = batch.failures.len();
+                let server = self.loader.source.label();
                 let mut details = vec![
+                    format!("Server: {server}"),
                     format!("Files requested: {}", batch.total),
                     format!("Saved: {} ({} reused from cache)", batch.total.saturating_sub(failed), batch.cached),
                     format!("Failed: {failed}"),
@@ -268,6 +302,11 @@ impl SingleTab {
                     if failed > 8 {
                         details.push("...".into());
                     }
+                    let reasons: Vec<String> = batch.failures.iter().take(8).map(|(_, e)| e.clone()).collect();
+                    sh.out.server_failed(
+                        format!("{failed} of {} downloads from {server} failed.\n{}", batch.total, reasons.join("\n")),
+                        Retry::SingleDownload,
+                    );
                     sh.out.notice(NoticeKind::Warning, "Download Finished", details.join("\n"));
                 } else {
                     sh.out.notice(NoticeKind::Information, "Download Complete", details.join("\n"));
@@ -411,7 +450,7 @@ impl SingleTab {
     }
 
     /// `show_available_fits`.
-    fn show_available(&mut self, sh: &mut Shared) {
+    pub(crate) fn show_available(&mut self, sh: &mut Shared) {
         let station = self.combo.text().trim().to_owned();
         if station.is_empty() {
             return sh.out.notice(
@@ -420,14 +459,17 @@ impl SingleTab {
                 format!("No station is selected. {}", self.loader.summary).trim().to_owned(),
             );
         }
+        sh.out.clear_server_failure = true;
         self.groups.clear();
         self.progress = Some(qt::Progress::busy());
-        let date = self.date;
-        self.fetch =
-            Some(Job::spawn(&sh.ctx, move |r| downloader::fetch_station_day(date, &station, |v, m| r.send((v, m)))));
+        let (date, source) = (self.date, self.loader.source);
+        self.status = format!("Searching {}...", source.label());
+        self.fetch = Some(Job::spawn(&sh.ctx, move |r| {
+            downloader::fetch_station_day(source, date, &station, |v, m| r.send((v, m)))
+        }));
     }
 
-    fn action(&mut self, id: &str, sh: &mut Shared) {
+    pub(crate) fn action(&mut self, id: &str, sh: &mut Shared) {
         match id {
             "select_all" | "deselect_all" => {
                 let on = id == "select_all";
@@ -443,7 +485,10 @@ impl SingleTab {
                     return sh.out.notice(NoticeKind::Warning, "No Selection", "Please select files to download.");
                 }
                 let Some(dir) = pick_folder("Select Download Folder") else { return };
+                sh.out.clear_server_failure = true;
                 self.progress = Some(qt::Progress::range(selected.len() as i64));
+                self.status =
+                    format!("Downloading {} FITS file(s) from {}...", selected.len(), self.loader.source.label());
                 self.downloads = Some(DownloadBatch::start(&sh.ctx, sh.cache_root, &selected, &dir));
             }
             "preview" => {
@@ -458,6 +503,7 @@ impl SingleTab {
                         "Another preview is already being prepared.",
                     );
                 }
+                sh.out.clear_server_failure = true;
                 self.progress = Some(qt::Progress::range(selected.len() as i64));
                 let root = sh.cache_root.to_path_buf();
                 self.preview = Some(Job::spawn(&sh.ctx, move |r| prepare_preview(&root, &selected, r)));
@@ -524,8 +570,9 @@ fn prepare_preview(
     Ok(PreviewResult { panels, errors, cached_count, total: n })
 }
 
-/// `_on_preview_ready`: the preview window, and a warning for files it lacks.
-pub fn open_preview(res: PreviewResult, sh: &mut Shared) {
+/// `_on_preview_ready`: the preview window, naming the server its files came
+/// from, and a warning for files it lacks.
+pub fn open_preview(res: PreviewResult, source: Source, sh: &mut Shared) {
     if res.panels.is_empty() {
         let text = if res.errors.is_empty() {
             "No preview available.".to_owned()
@@ -535,7 +582,7 @@ pub fn open_preview(res: PreviewResult, sh: &mut Shared) {
         return sh.out.notice(NoticeKind::Critical, "Preview Error", text);
     }
     let errors = res.errors.clone();
-    sh.out.previews.push(super::preview::PreviewWindow::new(&sh.ctx, res.panels));
+    sh.out.previews.push(super::preview::PreviewWindow::new(&sh.ctx, res.panels).with_source(source.label()));
     if !errors.is_empty() {
         sh.out.notice(
             NoticeKind::Warning,
@@ -545,5 +592,153 @@ pub fn open_preview(res: PreviewResult, sh: &mut Shared) {
                 errors.iter().take(8).cloned().collect::<Vec<_>>().join("\n")
             ),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+    use std::time::{Duration, Instant};
+
+    use callisto_core::radio::archive::{ASTRODONCEL_FILES_URL, ASTRODONCEL_LISTING_URL, Source, set_mock_http};
+    use egui_kittest::Harness;
+
+    use super::super::DownloaderDialog;
+    use super::super::stations::{LoaderState, StationService};
+    use crate::theme::Palette;
+
+    struct Rig {
+        d: DownloaderDialog,
+        svc: StationService,
+        p: Palette,
+        ready: bool,
+    }
+
+    fn harness(source: Source) -> Harness<'static, Rig> {
+        // Every server lists BIR; each also has a station of its own.
+        let mut svc = StationService::new(Arc::new(|s, _| Ok(vec!["BIR".into(), format!("ONLY-{}", s.id())])));
+        let cache = std::env::temp_dir().join(format!("lite_server_{}_{}", source.id(), std::process::id()));
+        let mut d = DownloaderDialog::new(cache, &mut svc, None, source);
+        d.single.date = chrono::NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        d.single.request_stations(&svc);
+        let rig = Rig { d, svc, p: Palette::new(false, true), ready: false };
+        Harness::builder().with_size([1540.0, 980.0]).build_ui_state(
+            |ui, r: &mut Rig| {
+                if !r.ready {
+                    egui_extras::install_image_loaders(ui.ctx());
+                    crate::fonts::SystemFonts::load().install(ui.ctx());
+                    r.p.apply(ui.ctx());
+                    r.ready = true;
+                    return;
+                }
+                let out = r.d.frame(ui, &mut r.svc, &r.p);
+                r.d.finish(ui.ctx(), out, &r.p, false);
+            },
+            rig,
+        )
+    }
+
+    fn step_until(h: &mut Harness<'static, Rig>, what: &str, done: impl Fn(&Rig) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done(h.state()) {
+            assert!(Instant::now() < deadline, "timed out: {what}");
+            h.step();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        h.step();
+    }
+
+    fn script(h: &mut Harness<'static, Rig>, cmd: &str) {
+        h.state_mut().d.script.push_back(cmd.into());
+        h.step();
+    }
+
+    #[test]
+    fn the_server_selector_switches_locks_and_retries() {
+        // The Astrodoncel listing of 2024-01-02 waits for `gate`; its answer
+        // is broken (0), lists one BIR file (1).
+        let gate = Arc::new(AtomicBool::new(true));
+        let answer = Arc::new(AtomicU8::new(0));
+        let (g, a) = (gate.clone(), answer.clone());
+        let listing = format!("{ASTRODONCEL_LISTING_URL}?path=2024%2F01%2F02");
+        set_mock_http(Some(Arc::new(move |url: &str| {
+            if url != listing {
+                return Some((404, Vec::new()));
+            }
+            while !g.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Some(match a.load(Ordering::SeqCst) {
+                0 => (200, b"<html>maintenance</html>".to_vec()),
+                _ => (200, br#"[{"name":"BIR_20240102_000000_01.fit.gz","isDirectory":false,"size":10}]"#.to_vec()),
+            })
+        })));
+
+        // The remembered server applies before the first station lookup.
+        let mut h = harness(Source::Astrodoncel);
+        step_until(&mut h, "stations", |r| r.d.single.loader.state == LoaderState::Loaded);
+        assert_eq!(h.state().d.source(), Source::Astrodoncel);
+        assert_eq!(h.state().d.single.loader.summary, "Astrodoncel: 2 stations have data on 2024-01-02 (UTC).");
+
+        // A search locks the selector until it ends.
+        gate.store(false, Ordering::SeqCst);
+        script(&mut h, "single|station|BIR");
+        script(&mut h, "single|show");
+        assert!(h.state().d.busy());
+        assert_eq!(h.state().d.single.status, "Searching Astrodoncel...");
+        let rig = h.state_mut();
+        assert!(!rig.d.set_source(&mut rig.svc, Source::Ecallisto), "refused while searching");
+        assert_eq!(rig.d.source(), Source::Astrodoncel);
+
+        // A broken answer is an error naming the server, with Retry; the
+        // server stays selected.
+        gate.store(true, Ordering::SeqCst);
+        step_until(&mut h, "failed search", |r| !r.d.busy());
+        let failure = h.state().d.server_failure().unwrap_or_default().to_owned();
+        assert!(failure.starts_with("Could not load the Astrodoncel listing for the selected date."), "{failure}");
+        assert!(h.state().d.pending_notices().iter().any(|n| n.title == "Fetch Error"));
+        assert_eq!(h.state().d.source(), Source::Astrodoncel);
+
+        // Retry repeats the search.
+        answer.store(1, Ordering::SeqCst);
+        script(&mut h, "retry");
+        step_until(&mut h, "retried search", |r| !r.d.busy());
+        assert!(h.state().d.server_failure().is_none());
+        let single = &h.state().d.single;
+        assert_eq!(single.status, "Found 1 FITS file(s) on Astrodoncel.");
+        assert_eq!(single.groups.len(), 1);
+        assert_eq!(
+            single.groups[0].children[0].0.url,
+            format!("{ASTRODONCEL_FILES_URL}2024/01/02/BIR_20240102_000000_01.fit.gz")
+        );
+        assert_eq!(single.groups[0].children[0].0.source(), Source::Astrodoncel);
+
+        // Switching clears the results, keeps the date and a station both
+        // servers list, and searches nothing.
+        let rig = h.state_mut();
+        rig.d.single.groups[0].children[0].1 = true;
+        assert!(rig.d.set_source(&mut rig.svc, Source::Ecallisto));
+        assert!(rig.d.single.groups.is_empty());
+        assert!(rig.d.single.status.is_empty());
+        assert_eq!(rig.d.single.date, chrono::NaiveDate::from_ymd_opt(2024, 1, 2).unwrap());
+        step_until(&mut h, "e-CALLISTO stations", |r| r.d.single.loader.state == LoaderState::Loaded);
+        assert!(!h.state().d.busy());
+        assert_eq!(h.state().d.single.combo.text(), "BIR");
+        assert!(h.state().d.single.loader.summary.starts_with("e-CALLISTO: 2 stations"));
+
+        // A station the new server lacks falls back to the first listed.
+        script(&mut h, "single|station|ONLY-ecallisto");
+        script(&mut h, "server|astrodoncel");
+        step_until(&mut h, "Astrodoncel stations", |r| r.d.single.loader.state == LoaderState::Loaded);
+        assert_eq!(h.state().d.single.combo.text(), "BIR");
+        set_mock_http(None);
+    }
+
+    #[test]
+    fn a_preview_window_names_its_server() {
+        let w =
+            super::super::preview::PreviewWindow::new(&egui::Context::default(), Vec::new()).with_source("Astrodoncel");
+        assert!(w.title().ends_with("(Astrodoncel)"), "{}", w.title());
     }
 }

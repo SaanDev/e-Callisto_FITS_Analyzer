@@ -4,6 +4,7 @@
 
 use std::sync::atomic::Ordering;
 
+use callisto_core::radio::archive::Source;
 use callisto_core::radio::burst_list::{
     self, BURST_LIST_BASE_URL, BurstEvent, BurstFits, BurstListError, BurstListResult, TYPE_FAMILIES,
 };
@@ -13,8 +14,8 @@ use egui::{Id, Rect, Sense, Ui};
 
 use super::batch::{DownloadBatch, pick_folder};
 use super::jobs::Job;
-use super::stations::{LoaderEvent, StationLoader};
-use super::{Shared, at, lay_out};
+use super::stations::{LoaderEvent, StationLoader, StationService};
+use super::{Retry, Shared, at, lay_out};
 use crate::session::NoticeKind;
 use crate::ui::itemview::{self, Check, Event, Row, Style, ViewState};
 use crate::ui::qlayout::{BoxLayout, Container, GridLayout, Item, Layout, Policy, Size, Splitter, WidgetSpec};
@@ -53,7 +54,10 @@ pub struct BurstTab {
     /// The FITS station combo: `(text, data)` items and the edited text.
     station_items: Vec<(String, String)>,
     station_text: String,
+    /// A station kept across a server change, selected once the list has it.
+    wanted_station: String,
     padding: i32,
+    /// Its `source` is where FITS files are searched; the catalog has its own.
     loader: StationLoader,
     fits: Vec<(Candidate, bool)>,
     fits_view: ViewState,
@@ -106,6 +110,7 @@ impl BurstTab {
             selection_label: "Select a burst above, then find the FITS files covering it.".into(),
             station_items: vec![("Choose a station".into(), String::new())],
             station_text: "Choose a station".into(),
+            wanted_station: String::new(),
             padding: 2,
             loader: StationLoader::default(),
             fits: Vec::new(),
@@ -126,6 +131,43 @@ impl BurstTab {
 
     pub fn is_busy(&self) -> bool {
         self.work.is_some() || self.downloads.is_some()
+    }
+
+    /// The server the tab starts on, before its first station lookup.
+    pub(crate) fn start_on(&mut self, source: Source) {
+        self.loader.source = source;
+    }
+
+    /// `set_archive_source`: search another server for FITS files; the loaded
+    /// catalog stays as it is.
+    pub(crate) fn set_source(&mut self, svc: &StationService, source: Source) {
+        let previous = self.station_text.trim().to_owned();
+        let event = self.selected_event().cloned();
+        self.fill_station_items(event.as_ref());
+        self.wanted_station = previous;
+        self.select_wanted_station();
+        self.clear_fits();
+        self.fits_tip.clear();
+        if let Some(e) = self.loader.set_source(svc, source) {
+            self.add_archive_stations(e);
+        }
+    }
+
+    /// Selects the station kept across a server change once the list offers it.
+    fn select_wanted_station(&mut self) {
+        if self.wanted_station.is_empty() {
+            return;
+        }
+        if self.station_text != self.station_items[0].0 {
+            // The user has chosen another station in the meantime.
+            self.wanted_station.clear();
+            return;
+        }
+        let wanted = self.wanted_station.to_lowercase();
+        if let Some(item) = self.station_items.iter().find(|i| i.0.to_lowercase() == wanted) {
+            self.station_text = item.0.clone();
+            self.wanted_station.clear();
+        }
     }
 
     pub fn request_cancel(&mut self) {
@@ -184,11 +226,10 @@ impl BurstTab {
         self.progress = qt::Progress::busy();
         self.detail = "\u{2026}".into();
         self.activity = match kind {
-            JobKind::Catalog => "Loading the event catalog\u{2026}",
-            JobKind::Fits => "Searching the FITS archive\u{2026}",
-            _ => "Preparing spectrogram preview\u{2026}",
-        }
-        .into();
+            JobKind::Catalog => "Loading the event catalog\u{2026}".into(),
+            JobKind::Fits => format!("Searching {} for FITS files\u{2026}", self.loader.source.label()),
+            _ => "Preparing spectrogram preview\u{2026}".into(),
+        };
     }
 
     fn on_progress(&mut self, current: usize, total: usize, message: String) {
@@ -253,7 +294,7 @@ impl BurstTab {
                     self.on_progress(a, b, m);
                 }
                 if let Some(r) = done {
-                    self.display_fits(r);
+                    self.display_fits(r, sh);
                     finished = true;
                 }
             }
@@ -294,9 +335,14 @@ impl BurstTab {
                 self.progress = qt::Progress { min: 0, max: 100, value: 100, format: "%p%".into() };
                 self.detail = "100%".into();
                 let failed = batch.failures.len();
-                let mut status = format!("Downloaded {} of {total} selected FITS file(s).", total - failed);
+                let mut status = format!(
+                    "Downloaded {} of {total} selected FITS file(s) from {}.",
+                    total - failed,
+                    self.loader.source.label()
+                );
                 if failed > 0 {
                     status.push_str(&format!(" {failed} failed."));
+                    sh.out.server_failed(status.clone(), Retry::BurstDownload);
                 }
                 self.activity = status.clone();
                 self.fits_status = status.clone();
@@ -320,7 +366,7 @@ impl BurstTab {
                 self.outcome = "cancelled";
                 self.catalog_status = "Catalog loading cancelled.".into();
             }
-            Err(BurstListError::Failed(e)) => {
+            Err(BurstListError::Failed(e) | BurstListError::Server(e)) => {
                 self.outcome = "error";
                 self.catalog_status = format!("Could not load the burst list: {e}");
             }
@@ -405,34 +451,37 @@ impl BurstTab {
         });
     }
 
-    /// `_event_selected`.
-    fn event_selected_changed(&mut self) {
-        let event = self.selected_event().cloned();
-        match &event {
-            None => {
-                self.selection_label = "Select a burst above, then find the FITS files covering it.".into();
-                self.station_items = vec![("Choose a station".into(), String::new())];
-            }
-            Some(e) => {
-                self.selection_label = format!(
-                    "{} \u{b7} {} \u{2013} {} UTC",
-                    if e.burst_type.is_empty() { "Unknown type" } else { &e.burst_type },
-                    e.start_utc.format("%Y-%m-%d %H:%M:%S"),
-                    e.end_utc.format("%Y-%m-%d %H:%M:%S")
-                );
-                self.station_items = if e.stations.is_empty() {
-                    vec![("Choose a station".into(), String::new())]
-                } else {
-                    vec![("All reported stations".into(), "__reported__".into())]
-                };
-                for s in &e.stations {
-                    if !self.station_items.iter().any(|i| &i.0 == s) {
-                        self.station_items.push((s.clone(), s.clone()));
-                    }
+    /// The FITS station combo for `event`: its reported stations; the
+    /// archive's stations for its days are added once loaded.
+    fn fill_station_items(&mut self, event: Option<&BurstEvent>) {
+        self.station_items = match event {
+            Some(e) if !e.stations.is_empty() => vec![("All reported stations".into(), "__reported__".into())],
+            _ => vec![("Choose a station".into(), String::new())],
+        };
+        if let Some(e) = event {
+            for s in &e.stations {
+                if !self.station_items.iter().any(|i| &i.0 == s) {
+                    self.station_items.push((s.clone(), s.clone()));
                 }
             }
         }
         self.station_text = self.station_items[0].0.clone();
+    }
+
+    /// `_event_selected`.
+    fn event_selected_changed(&mut self) {
+        let event = self.selected_event().cloned();
+        self.wanted_station.clear();
+        self.fill_station_items(event.as_ref());
+        self.selection_label = match &event {
+            None => "Select a burst above, then find the FITS files covering it.".into(),
+            Some(e) => format!(
+                "{} \u{b7} {} \u{2013} {} UTC",
+                if e.burst_type.is_empty() { "Unknown type" } else { &e.burst_type },
+                e.start_utc.format("%Y-%m-%d %H:%M:%S"),
+                e.end_utc.format("%Y-%m-%d %H:%M:%S")
+            ),
+        };
         self.clear_fits();
         self.loader.cancel();
     }
@@ -458,9 +507,10 @@ impl BurstTab {
                 self.station_items.push((s.clone(), s));
             }
         }
+        self.select_wanted_station();
     }
 
-    fn display_fits(&mut self, r: Result<BurstFits, BurstListError>) {
+    fn display_fits(&mut self, r: Result<BurstFits, BurstListError>, sh: &mut Shared) {
         match r {
             Err(BurstListError::Cancelled) => {
                 self.outcome = "cancelled";
@@ -470,12 +520,20 @@ impl BurstTab {
                 self.outcome = "error";
                 self.fits_status = format!("Could not find FITS files: {e}");
             }
+            Err(BurstListError::Server(e)) => {
+                self.outcome = "error";
+                self.fits_status = format!("Could not find FITS files: {e}");
+                sh.out.server_failed(e, Retry::BurstFind);
+            }
             Ok(res) => {
                 self.fits = res.candidates.iter().map(|c| (c.clone(), true)).collect();
                 self.fits_view = ViewState::default();
-                let mut status = format!("Found {} FITS file(s) covering the selected window.", res.candidates.len());
+                let server = self.loader.source.label();
+                let mut status =
+                    format!("Found {} FITS file(s) on {server} covering the selected window.", res.candidates.len());
                 if res.candidates.is_empty() {
-                    status = "No matching FITS files. Try another station or increase the padding.".into();
+                    status =
+                        format!("No matching FITS files on {server}. Try another station or increase the padding.");
                 }
                 if !res.warnings.is_empty() {
                     status.push(' ');
@@ -498,11 +556,14 @@ impl BurstTab {
             Err(PrepareError::Failed(e)) => {
                 self.outcome = "error";
                 self.fits_status = format!("Could not preview FITS files: {e}");
+                sh.out.server_failed(e, Retry::BurstPreview);
             }
             Err(PrepareError::Cancelled) => {}
             Ok(res) => {
                 let (n, cached, errors) = (res.panels.len(), res.cached_count, res.errors.clone());
-                sh.out.previews.push(super::preview::PreviewWindow::new(&sh.ctx, res.panels));
+                let window =
+                    super::preview::PreviewWindow::new(&sh.ctx, res.panels).with_source(self.loader.source.label());
+                sh.out.previews.push(window);
                 let mut status =
                     format!("Preview opened \u{b7} {n} panel(s) \u{b7} {cached} file(s) reused from cache.");
                 if !errors.is_empty() {
@@ -937,7 +998,7 @@ impl BurstTab {
     }
 
     /// `find_fits`.
-    fn find_fits(&mut self, sh: &mut Shared) {
+    pub(crate) fn find_fits(&mut self, sh: &mut Shared) {
         if self.is_busy() {
             return;
         }
@@ -958,12 +1019,15 @@ impl BurstTab {
                 "Choose or enter a station to search for this burst.",
             );
         }
+        sh.out.clear_server_failure = true;
         self.clear_fits();
-        self.fits_status = "Searching archive listings for files covering the burst\u{2026}".into();
+        let source = self.loader.source;
+        self.fits_status = format!("Searching {} for files covering the burst\u{2026}", source.label());
         let padding = self.padding as i64;
         let job = Job::spawn(&sh.ctx, move |r| {
             let flag = r.cancel_flag();
             burst_list::find_burst_fits(
+                source,
                 &event,
                 &stations,
                 padding,
@@ -974,13 +1038,14 @@ impl BurstTab {
         self.start_work(JobKind::Fits, Work::Fits(job));
     }
 
-    fn file_action(&mut self, id: &str, sh: &mut Shared) {
+    pub(crate) fn file_action(&mut self, id: &str, sh: &mut Shared) {
         let selected = self.checked_files();
         if selected.is_empty() || self.is_busy() {
             return;
         }
         match id {
             "preview" => {
+                sh.out.clear_server_failure = true;
                 self.fits_status = format!("Preparing a preview of {} selected FITS file(s)\u{2026}", selected.len());
                 let root = sh.cache_root.to_path_buf();
                 let job = Job::spawn(&sh.ctx, move |r| {
@@ -998,6 +1063,7 @@ impl BurstTab {
             "compare" => sh.out.compare = Some(selected.into_iter().map(|c| c.url).collect()),
             "download" => {
                 let Some(dir) = pick_folder("Select Download Folder") else { return };
+                sh.out.clear_server_failure = true;
                 self.kind = Some(JobKind::Download);
                 self.outcome = "";
                 self.cancel_requested = false;
@@ -1005,7 +1071,8 @@ impl BurstTab {
                     qt::Progress { min: 0, max: selected.len() as i64 * 1000, value: 0, format: "%p%".into() };
                 self.detail = "0%".into();
                 self.activity = format!("Downloading {} FITS file(s)\u{2026}", selected.len());
-                self.fits_status = "Downloading selected FITS files\u{2026}".into();
+                self.fits_status =
+                    format!("Downloading selected FITS files from {}\u{2026}", self.loader.source.label());
                 self.downloads = Some(DownloadBatch::start(&sh.ctx, sh.cache_root, &selected, &dir));
             }
             _ => {}
