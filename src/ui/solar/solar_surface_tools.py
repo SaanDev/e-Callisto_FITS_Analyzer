@@ -265,18 +265,45 @@ def _foreshortening(area: SurfaceArea) -> str:
     return f" (×{factor:.2f} foreshortening)" if factor >= 1.05 else ""
 
 
-def _area_core(area: SurfaceArea) -> str:
-    """``152.3 MSH · 463 Mm²`` (with its foreshortening factor), plus any off-limb part."""
+def _seen_msh(area: SurfaceArea) -> float:
+    """The on-disk area as it appears on the image (no curvature correction), in MSH."""
+    from src.backend.solar.surface_measure import km2_to_msh
+
+    return km2_to_msh(area.on_disk_plane_of_sky_km2)
+
+
+def _area_core(area: SurfaceArea, *, corrected: bool = True) -> str:
+    """``152.3 MSH · 463 Mm²`` plus any off-limb part.
+
+    Corrected: the true area on the sphere, with its foreshortening factor.
+    As seen: the area exactly as it appears on the image, in MSH, with the
+    corrected value alongside so the two are never confused.
+    """
     parts = []
     if area.on_disk_pixels > 0.0:
-        parts.append(f"{area.on_disk_msh:,.1f} MSH · {_mm2(area.on_disk_km2)}{_foreshortening(area)}")
+        if corrected:
+            parts.append(f"{area.on_disk_msh:,.1f} MSH · {_mm2(area.on_disk_km2)}{_foreshortening(area)}")
+        else:
+            parts.append(
+                f"{_seen_msh(area):,.1f} MSH as seen · {_mm2(area.on_disk_plane_of_sky_km2)}"
+                f" (not corrected for curvature; corrected {area.on_disk_msh:,.1f} MSH)"
+            )
     if area.has_off_limb:
         parts.append(f"off-limb {_mm2(area.off_limb_km2)} (plane of sky, not corrected)")
     return " + ".join(parts) if parts else "0 MSH"
 
 
-def format_length(result: SurfaceLength) -> str:
+def format_length(result: SurfaceLength, *, corrected: bool = True) -> str:
     """One-line Details entry for a length."""
+    if not corrected:
+        text = (
+            f"Length  ·  {_mm(result.plane_of_sky_km)} as seen, {result.plane_of_sky_arcsec:,.1f}″"
+            f" (not corrected for curvature; {_mm(result.total_km)} along the surface)"
+            f"  ·  {result.n_vertices} points"
+        )
+        if result.start_lonlat is not None or result.end_lonlat is not None:
+            text += f"  ·  {format_lonlat(result.start_lonlat)} → {format_lonlat(result.end_lonlat)}"
+        return text
     text = f"Length  ·  {_mm(result.total_km)}"
     if result.off_limb_km > 0.0 and result.on_disk_km > 0.0:
         text += f" ({_mm(result.on_disk_km)} on the surface + {_mm(result.off_limb_km)} off-limb, plane of sky)"
@@ -293,29 +320,34 @@ def format_length(result: SurfaceLength) -> str:
     return text
 
 
-def format_area(result: AreaResult) -> str:
-    """One-line Details entry for an area."""
+def format_area(result: AreaResult, *, corrected: bool = True) -> str:
+    """One-line Details entry for an area (corrected for curvature, or as seen)."""
     region = result.region
     label = {"polygon": "polygon", "lasso": "lasso", "ellipse": "ellipse", "rectangle": "rectangle"}.get(
         result.shape_kind, result.shape_kind
     )
     mode = result.threshold.mode
     if mode == "sunspot" and result.selected is not None:
+        umbra = result.umbra.on_disk_msh if corrected else _seen_msh(result.umbra)
+        penumbra = result.penumbra.on_disk_msh if corrected else _seen_msh(result.penumbra)
+        seen = "" if corrected else " as seen"
         text = (
-            f"Sunspot ({label})  ·  spot {_area_core(result.selected)}"
-            f"  ·  umbra {result.umbra.on_disk_msh:,.1f} MSH, penumbra {result.penumbra.on_disk_msh:,.1f} MSH"
+            f"Sunspot ({label})  ·  spot {_area_core(result.selected, corrected=corrected)}"
+            f"  ·  umbra {umbra:,.1f} MSH{seen}, penumbra {penumbra:,.1f} MSH{seen}"
             f" (I/I_qs < {result.threshold.umbra_level:.2f} / < {result.threshold.penumbra_level:.2f})"
         )
         focus = result.selected
     elif mode in ("dark", "bright") and result.selected is not None:
         word = "darker than" if mode == "dark" else "brighter than"
+        shape_msh = region.on_disk_msh if corrected else _seen_msh(region)
         text = (
-            f"Area ({label}, {word} {result.threshold.level:.2f} I_qs)  ·  {_area_core(result.selected)}"
-            f"  ·  of a {region.on_disk_msh:,.1f} MSH shape"
+            f"Area ({label}, {word} {result.threshold.level:.2f} I_qs)  ·  "
+            f"{_area_core(result.selected, corrected=corrected)}"
+            f"  ·  of a {shape_msh:,.1f} MSH shape"
         )
         focus = result.selected
     else:
-        text = f"Area ({label})  ·  {_area_core(region)}"
+        text = f"Area ({label})  ·  {_area_core(region, corrected=corrected)}"
         focus = region
     if focus.on_disk_pixels > 0.0:
         text += f"  ·  centroid {format_lonlat(focus.centroid_lonlat)}"
@@ -323,7 +355,7 @@ def format_area(result: AreaResult) -> str:
             text += f", μ={focus.mean_mu:.2f}"
     if focus.mean_intensity is not None and not result.quicklook:
         text += f"  ·  mean {focus.mean_intensity:,.1f} {result.intensity_unit}"
-    if focus.near_limb:
+    if focus.near_limb and corrected:
         text += f"  ·  ⚠ reaches μ<{LIMB_WARNING_MU:.1f}: close to the limb, the correction is large"
     if result.limb_excluded_px and mode in ("sunspot", "dark"):
         text += f"  ·  {result.limb_excluded_px:,} px off the disk or at the extreme limb left out of the threshold"
@@ -336,6 +368,8 @@ class SurfaceMeasurePanel(QWidget):
 
     shapeChanged = Signal(str)
     thresholdChanged = Signal()
+    #: The corrected / as-seen choice changed.
+    curvatureChanged = Signal()
     #: A table row was picked by the user (row index).
     recordSelected = Signal(int)
     #: A feature name was edited: (row index, new name).
@@ -377,12 +411,34 @@ class SurfaceMeasurePanel(QWidget):
         self.hint_label.setWordWrap(True)
         layout.addWidget(self.hint_label)
 
+        # Corrected for the Sun's curvature, or as the image shows it. Affects
+        # what is displayed (result, table, graph); the CSV always has both.
+        values_row = QHBoxLayout()
+        values_row.setSpacing(6)
+        self.values_label = _field_label("Values")
+        values_row.addWidget(self.values_label)
+        self.curvature_combo = QComboBox()
+        self.curvature_combo.addItem("Corrected for curvature", "corrected")
+        self.curvature_combo.addItem("As seen (uncorrected)", "as_seen")
+        self.curvature_combo.setToolTip(
+            "Corrected for curvature: the true size on the solar surface. Each pixel is\n"
+            "put back on the sphere, so a feature near the limb measures what it would\n"
+            "at disk centre (lengths along the surface, areas in MSH). This is how\n"
+            "sunspot catalogues report areas.\n"
+            "As seen (uncorrected): the size exactly as it appears on the image, with no\n"
+            "correction for foreshortening (lengths in the plane of the sky, areas still\n"
+            "in MSH). Smaller than the true size, increasingly so towards the limb.\n"
+            "The CSV export always contains both."
+        )
+        self.curvature_combo.currentIndexChanged.connect(lambda _i: self.curvatureChanged.emit())
+        values_row.addWidget(self.curvature_combo, 1)
+        layout.addLayout(values_row)
+
         # --- drawing: shape (Area only) and the in-progress line/polygon buttons
         self.draw_section = QWidget()
-        draw = QGridLayout(self.draw_section)
+        draw = QVBoxLayout(self.draw_section)
         draw.setContentsMargins(0, 0, 0, 0)
-        draw.setHorizontalSpacing(6)
-        draw.setVerticalSpacing(6)
+        draw.setSpacing(6)
         self.shape_label = _field_label("Shape")
         self.shape_combo = QComboBox()
         for key in SHAPES:
@@ -394,18 +450,22 @@ class SurfaceMeasurePanel(QWidget):
             "  Ellipse / Rectangle — drag from one corner to the opposite one."
         )
         self.shape_combo.currentIndexChanged.connect(lambda _i: self.shapeChanged.emit(self.shape()))
-        draw.addWidget(self.shape_label, 0, 0)
-        draw.addWidget(self.shape_combo, 0, 1, 1, 2)
+        shape_row = QHBoxLayout()
+        shape_row.setSpacing(6)
+        shape_row.addWidget(self.shape_label)
+        shape_row.addWidget(self.shape_combo, 1)
+        draw.addLayout(shape_row)
         self.undo_btn = QPushButton("Undo Point")
         self.undo_btn.setToolTip("Remove the last clicked point of the line or polygon being drawn.")
         self.finish_btn = QPushButton("Finish")
         self.finish_btn.setToolTip("Finish the line or polygon being drawn (or double-click the last point).")
         self.clear_shape_btn = QPushButton("Clear Shape")
         self.clear_shape_btn.setToolTip("Remove the shape of the active tool.")
-        for col, btn in enumerate((self.undo_btn, self.finish_btn, self.clear_shape_btn)):
-            draw.addWidget(btn, 1, col)
-        draw.setColumnStretch(1, 1)
-        draw.setColumnStretch(2, 1)
+        draw_buttons = QHBoxLayout()
+        draw_buttons.setSpacing(6)
+        for btn in (self.undo_btn, self.finish_btn, self.clear_shape_btn):
+            draw_buttons.addWidget(btn, 1)
+        draw.addLayout(draw_buttons)
         layout.addWidget(self.draw_section)
 
         # --- threshold (Area only): a subheading and field rows, as in the sidebar
@@ -431,7 +491,8 @@ class SurfaceMeasurePanel(QWidget):
         self.threshold_combo = QComboBox()
         for key in THRESHOLDS:
             self.threshold_combo.addItem(THRESHOLD_LABELS[key], key)
-        grid.addWidget(_field_label("Select"), 1, 0)
+        self.select_label = _field_label("Select")
+        grid.addWidget(self.select_label, 1, 0)
         grid.addWidget(self.threshold_combo, 1, 1, 1, 3)
         self.umbra_spin = self._level_spin(DEFAULT_UMBRA_LEVEL, "Umbra: pixels below this fraction of the quiet Sun.")
         self.penumbra_spin = self._level_spin(
@@ -597,6 +658,11 @@ class SurfaceMeasurePanel(QWidget):
         self.table.itemChanged.connect(self._on_table_item_changed)
         self._sync_threshold_rows()
         self.set_tool(None)
+        # One caption column for every row, so the fields start in one line.
+        captions = (self.values_label, self.shape_label, self.select_label, self.umbra_label, self.level_label, self.cluster_label)
+        width = max(label.sizeHint().width() for label in captions)
+        for label in captions:
+            label.setFixedWidth(width)
         # Only height may scroll: reserve the content's full width (plus the
         # scrollbar) so nothing is ever clipped at the right edge. The content
         # widens as the table fills, so this is re-measured on every relayout.
@@ -674,6 +740,13 @@ class SurfaceMeasurePanel(QWidget):
 
     def tint_enabled(self) -> bool:
         return self.tint_check.isChecked()
+
+    def corrected(self) -> bool:
+        """Whether values are shown corrected for curvature (else as seen)."""
+        return str(self.curvature_combo.currentData() or "corrected") == "corrected"
+
+    def set_corrected(self, corrected: bool) -> None:
+        self.curvature_combo.setCurrentIndex(self.curvature_combo.findData("corrected" if corrected else "as_seen"))
 
     def set_quicklook(self, quicklook: bool) -> None:
         """JP2 quicklook pixels are display bytes: no thresholds, no intensities."""
@@ -781,6 +854,7 @@ class SurfaceMeasurePanel(QWidget):
 
     def show_records(self, records: list[SurfaceRecord], active: int | None) -> None:
         """Refill the table; ``active`` is the selected row."""
+        corrected = self.corrected()
         self.table.blockSignals(True)
         try:
             self.table.setRowCount(len(records))
@@ -805,7 +879,7 @@ class SurfaceMeasurePanel(QWidget):
                     record.name,
                     when,
                     record.measure_label,
-                    record.headline,
+                    record.headline_for(corrected=corrected),
                     "—" if mu is None else f"{float(mu):.2f}",
                 )
                 where = "start" if record.kind == "length" else "centroid"
@@ -1333,7 +1407,7 @@ class SurfaceTool:
             panel.clear_series("Select a row to plot its feature over time.")
             return
         name = self.records[self.active].name
-        series = feature_series(self.records, name)
+        series = feature_series(self.records, name, corrected=self._corrected())
         if series is None or not series.values:
             panel.clear_series(f"{name}: no observation times to plot.")
             return
@@ -1690,8 +1764,26 @@ class SurfaceTool:
         else:
             canvas.clear_surface_mask_overlay()
 
+    def _corrected(self) -> bool:
+        panel = self._panel()
+        return panel.corrected() if panel is not None else True
+
     def _format(self, result: SurfaceLength | AreaResult) -> str:
-        return format_length(result) if isinstance(result, SurfaceLength) else format_area(result)
+        corrected = self._corrected()
+        if isinstance(result, SurfaceLength):
+            return format_length(result, corrected=corrected)
+        return format_area(result, corrected=corrected)
+
+    def curvature_changed(self) -> None:
+        """Show results, table and graph corrected or as seen (nothing is re-measured)."""
+        result = self.last_result
+        if result is not None and self.mode is not None:
+            shape = self.shapes.get(self.mode)
+            text = self._panel_text(result)
+            if shape is not None and not self._is_recorded(result, shape):
+                text = "● Not in the table — press Record to add it.\n" + text
+            self._show_result(text, recordable=True)
+        self._show_records()
 
     def _panel_text(self, result: SurfaceLength | AreaResult) -> str:
         """Three lines: frame and time; what was measured and its number; the rest."""

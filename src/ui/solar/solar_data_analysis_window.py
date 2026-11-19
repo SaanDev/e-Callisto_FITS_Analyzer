@@ -2370,6 +2370,16 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         )
         self.pan_zoom_check.setEnabled(False)
         self.pan_zoom_check.toggled.connect(self._on_pan_zoom_toggled)
+        # The same setting as North Up in the display options, where it is easy
+        # to miss: right above the image, beside the other view control.
+        self.north_up_bar_check = QCheckBox("North Up")
+        self.north_up_bar_check.setChecked(True)
+        self.north_up_bar_check.setToolTip(
+            "Show the image with solar north up and east left. Raw SDO/HMI frames are\n"
+            "stored upside down; turning them makes NOAA labels, the grid and the\n"
+            "coordinates point at the right spots. Same as North Up in the display options."
+        )
+        measure_row.addWidget(self.north_up_bar_check)
         measure_row.addWidget(self.pan_zoom_check)
         plot_layout.addWidget(measure_bar)
 
@@ -4226,6 +4236,9 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self.reset_derotation_btn.clicked.connect(self.reset_derotation)
         self.solar_limb_check.toggled.connect(lambda _checked: self._render_current_frame())
         self.north_up_check.toggled.connect(self._on_north_up_toggled)
+        # Toolbar copy drives the display-options checkbox, which does the work.
+        self.north_up_bar_check.toggled.connect(self.north_up_check.setChecked)
+        self.north_up_check.toggled.connect(self._sync_north_up_bar)
         # Measurement tools (controller owns the click state machine).
         self.ruler_tool_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("ruler", on))
         self.profile_tool_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("profile", on))
@@ -4244,6 +4257,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self.surface_panel.track_btn.clicked.connect(lambda: surface.track_feature())
         self.surface_panel.shapeChanged.connect(lambda _shape: surface.shape_changed())
         self.surface_panel.thresholdChanged.connect(surface.threshold_changed)
+        self.surface_panel.curvatureChanged.connect(surface.curvature_changed)
         self.stats_tool_btn.clicked.connect(self._report_region_stats)
         self.height_time_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("height_time", on))
         self.circle_tool_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("circle_fit", on))
@@ -6672,6 +6686,15 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self.north_up_check.blockSignals(True)
         self.north_up_check.setChecked(bool(checked))
         self.north_up_check.blockSignals(False)
+        self._sync_north_up_bar()
+
+    def _sync_north_up_bar(self, *_args: Any) -> None:
+        """Keep the toolbar North Up in step with the display-options one."""
+        bar = getattr(self, "north_up_bar_check", None)
+        if bar is not None and bar.isChecked() != self.north_up_check.isChecked():
+            bar.blockSignals(True)
+            bar.setChecked(self.north_up_check.isChecked())
+            bar.blockSignals(False)
 
     def _confirm_clear_surface_table(self) -> None:
         surface = self._measure.surface
@@ -8794,6 +8817,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
                 "mode": str(panel.threshold_combo.currentData() or "none")
             },
             "tint": bool(panel.tint_enabled()),
+            "corrected": bool(panel.corrected()),
         }
 
     def _restore_surface_measurements(
@@ -8808,6 +8832,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             if isinstance(settings.get("threshold"), Mapping):
                 panel.apply_threshold_settings(dict(settings["threshold"]))
             panel.tint_check.setChecked(bool(settings.get("tint", True)))
+            panel.set_corrected(bool(settings.get("corrected", True)))
         kept: list[Any] = []
         dropped = 0
         for record in deserialize_records(measurements.get("surface_records")):

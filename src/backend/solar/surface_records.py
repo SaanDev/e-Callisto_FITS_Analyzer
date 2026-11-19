@@ -48,16 +48,46 @@ class SurfaceRecord:
 
     @property
     def headline(self) -> str:
-        """The main number, as the table's Result column shows it."""
+        """The main number (corrected for curvature), as the table shows it."""
+        return self.headline_for(corrected=True)
+
+    def headline_for(self, *, corrected: bool) -> str:
+        """The main number, corrected for curvature or as seen on the image."""
         v = self.values
         if self.kind == "length":
-            return _fmt(v.get("length_total_mm"), "{:,.1f} Mm")
-        main = _msh(v.get("area_msh"))
-        if self.threshold.get("mode") == "sunspot" and v.get("umbra_msh") is not None:
-            main += f" (U {_msh(v['umbra_msh'], unit=False)})"
-        if not v.get("area_msh") and v.get("off_limb_mm2"):
+            key = "length_total_mm" if corrected else "length_plane_of_sky_mm"
+            return _fmt(v.get(key), "{:,.1f} Mm")
+        area = self.value("area_msh", corrected=corrected)
+        main = _msh(area)
+        umbra = self.value("umbra_msh", corrected=corrected)
+        if self.threshold.get("mode") == "sunspot" and umbra is not None:
+            main += f" (U {_msh(umbra, unit=False)})"
+        if not area and v.get("off_limb_mm2"):
             main = _fmt(v.get("off_limb_mm2"), "{:,.0f} Mm² off-limb")
         return main
+
+    def value(self, key: str, *, corrected: bool = True) -> float | None:
+        """A stored number; ``corrected=False`` gives its as-seen counterpart.
+
+        As-seen areas are the on-disk area exactly as it appears on the image
+        (no curvature correction), still expressed in MSH. Rows recorded before
+        they were stored derive the whole-spot one from the plane-of-sky area.
+        """
+        v = self.values
+        if corrected:
+            return _num(v.get(key))
+        seen_key = {
+            "area_msh": "area_as_seen_msh",
+            "umbra_msh": "umbra_as_seen_msh",
+            "penumbra_msh": "penumbra_as_seen_msh",
+            "region_msh": "region_as_seen_msh",
+            "length_total_mm": "length_plane_of_sky_mm",
+        }.get(key, key)
+        if seen_key in v:
+            return _num(v.get(seen_key))
+        if key == "area_msh" and v.get("area_plane_of_sky_mm2") is not None:
+            return _msh_from_km2(float(v["area_plane_of_sky_mm2"]) * 1e6)
+        return None
 
     @property
     def measure_label(self) -> str:
@@ -72,6 +102,15 @@ class SurfaceRecord:
         if mode == "bright":
             return f"Area ≥ {float(self.threshold.get('level', 0.0)):.2f}"
         return "Area"
+
+
+_RSUN_KM = 695_700.0
+
+
+def _msh_from_km2(km2: float, rsun_km: float = _RSUN_KM) -> float | None:
+    """Area in km^2 as millionths of the solar hemisphere (2 pi R^2)."""
+    value = _num(km2)
+    return None if value is None else value / (2.0 * math.pi * float(rsun_km) ** 2) * 1e6
 
 
 def _msh(value: Any, *, unit: bool = True) -> str:
@@ -144,17 +183,28 @@ def area_values(result: Any, geometry: Any | None = None) -> dict[str, Any]:
     focus = result.selected if getattr(result, "selected", None) is not None else region
     lon, lat = _lonlat(focus.centroid_lonlat)
     cx, cy = _lonlat(focus.centroid_arcsec)
+    rsun_km = _num(getattr(geometry, "rsun_km", None)) or _RSUN_KM
+
+    def seen(area: Any) -> float | None:
+        # The on-disk area as it appears on the image, in MSH, with no
+        # correction for the curvature of the Sun.
+        return _msh_from_km2(area.on_disk_plane_of_sky_km2, rsun_km)
+
     values = {
         "area_msh": _num(focus.on_disk_msh),
+        "area_as_seen_msh": seen(focus),
         "area_mm2": _num(focus.on_disk_km2 / 1e6),
         "area_plane_of_sky_mm2": _num(focus.on_disk_plane_of_sky_km2 / 1e6),
         "off_limb_mm2": _num(focus.off_limb_km2 / 1e6),
         "n_pixels": int(focus.n_pixels),
         "region_msh": _num(region.on_disk_msh),
+        "region_as_seen_msh": seen(region),
         "region_off_limb_mm2": _num(region.off_limb_km2 / 1e6),
         "umbra_msh": None,
+        "umbra_as_seen_msh": None,
         "umbra_mm2": None,
         "penumbra_msh": None,
+        "penumbra_as_seen_msh": None,
         "penumbra_mm2": None,
         "centroid_lon_deg": lon,
         "centroid_lat_deg": lat,
@@ -170,9 +220,11 @@ def area_values(result: Any, geometry: Any | None = None) -> dict[str, Any]:
     penumbra = getattr(result, "penumbra", None)
     if umbra is not None:
         values["umbra_msh"] = _num(umbra.on_disk_msh)
+        values["umbra_as_seen_msh"] = seen(umbra)
         values["umbra_mm2"] = _num(umbra.on_disk_km2 / 1e6)
     if penumbra is not None:
         values["penumbra_msh"] = _num(penumbra.on_disk_msh)
+        values["penumbra_as_seen_msh"] = seen(penumbra)
         values["penumbra_mm2"] = _num(penumbra.on_disk_km2 / 1e6)
     values.update(_geometry_values(geometry))
     return values
@@ -211,12 +263,15 @@ CSV_COLUMNS = (
     "end_lon_deg",
     "end_lat_deg",
     "area_msh",
+    "area_as_seen_msh",
     "area_mm2",
     "area_plane_of_sky_mm2",
     "off_limb_mm2",
     "umbra_msh",
+    "umbra_as_seen_msh",
     "umbra_mm2",
     "penumbra_msh",
+    "penumbra_as_seen_msh",
     "penumbra_mm2",
     "region_msh",
     "region_off_limb_mm2",
@@ -243,6 +298,7 @@ CSV_NOTES = (
     "# corrected for foreshortening with the observer's true distance (perspective projection).",
     "# off_limb_* parts are plane-of-sky values at the Sun's distance and are NOT corrected.",
     "# area_* = thresholded pixels when a threshold was used, else the whole shape (region_*).",
+    "# *_as_seen_msh = the same area as it appears on the image, NOT corrected for curvature, in MSH.",
     "# frame is 1-based; vertices_arcsec are helioprojective (Tx Ty) pairs separated by ';'.",
 )
 
@@ -432,12 +488,13 @@ class FeatureSeries:
         return [(t - t0).total_seconds() for t in self.times]
 
 
-def feature_series(records: Iterable[SurfaceRecord], name: str) -> FeatureSeries | None:
+def feature_series(records: Iterable[SurfaceRecord], name: str, *, corrected: bool = True) -> FeatureSeries | None:
     """The rows called ``name``, ordered by time (one point per frame).
 
-    Areas plot the corrected on-disk MSH; a feature that is entirely off-limb
-    (an arcade above the limb) plots its plane-of-sky Mm² instead. Sunspots add
-    the umbra as a second series.
+    Areas plot the on-disk MSH -- corrected for curvature, or as seen on the
+    image with ``corrected=False`` -- and lengths the surface (or plane-of-sky)
+    length. A feature that is entirely off-limb (an arcade above the limb)
+    plots its plane-of-sky Mm² instead. Sunspots add the umbra as a second series.
     """
     rows = [r for r in records if r.name == name]
     if not rows:
@@ -451,21 +508,22 @@ def feature_series(records: Iterable[SurfaceRecord], name: str) -> FeatureSeries
     for record in timed:
         by_frame[record.frame_index] = record
     timed = sorted(by_frame.values(), key=lambda r: (r.time, r.frame_index))
+    seen = "" if corrected else ", as seen"
     if kind == "length":
-        values = [_num(r.values.get("length_total_mm")) for r in timed]
-        unit, label = "Mm", "Length (Mm)"
+        values = [r.value("length_total_mm", corrected=corrected) for r in timed]
+        unit, label = "Mm", f"Length (Mm{seen})"
         second = None
         second_label = ""
     else:
-        disk = [_num(r.values.get("area_msh")) for r in timed]
+        disk = [r.value("area_msh", corrected=corrected) for r in timed]
         if any(v for v in disk if v):
-            values, unit, label = disk, "MSH", "Area (MSH)"
+            values, unit, label = disk, "MSH", f"Area (MSH{seen})"
         else:
             values = [_num(r.values.get("off_limb_mm2")) for r in timed]
             unit, label = "Mm² (plane of sky)", "Off-limb area (Mm²)"
         sunspot = any(r.threshold.get("mode") == "sunspot" for r in timed)
-        second = [_num(r.values.get("umbra_msh")) for r in timed] if sunspot and unit == "MSH" else None
-        second_label = "umbra (MSH)" if second is not None else ""
+        second = [r.value("umbra_msh", corrected=corrected) for r in timed] if sunspot and unit == "MSH" else None
+        second_label = f"umbra (MSH{seen})" if second is not None else ""
     keep = [i for i, v in enumerate(values) if v is not None]
     return FeatureSeries(
         name=name,

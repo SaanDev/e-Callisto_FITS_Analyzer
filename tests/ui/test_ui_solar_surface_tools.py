@@ -1243,3 +1243,66 @@ def test_project_keeps_the_orientation_of_its_measurements(win, tmp_path):
     win.restore_project_part(old, {"frame.fits": str(tmp_path / "frame.fits")})
     assert loads == [[str(tmp_path / "frame.fits")]]  # the frames were sent to be reloaded...
     assert not win.north_up_check.isChecked()  # ...unrotated, as the project was made
+
+
+# ------------------------------------------------- corrected / as-seen control
+def test_values_control_switches_between_corrected_and_as_seen(win):
+    _load(win, _sequence(hours=(0.0, 12.0)))
+    win.area_tool_btn.setChecked(True)
+    win.surface_panel.set_threshold_mode("sunspot")
+    _box_on_spot(win, _spot_xy(0.0))
+    surface = win._measure.surface
+    surface.track_feature()
+    record = surface.records[surface.active]
+    panel = win.surface_panel
+    assert panel.corrected()
+    corrected_cell = panel.table.item(surface.active, 3).text()
+
+    panel.set_corrected(False)
+    seen_cell = panel.table.item(surface.active, 3).text()
+    assert seen_cell == record.headline_for(corrected=False) != corrected_cell
+    assert "as seen" in panel.result_text()
+    assert "not corrected for curvature" in panel.result_text()
+    assert "as seen" in panel.plot.getPlotItem().getAxis("left").labelText
+    _, ys = panel._series_main.getData()
+    assert list(ys) == pytest.approx([r.value("area_msh", corrected=False) for r in surface.records if r.name == record.name])
+    # The switch only changes what is shown: the stored numbers are untouched,
+    # and the table still knows the shape is recorded.
+    assert record.values["area_msh"] > record.values["area_as_seen_msh"]
+    assert "Not in the table" not in panel.result_text()
+    # It travels with the project.
+    meta = win._collect_session_meta()
+    assert meta["measurements"]["surface_settings"]["corrected"] is False
+
+
+def test_length_as_seen_is_the_plane_of_sky_length(win):
+    _load(win, [DiskMap(_disk())])
+    win.length_tool_btn.setChecked(True)
+    win.surface_panel.set_corrected(False)
+    for x in (500.0, 700.0, 850.0):
+        win._measure.on_canvas_click(x, 100.0, "left")
+    win.surface_panel.finish_btn.click()
+    result = win._measure.surface.last_result
+    line = _last_line(win)
+    assert f"{result.plane_of_sky_km / 1000.0:,.1f} Mm as seen" in line
+    assert f"{result.total_km / 1000.0:,.1f} Mm along the surface" in line
+
+
+def test_toolbar_north_up_follows_the_display_option(win, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    assert win.north_up_bar_check.isChecked() and win.north_up_check.isChecked()
+    _load_fits_map(win, tmp_path, _HMI_ROTATED)
+    win.north_up_bar_check.setChecked(False)  # the toolbar drives the real setting
+    assert not win.north_up_check.isChecked()
+    assert float(win._map_frames[0].meta["crota2"]) == pytest.approx(179.93)
+    win.north_up_check.setChecked(True)  # and follows it
+    assert win.north_up_bar_check.isChecked()
+    # A refused change puts both back.
+    win.length_tool_btn.setChecked(True)
+    win._measure.on_canvas_click(0.0, 0.0, "left")
+    win._measure.on_canvas_click(100.0, 0.0, "left")
+    win._measure.surface.finish()
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
+    win.north_up_bar_check.setChecked(False)
+    assert win.north_up_check.isChecked() and win.north_up_bar_check.isChecked()

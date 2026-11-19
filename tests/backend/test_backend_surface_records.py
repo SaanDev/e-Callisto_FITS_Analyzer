@@ -293,3 +293,40 @@ def test_linear_rate_slope_and_error():
 def test_group_rows_by_feature():
     rows = [_row("B", 2, 0.0, msh=1.0), _row("A", 1, 0.0, msh=1.0), _row("B", 0, 0.0, msh=1.0), _row("A", 0, 0.0, msh=1.0)]
     assert [(r.name, r.frame_index) for r in group_rows_by_feature(rows)] == [("B", 0), ("B", 2), ("A", 0), ("A", 1)]
+
+
+# ---------------------------------------------- corrected vs as-seen values
+def test_area_values_keep_the_as_seen_area_in_msh():
+    from src.backend.solar.surface_measure import km2_to_msh
+
+    record, result = _sunspot_record()
+    v = record.values
+    assert v["area_as_seen_msh"] == pytest.approx(km2_to_msh(result.selected.on_disk_plane_of_sky_km2, rsun_km=G.rsun_km))
+    assert v["umbra_as_seen_msh"] == pytest.approx(km2_to_msh(result.umbra.on_disk_plane_of_sky_km2, rsun_km=G.rsun_km))
+    assert v["region_as_seen_msh"] == pytest.approx(km2_to_msh(result.region.on_disk_plane_of_sky_km2, rsun_km=G.rsun_km))
+    # Seen near disk centre the two barely differ; the corrected one is the true size.
+    assert record.value("area_msh", corrected=False) == pytest.approx(v["area_as_seen_msh"])
+    assert record.headline_for(corrected=False).startswith(f"{v['area_as_seen_msh']:,.0f} MSH")
+    assert record.headline == record.headline_for(corrected=True)
+
+
+def test_as_seen_falls_back_for_rows_saved_before_it_existed():
+    old = SurfaceRecord("Old", "area", "polygon", [(0, 0), (1, 1)], 0, values={"area_msh": 120.0, "area_plane_of_sky_mm2": 182.0})
+    seen = old.value("area_msh", corrected=False)
+    assert seen == pytest.approx(182.0e6 / (2 * math.pi * 695_700.0**2) * 1e6)
+    length, result = _length_record()
+    assert length.headline_for(corrected=False) == f"{result.plane_of_sky_km / 1000.0:,.1f} Mm"
+
+
+def test_feature_series_as_seen():
+    rows = [
+        _row("Spot", 0, 0.0, msh=100.0, umbra=25.0, mode="sunspot"),
+        _row("Spot", 1, 6.0, msh=90.0, umbra=20.0, mode="sunspot"),
+    ]
+    rows[0].values.update(area_as_seen_msh=60.0, umbra_as_seen_msh=15.0)
+    rows[1].values.update(area_as_seen_msh=40.0, umbra_as_seen_msh=9.0)
+    seen = feature_series(rows, "Spot", corrected=False)
+    assert seen.values == [60.0, 40.0]
+    assert seen.second == [15.0, 9.0]
+    assert "as seen" in seen.label
+    assert feature_series(rows, "Spot").values == [100.0, 90.0]
