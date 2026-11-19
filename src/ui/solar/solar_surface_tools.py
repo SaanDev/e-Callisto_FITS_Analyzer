@@ -83,6 +83,7 @@ from src.backend.solar.surface_measure import (
     normalize_to_quiet_sun,
     polygon_mask_from_arcsec,
     polyline_surface_length,
+    disk_interior_mask,
     rectangle_mask,
     rotate_points,
     sunspot_masks,
@@ -201,6 +202,9 @@ class AreaResult:
     quicklook: bool = False
     #: ``(mask, rgb)`` tints for the canvas, in drawing order.
     layers: tuple = ()
+    #: Pixels of the shape a dark threshold left out: off the disk or within
+    #: the outermost limb (mu below the quiet-Sun fit), where nothing is a spot.
+    limb_excluded_px: int = 0
 
 
 def _plain(rich: str) -> str:
@@ -321,6 +325,8 @@ def format_area(result: AreaResult) -> str:
         text += f"  ·  mean {focus.mean_intensity:,.1f} {result.intensity_unit}"
     if focus.near_limb:
         text += f"  ·  ⚠ reaches μ<{LIMB_WARNING_MU:.1f}: close to the limb, the correction is large"
+    if result.limb_excluded_px and mode in ("sunspot", "dark"):
+        text += f"  ·  {result.limb_excluded_px:,} px off the disk or at the extreme limb left out of the threshold"
     return text
 
 
@@ -409,7 +415,12 @@ class SurfaceMeasurePanel(QWidget):
             "are divided by the quiet-Sun level at the same distance from disk centre\n"
             "(fitted over the whole disk, so limb darkening or brightening cancels), and\n"
             "off-limb pixels by the level at the limb. Always uses the frame's own data,\n"
-            "even when a difference image is displayed."
+            "even when a difference image is displayed.\n"
+            "Sunspot mode is the standard intensity-threshold method: a patch counts only if\n"
+            "it is a real depression (its darkest pixel at least 0.10 below the penumbra\n"
+            "level), so granulation is never counted. Dark thresholds ignore the sky and the\n"
+            "outermost limb. Areas are corrected for foreshortening, in MSH. They read about\n"
+            "1.4x NOAA/USAF region areas, which are known to be low (Meadows 2020, MNRAS)."
         )
         self.threshold_group.setToolTip(self._threshold_tip)
         grid = QGridLayout(self.threshold_group)
@@ -1569,10 +1580,18 @@ class SurfaceTool:
 
         profile = self._quiet_sun(raw, geometry, index)
         normalized = normalize_to_quiet_sun(raw, geometry, profile, region=region)
+        # Dark thresholds only look where a spot can be and the quiet-Sun level
+        # is known: on the disk, inside the profile's mu range. Bright ones keep
+        # off-limb pixels (an arcade above the limb is exactly what they are for).
+        dark_region = region
+        excluded = 0
+        if settings.mode in ("sunspot", "dark"):
+            dark_region = disk_interior_mask(region, geometry, mu_min=profile.mu_min)
+            excluded = int(region.sum() - dark_region.sum())
         if settings.mode == "sunspot":
             masks = sunspot_masks(
                 normalized,
-                region,
+                dark_region,
                 umbra_level=settings.umbra_level,
                 penumbra_level=settings.penumbra_level,
                 min_cluster_px=settings.min_cluster_px,
@@ -1586,9 +1605,10 @@ class SurfaceTool:
                 penumbra=mask_surface_area(masks.penumbra, geometry, image=intensity),
                 intensity_unit=unit,
                 layers=((masks.penumbra, PENUMBRA_COLOR), (masks.umbra, UMBRA_COLOR)),
+                limb_excluded_px=excluded,
             )
         bounds = {"below": settings.level} if settings.mode == "dark" else {"above": settings.level}
-        selected = threshold_mask(normalized, region, min_cluster_px=settings.min_cluster_px, **bounds)
+        selected = threshold_mask(normalized, dark_region, min_cluster_px=settings.min_cluster_px, **bounds)
         return AreaResult(
             shape.kind,
             region_area,
@@ -1596,6 +1616,7 @@ class SurfaceTool:
             selected=mask_surface_area(selected, geometry, image=intensity),
             intensity_unit=unit,
             layers=((selected, DARK_COLOR if settings.mode == "dark" else BRIGHT_COLOR),),
+            limb_excluded_px=excluded,
         )
 
     def _quiet_sun(self, raw: np.ndarray, geometry: SurfaceGeometry, index: int) -> QuietSunProfile:

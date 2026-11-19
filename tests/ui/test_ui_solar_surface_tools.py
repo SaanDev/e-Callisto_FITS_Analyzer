@@ -1152,3 +1152,28 @@ def test_cropped_frame_keeps_the_radius_and_measures_correctly(win, tmp_path):
     assert length.total_km == pytest.approx(truth, rel=0.005)
     area, truth = _measure_box(win, source, -15.0, -5.0)
     assert area.on_disk_msh == pytest.approx(truth, rel=0.02)
+
+
+def test_dark_thresholds_ignore_the_sky_and_extreme_limb(win):
+    """The off-disk sky and the outer limb are darker than the quiet Sun but are not spots.
+
+    Before the fix a shape reaching the limb counted them: a full-disk HMI
+    frame came out at ~69,000 MSH of "sunspot" instead of ~4,000.
+    """
+    _load(win, [DiskMap(_disk())])  # sky pixels are 5.0, far below the quiet Sun
+    win.area_tool_btn.setChecked(True)
+    win.surface_panel.set_threshold_mode("sunspot")
+    win.surface_panel.set_shape("rectangle")
+    surface = win._measure.surface
+    surface.on_drag("start", -1050.0, -1050.0)
+    surface.on_drag("finish", 1050.0, 1050.0)
+    result = surface.last_result
+    umbra, penumbra = _expected_spot()
+    # Only the real spot is found, not the ring of sky round the disk.
+    assert result.selected.off_limb_pixels == 0.0
+    assert result.selected.on_disk_msh == pytest.approx(umbra.on_disk_msh + penumbra.on_disk_msh, rel=0.05)
+    assert result.limb_excluded_px > 0
+    assert "left out of the threshold" in _last_line(win)
+    # A bright threshold still reaches off the limb (arcades live there).
+    win.surface_panel.set_threshold_mode("bright")
+    assert surface.last_result.limb_excluded_px == 0
