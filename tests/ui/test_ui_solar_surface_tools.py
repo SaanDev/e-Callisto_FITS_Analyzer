@@ -1067,7 +1067,9 @@ def _load_fits_map(win, tmp_path, header):
     win._apply_loaded_frames(list(frames.maps), paths=list(frames.paths), metadata=dict(frames.metadata))
     win.measurements_check.setChecked(True)
     QApplication.processEvents()
-    return frames.maps[0]
+    # The frame as displayed (north-up when North Up is on): a user's clicks
+    # land on its pixels.
+    return win._map_frames[0]
 
 
 def _user_clicks(win, source_map, lons, lats):
@@ -1113,7 +1115,11 @@ def _measure_meridian_arc(win, source_map, lon0, lat0, size=10.0):
     return win._measure.surface.last_result, rsun_km * math.radians(size)
 
 
-def test_rotated_hmi_frame_measures_and_places_features_correctly(win, tmp_path):
+@pytest.mark.parametrize("north_up", [True, False])
+def test_rotated_hmi_frame_measures_and_places_features_correctly(win, tmp_path, north_up):
+    # North Up off keeps the frame as stored: the measurement geometry then has
+    # to apply the 180-deg rotation itself.
+    win._set_north_up_silently(north_up)
     source = _load_fits_map(win, tmp_path, _HMI_ROTATED)
     for lon0, lat0 in [(-40.0, 10.0), (30.0, -30.0)]:
         area, truth = _measure_box(win, source, lon0, lat0)
@@ -1177,3 +1183,63 @@ def test_dark_thresholds_ignore_the_sky_and_extreme_limb(win):
     # A bright threshold still reaches off the limb (arcades live there).
     win.surface_panel.set_threshold_mode("bright")
     assert surface.last_result.limb_excluded_px == 0
+
+
+# ------------------------------------------------------------------ North Up
+def test_rotated_hmi_is_shown_north_up_by_default(win, tmp_path):
+    assert win.north_up_check.isChecked()
+    _load_fits_map(win, tmp_path, _HMI_ROTATED)
+    frame = win._map_frames[0]
+    assert float(frame.meta["crota2"]) == pytest.approx(-0.07, abs=1e-6)
+    assert "north-up" in win.analysis_text.toPlainText()
+    # Reading the axes now finds the feature where the solar coordinates say it is.
+    from src.backend.solar.surface_measure import SurfaceGeometry, arcsec_from_stonyhurst
+
+    reader = SurfaceGeometry(rsun_arcsec=949.9, b0_deg=-3.2)
+    tx, ty, _ = arcsec_from_stonyhurst(30.0, -20.0, reader)
+    win.length_tool_btn.setChecked(True)
+    win._measure.on_canvas_click(float(tx), float(ty), "left")
+    win._measure.on_canvas_click(float(tx) + 50.0, float(ty), "left")
+    win._measure.surface.finish()
+    lon, lat = win._measure.surface.last_result.start_lonlat
+    assert (lon, lat) == pytest.approx((30.0, -20.0), abs=0.3)
+
+
+def test_north_up_off_reloads_the_stored_frames(win, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    _load_fits_map(win, tmp_path, _HMI_ROTATED)
+    win.north_up_check.setChecked(False)
+    assert float(win._map_frames[0].meta["crota2"]) == pytest.approx(179.93)
+    # With measurements present it asks first; "No" keeps everything as it was.
+    win.length_tool_btn.setChecked(True)
+    win._measure.on_canvas_click(0.0, 0.0, "left")
+    win._measure.on_canvas_click(100.0, 0.0, "left")
+    win._measure.surface.finish()
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
+    win.north_up_check.setChecked(True)
+    assert not win.north_up_check.isChecked()
+    assert win._measure.surface.records
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    win.north_up_check.setChecked(True)
+    assert win._measure.surface.records == []
+    assert float(win._map_frames[0].meta["crota2"]) == pytest.approx(-0.07, abs=1e-6)
+
+
+def test_project_keeps_the_orientation_of_its_measurements(win, tmp_path):
+    _load_fits_map(win, tmp_path, _HMI_ROTATED)
+    meta = win._collect_session_meta()
+    assert meta["view"]["north_up"] is True
+    # A project saved before North Up existed was never rotated: it reopens unrotated.
+    old = dict(meta)
+    old["view"] = {k: v for k, v in meta["view"].items() if k != "north_up"}
+    win._set_north_up_silently(True)
+    old["frame_files"] = ["frame.fits"]
+    loads = []
+    # Stand in for both loaders (local files, archive re-fetch): a real one
+    # starts a background thread that would outlive the test.
+    win.load_local_paths = lambda paths, **kw: loads.append(list(paths))
+    win._refetch_project_frames = lambda *a, **kw: loads.append("refetch")
+    win.restore_project_part(old, {"frame.fits": str(tmp_path / "frame.fits")})
+    assert loads == [[str(tmp_path / "frame.fits")]]  # the frames were sent to be reloaded...
+    assert not win.north_up_check.isChecked()  # ...unrotated, as the project was made

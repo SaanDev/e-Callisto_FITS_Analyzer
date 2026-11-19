@@ -3759,6 +3759,16 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         )
         self.colorbar_check = QCheckBox("Colorbar")
         self.colorbar_check.setChecked(True)
+        self.north_up_check = QCheckBox("North Up")
+        self.north_up_check.setChecked(True)
+        self.north_up_check.setToolTip(
+            "Turn every frame so solar north is up and east is left, as it is seen.\n"
+            "Raw SDO/HMI images are stored about 180 deg round; shown as stored, the\n"
+            "Sun is upside down and NOAA labels, the coordinate grid, the cursor\n"
+            "readout and position angles all land on the mirror image of the right\n"
+            "spot. A half-turn is an exact pixel flip; other angles are resampled.\n"
+            "Changing it reloads the frames."
+        )
         self.region_overlay_check = QCheckBox("Region Overlays")
         self.region_overlay_check.setChecked(True)
 
@@ -3789,6 +3799,8 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         row += 1
         layout.addWidget(self.colorbar_check, row, 0)
         layout.addWidget(self.region_overlay_check, row, 1)
+        row += 1
+        layout.addWidget(self.north_up_check, row, 0, 1, 2)
         row += 1
         layout.addWidget(self._subheading("Crop (arcsec)"), row, 0, 1, 2)
         row += 1
@@ -4213,6 +4225,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self.apply_derotation_btn.clicked.connect(self.apply_derotation)
         self.reset_derotation_btn.clicked.connect(self.reset_derotation)
         self.solar_limb_check.toggled.connect(lambda _checked: self._render_current_frame())
+        self.north_up_check.toggled.connect(self._on_north_up_toggled)
         # Measurement tools (controller owns the click state machine).
         self.ruler_tool_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("ruler", on))
         self.profile_tool_btn.toggled.connect(lambda on: self._on_measure_tool_toggled("profile", on))
@@ -5806,6 +5819,14 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
                 "(polarizer states, wavelengths or image sizes); running/base "
                 "differences may be unreliable."
             )
+        # Keep the frames as stored so North Up can be switched later, then turn
+        # them north-up before anything else sees them: levels, derotation,
+        # crops, region detection, labels and measurements all then work in
+        # true solar coordinates.
+        self._stored_frames = list(frames)
+        frames, turned = self._oriented_frames(frames)
+        if turned:
+            dropped_note += f"\nTurned {turned} frame(s) north-up (North Up is on)."
         # Differencing frames with unequal exposure times in raw DN creates
         # false signal, so remember whether normalisation to DN/s is needed.
         self._exposure_varies = exposures_differ(frames)
@@ -6585,6 +6606,72 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             self.height_time_btn,
             self.circle_tool_btn,
         )
+
+    def _oriented_frames(self, frames: list[Any]) -> tuple[list[Any], int]:
+        """``frames`` turned north-up when North Up is on; returns ``(frames, how many turned)``."""
+        if not getattr(self, "north_up_check", None) or not self.north_up_check.isChecked():
+            return list(frames), 0
+        from src.backend.solar.orientation import north_up
+
+        out: list[Any] = []
+        turned = 0
+        for frame in frames:
+            try:
+                rotated = north_up(frame)
+            except Exception:
+                rotated = frame
+            turned += rotated is not frame
+            out.append(rotated)
+        return out, turned
+
+    def _has_any_measurement(self) -> bool:
+        measure = getattr(self, "_measure", None)
+        if measure is None:
+            return False
+        surface = getattr(measure, "surface", None)
+        return bool(
+            measure.picks
+            or measure.circles
+            or (surface is not None and (surface.records or surface.shapes))
+        )
+
+    def _on_north_up_toggled(self, checked: bool) -> None:
+        """Reload the loaded frames in the new orientation.
+
+        Measurements are positions on the image, so they belong to one
+        orientation; they are cleared (after asking) rather than left pointing
+        at the mirror image.
+        """
+        stored = list(getattr(self, "_stored_frames", None) or [])
+        if not stored or not self._map_frames:
+            return
+        if self._has_any_measurement():
+            reply = QMessageBox.question(
+                self,
+                "North Up",
+                "Changing the orientation reloads the frames and clears the measurements "
+                "(CME picks, circle fits and the Surface table). Continue?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                self._set_north_up_silently(not checked)
+                return
+        frame_index = int(self._current_frame_index)
+        self._measure.clear_all()
+        self._apply_loaded_frames(stored, paths=list(self._loaded_paths), metadata=dict(self._map_metadata or {}))
+        self._reset_canvas_views()
+        if 0 <= frame_index < len(self._map_frames):
+            self._set_frame_index(frame_index)
+        self.statusBar().showMessage(
+            "Frames shown north-up." if checked else "Frames shown as stored (not rotated).", 6000
+        )
+        self._notify_project_modified()
+
+    def _set_north_up_silently(self, checked: bool) -> None:
+        self.north_up_check.blockSignals(True)
+        self.north_up_check.setChecked(bool(checked))
+        self.north_up_check.blockSignals(False)
 
     def _confirm_clear_surface_table(self) -> None:
         surface = self._measure.surface
@@ -8004,6 +8091,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self._original_frames = []
         self._leveled_frames = []
         self._map_frames = []
+        self._stored_frames = []
         self._base_level = None
         self._current_level = None
         self._level_warnings = []
@@ -8029,6 +8117,7 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
         self._set_results_selection_controls_enabled(False)
 
     def _reset_controls_to_defaults(self) -> None:
+        self._set_north_up_silently(True)
         now = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
         self.wavelength_combo.setCurrentText("AIA 193 A")
         self.start_dt_edit.setDateTime(QDateTime(now - timedelta(hours=2)))
@@ -8637,6 +8726,8 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             },
             "current_frame_index": int(self._current_frame_index),
             "frame_count": len(self._map_frames),
+            # Measurements are image positions, so the orientation travels with them.
+            "north_up": bool(self.north_up_check.isChecked()),
             # Reopening a cubic analysis as a straight line would silently
             # change every speed it reports, so the fit degree travels with it.
             "fit_order": int(self.tracking_panel.fit_order()),
@@ -8903,6 +8994,9 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             )
             return
         self.clear_for_project()
+        # Frames must come back in the orientation their measurements were made
+        # in. Projects saved before North Up existed were never rotated.
+        self._set_north_up_silently(bool(dict(meta.get("view") or {}).get("north_up", False)))
 
         paths: list[str] = []
         frame_files = [str(name) for name in meta.get("frame_files") or []]
