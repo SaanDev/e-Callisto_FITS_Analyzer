@@ -685,3 +685,150 @@ def test_rotation_agrees_with_sunpy_rotated_frame():
     # two agree to a few arcsec over a day.
     assert out.points[0][0] == pytest.approx(rotated.Tx.to_value(u.arcsec), abs=3.0)
     assert out.points[0][1] == pytest.approx(rotated.Ty.to_value(u.arcsec), abs=3.0)
+
+
+# ------------------------------------------------- image rotation and frames
+from types import SimpleNamespace
+
+from src.backend.solar.surface_measure import (
+    frame_observer_deg,
+    frame_rotation_deg,
+    geometry_for_frame,
+    solar_radius_arcsec_from_meta,
+)
+
+
+def test_rotation_round_trips_about_the_reference_point():
+    g = SurfaceGeometry(rsun_arcsec=RSUN, x_ref_arcsec=10.0, y_ref_arcsec=-5.0, rotation_deg=37.0)
+    tx, ty = g.to_helioprojective(np.array([110.0, -300.0]), np.array([-5.0, 400.0]))
+    back_x, back_y = g.from_helioprojective(tx, ty)
+    np.testing.assert_allclose(back_x, [110.0, -300.0], atol=1e-9)
+    np.testing.assert_allclose(back_y, [-5.0, 400.0], atol=1e-9)
+    # The reference point itself does not move; 100" east of it turns 37 deg CCW.
+    rx, ry = g.to_helioprojective(10.0, -5.0)
+    assert (float(rx), float(ry)) == pytest.approx((10.0, -5.0))
+    ex, ey = g.to_helioprojective(110.0, -5.0)
+    assert float(ex) == pytest.approx(10.0 + 100.0 * math.cos(math.radians(37.0)))
+    assert float(ey) == pytest.approx(-5.0 + 100.0 * math.sin(math.radians(37.0)))
+
+
+def test_rotated_image_measures_the_same_and_places_points_correctly():
+    upright = SurfaceGeometry(rsun_arcsec=RSUN, b0_deg=3.0)
+    flipped = SurfaceGeometry(rsun_arcsec=RSUN, b0_deg=3.0, rotation_deg=180.0)
+    tx, ty = _hgs_to_arcsec(np.array([30.0]), np.array([20.0]), upright)
+    # In a 180-deg rotated image the same surface point is plotted at (-Tx, -Ty).
+    lon, lat = stonyhurst_from_arcsec(-tx, -ty, flipped)
+    assert float(lon) == pytest.approx(30.0, abs=1e-6)
+    assert float(lat) == pytest.approx(20.0, abs=1e-6)
+    ix, iy, visible = arcsec_from_stonyhurst(30.0, 20.0, flipped)
+    assert bool(visible)
+    assert (float(ix), float(iy)) == pytest.approx((-float(tx[0]), -float(ty[0])))
+    line = [(-100.0, 0.0), (-200.0, 150.0)]
+    a = polyline_surface_length(line, upright)
+    b = polyline_surface_length([(-x, -y) for x, y in line], flipped)
+    assert b.total_km == pytest.approx(a.total_km)
+    assert b.start_lonlat == pytest.approx(a.start_lonlat)
+
+
+def test_rotated_full_disk_area_is_unchanged():
+    n = 256
+    plain = _centred(n, 9.6)
+    turned = _centred(n, 9.6, rotation_deg=25.0)
+    mask = np.ones((n, n), dtype=bool)
+    assert mask_surface_area(mask, turned).on_disk_msh == pytest.approx(
+        mask_surface_area(mask, plain).on_disk_msh, rel=2e-3
+    )
+
+
+def test_solar_radius_from_meta_derives_it_from_the_distance():
+    assert solar_radius_arcsec_from_meta({"RSUN_OBS": 950.0}) == 950.0
+    assert solar_radius_arcsec_from_meta({"rsun_obs": "951.5"}) == 951.5
+    au = 1.495978707e11
+    derived = solar_radius_arcsec_from_meta({"DSUN_OBS": 0.96 * au, "RSUN_REF": 696_000_000.0})
+    assert derived == pytest.approx(math.degrees(math.asin(696e6 / (0.96 * au))) * 3600.0)
+    assert derived == pytest.approx(999.6, abs=0.1)  # not Earth's ~960
+    # No RSUN_REF: the IAU radius.
+    assert solar_radius_arcsec_from_meta({"dsun_obs": au}) == pytest.approx(
+        math.degrees(math.asin(RSUN_KM * 1000.0 / au)) * 3600.0
+    )
+    assert solar_radius_arcsec_from_meta({}) is None
+    assert solar_radius_arcsec_from_meta(None) is None
+
+
+def test_frame_rotation_prefers_the_maps_matrix():
+    c, s_ = math.cos(math.radians(30.0)), math.sin(math.radians(30.0))
+    assert frame_rotation_deg(SimpleNamespace(rotation_matrix=[[c, -s_], [s_, c]], meta={"crota2": 99.0})) == pytest.approx(30.0)
+    # A map class that ignores CROTA (Helioviewer LASCO) reports identity.
+    assert frame_rotation_deg(SimpleNamespace(rotation_matrix=np.eye(2), meta={"crota2": -174.0})) == pytest.approx(0.0)
+    assert frame_rotation_deg(SimpleNamespace(meta={"PC1_1": c, "PC2_1": s_})) == pytest.approx(30.0)
+    assert frame_rotation_deg(SimpleNamespace(meta={"CROTA2": 179.93})) == pytest.approx(179.93)
+    assert frame_rotation_deg(SimpleNamespace(meta={})) == 0.0
+
+
+def test_frame_observer_reads_map_then_coordinate_frame():
+    def coord(lat, lon):
+        return SimpleNamespace(lat=SimpleNamespace(to_value=lambda unit: lat), lon=SimpleNamespace(to_value=lambda unit: lon))
+
+    assert frame_observer_deg(SimpleNamespace(observer_coordinate=coord(-3.2, 0.5))) == (-3.2, 0.5)
+    crop = SimpleNamespace(coordinate_frame=SimpleNamespace(observer=coord(5.0, -20.0)))
+    assert frame_observer_deg(crop) == (5.0, -20.0)
+    assert frame_observer_deg(SimpleNamespace()) is None
+
+
+def _write_map(tmp_path, name, header, n=256):
+    pytest.importorskip("sunpy")
+    from astropy.io import fits
+
+    path = tmp_path / name
+    fits.writeto(path, np.ones((n, n), dtype="float32"), fits.Header(header), overwrite=True)
+    import sunpy.map
+
+    return sunpy.map.Map(str(path))
+
+
+_BASE_HEADER = {
+    "CTYPE1": "HPLN-TAN", "CTYPE2": "HPLT-TAN", "CUNIT1": "arcsec", "CUNIT2": "arcsec",
+    "CRPIX1": 128.5, "CRPIX2": 128.5, "CRVAL1": 0.0, "CRVAL2": 0.0, "CDELT1": 8.0, "CDELT2": 8.0,
+    "DATE-OBS": "2024-05-10T12:00:00", "RSUN_REF": 696000000.0,
+}
+
+
+def test_geometry_for_frame_matches_sunpy_on_a_rotated_map(tmp_path):
+    frame = _write_map(tmp_path, "hmi.fits", dict(
+        _BASE_HEADER, TELESCOP="SDO/HMI", INSTRUME="HMI_FRONT2", CROTA2=179.93, DSUN_OBS=1.5115e11,
+        HGLN_OBS=0.0, HGLT_OBS=-3.2, RSUN_OBS=949.9, WAVELNTH=6173.0,
+    ))
+    import astropy.units as u
+
+    # The window's linear axis transform (it ignores rotation, as the canvas does).
+    transform = {"x_ref_pix": 127.5, "y_ref_pix": 127.5, "x_scale_arcsec_per_pix": 8.0, "y_scale_arcsec_per_pix": 8.0}
+    g = geometry_for_frame(frame, transform)
+    assert g.rotation_deg == pytest.approx(179.93)
+    assert g.b0_deg == pytest.approx(-3.2)
+    assert g.rsun_arcsec == pytest.approx(949.9)
+    cols = np.array([60.0, 128.0, 190.0])
+    rows = np.array([90.0, 140.0, 170.0])
+    world = frame.pixel_to_world(cols * u.pix, rows * u.pix)
+    from sunpy.coordinates import frames
+
+    hgs = world.transform_to(frames.HeliographicStonyhurst(obstime=frame.date))
+    tx, ty = g.pixel_to_arcsec(cols, rows)
+    lon, lat = stonyhurst_from_arcsec(tx, ty, g)
+    np.testing.assert_allclose(lon, (hgs.lon.to_value(u.deg) + 180) % 360 - 180, atol=0.05)
+    np.testing.assert_allclose(lat, hgs.lat.to_value(u.deg), atol=0.05)
+
+
+def test_geometry_for_frame_without_rsun_obs_uses_the_distance(tmp_path):
+    frame = _write_map(tmp_path, "euvi.fits", dict(
+        _BASE_HEADER, TELESCOP="STEREO", OBSRVTRY="STEREO_A", INSTRUME="SECCHI", DETECTOR="EUVI",
+        WAVELNTH=195.0, DSUN_OBS=0.96 * 1.495978707e11, HGLN_OBS=-20.0, HGLT_OBS=5.0,
+    ))
+    g = geometry_for_frame(frame, {})
+    assert g.rsun_arcsec == pytest.approx(999.6, abs=0.1)
+    assert g.observer_lon_deg == pytest.approx(-20.0)
+    assert g.b0_deg == pytest.approx(5.0)
+    # A plain object with only the header still gets the right radius.
+    crop = SimpleNamespace(meta=dict(frame.meta))
+    assert geometry_for_frame(crop, {}).rsun_arcsec == pytest.approx(999.6, abs=0.1)
+    with pytest.raises(ValueError, match="solar radius"):
+        geometry_for_frame(SimpleNamespace(meta={}), {})

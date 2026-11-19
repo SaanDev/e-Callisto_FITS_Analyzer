@@ -78,7 +78,7 @@ from src.backend.solar.surface_measure import (
     SurfaceLength,
     ellipse_mask,
     fit_quiet_sun_profile,
-    geometry_from_meta,
+    geometry_for_frame,
     mask_surface_area,
     normalize_to_quiet_sun,
     polygon_mask_from_arcsec,
@@ -1542,7 +1542,10 @@ class SurfaceTool:
             rsun = float(win._solar_radius_arcsec(frame))
         except Exception:
             rsun = 960.0
-        geometry = geometry_from_meta(getattr(frame, "meta", None), transform, rsun_arcsec=rsun)
+        # Observer and image rotation from the map itself (header keys only as
+        # a fallback): a rotated frame (raw HMI is stored ~180 deg round) would
+        # otherwise put every centroid on the wrong side of the disk.
+        geometry = geometry_for_frame(frame, transform, rsun_arcsec=rsun)
         return frame, raw, geometry
 
     def _measure_area(

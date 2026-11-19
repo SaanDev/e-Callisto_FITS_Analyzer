@@ -104,7 +104,18 @@ class AiaArrayMap:
         self.nickname = str(nickname or _safe_text(getattr(source_map, "nickname", ""))).strip()
         self.source = _safe_text(getattr(source_map, "source", ""))
 
-        for attr in ("scale", "reference_pixel", "reference_coordinate", "coordinate_frame", "rsun_meters"):
+        # rsun_obs and rotation_matrix keep measurements on a crop right: the
+        # header may lack RSUN_OBS (it is derived from DSUN_OBS), and SunPy's
+        # rotation matrix knows when a header CROTA must be ignored.
+        for attr in (
+            "scale",
+            "reference_pixel",
+            "reference_coordinate",
+            "coordinate_frame",
+            "rsun_meters",
+            "rsun_obs",
+            "rotation_matrix",
+        ):
             if hasattr(source_map, attr):
                 try:
                     setattr(self, attr, getattr(source_map, attr))

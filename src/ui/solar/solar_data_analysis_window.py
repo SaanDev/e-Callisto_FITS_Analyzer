@@ -8226,6 +8226,13 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
                 radius = self._as_float(meta.get(key), unit_hint="arcsec")
                 if radius is not None and np.isfinite(radius) and radius > 0:
                     return float(radius)
+        # No RSUN_OBS (STEREO/SECCHI, GONG, a crop of either): derive it from
+        # the observer distance as SunPy does, rather than assume Earth's view.
+        from src.backend.solar.surface_measure import solar_radius_arcsec_from_meta
+
+        derived = solar_radius_arcsec_from_meta(meta)
+        if derived is not None and np.isfinite(derived) and derived > 0:
+            return float(derived)
         return 960.0
 
     def load_magnetogram_overlay(self):

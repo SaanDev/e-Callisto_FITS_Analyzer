@@ -81,7 +81,15 @@ class SurfaceGeometry:
 
     The pixel <-> arcsec part mirrors the window's ``axis_transform`` dict:
     ``Tx = x_ref_arcsec + (col - x_ref_pix) * x_scale`` and likewise for rows.
-    Pixel ``(col, row)`` integer coordinates are pixel centres.
+    Pixel ``(col, row)`` integer coordinates are pixel centres. Those are the
+    *image-frame* arcsec the canvas plots and the user clicks in.
+
+    ``rotation_deg`` is the image's rotation from solar north (FITS ``CROTA2``,
+    or the angle of the map's PC matrix): the true helioprojective position is
+    the image-frame offset from the reference point rotated by it. Raw HMI
+    frames are stored about 180 deg rotated; AIA level 1 a fraction of a degree.
+    Every function here accepts image-frame arcsec and applies the rotation
+    before going onto the sphere, so lengths, areas *and* positions are right.
     """
 
     rsun_arcsec: float
@@ -94,6 +102,7 @@ class SurfaceGeometry:
     b0_deg: float = 0.0
     observer_lon_deg: float = 0.0
     rsun_km: float = RSUN_KM
+    rotation_deg: float = 0.0
 
     def __post_init__(self) -> None:
         rsun = float(self.rsun_arcsec)
@@ -107,6 +116,8 @@ class SurfaceGeometry:
                 raise ValueError(f"{name} must be finite and non-zero, got {value!r}.")
         if not math.isfinite(float(self.rsun_km)) or float(self.rsun_km) <= 0.0:
             raise ValueError(f"rsun_km must be positive, got {self.rsun_km!r}.")
+        if not math.isfinite(float(self.rotation_deg)):
+            raise ValueError(f"rotation_deg must be finite, got {self.rotation_deg!r}.")
 
     @classmethod
     def from_axis_transform(
@@ -117,6 +128,7 @@ class SurfaceGeometry:
         b0_deg: float = 0.0,
         observer_lon_deg: float = 0.0,
         rsun_km: float = RSUN_KM,
+        rotation_deg: float = 0.0,
     ) -> "SurfaceGeometry":
         """Build from the analysis window's ``axis_transform`` dict."""
         return cls(
@@ -130,6 +142,7 @@ class SurfaceGeometry:
             b0_deg=float(b0_deg),
             observer_lon_deg=float(observer_lon_deg),
             rsun_km=float(rsun_km),
+            rotation_deg=float(rotation_deg),
         )
 
     # Observer distance from Sun centre, in solar radii.
@@ -160,56 +173,152 @@ class SurfaceGeometry:
         rows = self.y_ref_pix + (ty - self.y_ref_arcsec) / self.y_scale_arcsec_per_pix
         return cols, rows
 
+    def to_helioprojective(self, tx: Any, ty: Any) -> tuple[np.ndarray, np.ndarray]:
+        """Image-frame arcsec (as plotted) -> true helioprojective ``(Tx, Ty)``.
 
-def geometry_from_map(frame: Any, axis_transform: Mapping[str, float]) -> SurfaceGeometry:
-    """Read the solar radius and observer position from a SunPy map.
+        The FITS convention: the world offset from the reference point is the
+        PC matrix ``[[cos r, -sin r], [sin r, cos r]]`` times the image offset.
+        """
+        tx = np.asarray(tx, dtype=float)
+        ty = np.asarray(ty, dtype=float)
+        r = math.radians(float(self.rotation_deg))
+        if r == 0.0:
+            return tx, ty
+        dx = tx - self.x_ref_arcsec
+        dy = ty - self.y_ref_arcsec
+        c, s_ = math.cos(r), math.sin(r)
+        return self.x_ref_arcsec + c * dx - s_ * dy, self.y_ref_arcsec + s_ * dx + c * dy
 
-    ``axis_transform`` is the window's pixel <-> arcsec mapping for the shown
-    data (it already accounts for any crop). Raises ``ValueError`` when the map
-    carries no usable apparent solar radius, which is the one value nothing can
-    be measured without.
+    def from_helioprojective(self, tx: Any, ty: Any) -> tuple[np.ndarray, np.ndarray]:
+        """True helioprojective ``(Tx, Ty)`` -> image-frame arcsec (as plotted)."""
+        tx = np.asarray(tx, dtype=float)
+        ty = np.asarray(ty, dtype=float)
+        r = math.radians(float(self.rotation_deg))
+        if r == 0.0:
+            return tx, ty
+        dx = tx - self.x_ref_arcsec
+        dy = ty - self.y_ref_arcsec
+        c, s_ = math.cos(r), math.sin(r)
+        return self.x_ref_arcsec + c * dx + s_ * dy, self.y_ref_arcsec - s_ * dx + c * dy
+
+
+def solar_radius_arcsec_from_meta(meta: Mapping[str, Any] | None) -> float | None:
+    """Apparent solar radius from a header, as SunPy derives it.
+
+    ``RSUN_OBS`` (or ``SOLAR_R``) when present; otherwise computed from the
+    observer distance ``DSUN_OBS`` and ``RSUN_REF`` (default the IAU radius),
+    ``asin(R / D)``. STEREO/SECCHI, GONG and others often carry only the
+    distance, and a cropped frame keeps only its header, so without this a
+    measurement silently falls back to an Earth-like 960 arcsec.
     """
-    import astropy.units as u
+    meta = dict(meta or {})
+    direct = _meta_float(meta, "rsun_obs", "solar_r", "rsun")
+    if direct is not None and 1.0 < direct < 324_000.0:
+        return direct
+    dsun_m = _meta_float(meta, "dsun_obs")
+    if dsun_m is None or dsun_m <= 0.0:
+        return None
+    rsun_ref_m = _meta_float(meta, "rsun_ref") or RSUN_KM * 1000.0
+    if rsun_ref_m >= dsun_m:
+        return None
+    return math.degrees(math.asin(rsun_ref_m / dsun_m)) * 3600.0
 
-    rsun_arcsec: float | None = None
-    try:
-        rsun_arcsec = float(frame.rsun_obs.to_value(u.arcsec))
-    except Exception:
-        rsun_arcsec = None
-    if rsun_arcsec is None or not math.isfinite(rsun_arcsec) or rsun_arcsec <= 0.0:
-        raise ValueError("This map has no apparent solar radius (RSUN_OBS), so its pixels cannot be placed on the Sun.")
 
-    b0_deg = 0.0
-    lon_deg = 0.0
-    try:
-        observer = frame.observer_coordinate
-        b0_deg = float(observer.lat.to_value(u.deg))
-        lon_deg = float(observer.lon.to_value(u.deg))
-    except Exception:
+def frame_rotation_deg(frame: Any) -> float:
+    """The image's rotation from solar north, in degrees (0 when unknown).
+
+    The map's own ``rotation_matrix`` comes first: SunPy's instrument classes
+    know when a header's ``CROTA`` must be ignored (Helioviewer LASCO JP2s are
+    already rotated but keep it). Plain frames fall back to the PC matrix or
+    ``CROTA2`` in the header.
+    """
+    matrix = getattr(frame, "rotation_matrix", None)
+    if matrix is not None:
         try:
-            b0_deg = float(frame.carrington_latitude.to_value(u.deg))
+            m = np.asarray(matrix, dtype=float)
+            angle = math.degrees(math.atan2(float(m[1, 0]), float(m[0, 0])))
+            if math.isfinite(angle):
+                return angle
         except Exception:
-            b0_deg = 0.0
-    if not math.isfinite(b0_deg):
-        b0_deg = 0.0
-    if not math.isfinite(lon_deg):
-        lon_deg = 0.0
+            pass
+    meta = dict(getattr(frame, "meta", None) or {})
+    pc11 = _meta_float(meta, "pc1_1")
+    pc21 = _meta_float(meta, "pc2_1")
+    if pc11 is not None and pc21 is not None:
+        return math.degrees(math.atan2(pc21, pc11))
+    crota = _meta_float(meta, "crota2", "crota")
+    return float(crota) if crota is not None else 0.0
 
-    rsun_km = RSUN_KM
+
+def frame_observer_deg(frame: Any) -> tuple[float, float] | None:
+    """Stonyhurst ``(lat, lon)`` of the observer of ``frame`` (B0 and longitude).
+
+    Reads the map's ``observer_coordinate`` (SunPy fills it from the header, or
+    from Earth's position at the observation time when the header has none),
+    then the coordinate frame a cropped frame still carries. None when neither
+    is available; the caller then reads header keys.
+    """
+    getters = (
+        lambda: frame.observer_coordinate,
+        lambda: frame.coordinate_frame.observer,
+    )
+    for getter in getters:
+        try:
+            observer = getter()
+            lat = float(observer.lat.to_value("deg"))
+            lon = float(observer.lon.to_value("deg"))
+        except Exception:
+            continue
+        if math.isfinite(lat) and math.isfinite(lon):
+            return lat, lon
+    return None
+
+
+def geometry_for_frame(
+    frame: Any,
+    axis_transform: Mapping[str, float],
+    *,
+    rsun_arcsec: float | None = None,
+) -> SurfaceGeometry:
+    """The geometry of a loaded frame: radius, observer, rotation and scale.
+
+    ``rsun_arcsec`` overrides the radius (the window resolves it the same way
+    for all its tools); otherwise it comes from the map, then the header. The
+    observer comes from the map's coordinates when it has them, else from the
+    header, and the rotation from :func:`frame_rotation_deg`.
+    """
+    meta = dict(getattr(frame, "meta", None) or {})
+    radius = rsun_arcsec
+    if radius is None:
+        try:
+            radius = float(frame.rsun_obs.to_value("arcsec"))
+        except Exception:
+            radius = solar_radius_arcsec_from_meta(meta)
+    if radius is None or not math.isfinite(float(radius)) or float(radius) <= 0.0:
+        raise ValueError("This map has no apparent solar radius (RSUN_OBS or DSUN_OBS), so its pixels cannot be placed on the Sun.")
+    base = geometry_from_meta(meta, axis_transform, rsun_arcsec=float(radius))
+    observer = frame_observer_deg(frame)
+    b0, lon = (observer if observer is not None else (base.b0_deg, base.observer_lon_deg))
+    rsun_km = base.rsun_km
     try:
-        value = float(frame.rsun_meters.to_value(u.km))
+        value = float(frame.rsun_meters.to_value("km"))
         if math.isfinite(value) and value > 0.0:
             rsun_km = value
     except Exception:
         pass
-
     return SurfaceGeometry.from_axis_transform(
         axis_transform,
-        rsun_arcsec=rsun_arcsec,
-        b0_deg=b0_deg,
-        observer_lon_deg=lon_deg,
+        rsun_arcsec=float(radius),
+        b0_deg=b0,
+        observer_lon_deg=lon,
         rsun_km=rsun_km,
+        rotation_deg=frame_rotation_deg(frame),
     )
+
+
+def geometry_from_map(frame: Any, axis_transform: Mapping[str, float]) -> SurfaceGeometry:
+    """:func:`geometry_for_frame` with the radius read from the map itself."""
+    return geometry_for_frame(frame, axis_transform)
 
 
 def _meta_float(meta: Mapping[str, Any], *keys: str) -> float | None:
@@ -272,15 +381,16 @@ class SurfaceProjection:
 
 
 def project_to_sphere(tx_arcsec: Any, ty_arcsec: Any, geometry: SurfaceGeometry) -> SurfaceProjection:
-    """Intersect helioprojective lines of sight with the solar sphere.
+    """Intersect lines of sight (image-frame arcsec) with the solar sphere.
 
     Uses the helioprojective -> heliocentric relations of Thompson (2006, A&A
     449, 791): a point at distance ``d`` along ``(Tx, Ty)`` sits at
     ``x = d cos Ty sin Tx``, ``y = d sin Ty``, ``z = D - d cos Ty cos Tx``; the
     near root of ``|P| = 1`` picks the visible hemisphere.
     """
-    tx = np.asarray(tx_arcsec, dtype=float) * _ARCSEC_TO_RAD
-    ty = np.asarray(ty_arcsec, dtype=float) * _ARCSEC_TO_RAD
+    hpc_x, hpc_y = geometry.to_helioprojective(tx_arcsec, ty_arcsec)
+    tx = hpc_x * _ARCSEC_TO_RAD
+    ty = hpc_y * _ARCSEC_TO_RAD
     big_d = geometry.observer_distance_rsun
 
     cos_ty = np.cos(ty)
@@ -638,6 +748,8 @@ def _surface_weights(
     """
     tx, ty = geometry.pixel_to_arcsec(cols, rows)
     proj = project_to_sphere(tx, ty, geometry)
+    # Distances from Sun centre need the true (rotated) helioprojective position.
+    tx, ty = geometry.to_helioprojective(tx, ty)
     omega = geometry.pixel_area_arcsec2 * _ARCSEC_TO_RAD * _ARCSEC_TO_RAD
 
     disk_fraction = proj.on_disk.astype(float)
@@ -669,6 +781,7 @@ def _surface_weights(
     for start in range(0, idx.size, per_chunk):
         sel = idx[start : start + per_chunk]
         stx, sty = geometry.pixel_to_arcsec(cols[sel][:, None] + oc[None, :], rows[sel][:, None] + orow[None, :])
+        stx, sty = geometry.to_helioprojective(stx, sty)
         th = np.arccos(np.clip(np.cos(stx * _ARCSEC_TO_RAD) * np.cos(sty * _ARCSEC_TO_RAD), -1.0, 1.0))
         th_in = np.maximum(th - 0.5 * side, 0.0)
         th_out = th + 0.5 * side
@@ -1070,7 +1183,7 @@ def synodic_rotation_deg(latitude_deg: Any, seconds: float) -> np.ndarray:
 def arcsec_from_stonyhurst(
     lon_deg: Any, lat_deg: Any, geometry: SurfaceGeometry
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Stonyhurst -> helioprojective ``(Tx, Ty, visible)`` for this observer.
+    """Stonyhurst -> image-frame arcsec ``(Tx, Ty, visible)`` for this observer.
 
     ``visible`` is False for points on the far side of the limb, whose
     helioprojective position would land on the disk in front of them.
@@ -1087,6 +1200,7 @@ def arcsec_from_stonyhurst(
     tx = np.degrees(np.arctan2(x, zeta)) * 3600.0
     ty = np.degrees(np.arcsin(y / dist)) * 3600.0
     visible = z * big_d - 1.0 > 0.0
+    tx, ty = geometry.from_helioprojective(tx, ty)
     return tx, ty, visible
 
 

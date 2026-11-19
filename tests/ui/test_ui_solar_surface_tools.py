@@ -1037,3 +1037,118 @@ def test_quicklook_tooltip_is_restored_after_fits_frames(win):
     assert "quicklook" in panel.threshold_group.toolTip()
     panel.set_quicklook(False)
     assert panel.threshold_group.toolTip() == original
+
+
+# ------------------------------------------- real maps through the click path
+_TRUTH_HEADER = {
+    "CTYPE1": "HPLN-TAN", "CTYPE2": "HPLT-TAN", "CUNIT1": "arcsec", "CUNIT2": "arcsec",
+    "CRPIX1": 256.5, "CRPIX2": 256.5, "CRVAL1": 0.0, "CRVAL2": 0.0, "CDELT1": 4.4, "CDELT2": 4.4,
+    "DATE-OBS": "2024-05-10T12:00:00", "RSUN_REF": 696000000.0,
+}
+_HMI_ROTATED = dict(
+    _TRUTH_HEADER, TELESCOP="SDO/HMI", INSTRUME="HMI_FRONT2", CONTENT="CONTINUUM INTENSITY", WAVELNTH=6173.0,
+    CROTA2=179.93, DSUN_OBS=1.5115e11, HGLN_OBS=0.0, HGLT_OBS=-3.2, RSUN_OBS=949.9, T_OBS="2024-05-10T12:00:00",
+)
+_EUVI_NO_RSUN = dict(
+    _TRUTH_HEADER, TELESCOP="STEREO", OBSRVTRY="STEREO_A", INSTRUME="SECCHI", DETECTOR="EUVI", WAVELNTH=195.0,
+    CROTA=0.0, DSUN_OBS=0.96 * 1.495978707e11, HGLN_OBS=-20.0, HGLT_OBS=5.0,
+)
+
+
+def _load_fits_map(win, tmp_path, header):
+    pytest.importorskip("sunpy")
+    from astropy.io import fits
+
+    from src.backend.solar.solar_data_analysis import load_aia_maps_streaming
+
+    path = tmp_path / "frame.fits"
+    fits.writeto(path, np.ones((512, 512), dtype="float32"), fits.Header(header), overwrite=True)
+    frames = load_aia_maps_streaming([str(path)])
+    win._apply_loaded_frames(list(frames.maps), paths=list(frames.paths), metadata=dict(frames.metadata))
+    win.measurements_check.setChecked(True)
+    QApplication.processEvents()
+    return frames.maps[0]
+
+
+def _user_clicks(win, source_map, lons, lats):
+    """Canvas arcsec a user clicks for these Stonyhurst points (via the map's own WCS)."""
+    import astropy.units as u
+    from astropy.coordinates import SkyCoord
+    from sunpy.coordinates import frames
+
+    coords = SkyCoord(
+        np.asarray(lons) * u.deg, np.asarray(lats) * u.deg, frame=frames.HeliographicStonyhurst,
+        obstime=source_map.date, observer=source_map.observer_coordinate, rsun=source_map.rsun_meters,
+    )
+    px, py = source_map.world_to_pixel(coords)
+    origin = getattr(win._map_frames[0], "_crop_origin_px", (0, 0))
+    return [
+        win.pyqt_canvas.map_arcsec_from_pixel(float(x) - origin[0], float(y) - origin[1])
+        for x, y in zip(np.asarray(getattr(px, "value", px)), np.asarray(getattr(py, "value", py)))
+    ]
+
+
+def _measure_box(win, source_map, lon0, lat0, size=10.0):
+    n = 30
+    e = np.linspace(0.0, size, n)
+    lons = np.concatenate([lon0 + e, np.full(n, lon0 + size), lon0 + size - e, np.full(n, lon0)])
+    lats = np.concatenate([np.full(n, lat0), lat0 + e, np.full(n, lat0 + size), lat0 + size - e])
+    win.area_tool_btn.setChecked(True)
+    win.surface_panel.set_shape("polygon")
+    win.surface_panel.set_threshold_mode("none")
+    for x, y in _user_clicks(win, source_map, lons, lats):
+        win._measure.on_canvas_click(x, y, "left")
+    win._measure.surface.finish()
+    truth = math.radians(size) * (math.sin(math.radians(lat0 + size)) - math.sin(math.radians(lat0))) / (2 * math.pi) * 1e6
+    return win._measure.surface.last_result.region, truth
+
+
+def _measure_meridian_arc(win, source_map, lon0, lat0, size=10.0):
+    win.length_tool_btn.setChecked(True)
+    lats = lat0 + np.linspace(0.0, size, 21)
+    for x, y in _user_clicks(win, source_map, np.full(21, lon0), lats):
+        win._measure.on_canvas_click(x, y, "left")
+    win._measure.surface.finish()
+    rsun_km = float(source_map.rsun_meters.to_value("km"))
+    return win._measure.surface.last_result, rsun_km * math.radians(size)
+
+
+def test_rotated_hmi_frame_measures_and_places_features_correctly(win, tmp_path):
+    source = _load_fits_map(win, tmp_path, _HMI_ROTATED)
+    for lon0, lat0 in [(-40.0, 10.0), (30.0, -30.0)]:
+        area, truth = _measure_box(win, source, lon0, lat0)
+        assert area.on_disk_msh == pytest.approx(truth, rel=0.02)
+        # The centroid lands on the box, not on the mirrored hemisphere.
+        lon, lat = area.centroid_lonlat
+        assert lon == pytest.approx(lon0 + 5.0, abs=0.3)
+        assert lat == pytest.approx(lat0 + 5.0, abs=0.5)
+    length, truth = _measure_meridian_arc(win, source, 20.0, -10.0)
+    assert length.total_km == pytest.approx(truth, rel=0.005)
+    assert length.start_lonlat == pytest.approx((20.0, -10.0), abs=0.2)
+
+
+def test_frame_without_rsun_obs_measures_with_its_true_radius(win, tmp_path):
+    source = _load_fits_map(win, tmp_path, _EUVI_NO_RSUN)
+    assert win._solar_radius_arcsec(win._map_frames[0]) == pytest.approx(999.6, abs=0.1)
+    area, truth = _measure_box(win, source, -40.0, 10.0)
+    assert area.on_disk_msh == pytest.approx(truth, rel=0.02)
+    length, truth = _measure_meridian_arc(win, source, 0.0, 0.0)
+    assert length.total_km == pytest.approx(truth, rel=0.005)
+
+
+def test_cropped_frame_keeps_the_radius_and_measures_correctly(win, tmp_path):
+    source = _load_fits_map(win, tmp_path, _EUVI_NO_RSUN)
+    for spin, value in zip(
+        (win.crop_x0_spin, win.crop_x1_spin, win.crop_y0_spin, win.crop_y1_spin), (-700.0, 700.0, -700.0, 700.0)
+    ):
+        spin.setValue(value)
+    win.apply_axis_crop()
+    QApplication.processEvents()
+    cropped = win._map_frames[0]
+    assert cropped.data.shape[0] < 512  # really cropped
+    # Before the fix a crop lost the derived radius and fell back to 960".
+    assert win._solar_radius_arcsec(cropped) == pytest.approx(999.6, abs=0.1)
+    length, truth = _measure_meridian_arc(win, source, -10.0, -5.0)
+    assert length.total_km == pytest.approx(truth, rel=0.005)
+    area, truth = _measure_box(win, source, -15.0, -5.0)
+    assert area.on_disk_msh == pytest.approx(truth, rel=0.02)
