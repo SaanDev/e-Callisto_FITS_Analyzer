@@ -2,14 +2,14 @@
 //! the newest stable GitHub release for this platform, and its installer
 //! downloaded.
 //!
-//! From 3.2.0 one tag (`v3.2.0`, pre-releases `v3.3.0-beta`) carries the
+//! From 3.2.0 one tag per release (`v3.3.0`, pre-releases `v3.4.0-beta`) carries the
 //! full app's installers and Lite's, Lite's marked `-lite` in the file name
-//! (`e-CALLISTO_FITS_Analyzer_v3.2.0-lite_Setup.exe`,
-//! `e-callisto-fits-analyzer_3.2.0-lite_amd64.deb`,
-//! `e-callisto-fits-analyzer_3.2.0-lite_macOS_arm64.dmg`). Lite takes only
+//! (`e-CALLISTO_FITS_Analyzer_v3.3.0-lite_Setup.exe`,
+//! `e-callisto-fits-analyzer_3.3.0-lite_amd64.deb`,
+//! `e-callisto-fits-analyzer_3.3.0-lite_macOS_arm64.dmg`). Lite takes only
 //! its own installers, and only releases that have one for this platform;
 //! the full app skips them. Lite's version is the release's with `-lite`
-//! (3.2.0-lite).
+//! (3.3.0-lite).
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};

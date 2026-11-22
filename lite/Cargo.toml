@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/callisto-core", "crates/callisto-lite"]
 
 [workspace.package]
-version = "3.2.0-lite"
+version = "3.3.0-lite"
 edition = "2024"
 license = "MIT"
 homepage = "https://ecallistoanalyzer.org/"

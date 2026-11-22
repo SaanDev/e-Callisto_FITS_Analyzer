@@ -19,7 +19,7 @@ use crate::session::Session;
 use crate::session::project::is_radio_array;
 
 /// What Lite's `meta.app_version` says: its own version, marked `-lite`
-/// (3.2.0-lite), not the full app's.
+/// (3.3.0-lite), not the full app's.
 pub fn app_version() -> String {
     env!("CARGO_PKG_VERSION").to_owned()
 }

@@ -1,6 +1,6 @@
 """
 e-CALLISTO FITS Analyzer
-Version 3.2.0
+Version 3.3.0
 Sahan S Liyanage
 Astronomical and Space Science Unit, University of Colombo, Sri Lanka.
 

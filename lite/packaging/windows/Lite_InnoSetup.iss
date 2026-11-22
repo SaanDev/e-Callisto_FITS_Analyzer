@@ -3,17 +3,17 @@
 ; folder and Start menu group, so it installs beside the full app.
 ;
 ; Build with build_windows_installer.ps1, or:
-;   iscc /DAppVersion=3.2.0-lite /DNumericVersion=3.2.0 /DStageDir=...\stage Lite_InnoSetup.iss
-; The installer is e-CALLISTO_FITS_Analyzer_v3.2.0-lite_Setup.exe, the name
-; the update check looks for in the release tag (v3.2.0).
+;   iscc /DAppVersion=3.3.0-lite /DNumericVersion=3.3.0 /DStageDir=...\stage Lite_InnoSetup.iss
+; The installer is e-CALLISTO_FITS_Analyzer_v3.3.0-lite_Setup.exe, the name
+; the update check looks for in the release tag (v3.3.0).
 
 #define AppName "e-CALLISTO FITS Analyzer Lite"
 #ifndef AppVersion
-  #define AppVersion "3.2.0-lite"
+  #define AppVersion "3.3.0-lite"
 #endif
-; Windows' version fields take numbers only: 3.2.0-lite -> 3.2.0.
+; Windows' version fields take numbers only: 3.3.0-lite -> 3.3.0.
 #ifndef NumericVersion
-  #define NumericVersion "3.2.0"
+  #define NumericVersion "3.3.0"
 #endif
 #define AppPublisher "Sahan S. Liyanage"
 #define AppExeName "e-CALLISTO FITS Analyzer Lite.exe"

@@ -8,7 +8,7 @@
 # Usage, from anywhere on a Mac with Xcode's command line tools and rustup:
 #   bash lite/packaging/macos/build_macos_dmg.sh
 # Optional:
-#   VERSION=3.2.0-lite                    the version (default: Lite's Cargo version)
+#   VERSION=3.3.0-lite                    the version (default: Lite's Cargo version)
 #   CODESIGN_IDENTITY="Developer ID Application: ..."   sign for distribution (default: ad hoc)
 #   NOTARY_PROFILE=<keychain profile>     notarise and staple the .dmg
 #                                         (xcrun notarytool store-credentials <profile> ...)
@@ -19,7 +19,7 @@ ROOT="$(cd "$LITE/.." && pwd)"
 APP_NAME="e-CALLISTO FITS Analyzer Lite"
 BUNDLE_ID="com.sahansliyanage.callisto.fitsanalyzer.lite"
 VERSION="${VERSION:-$(awk -F'"' '/^version[[:space:]]*=/{print $2; exit}' "$LITE/Cargo.toml")}"
-# Bundle versions take numbers only: 3.2.0-lite -> 3.2.0.
+# Bundle versions take numbers only: 3.3.0-lite -> 3.3.0.
 NUMERIC_VERSION="${VERSION%%-*}"
 TARGET_DIR="${CARGO_TARGET_DIR:-$LITE/target}"
 DIST="$LITE/dist"

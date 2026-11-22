@@ -1,7 +1,35 @@
-# e-CALLISTO FITS Analyzer (v3.2.0)
+# e-CALLISTO FITS Analyzer (v3.3.0)
 A desktop application for visualizing, processing, and analyzing e-CALLISTO solar radio FITS data and other solar physics related data.
 
 **Website: [ecallistoanalyzer.org](https://ecallistoanalyzer.org)**: downloads for Windows, macOS and Linux, the illustrated [user guide](https://ecallistoanalyzer.org/guide/), [tutorials](https://ecallistoanalyzer.org/tutorials/) and [how to cite the software](https://ecallistoanalyzer.org/citation/).
+
+## What's New in v3.3.0
+
+v3.3.0 ships with **e-CALLISTO FITS Analyzer Lite v3.3.0-lite**, the Rust build of the radio part of the app, under the same release tag. Solar Image Analysis is now **v1.8**.
+
+### Solar Image Analysis v1.8: lengths and areas on the solar surface
+- **Length and Area tools** (toolbar, beside Pan / Zoom, with a new **Surface** tab next to CME Tracking): measure filament lengths, sunspot areas and post-flare arcade areas on any on-disk image with a WCS (SDO/AIA and HMI, SOHO/EIT, STEREO/EUVI, GOES/SUVI).
+  - **Length**: click along the feature and double-click (or press **Finish**) at the end. The polyline is deprojected onto the sphere as great-circle arcs; any part beyond the limb is measured in the plane of the sky and reported separately.
+  - **Area**: draw a **Polygon** (click corners), **Freehand lasso**, **Ellipse** or **Rectangle**. On-disk pixels are corrected for foreshortening and reported in millionths of the solar hemisphere (MSH) and km²; off-limb pixels are given as an uncorrected plane-of-sky area.
+  - **Undo Point**, **Finish** and **Clear Shape** edit the shape being drawn; `Esc` or a right click cancels it.
+- **Threshold inside the shape**: measure the whole region, **Sunspot only: umbra / penumbra** (defaults below 0.6 and 0.9 of the quiet Sun), **Darker than** or **Brighter than** a level. Intensities are divided by a limb-darkening profile of the quiet Sun fitted over the whole disk, and the threshold always works on the frame's own data, even when a difference image is shown. Sunspot mode is the standard intensity-threshold method: a patch counts only if it is a real depression (its darkest pixel at least 0.10 below the penumbra level), so granulation is not counted, and dark thresholds ignore the sky and the outermost limb. **Min patch** drops isolated noise pixels, and **Tint pixels** shows what was selected.
+- **Area method**: **Finite-distance** geometry (the default, following each pixel's line of sight from the spacecraft) or **Orthographic** for comparison with older catalogues; a **Limb cutoff** (μ ≥ 0.30 by default) whose excluded pixels are tinted red; and **Pixel centres** or **Subpixel 4×4** boundaries. The result card reports the status (valid, partial, invalid or a valid zero), the pixels left out and why, and a sensitivity range (mask ±1 px, threshold ±0.02).
+- **Corrected or as seen**: the **Values** selector shows results, the table and the graph either corrected for curvature (the true size on the Sun) or as seen on the image. The CSV always holds both.
+- **Table, tracking and export**: **Record** adds the measurement to a table (rows that share a name are one feature over time); **Track Frames** carries the shape across the sequence, optionally rotated with the Sun (**Rotate shapes with the Sun when tracking**, Howard synoptic differential rotation), and a graph plots the feature's length or area over time with a linear rate. The **Table** menu exports a CSV or a JSON file with full provenance. Shapes, records and settings are saved in the `.efaproj` project. Areas read about 1.4× NOAA/USAF region areas, which are known to underestimate (Meadows 2020, MNRAS 497, 1110); no scaling factor is applied.
+- **Checked geometry**: the solar radius comes from the header's RSUN_REF and DSUN_OBS and is cross-checked with RSUN_OBS; a measurement is refused when they disagree. Every loaded frame's pixel size is checked against its image size (1024², 2048², 4096²): for sharp-limb images (HMI continuum, AIA 1700/4500) the limb is fitted from the pixels and compared with the header, and a stale header left from 2× or 4× binning is corrected. The verdict appears in the result card and the export.
+- **North Up** (on by default; display options and the toolbar): frames stored rotated, such as raw HMI at about 180°, are turned north up on load, so the image, NOAA/HEK labels, the coordinate grid and the hover latitude/longitude all agree. Older projects reopen unrotated.
+
+### Solar Image Analysis fixes
+- Ruler, CME heights, lengths and areas on cropped frames and on headers without RSUN_OBS (common for STEREO and GONG crops) now use the radius derived from the observer's distance instead of a fixed 960″, which made lengths 4–8% and areas 9–26% too large.
+- Measurements on rotated frames now account for the image rotation (CROTA / PC matrix), so centroids and latitude/longitude no longer land in the mirrored hemisphere.
+- PFSS open-field boundaries no longer vanish on AIA frames, whose solar sphere (RSUN_REF) is slightly larger than 1 R☉.
+- The details drawer under the image can be dragged taller, and maximising and restoring the window no longer leaves it unable to shrink.
+
+### Choice of FITS server in the downloader
+- A **Server** selector above the e-CALLISTO downloader's tabs chooses where every tab finds and downloads FITS files: **e-CALLISTO** (the default) or **Astrodoncel**. The choice is remembered, and changing it keeps your dates and time windows, clears the previous server's results and reloads the station lists.
+- When the selected server fails, the error names it and a **Retry** button appears; the app never switches servers by itself. An open preview names the server its files came from.
+- Files of the same name from the two servers are cached separately (Astrodoncel's under `sources/astrodoncel`), every new download is checked to be a complete, readable FITS file before it is cached, and extending an imported observation's timeline continues on the server it came from.
+- Lite has the same selector, and takes over the full app's choice when it imports the full app's settings.
 
 ## What's New in v3.2.0
 
@@ -118,7 +146,7 @@ v3.1.0 also includes these archive, instrument, visualization and solar-image an
 - Load ARTEMIS-IV (Thermopylae, Greece) `ARTLOOK` files directly: the hours-based UT time axis is converted on load, intensities are labelled and scaled as ADC counts with the ASG's own 58.51 counts/dB conversion, and the observation opens background subtracted because the receiver's channel gains span more than an order of magnitude.
 - Extend a loaded dataset in place from the sidebar's **Timeline** section: fetch the previous or next observation from disk or the archive, time-combine it into the spectrum without leaving the plot, trim from either end, and undo any of it. Annotations, the ruler measurement and drift picks keep their place, and the active background subtraction and RFI cleaning are re-derived over the longer array.
 - Switch the frequency axis between **Linear** and **Log** from the sidebar's **Axis** section, with decade-anchored ticks labelled in MHz and identical behaviour in the software and hardware-accelerated renderers.
-- Download and analyze e-CALLISTO and Learmonth Station radio data, including Learmonth chunk conversion to FIT format for the main Analyzer.
+- Download and analyze e-CALLISTO and Learmonth Station radio data, including Learmonth chunk conversion to FIT format for the main Analyzer, with e-CALLISTO files fetched from the e-CALLISTO or Astrodoncel server.
 - Use hardware-accelerated plotting with live cursor readouts, rectangular zoom, lock/unlock navigation, and **Edit → Reset to Raw** controls.
 - Subtract the per-channel background from the sidebar's **Background Subtraction** section with **Mean**, **Median** or **Median (dB)**; it is always computed from the raw data, so re-applying replaces the result instead of stacking.
 - Adjust the contrast live with high-resolution threshold sliders that set the color-scale limits only (the data are never clipped), value readouts, optional signed-log scaling, dB or Digits/ADU display modes, and graph-property controls.
@@ -142,6 +170,7 @@ v3.1.0 also includes these archive, instrument, visualization and solar-image an
 - Overlay GOES XRS curves directly on the main spectrum with automatic legacy/modern GOES fallback and flare-class guides.
 - Analyze SDO/AIA images from **Analysis -> Solar Data Analysis** with crop, difference, active-region, composite, and movie export tools.
 - Measure a CME frame by frame in the Solar Image Analysis window with a ruler, intensity profiles, region statistics, leading-edge height–time tracking, and circle fitting for on-disk domes — reporting linear, quadratic or cubic kinematics with a 1σ error on every speed and acceleration.
+- Measure filament lengths and sunspot or arcade areas on the solar surface, corrected for curvature, with sunspot umbra/penumbra thresholds, a results table, tracking over time and CSV/JSON export; frames are shown north up.
 - Reconstruct CME flux ropes and shocks in **Analysis → GCS CME Fitting…**, refine against clicked fronts, record each model over time, and export figures, movies and fitting reports.
 - Extrapolate the coronal magnetic field with a PFSS model from GONG, HMI, ADAPT or a local synoptic magnetogram, and overlay open and closed field lines and coronal-hole boundaries on the AIA disk, with a four-panel diagnostics window for the source-surface field and solution statistics.
 - Explore external archives with the SunPy Multi-Mission Explorer for SDO, SOHO, STEREO-A, and GOES products.
@@ -759,6 +788,8 @@ without leaving the tool.
 | **Region Stats** | Summarises the crop rectangle: pixel count, mean/median/min/max/σ and the intensity-weighted centroid. Enable **Rectangle crop** first to choose the region. |
 | **Track CME** | One click per frame on the leading edge. The height is its distance from disk centre; the frame auto-advances and each pick lands in the table. Best for limb events. |
 | **Circle Fit** | Three or more clicks along a circular front per frame. The CME is taken as a sphere resting on the surface, so the height is 1 R☉ + the circle's diameter (1 R☉ + 2r). Best for eruptions near disk centre. |
+| **Length** | Click along a feature (a filament, say) and double-click the last point. The length is deprojected onto the solar sphere; parts beyond the limb are measured in the plane of the sky and reported separately. Results are in the **Surface** tab. |
+| **Area** | Draw a polygon, freehand lasso, ellipse or rectangle around a sunspot, arcade or other region, optionally with an intensity threshold inside it. Reported in MSH and km², corrected for foreshortening. Results are in the **Surface** tab. |
 | **GCS CME Fitting** | A separate three-viewpoint window (Analysis menu). Match one 3-D Graduated Cylindrical Shell to the flux-rope front, and optionally a spheroid or ellipsoid to the shock, in every view at once. Apex heights are **de-projected under the model assumptions**; derived radial speeds depend on viewing geometry, timing and front selection. |
 | **Clear** | Resets every measurement: picks, circles, table and overlays. |
 
@@ -785,6 +816,39 @@ Every value carries a 1σ error from the fit covariance. A degree-*n* fit needs 
 before an error bar can be estimated at all; below that the value is shown without one rather than with a
 misleading zero. **Export CSV** saves the table, and the whole analysis — picks, circles, fit order — is stored
 in and restored from the `.efaproj` project.
+
+### Surface Measurements (Length and Area)
+
+The **Length** and **Area** buttons in the toolbar measure features on the solar disk, and the **Surface** tab beside
+CME Tracking holds their settings, the live result and the table. They work on any on-disk image with a WCS.
+
+- **Shape**: *Polygon (click corners)*, *Freehand lasso (drag)*, *Ellipse (drag)* or *Rectangle (drag)*. **Undo Point**,
+  **Finish** and **Clear Shape** edit the shape being drawn.
+- **Threshold · fraction of quiet Sun**: *Selected region (whole shape)*, *Sunspot only: umbra / penumbra* (umbra < 0.6,
+  penumbra < 0.9 by default), *Darker than* or *Brighter than*. Intensities are divided by a quiet-Sun limb-darkening
+  profile fitted over the whole disk, and the frame's own data are used even while a difference image is shown. A
+  sunspot patch counts only if its darkest pixel is at least 0.10 below the penumbra level. **Min patch** drops isolated
+  pixels and **Tint pixels** shows the selection on the image.
+- **Area method**: *Finite-distance* (default) or *Orthographic* geometry, a **Limb cutoff** (μ ≥ 0.30 by default; the
+  pixels it excludes are tinted red) and *Pixel centres* or *Subpixel 4×4* boundaries.
+- **Values**: *Corrected for curvature* (the true size on the Sun, the default) or *As seen (uncorrected)*. This changes
+  only what is displayed; the CSV contains both.
+- **Record** adds the result to the table. Rows that share a name are one feature over time: **Track Frames** carries the
+  shape through the sequence (optionally rotated with the Sun), and selecting a row plots that feature against time
+  with a linear rate. The **Table** menu exports the table as CSV, or as JSON with full provenance, deletes a row or
+  clears the table. Everything is saved in the `.efaproj` project.
+- The table changes only when you finish a shape or press **Record**; changing the threshold or the frame updates the
+  live result, which then shows that it is not yet in the table.
+- Measurements are refused when the header's solar radius (RSUN_REF, DSUN_OBS, RSUN_OBS) is inconsistent or the
+  image's pixel size does not match its dimensions. Exact 2× or 4× binning left in a stale header is corrected
+  automatically, and the check's verdict is shown in the result and exported.
+- Sunspot areas from this standard method read about 1.4× NOAA/USAF region areas, which are known to be low (Meadows
+  2020, MNRAS 497, 1110). Threshold results on images whose quiet Sun is not radially symmetric (for example AIA 1700
+  and 4500) carry a warning.
+
+**North Up** (on by default, in the display options and on the toolbar) turns frames that are stored rotated, such as
+raw HMI at about 180°, north up when they are loaded, so the image agrees with NOAA/HEK labels, the coordinate grid and
+the hover readout. Switching it reloads the frames and clears the measurements, after asking.
 
 ### Overlay Layers (multi-instrument coronagraph composites)
 
@@ -995,10 +1059,10 @@ infinities and all-NaN rows.
     - `gem install --no-document fpm`
     - `PYTHON_BIN=/usr/bin/python3 PIP_INDEX_URL=https://pypi.org/simple bash packaging/linux/build_deb_linux.sh`
 - Expected output on `amd64`:
-  - `dist/e-callisto-fits-analyzer_3.2.0_amd64.deb`
+  - `dist/e-callisto-fits-analyzer_3.3.0_amd64.deb`
 - Install the generated local package using a path, not a bare filename:
-  - `sudo apt install -y ./dist/e-callisto-fits-analyzer_3.2.0_amd64.deb`
-  - If you are already inside `dist`, use `sudo apt install -y ./e-callisto-fits-analyzer_3.2.0_amd64.deb`
+  - `sudo apt install -y ./dist/e-callisto-fits-analyzer_3.3.0_amd64.deb`
+  - If you are already inside `dist`, use `sudo apt install -y ./e-callisto-fits-analyzer_3.3.0_amd64.deb`
 - Manual PyInstaller build only creates the Linux app folder, not the `.deb`:
   - `pyinstaller packaging/pyinstaller/FITS_Analyzer_linux.spec`
 
@@ -1008,7 +1072,7 @@ infinities and all-NaN rows.
 - Build the `.app` and the disk image in one step:
   - `bash packaging/macos/build_macos_dmg.sh`
 - Expected output on Apple silicon:
-  - `dist/e-callisto-fits-analyzer_3.2.0_macOS_arm64.dmg`
+  - `dist/e-callisto-fits-analyzer_3.3.0_macOS_arm64.dmg`
 - Re-wrap an existing `dist/*.app` without rebuilding it:
   - `SKIP_APP=1 bash packaging/macos/build_macos_dmg.sh`
 - Build the app bundle only:

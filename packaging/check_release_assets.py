@@ -6,7 +6,7 @@ them apart: their update check downloads the first asset GitHub lists with
 the right extension. So upload the full app's installers first, then Lite's,
 and run this before announcing the release:
 
-    python packaging/check_release_assets.py v3.2.0
+    python packaging/check_release_assets.py v3.3.0
 
 It reads the release from GitHub's API (no token needed for a public
 repository) and checks that

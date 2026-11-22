@@ -8,7 +8,7 @@ installer lands in lite\dist.
 Usage (from anywhere):
   powershell -ExecutionPolicy Bypass -File lite\packaging\windows\build_windows_installer.ps1
 Optional:
-  -Version 3.2.0-lite the version shown by the installer (default: Lite's Cargo version)
+  -Version 3.3.0-lite the version shown by the installer (default: Lite's Cargo version)
   -TargetDir <dir>    cargo's target folder (default: lite\target)
   -SkipInstaller      stage only
 #>

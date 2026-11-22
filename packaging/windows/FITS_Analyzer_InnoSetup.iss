@@ -1,6 +1,6 @@
 #define AppName "e-CALLISTO FITS Analyzer"
 #ifndef AppVersion
-  #define AppVersion "3.2.0"
+  #define AppVersion "3.3.0"
 #endif
 #define AppPublisher "Sahan S. Liyanage"
 #define AppExeName "e-Callisto FITS Analyzer.exe"
