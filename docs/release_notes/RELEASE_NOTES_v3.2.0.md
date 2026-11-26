@@ -71,15 +71,11 @@ Lite is the radio part of the e-CALLISTO FITS Analyzer, rewritten in Rust as a s
 
 From v3.2.0, each version is published under a single tag (`v3.2.0`) that carries the installers for every platform, for both the full app and Lite. Choose the file for your system:
 
-<<<<<<< HEAD:docs/release_notes/RELEASE_NOTES_v3.2.0.md
 | Platform | Full application | Lite |
 |---|---|---|
 | Windows 10 / 11 (64-bit) | `e-CALLISTO_FITS_Analyzer_v3.2.0_Setup.exe` | `e-CALLISTO_FITS_Analyzer_v3.2.0-lite_Setup.exe` |
-| macOS 15 Sequoia or later (Apple silicon) | `e-callisto-fits-analyzer_3.2.0_macOS_arm64.dmg` | `e-callisto-fits-analyzer_3.2.0-lite_macOS_arm64.dmg` |
+| macOS 13 Ventura or later (Apple silicon) | `e-callisto-fits-analyzer_3.2.0_macOS_arm64.dmg` | `e-callisto-fits-analyzer_3.2.0-lite_macOS_arm64.dmg` |
 | Linux (Debian, Ubuntu and derivatives, amd64) | `e-callisto-fits-analyzer_3.2.0_amd64.deb` | `e-callisto-fits-analyzer_3.2.0-lite_amd64.deb` |
-=======
-Requires a Mac with Apple silicon and macOS 13 Ventura or later. The app bundle reports version `3.2.0`.
->>>>>>> 60764f6 (Update macOS build instructions for v3.2.0; adjust minimum height in TrackingPanel; add canvas minimum size handling; enhance tests for window resizing behavior.):docs/release_notes/RELEASE_NOTES_v3.2.0_macOS.md
 
 Installers with `-lite` in their names are for Lite; the others are the full application. The full app's installers upgrade an existing v3.x installation in place, and the in-app update check offers each edition its own installer. Downloads and help are on [ecallistoanalyzer.org](https://ecallistoanalyzer.org/).
 

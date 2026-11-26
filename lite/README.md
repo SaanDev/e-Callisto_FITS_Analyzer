@@ -47,6 +47,12 @@ application id and shortcuts), named for the release tag:
 `e-callisto-fits-analyzer_3.3.0-lite_amd64.deb` (package
 `e-callisto-fits-analyzer-lite`) and
 `e-callisto-fits-analyzer_3.3.0-lite_macOS_arm64.dmg` (Apple Silicon).
+From 3.3.0 there are ARM64 builds for Windows and Linux too,
+`e-CALLISTO_FITS_Analyzer_v3.3.0-lite_arm64_Setup.exe` and
+`e-callisto-fits-analyzer_3.3.0-lite_arm64.deb`, from
+`lite\packaging\windows\build_windows_arm64.ps1` (it cross-compiles, so an
+x64 PC works) and `lite/packaging/linux/build_deb_linux_arm64.sh` (on an
+arm64 machine; the package needs that machine's glibc).
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File lite\packaging\windows\build_windows_installer.ps1
@@ -71,14 +77,19 @@ marked pre-release on GitHub), with all six installers: the full app's
 is the full app's with `-lite` (`version` in `lite/Cargo.toml`). Give the
 release a title that names no platform, or all three. Upload the full app's
 installers first, then Lite's: copies of the full app up to 3.1.x download
-the first installer GitHub lists for their platform. Before announcing, run
+the first installer GitHub lists for their platform. Upload the Windows and
+Linux ARM64 installers (`_arm64` in the name) last, after every x64 one:
+copies up to 3.2.x take the first installer whatever its CPU. Before
+announcing, run
 
 ```powershell
 python packaging/check_release_assets.py v3.3.0
 ```
 
 It checks the six names, the order, and which installer each update check
-(3.1.x, today's full app, Lite) would download.
+(3.1.x, today's full app, Lite) would download, and, when the release has
+ARM64 installers, that both editions' are there and that ARM64 builds pick
+them.
 
 ## Tests
 

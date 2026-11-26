@@ -3,9 +3,23 @@ A desktop application for visualizing, processing, and analyzing e-CALLISTO sola
 
 **Website: [ecallistoanalyzer.org](https://ecallistoanalyzer.org)**: downloads for Windows, macOS and Linux, the illustrated [user guide](https://ecallistoanalyzer.org/guide/), [tutorials](https://ecallistoanalyzer.org/tutorials/) and [how to cite the software](https://ecallistoanalyzer.org/citation/).
 
+## Download
+
+Every release is one tag on the [Releases page](https://github.com/SaanDev/e-Callisto_FITS_Analyzer/releases) with the installers of both the full app and Lite (`-lite` in the name). For v3.3.0:
+
+| Platform | Full application | Lite |
+|---|---|---|
+| Windows 10 / 11 (x64) | `e-CALLISTO_FITS_Analyzer_v3.3.0_Setup.exe` | `e-CALLISTO_FITS_Analyzer_v3.3.0-lite_Setup.exe` |
+| Windows 11 on ARM (ARM64) | `e-CALLISTO_FITS_Analyzer_v3.3.0_arm64_Setup.exe` | `e-CALLISTO_FITS_Analyzer_v3.3.0-lite_arm64_Setup.exe` |
+| macOS 13 Ventura or later (Apple silicon) | `e-callisto-fits-analyzer_3.3.0_macOS_arm64.dmg` | `e-callisto-fits-analyzer_3.3.0-lite_macOS_arm64.dmg` |
+| Linux x64 (Debian, Ubuntu and derivatives) | `e-callisto-fits-analyzer_3.3.0_amd64.deb` | `e-callisto-fits-analyzer_3.3.0-lite_amd64.deb` |
+| Linux arm64 (Ubuntu 24.04 or later) | `e-callisto-fits-analyzer_3.3.0_arm64.deb` | `e-callisto-fits-analyzer_3.3.0-lite_arm64.deb` |
+
+The full release notes are in [docs/release_notes/RELEASE_NOTES_v3.3.0.md](docs/release_notes/RELEASE_NOTES_v3.3.0.md).
+
 ## What's New in v3.3.0
 
-v3.3.0 ships with **e-CALLISTO FITS Analyzer Lite v3.3.0-lite**, the Rust build of the radio part of the app, under the same release tag. Solar Image Analysis is now **v1.8**.
+v3.3.0 ships with **e-CALLISTO FITS Analyzer Lite v3.3.0-lite**, the Rust build of the radio part of the app, under the same release tag. Solar Image Analysis is now **v1.8**. Windows on ARM and Linux arm64 get native installers for both editions.
 
 ### Solar Image Analysis v1.8: lengths and areas on the solar surface
 - **Length and Area tools** (toolbar, beside Pan / Zoom, with a new **Surface** tab next to CME Tracking): measure filament lengths, sunspot areas and post-flare arcade areas on any on-disk image with a WCS (SDO/AIA and HMI, SOHO/EIT, STEREO/EUVI, GOES/SUVI).
@@ -30,6 +44,15 @@ v3.3.0 ships with **e-CALLISTO FITS Analyzer Lite v3.3.0-lite**, the Rust build 
 - When the selected server fails, the error names it and a **Retry** button appears; the app never switches servers by itself. An open preview names the server its files came from.
 - Files of the same name from the two servers are cached separately (Astrodoncel's under `sources/astrodoncel`), every new download is checked to be a complete, readable FITS file before it is cached, and extending an imported observation's timeline continues on the server it came from.
 - Lite has the same selector, and takes over the full app's choice when it imports the full app's settings.
+
+### Native ARM64 builds for Windows and Linux
+- Windows 11 PCs with an ARM processor get installers of their own for the full app and Lite (`_arm64` in the name), which run natively instead of under x64 emulation. The ARM64 installer installs over an x64 copy of the same edition.
+- In the full app on Windows on ARM, CME movies from the SOHO/LASCO CME catalog open in the web browser instead of the app's movie window, because PySide6 for Windows on ARM does not include Qt WebEngine. Everything else is the same as on x64.
+- Linux arm64 machines get `.deb` packages for both editions. The full app's arm64 package needs Ubuntu 24.04 or later, because PySide6 ships Linux ARM64 builds only for glibc 2.39 and newer.
+- The update check knows which processor it runs on: on Windows and Linux an x64 copy is offered the x64 installer and an ARM64 copy the ARM64 one, in both editions. A Windows on ARM PC running the x64 build under emulation keeps being offered x64 installers; install the ARM64 one once by hand to switch.
+
+### Other fixes
+- Exported figures are saved in the format you chose. Default file names come from plot titles that often hold a FITS file name, and a name such as `…_02.fit-Background Subtracted` looked to the save dialog as if it already had an extension, so the export failed. The name in the dialog now ends in the chosen format, and any other ending gets that format's extension added. This covers Export Figure, the Event Figure, the Geomagnetic Response figure and Lite's figure exports.
 
 ## What's New in v3.2.0
 
@@ -184,6 +207,7 @@ v3.1.0 also includes these archive, instrument, visualization and solar-image an
 - Export processed FITS files, provenance reports (Markdown + JSON), and analysis logs (CSV + TXT).
 - Generate diagnostics ZIP bundles for bug reports and open a prefilled GitHub issue draft from inside the app.
 - Use the built-in citation dialog to copy the recommended citation or BibTeX entry, and check for newer GitHub releases from the app.
+- Install on Windows (x64 or ARM64), macOS 13 or later on Apple silicon, and Debian or Ubuntu Linux (x64 or arm64); the update check offers the installer for your processor.
 
 ---
 
@@ -955,6 +979,7 @@ Use **About → Check for Updates...** to query the latest release from GitHub.
 
 - If a newer version is available, the app shows current/latest versions and a direct download action.
 - Downloads run in-app and save the installer/package to your selected location.
+- On Windows and Linux the check offers the installer for the processor the running copy was built for (x64 or ARM64), and the full app and Lite are each offered their own installer.
 - If you are up to date, the app confirms your current version.
 - If the check fails (for example, no network), the app shows a clear error message.
 
@@ -1035,6 +1060,16 @@ infinities and all-NaN rows.
 - Manual installer script:
   - `packaging/windows/FITS_Analyzer_InnoSetup.iss`
 
+### Windows on ARM (ARM64)
+- Build on a Windows 11 ARM64 PC or VM; PyInstaller cannot cross-build, and the script refuses an x64 Python running under emulation.
+- It needs the ARM64 Python 3.12 or 3.13 installer from python.org, Visual Studio 2022 Build Tools with the C++ ARM64 build tools and a Windows 11 SDK, Rust from [rustup.rs](https://rustup.rs) and Inno Setup 6.3 or newer. Several dependencies have no ARM64 wheel on PyPI and are compiled on the first run, which takes 20 to 40 minutes.
+- Build:
+  - `powershell -ExecutionPolicy Bypass -File .\packaging\windows\build_windows_arm64.ps1`
+- Expected output:
+  - `dist/e-CALLISTO_FITS_Analyzer_v3.3.0_arm64_Setup.exe`
+- Lite's ARM64 installer has its own script, which cross-compiles and also runs on an x64 PC:
+  - `powershell -ExecutionPolicy Bypass -File .\lite\packaging\windows\build_windows_arm64.ps1`
+
 ### Linux (.deb + PyInstaller)
 - Build the `.deb` on Linux. Do not run this step on macOS or Windows: PyInstaller bundles binaries for the host OS, and `build_deb_linux.sh` uses Linux tools such as `dpkg`, `apt-get`, and `fpm`.
 - Ubuntu 24.04 on `amd64` is recommended for the release package. Other Debian/Ubuntu versions can work if they provide Python `3.11+`.
@@ -1065,6 +1100,15 @@ infinities and all-NaN rows.
   - If you are already inside `dist`, use `sudo apt install -y ./e-callisto-fits-analyzer_3.3.0_amd64.deb`
 - Manual PyInstaller build only creates the Linux app folder, not the `.deb`:
   - `pyinstaller packaging/pyinstaller/FITS_Analyzer_linux.spec`
+
+### Linux arm64 (.deb)
+- Build on Ubuntu 24.04 arm64 (an ARM server, a Raspberry Pi or a VM on an Apple silicon Mac). PyInstaller cannot cross-build, and the package needs the glibc of the machine it was built on, so 24.04 gives a package for 24.04 and newer.
+- Build:
+  - `bash packaging/linux/build_deb_linux_arm64.sh`
+- Expected output:
+  - `dist/e-callisto-fits-analyzer_3.3.0_arm64.deb`
+- Lite's arm64 package has its own script:
+  - `bash lite/packaging/linux/build_deb_linux_arm64.sh`
 
 ### macOS (.dmg + py2app)
 - For a non-programmer-friendly walkthrough, see
