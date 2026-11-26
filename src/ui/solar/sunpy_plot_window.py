@@ -16,9 +16,9 @@ from typing import Any, Sequence
 
 import numpy as np
 import pyqtgraph as pg
-from pyqtgraph.exporters import SVGExporter
-from PySide6.QtCore import QSize, QTimer, Qt, QRectF, Signal
-from PySide6.QtGui import QAction, QGuiApplication, QPainter, QPalette, QPdfWriter
+from PySide6.QtCore import QMarginsF, QRect, QSize, QSizeF, QTimer, Qt, QRectF, Signal
+from PySide6.QtGui import QAction, QGuiApplication, QImage, QPageSize, QPainter, QPalette, QPdfWriter
+from PySide6.QtSvg import QSvgGenerator
 from PySide6.QtWidgets import (
     QCheckBox,
     QDoubleSpinBox,
@@ -128,6 +128,88 @@ def _configure_pyqtgraph_once():
         desired_use_gl = False
     setattr(_configure_pyqtgraph_once, "_opengl_enabled", bool(desired_use_gl))
     setattr(_configure_pyqtgraph_once, "_configured", True)
+
+
+def _view_background(view) -> Any:
+    brush = view.backgroundBrush()
+    if brush.style() != Qt.NoBrush:
+        return brush.color()
+    return view.palette().color(QPalette.Window)
+
+
+def render_graphics_view(view, scale: float | None = None) -> QImage:
+    """Paint a pyqtgraph view's scene, exactly as it is shown, into an image.
+
+    ``QWidget.grab()`` reads the viewport's pixels back. With hardware
+    acceleration the viewport is an OpenGL widget and ``grab()`` returns an
+    empty frame, so exports came out as a blank background. Painting the scene
+    through a QPainter gives the same picture (image, colormap, contrast,
+    zoom, colorbar, grid, labels and overlays) whatever the viewport is.
+    ``scale`` defaults to the screen's device pixel ratio, so a Retina screen
+    exports at its own resolution.
+    """
+    source = view.viewport().rect()
+    if scale is None:
+        try:
+            scale = float(view.devicePixelRatioF())
+        except Exception:
+            scale = 1.0
+    scale = max(1.0, float(scale))
+    width = max(1, int(round(source.width() * scale)))
+    height = max(1, int(round(source.height() * scale)))
+    image = QImage(width, height, QImage.Format_ARGB32)
+    image.fill(_view_background(view))
+    painter = QPainter(image)
+    try:
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.TextAntialiasing, True)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        view.render(painter, QRectF(0, 0, width, height), source, Qt.IgnoreAspectRatio)
+    finally:
+        painter.end()
+    return image
+
+
+def save_graphics_view(view, path: str) -> None:
+    """Save what a pyqtgraph view shows: PNG/TIFF/JPG as an image, SVG and PDF
+    with vector axes, labels and overlays around the embedded image."""
+    ext = Path(path).suffix.lower()
+    source = view.viewport().rect()
+    width = max(1, source.width())
+    height = max(1, source.height())
+    if ext in {".svg", ".pdf"}:
+        if ext == ".svg":
+            device = QSvgGenerator()
+            device.setFileName(str(path))
+            device.setSize(QSize(width, height))
+            device.setViewBox(QRect(0, 0, width, height))
+            device.setTitle("e-CALLISTO FITS Analyzer plot")
+        else:
+            device = QPdfWriter(str(path))
+            # One page the size of the plot, one screen pixel to a point. At
+            # any other resolution pyqtgraph's view box contents are scaled
+            # apart from its axes (measured: a 96 dpi page draws the image and
+            # grid 4/3 too large).
+            device.setResolution(72)
+            device.setPageSize(QPageSize(QSizeF(width, height), QPageSize.Point))
+            device.setPageMargins(QMarginsF(0, 0, 0, 0))
+        painter = QPainter(device)
+        if not painter.isActive():
+            raise RuntimeError(f"Could not write '{path}'.")
+        try:
+            target = QRectF(painter.viewport()) if ext == ".pdf" else QRectF(0, 0, width, height)
+            painter.fillRect(target, _view_background(view))
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setRenderHint(QPainter.TextAntialiasing, True)
+            view.render(painter, target, source, Qt.KeepAspectRatio)
+        finally:
+            painter.end()
+        return
+    image = render_graphics_view(view)
+    if ext in {".jpg", ".jpeg"}:
+        image = image.convertToFormat(QImage.Format_RGB32)
+    if not image.save(str(path)):
+        raise RuntimeError(f"Failed to save plot to '{path}'.")
 
 
 def _fallback_colormap_lut(name: str) -> np.ndarray | None:
@@ -1216,6 +1298,10 @@ class SunPyPlotCanvas(QWidget):
     def has_plot_content(self) -> bool:
         return self.map_image.image is not None
 
+    def save_plot(self, path: str) -> None:
+        """Save the graph on screen (map or time series) as shown."""
+        save_graphics_view(self.map_plot if self.is_map_visible() else self.ts_plot, path)
+
     def set_map_title(self, title: str) -> None:
         """Set the map graph title (used for the empty 'No image data loaded.'
         state; frame renders set their own title through plot_map_data)."""
@@ -2161,35 +2247,7 @@ class SunPyPlotWindow(QMainWindow):
     def save_current_plot(self, path: str) -> None:
         if not self.has_plot_content():
             raise RuntimeError("No SunPy plot is available to export.")
-
-        ext = Path(path).suffix.lower()
-        if ext == ".svg":
-            target_plot_item = self.canvas.map_plot.plotItem if self._mode == "map" else self.canvas.ts_plot.plotItem
-            exporter = SVGExporter(target_plot_item)
-            exporter.export(path)
-            return
-
-        widget = self.canvas.map_plot if self._mode == "map" else self.canvas.ts_plot
-        pixmap = widget.grab()
-        if ext == ".pdf":
-            self._save_pdf_from_pixmap(path, pixmap)
-            return
-
-        if not pixmap.save(path):
-            raise RuntimeError(f"Failed to save plot to '{path}'.")
-
-    @staticmethod
-    def _save_pdf_from_pixmap(path: str, pixmap):
-        writer = QPdfWriter(path)
-        painter = QPainter(writer)
-        try:
-            viewport = painter.viewport()
-            scaled = pixmap.scaled(viewport.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            x = int((viewport.width() - scaled.width()) / 2)
-            y = int((viewport.height() - scaled.height()) / 2)
-            painter.drawPixmap(x, y, scaled)
-        finally:
-            painter.end()
+        save_graphics_view(self.canvas.map_plot if self._mode == "map" else self.canvas.ts_plot, path)
 
     def _on_fps_changed(self, _value: float):
         if self._play_timer.isActive():

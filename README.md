@@ -38,6 +38,7 @@ v3.3.0 ships with **e-CALLISTO FITS Analyzer Lite v3.3.0-lite**, the Rust build 
 - Measurements on rotated frames now account for the image rotation (CROTA / PC matrix), so centroids and latitude/longitude no longer land in the mirrored hemisphere.
 - PFSS open-field boundaries no longer vanish on AIA frames, whose solar sphere (RSUN_REF) is slightly larger than 1 R☉.
 - The details drawer under the image can be dragged taller, and maximising and restoring the window no longer leaves it unable to shrink.
+- **Export Plot** saves the frame on screen again. With hardware acceleration on (the default) the exported file held only the empty background, because the export copied the screen of an OpenGL canvas. It now draws the plot into the file: the displayed frame with its colormap, contrast, scale, difference mode, zoom or crop, colorbar, grid, labels and overlays, as PNG, TIFF or JPG at screen resolution or as PDF and SVG with vector axes. SVG export works again, and the project report's current frame and the SunPy Multi-Mission Explorer's Export Plot are fixed the same way.
 
 ### Choice of FITS server in the downloader
 - A **Server** selector above the e-CALLISTO downloader's tabs chooses where every tab finds and downloads FITS files: **e-CALLISTO** (the default) or **Astrodoncel**. The choice is remembered, and changing it keeps your dates and time windows, clears the previous server's results and reloads the station lists.

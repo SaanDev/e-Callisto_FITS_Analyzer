@@ -24,9 +24,8 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
-from pyqtgraph.exporters import SVGExporter
 from PySide6.QtCore import QDateTime, QEasingCurve, QObject, QPropertyAnimation, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QAction, QPainter, QPdfWriter
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -9519,29 +9518,12 @@ class SolarDataAnalysisWindow(PfssControlsMixin, QMainWindow):
             QMessageBox.critical(self, "Export Plot", str(exc))
 
     def _save_canvas_plot(self, path: str) -> None:
-        canvas = self._active_canvas()
-        if hasattr(canvas, "save_plot"):
-            canvas.save_plot(path)
-            return
-        ext = Path(path).suffix.lower()
-        if ext == ".svg":
-            SVGExporter(self.pyqt_canvas.map_plot.plotItem).export(path)
-            return
-        pixmap = self.pyqt_canvas.map_plot.grab()
-        if ext == ".pdf":
-            writer = QPdfWriter(path)
-            painter = QPainter(writer)
-            try:
-                viewport = painter.viewport()
-                scaled = pixmap.scaled(viewport.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                x = int((viewport.width() - scaled.width()) / 2)
-                y = int((viewport.height() - scaled.height()) / 2)
-                painter.drawPixmap(x, y, scaled)
-            finally:
-                painter.end()
-            return
-        if not pixmap.save(path):
-            raise RuntimeError(f"Failed to save plot to '{path}'.")
+        """Save the frame as it is displayed, with every display adjustment.
+
+        Both canvases render their scene again rather than reading the screen:
+        a screen grab of the hardware accelerated (OpenGL) canvas is blank.
+        """
+        self._active_canvas().save_plot(path)
 
     def export_cropped_fits(self):
         if not self._map_frames or self._current_map_data is None:
