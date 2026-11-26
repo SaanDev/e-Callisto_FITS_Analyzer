@@ -420,3 +420,89 @@ def test_check_for_updates_skips_prerelease_for_platform(monkeypatch):
     assert result.status == "update_available"
     assert result.latest_version == "2.2.1"
     assert result.download_url == "https://example.com/linux-v2.2.1.deb"
+
+
+def _arm_release(version, published="2026-12-01T12:00:00Z"):
+    """A shared tag with x64 and arm64 installers for Windows and Linux."""
+    names = [
+        f"e-CALLISTO_FITS_Analyzer_v{version}_Setup.exe",
+        f"e-callisto-fits-analyzer_{version}_amd64.deb",
+        f"e-callisto-fits-analyzer_{version}_macOS_arm64.dmg",
+        f"e-CALLISTO_FITS_Analyzer_v{version}-lite_Setup.exe",
+        f"e-callisto-fits-analyzer_{version}-lite_amd64.deb",
+        f"e-callisto-fits-analyzer_{version}-lite_macOS_arm64.dmg",
+        f"e-CALLISTO_FITS_Analyzer_v{version}_arm64_Setup.exe",
+        f"e-callisto-fits-analyzer_{version}_arm64.deb",
+        f"e-CALLISTO_FITS_Analyzer_v{version}-lite_arm64_Setup.exe",
+        f"e-callisto-fits-analyzer_{version}-lite_arm64.deb",
+    ]
+    return {
+        "tag_name": f"v{version}",
+        "name": f"e-CALLISTO FITS Analyzer v{version}",
+        "html_url": f"https://example.com/release/v{version}",
+        "published_at": published,
+        "assets": [{"name": n, "browser_download_url": f"https://example.com/{n}"} for n in names],
+    }
+
+
+def test_asset_arch():
+    assert update_checker.asset_arch("e-CALLISTO_FITS_Analyzer_v3.3.0_arm64_Setup.exe") == "arm64"
+    assert update_checker.asset_arch("e-callisto-fits-analyzer_3.3.0_aarch64.deb") == "arm64"
+    assert update_checker.asset_arch("e-callisto-fits-analyzer_3.3.0_amd64.deb") == "x64"
+    assert update_checker.asset_arch("e-CALLISTO_FITS_Analyzer_v3.3.0_Setup.exe") == "x64"
+    assert update_checker.asset_arch("charm64_3.3.0.exe") == "x64"  # a whole word only
+
+
+def test_current_arch_is_the_running_builds(monkeypatch):
+    for plat, arch in (("win-arm64", "arm64"), ("win-amd64", "x64"), ("linux-aarch64", "arm64"),
+                       ("linux-x86_64", "x64"), ("macosx-13.0-arm64", "arm64")):
+        monkeypatch.setattr(update_checker.sysconfig, "get_platform", lambda p=plat: p)
+        assert update_checker.current_arch() == arch, plat
+
+
+def test_select_download_url_by_cpu():
+    assets = _arm_release("3.3.0")["assets"]
+    pick = lambda system, machine: update_checker.select_download_url(assets, system_name=system, machine=machine)
+    base = "https://example.com/"
+    assert pick("Windows", "x64") == base + "e-CALLISTO_FITS_Analyzer_v3.3.0_Setup.exe"
+    assert pick("Windows", "arm64") == base + "e-CALLISTO_FITS_Analyzer_v3.3.0_arm64_Setup.exe"
+    assert pick("Linux", "x64") == base + "e-callisto-fits-analyzer_3.3.0_amd64.deb"
+    assert pick("Linux", "aarch64") == base + "e-callisto-fits-analyzer_3.3.0_arm64.deb"
+    # A named system without a CPU is x64, as every installer before 3.3.0.
+    assert pick("Windows", None) == base + "e-CALLISTO_FITS_Analyzer_v3.3.0_Setup.exe"
+    # macOS has the one DMG, whatever the CPU.
+    assert pick("Darwin", "x64") == base + "e-callisto-fits-analyzer_3.3.0_macOS_arm64.dmg"
+    # An arm64 build is never offered an x64 installer.
+    x64_only = [a for a in assets if update_checker.asset_arch(a["name"]) == "x64"]
+    assert update_checker.select_download_url(x64_only, system_name="Linux", machine="arm64") is None
+
+
+def test_check_for_updates_arm64_build_waits_for_arm64_installer(monkeypatch):
+    newer_x64_only = _shared_release("3.3.1", published="2026-12-10T12:00:00Z")
+    releases_payload = [newer_x64_only, _arm_release("3.3.0"), _shared_release("3.2.0")]
+    monkeypatch.setattr(update_checker.requests, "get", lambda url, headers=None, timeout=0: FakeResponse(releases_payload))
+
+    for system, arm_name in (("Windows", "e-CALLISTO_FITS_Analyzer_v3.3.0_arm64_Setup.exe"),
+                             ("Linux", "e-callisto-fits-analyzer_3.3.0_arm64.deb")):
+        arm = update_checker.check_for_updates("3.2.0", system_name=system, machine="arm64")
+        assert arm.status == "update_available", system
+        assert arm.latest_version == "3.3.0"
+        assert arm.download_url == f"https://example.com/{arm_name}"
+        x64 = update_checker.check_for_updates("3.2.0", system_name=system, machine="x64")
+        assert x64.latest_version == "3.3.1", system
+
+    # Before the first arm64 release there is nothing to offer an arm64 build.
+    monkeypatch.setattr(update_checker.requests, "get",
+                        lambda url, headers=None, timeout=0: FakeResponse([_shared_release("3.2.0")]))
+    none = update_checker.check_for_updates("3.2.0", system_name="Linux", machine="arm64")
+    assert none.is_error
+    assert "platform 'linux' (arm64)" in none.error
+
+
+def test_check_for_updates_of_running_system_uses_this_builds_cpu(monkeypatch):
+    monkeypatch.setattr(update_checker.requests, "get",
+                        lambda url, headers=None, timeout=0: FakeResponse([_arm_release("3.3.0")]))
+    monkeypatch.setattr(update_checker.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(update_checker, "current_arch", lambda: "arm64")
+    result = update_checker.check_for_updates("3.2.0")
+    assert result.download_url == "https://example.com/e-CALLISTO_FITS_Analyzer_v3.3.0_arm64_Setup.exe"

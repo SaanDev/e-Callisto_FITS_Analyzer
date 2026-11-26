@@ -10,6 +10,11 @@
 //! its own installers, and only releases that have one for this platform;
 //! the full app skips them. Lite's version is the release's with `-lite`
 //! (3.3.0-lite).
+//!
+//! From 3.3.0 Windows and Linux also have arm64 installers, named for their
+//! CPU (`…3.3.0-lite_arm64_Setup.exe`, `…3.3.0-lite_arm64.deb`; a name
+//! without one is x64). There each build takes only installers for its own
+//! CPU ([`Arch::current`]), as `update_checker.py` does; macOS has one DMG.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -50,6 +55,42 @@ impl Platform {
             Platform::MacOs => &[".dmg", ".pkg", ".zip"],
             Platform::Linux => &[".deb", ".appimage", ".tar.gz", ".zip"],
             Platform::Unknown => &[".exe", ".dmg", ".deb", ".appimage", ".pkg", ".zip", ".tar.gz"],
+        }
+    }
+
+    /// Installers built per CPU (`_ARCH_AWARE_PLATFORMS`).
+    fn by_arch(self) -> bool {
+        matches!(self, Platform::Windows | Platform::Linux)
+    }
+}
+
+/// A CPU (`ARCH_X64`, `ARCH_ARM64`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Arch {
+    X64,
+    Arm64,
+    Unknown,
+}
+
+impl Arch {
+    /// `current_arch()`: the CPU this build is for, which an x64 build keeps
+    /// when emulated on Windows on ARM.
+    pub fn current() -> Self {
+        match std::env::consts::ARCH {
+            "x86_64" => Arch::X64,
+            "aarch64" => Arch::Arm64,
+            _ => Arch::Unknown,
+        }
+    }
+
+    /// `asset_arch`: the CPU an installer is for, from its name; x64 when
+    /// it names none, as every installer before 3.3.0.
+    pub fn of_asset(name: &str) -> Self {
+        let n = name.to_lowercase();
+        if n.split(|c: char| !c.is_ascii_alphanumeric()).any(|w| w == "arm64" || w == "aarch64") {
+            Arch::Arm64
+        } else {
+            Arch::X64
         }
     }
 }
@@ -150,12 +191,15 @@ pub fn is_lite_asset(name: &str) -> bool {
     n.match_indices("lite").any(|(i, _)| i > 0 && sep(b[i - 1]) && b.get(i + 4).is_some_and(|&c| sep(c)))
 }
 
-/// `select_download_url`: the platform's preferred installer, of Lite's.
-pub fn select_download_url(assets: &[Value], platform: Platform) -> Option<String> {
+/// `select_download_url`: the platform's preferred installer, of Lite's; on
+/// Windows and Linux only one for `arch`.
+pub fn select_download_url(assets: &[Value], platform: Platform, arch: Arch) -> Option<String> {
+    let by_arch = platform.by_arch() && arch != Arch::Unknown;
     let named: Vec<(String, String)> = assets
         .iter()
         .map(|a| (s(a, "name").to_lowercase(), s(a, "browser_download_url")))
         .filter(|(n, u)| !n.is_empty() && !u.is_empty() && is_lite_asset(n))
+        .filter(|(n, _)| !by_arch || Arch::of_asset(n) == arch)
         .collect();
     for ext in platform.extensions() {
         if let Some((_, u)) = named.iter().find(|(n, _)| n.ends_with(ext)) {
@@ -201,7 +245,7 @@ fn platform_markers(text: &str) -> Vec<Platform> {
 }
 
 /// `_release_platform_score`.
-fn platform_score(r: &Value, platform: Platform) -> (i32, i32) {
+fn platform_score(r: &Value, platform: Platform, arch: Arch) -> (i32, i32) {
     let text = format!("{} {}", s(r, "tag_name").to_lowercase(), s(r, "name").to_lowercase());
     let markers = platform_markers(text.trim());
     let tag_score = if platform == Platform::Unknown {
@@ -214,12 +258,12 @@ fn platform_score(r: &Value, platform: Platform) -> (i32, i32) {
         0
     };
     let assets = r.get("assets").and_then(Value::as_array).cloned().unwrap_or_default();
-    (tag_score, select_download_url(&assets, platform).is_some() as i32)
+    (tag_score, select_download_url(&assets, platform, arch).is_some() as i32)
 }
 
 /// `_pick_latest_stable_release_for_platform` over a release list; `None`
-/// when no release has a Lite installer for this platform.
-pub fn pick_release(releases: &Value, platform: Platform) -> Result<Option<Value>> {
+/// when no release has a Lite installer for this platform and CPU.
+pub fn pick_release(releases: &Value, platform: Platform, arch: Arch) -> Result<Option<Value>> {
     let Some(list) = releases.as_array() else { bail!("Unexpected release list payload from GitHub API.") };
     let stable: Vec<&Value> = list.iter().filter(|r| is_stable(r)).collect();
     if stable.is_empty() {
@@ -235,15 +279,16 @@ pub fn pick_release(releases: &Value, platform: Platform) -> Result<Option<Value
             if v.len() < 5 {
                 v.resize(5, 0);
             }
-            let (t, a) = platform_score(r, platform);
+            let (t, a) = platform_score(r, platform, arch);
             Some((v, t, a, s(r, "published_at"), r))
         })
         .collect();
     if scored.is_empty() {
         bail!("No parseable stable release version found.");
     }
-    // Only releases with a Lite installer for this platform: the full app's
-    // per-platform releases before 3.2.0 have none.
+    // Only releases with a Lite installer for this platform and CPU: the
+    // full app's per-platform releases before 3.2.0 have none, and releases
+    // before 3.3.0 no arm64 one.
     scored.retain(|x| x.2 > 0);
     if scored.is_empty() {
         return Ok(None);
@@ -253,17 +298,17 @@ pub fn pick_release(releases: &Value, platform: Platform) -> Result<Option<Value
 }
 
 /// `check_for_updates` on a release list (for tests and the worker).
-pub fn evaluate(releases: &Value, current_version: &str, platform: Platform) -> Result<UpdateCheck> {
-    // No Lite installer for this platform yet (before Lite's first release,
-    // or while a release's assets upload): nothing newer, so up to date.
-    let Some(r) = pick_release(releases, platform)? else {
+pub fn evaluate(releases: &Value, current_version: &str, platform: Platform, arch: Arch) -> Result<UpdateCheck> {
+    // No Lite installer for this platform and CPU yet (before Lite's first
+    // release, or while a release's assets upload): nothing newer, so up to date.
+    let Some(r) = pick_release(releases, platform, arch)? else {
         return Ok(UpdateCheck { current_version: current_version.to_owned(), ..UpdateCheck::default() });
     };
     let numbers = release_version(&r).context("Could not parse release version from GitHub response.")?;
     let latest = format!("{numbers}{LITE_SUFFIX}");
     let release_url = s(&r, "html_url");
     let assets = r.get("assets").and_then(Value::as_array).cloned().unwrap_or_default();
-    let download_url = select_download_url(&assets, platform).unwrap_or_else(|| release_url.clone());
+    let download_url = select_download_url(&assets, platform, arch).unwrap_or_else(|| release_url.clone());
     let name = s(&r, "name");
     Ok(UpdateCheck {
         update_available: is_newer_version(current_version, &latest),
@@ -287,11 +332,11 @@ fn agent(timeout: Duration) -> ureq::Agent {
 
 /// `check_for_updates`: asks GitHub (8 s timeout).
 pub fn check_for_updates(current_version: &str) -> Result<UpdateCheck> {
-    check_at(&releases_url(), current_version, Platform::current())
+    check_at(&releases_url(), current_version, Platform::current(), Arch::current())
 }
 
 /// `check_for_updates` against a release list at `url`.
-fn check_at(url: &str, current_version: &str, platform: Platform) -> Result<UpdateCheck> {
+fn check_at(url: &str, current_version: &str, platform: Platform, arch: Arch) -> Result<UpdateCheck> {
     let mut resp = agent(Duration::from_secs(8))
         .get(url)
         .header("Accept", "application/vnd.github+json")
@@ -300,7 +345,7 @@ fn check_at(url: &str, current_version: &str, platform: Platform) -> Result<Upda
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let text = resp.body_mut().with_config().limit(32 * 1024 * 1024).read_to_string()?;
     let releases: Value = serde_json::from_str(&text)?;
-    evaluate(&releases, current_version, platform)
+    evaluate(&releases, current_version, platform, arch)
 }
 
 /// `_extract_whats_new_section`: the "What's New" section of release
@@ -435,10 +480,11 @@ pub fn suggest_filename(url: &str, latest_version: &str, current_version: &str) 
     let v = if latest_version.trim().is_empty() { current_version } else { latest_version.trim() };
     let v = v.trim_start_matches(['v', 'V']);
     let v = if v.ends_with(LITE_SUFFIX) { v.to_owned() } else { format!("{v}{LITE_SUFFIX}") };
+    let arm = Arch::current() == Arch::Arm64;
     match Platform::current() {
-        Platform::Windows => format!("e-CALLISTO_FITS_Analyzer_v{v}_Setup.exe"),
+        Platform::Windows => format!("e-CALLISTO_FITS_Analyzer_v{v}{}_Setup.exe", if arm { "_arm64" } else { "" }),
         Platform::MacOs => format!("e-callisto-fits-analyzer_{v}_macOS_arm64.dmg"),
-        Platform::Linux => format!("e-callisto-fits-analyzer_{v}_amd64.deb"),
+        Platform::Linux => format!("e-callisto-fits-analyzer_{v}_{}.deb", if arm { "arm64" } else { "amd64" }),
         Platform::Unknown => format!("e-CALLISTO_FITS_Analyzer_v{v}.bin"),
     }
 }
@@ -618,7 +664,7 @@ mod tests {
             (Platform::Linux, "e-callisto-fits-analyzer_3.2.0-lite_amd64.deb"),
             (Platform::MacOs, "e-callisto-fits-analyzer_3.2.0-lite_macOS_arm64.dmg"),
         ] {
-            let r = evaluate(&list, "3.2.0-lite", platform).unwrap();
+            let r = evaluate(&list, "3.2.0-lite", platform, Arch::X64).unwrap();
             assert!(!r.update_available, "{platform:?}");
             assert_eq!(r.latest_version, "3.2.0-lite");
             assert_eq!(r.download_url, format!("https://dl/{file}"));
@@ -633,23 +679,95 @@ mod tests {
         let mut beta = release("v3.4.0-beta", &["e-CALLISTO_FITS_Analyzer_v3.4.0-beta-lite_Setup.exe"], "2026-12-20");
         beta["prerelease"] = json!(true);
         newer.push(beta);
-        let r = evaluate(&Value::Array(newer.clone()), "3.2.0-lite", Platform::Windows).unwrap();
+        let r = evaluate(&Value::Array(newer.clone()), "3.2.0-lite", Platform::Windows, Arch::X64).unwrap();
         assert!(r.update_available);
         assert_eq!(r.latest_version, "3.3.0-lite");
         assert_eq!(r.download_url, "https://dl/e-CALLISTO_FITS_Analyzer_v3.3.0-lite_Setup.exe");
-        assert!(evaluate(&Value::Array(newer), "3.3.0-beta-lite", Platform::Windows).unwrap().update_available);
+        assert!(
+            evaluate(&Value::Array(newer), "3.3.0-beta-lite", Platform::Windows, Arch::X64).unwrap().update_available
+        );
         // Before Lite's first release there is nothing newer: up to date.
         let old = json!([release("v3.1.1(Windows)", &["e-CALLISTO_FITS_Analyzer_v3.1.1_Setup.exe"], "2026-10-14")]);
-        let none = evaluate(&old, "3.2.0-lite", Platform::Windows).unwrap();
+        let none = evaluate(&old, "3.2.0-lite", Platform::Windows, Arch::X64).unwrap();
         assert!(!none.update_available);
         assert_eq!(none.current_version, "3.2.0-lite");
         assert!(none.download_url.is_empty());
         // Nor while a release's Lite installers are still uploading.
         let uploading = json!([release("v3.2.0", &["e-CALLISTO_FITS_Analyzer_v3.2.0_Setup.exe"], "2026-11-01")]);
-        assert!(!evaluate(&uploading, "3.2.0-lite", Platform::Windows).unwrap().update_available);
+        assert!(!evaluate(&uploading, "3.2.0-lite", Platform::Windows, Arch::X64).unwrap().update_available);
         // A payload that is not a release list is still an error.
-        assert!(evaluate(&json!({"message": "API rate limit exceeded"}), "3.2.0-lite", Platform::Windows).is_err());
+        assert!(
+            evaluate(&json!({"message": "API rate limit exceeded"}), "3.2.0-lite", Platform::Windows, Arch::X64)
+                .is_err()
+        );
         assert_eq!(release_notes_preview(&r.notes, 1400), "What's New\n- Faster loading");
+    }
+
+    /// 3.3.0 with arm64 installers beside the x64 ones, after 3.2.0 without.
+    fn with_arm() -> Value {
+        let mut list = published().as_array().unwrap().clone();
+        list.push(release(
+            "v3.3.0",
+            &[
+                "e-CALLISTO_FITS_Analyzer_v3.3.0_Setup.exe",
+                "e-callisto-fits-analyzer_3.3.0_amd64.deb",
+                "e-callisto-fits-analyzer_3.3.0_macOS_arm64.dmg",
+                "e-CALLISTO_FITS_Analyzer_v3.3.0-lite_Setup.exe",
+                "e-callisto-fits-analyzer_3.3.0-lite_amd64.deb",
+                "e-callisto-fits-analyzer_3.3.0-lite_macOS_arm64.dmg",
+                "e-CALLISTO_FITS_Analyzer_v3.3.0_arm64_Setup.exe",
+                "e-callisto-fits-analyzer_3.3.0_arm64.deb",
+                "e-CALLISTO_FITS_Analyzer_v3.3.0-lite_arm64_Setup.exe",
+                "e-callisto-fits-analyzer_3.3.0-lite_arm64.deb",
+            ],
+            "2026-12-01",
+        ));
+        Value::Array(list)
+    }
+
+    #[test]
+    fn each_cpu_takes_its_own_installer() {
+        assert_eq!(Arch::of_asset("e-CALLISTO_FITS_Analyzer_v3.3.0-lite_arm64_Setup.exe"), Arch::Arm64);
+        assert_eq!(Arch::of_asset("e-callisto-fits-analyzer_3.3.0-lite_aarch64.deb"), Arch::Arm64);
+        assert_eq!(Arch::of_asset("e-callisto-fits-analyzer_3.3.0-lite_amd64.deb"), Arch::X64);
+        assert_eq!(Arch::of_asset("e-CALLISTO_FITS_Analyzer_v3.3.0-lite_Setup.exe"), Arch::X64);
+        assert_eq!(Arch::of_asset("charm64_3.3.0-lite.exe"), Arch::X64, "a whole word only");
+
+        let list = with_arm();
+        for (platform, arch, file) in [
+            (Platform::Windows, Arch::X64, "e-CALLISTO_FITS_Analyzer_v3.3.0-lite_Setup.exe"),
+            (Platform::Windows, Arch::Arm64, "e-CALLISTO_FITS_Analyzer_v3.3.0-lite_arm64_Setup.exe"),
+            (Platform::Linux, Arch::X64, "e-callisto-fits-analyzer_3.3.0-lite_amd64.deb"),
+            (Platform::Linux, Arch::Arm64, "e-callisto-fits-analyzer_3.3.0-lite_arm64.deb"),
+            // macOS has the one DMG, whatever the CPU.
+            (Platform::MacOs, Arch::Arm64, "e-callisto-fits-analyzer_3.3.0-lite_macOS_arm64.dmg"),
+            (Platform::MacOs, Arch::X64, "e-callisto-fits-analyzer_3.3.0-lite_macOS_arm64.dmg"),
+        ] {
+            let r = evaluate(&list, "3.2.0-lite", platform, arch).unwrap();
+            assert!(r.update_available, "{platform:?} {arch:?}");
+            assert_eq!(r.download_url, format!("https://dl/{file}"), "{platform:?} {arch:?}");
+        }
+
+        // A newer release without arm64 installers (yet): arm64 stays on 3.3.0, x64 moves on.
+        let mut newer = list.as_array().unwrap().clone();
+        newer.push(release(
+            "v3.3.1",
+            &["e-CALLISTO_FITS_Analyzer_v3.3.1-lite_Setup.exe", "e-callisto-fits-analyzer_3.3.1-lite_amd64.deb"],
+            "2026-12-10",
+        ));
+        let newer = Value::Array(newer);
+        for platform in [Platform::Windows, Platform::Linux] {
+            let arm = evaluate(&newer, "3.3.0-lite", platform, Arch::Arm64).unwrap();
+            assert!(!arm.update_available, "{platform:?}");
+            assert_eq!(arm.latest_version, "3.3.0-lite");
+            let x64 = evaluate(&newer, "3.3.0-lite", platform, Arch::X64).unwrap();
+            assert!(x64.update_available, "{platform:?}");
+            assert_eq!(x64.latest_version, "3.3.1-lite");
+        }
+
+        // Before the first arm64 release: nothing for arm64, so up to date.
+        let none = evaluate(&published(), "3.2.0-lite", Platform::Linux, Arch::Arm64).unwrap();
+        assert!(!none.update_available && none.download_url.is_empty());
     }
 
     /// A dummy GitHub on localhost: answers each path in `routes` with its
@@ -711,12 +829,14 @@ mod tests {
         let api = serve(vec![("/releases", serde_json::to_vec(&list).unwrap())]);
 
         // The check over HTTP, as the app makes it.
-        let r = check_at(&format!("{api}/releases"), "3.2.0-lite", Platform::Windows).unwrap();
+        let r = check_at(&format!("{api}/releases"), "3.2.0-lite", Platform::Windows, Arch::X64).unwrap();
         assert!(r.update_available);
         assert_eq!(r.latest_version, "3.2.1-lite");
         assert_eq!(r.download_url, format!("{base}/dl/e-CALLISTO_FITS_Analyzer_v3.2.1-lite_Setup.exe"));
         // Already on it: up to date.
-        assert!(!check_at(&format!("{api}/releases"), "3.2.1-lite", Platform::Windows).unwrap().update_available);
+        assert!(
+            !check_at(&format!("{api}/releases"), "3.2.1-lite", Platform::Windows, Arch::X64).unwrap().update_available
+        );
 
         // The download: Lite's installer, whole, under its release name.
         let dir = scratch_dir("download");
@@ -757,7 +877,7 @@ mod tests {
         assert!(download(&format!("{base}/dl/gone.exe"), &dest, &mut |_, _| {}, &|| false).is_err());
         assert!(!dest.exists() && !part.exists());
         // So is an unreachable release list.
-        assert!(check_at(&format!("{base}/no-such-list"), "3.2.0-lite", Platform::Windows).is_err());
+        assert!(check_at(&format!("{base}/no-such-list"), "3.2.0-lite", Platform::Windows, Arch::X64).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

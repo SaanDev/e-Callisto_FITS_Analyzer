@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import platform
 import re
+import sysconfig
 from dataclasses import dataclass
 from typing import Any
 
@@ -22,6 +23,14 @@ PLATFORM_WINDOWS = "windows"
 PLATFORM_MACOS = "macos"
 PLATFORM_LINUX = "linux"
 PLATFORM_UNKNOWN = "unknown"
+
+ARCH_X64 = "x64"
+ARCH_ARM64 = "arm64"
+ARCH_UNKNOWN = "unknown"
+
+# Platforms whose installers are built per CPU (from 3.3.0: x64 and arm64).
+# macOS has the one Apple Silicon DMG, so its choice ignores the CPU.
+_ARCH_AWARE_PLATFORMS = {PLATFORM_WINDOWS, PLATFORM_LINUX}
 
 # Pre-release label directly after the numeric version: "-beta", "-beta2", "-rc1", "b1", "rc1", " Beta".
 # Single-letter forms (a/b) must be attached or follow -/./_ so "3.1.0 a release" is not a match.
@@ -124,19 +133,87 @@ def is_lite_asset(name: str) -> bool:
     return bool(_LITE_ASSET_RE.search(str(name or "")))
 
 
-def select_download_url(assets: list[dict[str, Any]], system_name: str | None = None) -> str | None:
+def _normalize_arch(text: str | None) -> str:
+    value = str(text or "").strip().lower()
+    if value in {"arm64", "aarch64", "arm64e", "armv8", "armv8l"}:
+        return ARCH_ARM64
+    if value in {"x86_64", "amd64", "x64", "em64t"}:
+        return ARCH_X64
+    return ARCH_UNKNOWN
+
+
+def current_arch() -> str:
+    """The CPU this build of the app is for: ``x64``, ``arm64`` or ``unknown``.
+
+    The running build's CPU, not the machine's. ``sysconfig`` names the
+    interpreter's own build (``win-amd64``, ``win-arm64``, ``linux-aarch64``),
+    so an x64 build emulated on Windows on ARM keeps taking x64 installers.
+    """
+    try:
+        arch = _normalize_arch(sysconfig.get_platform().rsplit("-", 1)[-1])
+    except Exception:
+        arch = ARCH_UNKNOWN
+    if arch == ARCH_UNKNOWN:
+        arch = _normalize_arch(platform.machine())
+    return arch
+
+
+def _resolve_arch(system_name: str | None, machine: str | None) -> str:
+    """The CPU to choose installers for.
+
+    ``machine`` when given. Otherwise this build's CPU for a check of the
+    running system (no ``system_name``), and x64 for a named system, the CPU
+    every installer had before 3.3.0.
+    """
+    if machine:
+        return _normalize_arch(machine)
+    if system_name is None:
+        return current_arch()
+    return ARCH_X64
+
+
+# Installers name their CPU from 3.3.0: e-CALLISTO_FITS_Analyzer_v3.3.0_arm64_Setup.exe,
+# e-callisto-fits-analyzer_3.3.0_arm64.deb, ..._3.3.0_amd64.deb. A name without
+# one is x64, as every Windows installer is named.
+_ARM64_ASSET_RE = re.compile(r"(?<![a-z0-9])(?:arm64|aarch64)(?![a-z0-9])", re.IGNORECASE)
+
+
+def asset_arch(name: str) -> str:
+    """The CPU a release asset is for, from its name (``x64`` when it names none)."""
+    text = str(name or "")
+    if _ARM64_ASSET_RE.search(text):
+        return ARCH_ARM64
+    return ARCH_X64
+
+
+def select_download_url(
+    assets: list[dict[str, Any]],
+    system_name: str | None = None,
+    machine: str | None = None,
+) -> str | None:
+    """The full app's installer for a platform (and, on Windows and Linux, a CPU).
+
+    ``machine`` is the CPU (``x64``/``arm64``); see ``_resolve_arch`` for the
+    default. On Windows and Linux only installers for that CPU are taken: an
+    arm64 build is never offered an x64 one, nor the reverse.
+    """
     if not assets:
         return None
 
     platform_family = _platform_family(system_name)
     extension_priority = _asset_extension_priority(platform_family)
+    arch = _resolve_arch(system_name, machine)
+    by_arch = platform_family in _ARCH_AWARE_PLATFORMS and arch != ARCH_UNKNOWN
 
     lowered_assets: list[tuple[str, str]] = []
     for asset in assets:
         name = str(asset.get("name") or "").strip()
         url = str(asset.get("browser_download_url") or "").strip()
-        if name and url and not is_lite_asset(name):
-            lowered_assets.append((name.lower(), url))
+        if not name or not url or is_lite_asset(name):
+            continue
+        if by_arch and asset_arch(name) != arch:
+            continue
+        lowered_assets.append((name.lower(), url))
 
     for ext in extension_priority:
         for name, url in lowered_assets:
@@ -212,7 +289,11 @@ def _explicit_platform_markers(text: str) -> set[str]:
     return markers
 
 
-def _release_platform_score(payload: dict[str, Any], platform_family: str) -> tuple[int, int]:
+def _release_platform_score(
+    payload: dict[str, Any],
+    platform_family: str,
+    machine: str | None = None,
+) -> tuple[int, int]:
     """
     Returns:
       - tag_score: how well release metadata (tag/name) matches platform
@@ -231,7 +312,7 @@ def _release_platform_score(payload: dict[str, Any], platform_family: str) -> tu
 
     assets_raw = payload.get("assets") or []
     assets = assets_raw if isinstance(assets_raw, list) else []
-    asset_score = 1 if select_download_url(assets, system_name=platform_family) else 0
+    asset_score = 1 if select_download_url(assets, system_name=platform_family, machine=machine) else 0
     return tag_score, asset_score
 
 
@@ -239,7 +320,11 @@ def _pad_version(version: tuple[int, ...], width: int = 5) -> tuple[int, ...]:
     return version + (0,) * max(0, width - len(version))
 
 
-def _pick_latest_stable_release_for_platform(timeout: float, system_name: str | None) -> dict[str, Any]:
+def _pick_latest_stable_release_for_platform(
+    timeout: float,
+    system_name: str | None,
+    machine: str | None = None,
+) -> dict[str, Any]:
     releases = _github_get_json(GITHUB_RELEASES_LIST_URL, timeout=timeout)
     if not isinstance(releases, list):
         raise ValueError("Unexpected release list payload from GitHub API.")
@@ -254,19 +339,24 @@ def _pick_latest_stable_release_for_platform(timeout: float, system_name: str | 
         version = _release_version(release)
         if not version:
             continue
-        tag_score, asset_score = _release_platform_score(release, platform_family)
+        tag_score, asset_score = _release_platform_score(release, platform_family, machine=machine)
         published_at = str(release.get("published_at") or "")
         scored.append((_pad_version(version), tag_score, asset_score, published_at, release))
 
     if not scored:
         raise ValueError("No parseable stable release version found.")
 
-    # Only releases with the full app's installer for this platform, as Lite
-    # takes only those with its own: a shared tag may carry Lite's installer
-    # alone for a platform, or none yet while its assets upload.
+    # Only releases with the full app's installer for this platform (and CPU),
+    # as Lite takes only those with its own: a shared tag may carry Lite's
+    # installer alone for a platform, no arm64 build, or none yet while its
+    # assets upload.
     filtered = [item for item in scored if item[2] > 0]
     if not filtered:
-        raise ValueError(f"No release found for platform '{platform_family}'.")
+        cpu = ""
+        arch = _resolve_arch(system_name, machine)
+        if platform_family in _ARCH_AWARE_PLATFORMS and arch != ARCH_UNKNOWN:
+            cpu = f" ({arch})"
+        raise ValueError(f"No release found for platform '{platform_family}'{cpu}.")
 
     filtered.sort(key=lambda item: (item[0], item[1], item[2], item[3]), reverse=True)
     return filtered[0][-1]
@@ -276,10 +366,20 @@ def check_for_updates(
     current_version: str,
     timeout: float = 8.0,
     system_name: str | None = None,
+    machine: str | None = None,
 ) -> UpdateCheckResult:
+    """The newest stable release for this platform and CPU.
+
+    With no ``system_name`` it checks the running system, for this build's
+    CPU (``current_arch``). ``machine`` (``x64``/``arm64``) names the CPU of a
+    named system; without it a named system is x64.
+    """
     try:
         platform_family = _platform_family(system_name)
-        release = _pick_latest_stable_release_for_platform(timeout=timeout, system_name=platform_family)
+        arch = _resolve_arch(system_name, machine)
+        release = _pick_latest_stable_release_for_platform(
+            timeout=timeout, system_name=platform_family, machine=arch
+        )
 
         latest_version = _extract_version_text(str(release.get("tag_name") or "")) or _extract_version_text(
             str(release.get("name") or "")
@@ -294,7 +394,7 @@ def check_for_updates(
 
         assets_raw = release.get("assets") or []
         assets = assets_raw if isinstance(assets_raw, list) else []
-        download_url = select_download_url(assets, system_name=platform_family) or release_url
+        download_url = select_download_url(assets, system_name=platform_family, machine=arch) or release_url
 
         status = "update_available" if is_newer_version(current_version, latest_version) else "up_to_date"
 

@@ -210,7 +210,7 @@ from src.backend.session.recovery_manager import (
 )
 from src.backend.radio.noise_reduction import rowwise_baseline
 from src.backend.radio.rfi_filters import clean_rfi, config_dict as rfi_config_dict
-from src.backend.services.update_checker import GITHUB_REPO
+from src.backend.services.update_checker import ARCH_ARM64, GITHUB_REPO, current_arch
 from src.backend.session.view_config import (
     build_display_range_preset,
     build_view_config,
@@ -9618,13 +9618,14 @@ class MainWindow(QMainWindow):
             pass
 
         version = (str(latest_version or APP_VERSION).strip() or APP_VERSION).lstrip("vV")
-        # The release installers' names.
+        # The release installers' names, for this build's CPU on Windows and Linux.
+        arm = current_arch() == ARCH_ARM64
         if sys.platform.startswith("win"):
-            return f"e-CALLISTO_FITS_Analyzer_v{version}_Setup.exe"
+            return f"e-CALLISTO_FITS_Analyzer_v{version}{'_arm64' if arm else ''}_Setup.exe"
         if sys.platform == "darwin":
             return f"e-callisto-fits-analyzer_{version}_macOS_arm64.dmg"
         if sys.platform.startswith("linux"):
-            return f"e-callisto-fits-analyzer_{version}_amd64.deb"
+            return f"e-callisto-fits-analyzer_{version}_{'arm64' if arm else 'amd64'}.deb"
         return f"e-CALLISTO_FITS_Analyzer_v{version}.bin"
 
     def _default_download_dir(self) -> str:

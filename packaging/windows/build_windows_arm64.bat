@@ -1,5 +1,6 @@
 @echo off
-rem Windows ARM64 installers of the full app and Lite; see build_windows_arm64.ps1.
+rem Windows ARM64 installer of the full app; see build_windows_arm64.ps1.
+rem Lite: lite\packaging\windows\build_windows_arm64.bat
 setlocal
 
 set "SCRIPT_DIR=%~dp0"

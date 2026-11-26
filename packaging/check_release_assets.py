@@ -18,7 +18,11 @@ repository) and checks that
   full app, ``lite/crates/callisto-core/src/updates.rs`` for Lite) each pick
   their own installer;
 - the release title names either no platform or all three, so neither
-  checker scores it down for one platform.
+  checker scores it down for one platform;
+- if the release has Windows or Linux arm64 installers (``_arm64`` in the
+  name, from 3.3.0), both the full app's and Lite's are there, and the
+  update checks of arm64 builds pick them. Upload them after the x64 ones:
+  copies up to 3.2.x take the first installer whatever its CPU.
 
 It exits with status 1 if anything is wrong.
 """
@@ -45,6 +49,15 @@ def expected_names(version: str) -> dict[str, tuple[str, str]]:
         "Windows": (f"e-CALLISTO_FITS_Analyzer_v{version}_Setup.exe", f"e-CALLISTO_FITS_Analyzer_v{version}-lite_Setup.exe"),
         "Linux": (f"e-callisto-fits-analyzer_{version}_amd64.deb", f"e-callisto-fits-analyzer_{version}-lite_amd64.deb"),
         "Darwin": (f"e-callisto-fits-analyzer_{version}_macOS_arm64.dmg", f"e-callisto-fits-analyzer_{version}-lite_macOS_arm64.dmg"),
+    }
+
+
+def expected_arm64_names(version: str) -> dict[str, tuple[str, str]]:
+    """Windows and Linux arm64 installers (optional): (the full app's, Lite's)."""
+    return {
+        "Windows": (f"e-CALLISTO_FITS_Analyzer_v{version}_arm64_Setup.exe",
+                    f"e-CALLISTO_FITS_Analyzer_v{version}-lite_arm64_Setup.exe"),
+        "Linux": (f"e-callisto-fits-analyzer_{version}_arm64.deb", f"e-callisto-fits-analyzer_{version}-lite_arm64.deb"),
     }
 
 
@@ -101,6 +114,29 @@ def main() -> int:
                 and str(a.get("name") or "").lower().endswith(EXTENSIONS[system])]
         if not lite or lite[0].get("name") != lite_name:
             problems.append(f"{system}: Lite's update check would pick {lite[0].get('name') if lite else None!r}.")
+
+    # Windows and Linux arm64 installers, from 3.3.0: optional, but when a
+    # release has them, today's checks on an arm64 build must pick them. The
+    # checks above already require the x64 installers to be listed first, as
+    # copies up to 3.2.x take the first installer whatever its CPU.
+    for system, (main_name, lite_name) in expected_arm64_names(version).items():
+        present = [n for n in (main_name, lite_name) if n in names]
+        if not present:
+            print(f"\n{system} arm64: no installers in this release.")
+            continue
+        for n in (main_name, lite_name):
+            if n not in names:
+                problems.append(f"{system} arm64: {n} is missing, beside {present[0]}.")
+        if main_name in names:
+            new = update_checker.select_download_url(assets, system_name=system, machine=update_checker.ARCH_ARM64)
+            if new is None or not new.endswith("/" + main_name):
+                problems.append(f"{system} arm64: the full app's update check picks {new!r}.")
+        if lite_name in names:
+            lite = [a for a in assets if update_checker.is_lite_asset(str(a.get("name") or ""))
+                    and str(a.get("name") or "").lower().endswith(EXTENSIONS[system])
+                    and update_checker.asset_arch(str(a.get("name") or "")) == update_checker.ARCH_ARM64]
+            if not lite or lite[0].get("name") != lite_name:
+                problems.append(f"{system} arm64: Lite's update check would pick {lite[0].get('name') if lite else None!r}.")
 
     if problems:
         print("\nProblems:")

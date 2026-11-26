@@ -1,18 +1,17 @@
 <#
-Build the Windows on ARM (ARM64) installers of e-CALLISTO FITS Analyzer and
-of e-CALLISTO FITS Analyzer Lite.
+Build the Windows on ARM (ARM64) installer of e-CALLISTO FITS Analyzer (the
+full app). Lite has its own script:
+lite\packaging\windows\build_windows_arm64.ps1.
 
 Output:
-  dist\e-CALLISTO_FITS_Analyzer_v<version>_arm64_Setup.exe          (full app)
-  lite\dist\e-CALLISTO_FITS_Analyzer_v<version>-lite_arm64_Setup.exe (Lite)
+  dist\e-CALLISTO_FITS_Analyzer_v<version>_arm64_Setup.exe
+  (the app folder it installs: dist\win-arm64\e-Callisto FITS Analyzer\)
 
 Usage, on a Windows 11 ARM64 PC (or VM), from anywhere:
   powershell -ExecutionPolicy Bypass -File .\packaging\windows\build_windows_arm64.ps1
 Optional:
   -Python <path>    the ARM64 python.exe to build with (default: py -V:3.13-arm64, then 3.12)
   -Version 3.3.0    the full app's version (default: src\version.py)
-  -SkipMain         build Lite only (this also works on an x64 PC, as a cross-compile)
-  -SkipLite         build the full app only
   -SkipSmokeTest    do not start the built app to check that it opens
   -SkipInstaller    stop after the app folders, without Inno Setup
 
@@ -23,8 +22,8 @@ What the PC needs (all free):
   - Visual Studio 2022 Build Tools with "Desktop development with C++" and
     "MSVC v143 - VS 2022 C++ ARM64/ARM64EC build tools" (component
     Microsoft.VisualStudio.Component.VC.Tools.ARM64) plus a Windows 11 SDK.
-  - Rust from https://rustup.rs (the ARM64 rustup-init.exe), for Lite and for
-    streamtracer (PFSS field lines), which PyPI has no ARM64 wheel of.
+  - Rust from https://rustup.rs (the ARM64 rustup-init.exe), for streamtracer
+    (PFSS field lines), which PyPI has no ARM64 wheel of.
   - Inno Setup 6.3 or newer (it runs under x64 emulation, which is fine).
 
 Why it differs from build_windows_installer.ps1 (checked against PyPI on
@@ -49,8 +48,6 @@ param(
     [string]$Root = "",
     [string]$Version = "",
     [string]$Python = "",
-    [switch]$SkipMain,
-    [switch]$SkipLite,
     [switch]$SkipSmokeTest,
     [switch]$SkipInstaller
 )
@@ -204,8 +201,6 @@ function Assert-RustArm64 {
 
 # ---------------------------------------------------------------------------
 
-if ($SkipMain -and $SkipLite) { throw "Nothing to build: both -SkipMain and -SkipLite were given." }
-
 $Root = if ($Root) { (Resolve-Path $Root).Path } else { (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path }
 if (-not $Version) {
     $match = Select-String -Path (Join-Path $Root "src\version.py") -Pattern 'APP_VERSION\s*=\s*"([^"]+)"' | Select-Object -First 1
@@ -218,9 +213,10 @@ Write-Step "e-CALLISTO FITS Analyzer $Version for Windows ARM64 (this PC: $Nativ
 Write-Host "Project root: $Root"
 
 # Preflight: every tool is checked before the long steps start.
-if (-not $SkipMain -and $NativeArch -ne "ARM64") {
+if ($NativeArch -ne "ARM64") {
     throw ("The full app must be built on an ARM64 PC: PyInstaller cannot cross-build, so this PC ($NativeArch) " +
-           "would produce an x64 app. Build it on Windows 11 ARM64, or pass -SkipMain to build only Lite here.")
+           "would produce an x64 app. Build it on Windows 11 ARM64. (Lite can be cross-built here: " +
+           "lite\packaging\windows\build_windows_arm64.ps1.)")
 }
 Import-VsArm64Environment
 Assert-RustArm64
@@ -230,61 +226,60 @@ if (-not $SkipInstaller) {
     if (-not $Iscc) { throw "ISCC.exe not found. Install Inno Setup 6 (https://jrsoftware.org/isinfo.php), or use -SkipInstaller." }
 }
 
-if (-not $SkipMain) {
-    $PythonExe = Resolve-ArmPython $Python
-    Write-Host "Python: $PythonExe"
+$PythonExe = Resolve-ArmPython $Python
+Write-Host "Python: $PythonExe"
 
-    $SpecPath = Join-Path $Root "packaging\pyinstaller\FITS_Analyzer_win.spec"
-    $RuntimeRequirements = Join-Path $Root "requirements\requirements-runtime.txt"
-    $BuildRequirements = Join-Path $Root "requirements\requirements-build.txt"
-    $IssPath = Join-Path $Root "packaging\windows\FITS_Analyzer_InnoSetup.iss"
-    $Venv = Join-Path $Root ".venv-build-win-arm64"
-    $WorkRoot = Join-Path $Root "build\win-arm64"
-    $DistRoot = Join-Path $Root "dist\win-arm64"
-    $AppDir = Join-Path $DistRoot "e-Callisto FITS Analyzer"
-    $AppExe = Join-Path $AppDir "e-Callisto FITS Analyzer.exe"
-    $Installer = Join-Path $Root ("dist\e-CALLISTO_FITS_Analyzer_v{0}_arm64_Setup.exe" -f $Version)
-    foreach ($p in @($SpecPath, $RuntimeRequirements, $BuildRequirements, $IssPath)) {
-        if (-not (Test-Path $p)) { throw "Missing $p" }
-    }
+$SpecPath = Join-Path $Root "packaging\pyinstaller\FITS_Analyzer_win.spec"
+$RuntimeRequirements = Join-Path $Root "requirements\requirements-runtime.txt"
+$BuildRequirements = Join-Path $Root "requirements\requirements-build.txt"
+$IssPath = Join-Path $Root "packaging\windows\FITS_Analyzer_InnoSetup.iss"
+$Venv = Join-Path $Root ".venv-build-win-arm64"
+$WorkRoot = Join-Path $Root "build\win-arm64"
+$DistRoot = Join-Path $Root "dist\win-arm64"
+$AppDir = Join-Path $DistRoot "e-Callisto FITS Analyzer"
+$AppExe = Join-Path $AppDir "e-Callisto FITS Analyzer.exe"
+$Installer = Join-Path $Root ("dist\e-CALLISTO_FITS_Analyzer_v{0}_arm64_Setup.exe" -f $Version)
+foreach ($p in @($SpecPath, $RuntimeRequirements, $BuildRequirements, $IssPath)) {
+    if (-not (Test-Path $p)) { throw "Missing $p" }
+}
 
-    # 1) A fresh build environment, as the Linux build does.
-    Write-Step "Creating the build environment $Venv"
-    if (Test-Path $Venv) { Remove-Item -Recurse -Force $Venv }
-    Invoke-Native $PythonExe @("-m", "venv", $Venv) "Creating the virtual environment"
-    $VenvPython = Join-Path $Venv "Scripts\python.exe"
+# 1) A fresh build environment, as the Linux build does.
+Write-Step "Creating the build environment $Venv"
+if (Test-Path $Venv) { Remove-Item -Recurse -Force $Venv }
+Invoke-Native $PythonExe @("-m", "venv", $Venv) "Creating the virtual environment"
+$VenvPython = Join-Path $Venv "Scripts\python.exe"
 
-    # 2) requirements-runtime.txt with the ARM64 pin overrides.
-    New-Item -ItemType Directory -Force $WorkRoot | Out-Null
-    $ArmRequirements = Join-Path $WorkRoot "requirements-runtime-win-arm64.txt"
-    $lines = Get-Content $RuntimeRequirements
-    foreach ($name in $PinOverrides.Keys) {
-        $pattern = "^\s*" + [regex]::Escape($name) + "\s*=="
-        $hits = @($lines | Where-Object { $_ -match $pattern })
-        if ($hits.Count -ne 1) { throw "Expected one '$name==' line in requirements-runtime.txt, found $($hits.Count)." }
-        $lines = $lines | ForEach-Object { if ($_ -match $pattern) { "$name==$($PinOverrides[$name])  # Windows ARM64 override" } else { $_ } }
-        Write-Host ("Pin override: {0} -> {1}" -f $hits[0].Trim(), $PinOverrides[$name])
-    }
-    Set-Content -Path $ArmRequirements -Value $lines -Encoding ASCII
+# 2) requirements-runtime.txt with the ARM64 pin overrides.
+New-Item -ItemType Directory -Force $WorkRoot | Out-Null
+$ArmRequirements = Join-Path $WorkRoot "requirements-runtime-win-arm64.txt"
+$lines = Get-Content $RuntimeRequirements
+foreach ($name in $PinOverrides.Keys) {
+    $pattern = "^\s*" + [regex]::Escape($name) + "\s*=="
+    $hits = @($lines | Where-Object { $_ -match $pattern })
+    if ($hits.Count -ne 1) { throw "Expected one '$name==' line in requirements-runtime.txt, found $($hits.Count)." }
+    $lines = $lines | ForEach-Object { if ($_ -match $pattern) { "$name==$($PinOverrides[$name])  # Windows ARM64 override" } else { $_ } }
+    Write-Host ("Pin override: {0} -> {1}" -f $hits[0].Trim(), $PinOverrides[$name])
+}
+Set-Content -Path $ArmRequirements -Value $lines -Encoding ASCII
 
-    # 3) Dependencies. Packages without an ARM64 wheel compile here.
-    Write-Step "Installing dependencies (the first run compiles several packages: 20 to 40 minutes)"
-    $env:CRC32C_PURE_PYTHON = "1"                     # google-crc32c: pure Python, no crc32c C library to build
-    $env:CARGO_BUILD_TARGET = "aarch64-pc-windows-msvc"  # streamtracer (maturin) builds for ARM64 even with an x64 rustc
-    try {
-        Invoke-Native $VenvPython @("-m", "pip", "install", "--upgrade", "pip") "pip upgrade"
-        Invoke-Native $VenvPython @("-m", "pip", "install", "--requirement", $BuildRequirements) "Build dependency install"
-        Invoke-Native $VenvPython @("-m", "pip", "install", "--prefer-binary", "--requirement", $ArmRequirements) "Runtime dependency install"
-    } finally {
-        Remove-Item Env:\CARGO_BUILD_TARGET -ErrorAction SilentlyContinue
-        Remove-Item Env:\CRC32C_PURE_PYTHON -ErrorAction SilentlyContinue
-    }
+# 3) Dependencies. Packages without an ARM64 wheel compile here.
+Write-Step "Installing dependencies (the first run compiles several packages: 20 to 40 minutes)"
+$env:CRC32C_PURE_PYTHON = "1"                     # google-crc32c: pure Python, no crc32c C library to build
+$env:CARGO_BUILD_TARGET = "aarch64-pc-windows-msvc"  # streamtracer (maturin) builds for ARM64 even with an x64 rustc
+try {
+    Invoke-Native $VenvPython @("-m", "pip", "install", "--upgrade", "pip") "pip upgrade"
+    Invoke-Native $VenvPython @("-m", "pip", "install", "--requirement", $BuildRequirements) "Build dependency install"
+    Invoke-Native $VenvPython @("-m", "pip", "install", "--prefer-binary", "--requirement", $ArmRequirements) "Runtime dependency install"
+} finally {
+    Remove-Item Env:\CARGO_BUILD_TARGET -ErrorAction SilentlyContinue
+    Remove-Item Env:\CRC32C_PURE_PYTHON -ErrorAction SilentlyContinue
+}
 
-    # 4) The compiled packages import, before the long PyInstaller run. From a
-    # file: Windows PowerShell 5.1 mangles double quotes in a -c argument.
-    Write-Step "Checking the compiled packages"
-    $checkFile = Join-Path $WorkRoot "check_imports.py"
-    Set-Content -Path $checkFile -Encoding ASCII -Value @'
+# 4) The compiled packages import, before the long PyInstaller run. From a
+# file: Windows PowerShell 5.1 mangles double quotes in a -c argument.
+Write-Step "Checking the compiled packages"
+$checkFile = Join-Path $WorkRoot "check_imports.py"
+Set-Content -Path $checkFile -Encoding ASCII -Value @'
 import importlib, sysconfig
 assert sysconfig.get_platform() == "win-arm64", sysconfig.get_platform()
 mods = ["numpy", "scipy", "pandas", "sklearn", "astropy", "erfa", "astropy_healpix", "numcodecs",
@@ -300,72 +295,57 @@ try:
 except ImportError:
     print("QtWebEngine: absent (expected on Windows ARM64; CME movies open in the browser)")
 '@
-    Invoke-Native $VenvPython @($checkFile) "Import check"
+Invoke-Native $VenvPython @($checkFile) "Import check"
 
-    # 5) The app folder.
-    Write-Step "PyInstaller"
-    if (Test-Path $AppDir) { Remove-Item -Recurse -Force $AppDir }
-    Invoke-Native $VenvPython @(
-        "-m", "PyInstaller", "--clean", "--noconfirm",
-        "--distpath", $DistRoot,
-        "--workpath", (Join-Path $WorkRoot "pyinstaller"),
-        $SpecPath
-    ) "PyInstaller build"
-    if (-not (Test-Path $AppExe)) { throw "PyInstaller finished, but $AppExe is missing." }
+# 5) The app folder.
+Write-Step "PyInstaller"
+if (Test-Path $AppDir) { Remove-Item -Recurse -Force $AppDir }
+Invoke-Native $VenvPython @(
+    "-m", "PyInstaller", "--clean", "--noconfirm",
+    "--distpath", $DistRoot,
+    "--workpath", (Join-Path $WorkRoot "pyinstaller"),
+    $SpecPath
+) "PyInstaller build"
+if (-not (Test-Path $AppExe)) { throw "PyInstaller finished, but $AppExe is missing." }
 
-    $exeArch = Get-PeMachine $AppExe
-    $pyDll = Get-ChildItem -Path $AppDir -Recurse -Filter "python3*.dll" | Select-Object -First 1
-    $dllArch = if ($pyDll) { Get-PeMachine $pyDll.FullName } else { "missing" }
-    Write-Host "Built $AppExe (exe: $exeArch, $(if ($pyDll) { $pyDll.Name } else { 'python3*.dll' }): $dllArch)"
-    if ($exeArch -ne "arm64" -or $dllArch -ne "arm64") { throw "The app is not ARM64 throughout (exe $exeArch, Python DLL $dllArch)." }
+$exeArch = Get-PeMachine $AppExe
+$pyDll = Get-ChildItem -Path $AppDir -Recurse -Filter "python3*.dll" | Select-Object -First 1
+$dllArch = if ($pyDll) { Get-PeMachine $pyDll.FullName } else { "missing" }
+Write-Host "Built $AppExe (exe: $exeArch, $(if ($pyDll) { $pyDll.Name } else { 'python3*.dll' }): $dllArch)"
+if ($exeArch -ne "arm64" -or $dllArch -ne "arm64") { throw "The app is not ARM64 throughout (exe $exeArch, Python DLL $dllArch)." }
 
-    # 6) It opens. Off screen, so nothing appears; the CME helper is not tried,
-    # as it cannot start without QtWebEngine.
-    if (-not $SkipSmokeTest) {
-        Write-Step "Smoke test: starting the app for 10 seconds"
-        $savedQpa = $env:QT_QPA_PLATFORM
-        $env:QT_QPA_PLATFORM = "offscreen"
-        try {
-            $proc = Start-Process -FilePath $AppExe -PassThru
-            Start-Sleep -Seconds 10
-            if ($proc.HasExited) { throw "The app exited after start with code $($proc.ExitCode). Run $AppExe to see why." }
-            Stop-Process -Id $proc.Id -Force
-            Write-Host "The app started and kept running."
-        } finally {
-            $env:QT_QPA_PLATFORM = $savedQpa
-        }
-    }
-
-    # 7) The installer.
-    if (-not $SkipInstaller) {
-        Write-Step "Inno Setup"
-        Invoke-Native $Iscc @(
-            "/DRepoRoot=$Root",
-            "/DAppVersion=$Version",
-            "/DDistDir=$AppDir",
-            "/DArch=arm64",
-            $IssPath
-        ) "Inno Setup build"
-        if (-not (Test-Path $Installer)) { throw "Inno Setup finished, but $Installer is missing." }
-        Write-Host "Built installer: $Installer"
+# 6) It opens. Off screen, so nothing appears; the CME helper is not tried,
+# as it cannot start without QtWebEngine.
+if (-not $SkipSmokeTest) {
+    Write-Step "Smoke test: starting the app for 10 seconds"
+    $savedQpa = $env:QT_QPA_PLATFORM
+    $env:QT_QPA_PLATFORM = "offscreen"
+    try {
+        $proc = Start-Process -FilePath $AppExe -PassThru
+        Start-Sleep -Seconds 10
+        if ($proc.HasExited) { throw "The app exited after start with code $($proc.ExitCode). Run $AppExe to see why." }
+        Stop-Process -Id $proc.Id -Force
+        Write-Host "The app started and kept running."
+    } finally {
+        $env:QT_QPA_PLATFORM = $savedQpa
     }
 }
 
-if (-not $SkipLite) {
-    Write-Step "e-CALLISTO FITS Analyzer Lite for Windows ARM64"
-    $LiteScript = Join-Path $Root "lite\packaging\windows\build_windows_installer.ps1"
-    if ($SkipInstaller) { & $LiteScript -Arch arm64 -SkipInstaller } else { & $LiteScript -Arch arm64 }
-    $liteExe = Join-Path $Root "lite\target\aarch64-pc-windows-msvc\release\callisto-lite.exe"
-    if (Test-Path $liteExe) {
-        $liteArch = Get-PeMachine $liteExe
-        Write-Host "Lite executable: $liteArch"
-        if ($liteArch -ne "arm64") { throw "Lite's executable is $liteArch, not arm64." }
-    }
+# 7) The installer.
+if (-not $SkipInstaller) {
+    Write-Step "Inno Setup"
+    Invoke-Native $Iscc @(
+        "/DRepoRoot=$Root",
+        "/DAppVersion=$Version",
+        "/DDistDir=$AppDir",
+        "/DArch=arm64",
+        $IssPath
+    ) "Inno Setup build"
+    if (-not (Test-Path $Installer)) { throw "Inno Setup finished, but $Installer is missing." }
+    Write-Host "Built installer: $Installer"
 }
 
 Write-Step "Done"
-if (-not $SkipMain) {
-    Write-Host "Full app: $AppDir"
-    if (-not $SkipInstaller) { Write-Host "          $Installer" }
-}
-if (-not $SkipLite) { Write-Host "Lite:     $(Join-Path $Root 'lite\dist')" }
+Write-Host "Full app: $AppDir"
+if (-not $SkipInstaller) { Write-Host "          $Installer" }
+Write-Host "Lite is built on its own: lite\packaging\windows\build_windows_arm64.ps1"
