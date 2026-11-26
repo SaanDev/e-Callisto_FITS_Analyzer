@@ -256,10 +256,11 @@ from src.ui.downloads.learmonth_downloader import LearmonthDownloaderApp
 from src.ui.widgets.measurement_readout import MeasurementReadout
 from src.ui.common.gui_shared import (
     MplCanvas,
-    _ext_from_filter,
     _install_linux_msgbox_fixer,
     clamp_minimum_size_to_screen,
+    export_default_name,
     pick_export_path,
+    resolve_export_path,
     resource_path,
 )
 from src.ui.app.gui_workers import (
@@ -8544,18 +8545,15 @@ class MainWindow(QMainWindow):
             path, chosen_filter = QFileDialog.getSaveFileName(
                 self,
                 caption,
-                default_name,
+                export_default_name(default_name, filters, default_filter),
                 filters,
                 default_filter or "",
             )
             if not path:
                 return "", ""
-
-            ext = os.path.splitext(path)[1].lstrip(".").lower()
-            if not ext:
-                ext = _ext_from_filter(chosen_filter) or "png"
-                path = f"{path}.{ext}"
-            return path, ext
+            # A suffix the filters offer, else the selected filter's (a title's
+            # ".fit-Background Subtracted" is no format).
+            return resolve_export_path(path, chosen_filter, filters)
 
         return pick_export_path(
             self,
@@ -8772,9 +8770,11 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            if not os.path.splitext(file_path)[1]:
-                suffix = _ext_from_filter(str(ext)) or str(ext or "png").strip().lstrip(".").lower()
-                file_path = f"{file_path}.{suffix}"
+            # `ext` is the picker's format, or a filter's text from older callers.
+            chosen = str(ext or "")
+            if chosen and "*." not in chosen:
+                chosen = f"*.{chosen.strip().lstrip('.').lower()}"
+            file_path, _ = resolve_export_path(file_path, chosen, FIGURE_EXPORT_FILTERS)
             fig = self._build_origin_export_figure()
             if fig is None:
                 raise RuntimeError("There is no dynamic spectrum to export.")

@@ -70,6 +70,7 @@ from src.backend.common.event_figure import (
     build_event_figure,
 )
 from src.backend.common.figure_export import FIGURE_EXPORT_FILTERS, save_figure
+from src.ui.common.gui_shared import resolve_export_path
 from src.backend.solar.helioviewer import THUMBNAIL_SOURCES, thumbnail_source
 from src.backend.space_weather.geomagnetic_figures import GEO_PANELS
 
@@ -805,6 +806,7 @@ class EventFigureComposer(QMainWindow):
         path, _filter = QFileDialog.getSaveFileName(self, "Export Event Figure", default, FIGURE_EXPORT_FILTERS)
         if not path:
             return
+        path, _ext = resolve_export_path(path, _filter, FIGURE_EXPORT_FILTERS)
         try:
             save_figure(self.build_figure(), path, tight=True)
         except Exception as exc:

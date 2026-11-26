@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.backend.common.figure_export import FIGURE_EXPORT_FILTERS, save_figure
+from src.ui.common.gui_shared import resolve_export_path
 from src.backend.space_weather.geomagnetic_context import context_csv_rows
 from src.backend.space_weather.geomagnetic_figures import (
     DEFAULT_GEO_PANELS,
@@ -287,6 +288,7 @@ class GeomagneticResponseWindow(QMainWindow):
         )
         if not path:
             return
+        path, _ext = resolve_export_path(path, _filter, FIGURE_EXPORT_FILTERS)
         try:
             figure = geomagnetic_figure(
                 context, self.panels,

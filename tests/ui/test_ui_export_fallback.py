@@ -172,3 +172,89 @@ def test_linux_hardware_pick_export_path_uses_shared_helper(monkeypatch):
         "PNG (*.png)",
     )
     win.close()
+
+
+# A plot title holds the FITS file name, so the default export name does too:
+# "….fit-Background Subtracted" must not be taken for the format.
+_TITLE_NAME = "SWISS-FM_20261126_083847_02.fit-Background Subtracted"
+
+
+def test_resolve_export_path_adds_the_format_to_a_title_name():
+    from src.ui.common.gui_shared import resolve_export_path
+
+    filters = main_window_module.FIGURE_EXPORT_FILTERS
+    assert resolve_export_path(f"/tmp/{_TITLE_NAME}", "PNG (*.png)", filters) == (f"/tmp/{_TITLE_NAME}.png", "png")
+    assert resolve_export_path(f"/tmp/{_TITLE_NAME}", "PDF (*.pdf)", filters) == (f"/tmp/{_TITLE_NAME}.pdf", "pdf")
+    # No filter reported (some native dialogs): PNG.
+    assert resolve_export_path("/tmp/burst.fit", "", filters) == ("/tmp/burst.fit.png", "png")
+    # A format the filters offer is kept, as typed.
+    assert resolve_export_path(f"/tmp/{_TITLE_NAME}.SVG", "PNG (*.png)", filters) == (f"/tmp/{_TITLE_NAME}.SVG", "svg")
+    assert resolve_export_path("/tmp/plot.tif", "PNG (*.png)", filters) == ("/tmp/plot.tif", "tif")
+    # Another dialog's filters: its own first format when PNG is not one of them.
+    assert resolve_export_path("/tmp/movie.v2", "", "MP4 (*.mp4);;GIF (*.gif)") == ("/tmp/movie.v2.mp4", "mp4")
+    assert resolve_export_path("/tmp/movie.gif", "MP4 (*.mp4)", "MP4 (*.mp4);;GIF (*.gif)") == ("/tmp/movie.gif", "gif")
+
+
+def test_export_default_name_shows_the_format():
+    from src.ui.common.gui_shared import export_default_name
+
+    filters = main_window_module.FIGURE_EXPORT_FILTERS
+    assert export_default_name(_TITLE_NAME, filters, "PNG (*.png)") == f"{_TITLE_NAME}.png"
+    assert export_default_name("plot", filters, "PDF (*.pdf)") == "plot.pdf"
+    assert export_default_name("plot.png", filters, "PDF (*.pdf)") == "plot.png"
+    assert export_default_name("plot", filters) == "plot.png"
+
+
+def test_pick_export_path_saves_a_title_name_as_png(monkeypatch):
+    import src.ui.common.gui_shared as gui_shared
+
+    _app()
+    monkeypatch.setattr(gui_shared, "IS_LINUX", False)
+    offered = {}
+
+    def fake_save(parent, caption, name, filters, selected=""):
+        offered["name"] = name
+        # Accepted as offered, minus the suffix the dialog showed: as a portal
+        # or a user editing the name would return it.
+        return (f"/tmp/{_TITLE_NAME}", "PNG (*.png)")
+
+    monkeypatch.setattr(gui_shared.QFileDialog, "getSaveFileName", fake_save)
+    path, ext = gui_shared.pick_export_path(
+        None, "Export Figure", _TITLE_NAME, main_window_module.FIGURE_EXPORT_FILTERS, default_filter="PNG (*.png)"
+    )
+    assert offered["name"] == f"{_TITLE_NAME}.png"
+    assert (path, ext) == (f"/tmp/{_TITLE_NAME}.png", "png")
+
+
+def test_hardware_pick_export_path_saves_a_title_name_as_png(monkeypatch):
+    _app()
+    win = MainWindow(theme=None)
+    monkeypatch.setattr(win, "_hardware_mode_enabled", lambda: True)
+    monkeypatch.setattr(main_window_module.sys, "platform", "win32")
+    monkeypatch.setattr(
+        main_window_module.QFileDialog,
+        "getSaveFileName",
+        lambda *args, **kwargs: (f"C:/Users/me/{_TITLE_NAME}", "PNG (*.png)"),
+    )
+    path, ext = win._pick_export_path_for_figure(
+        "Export Figure", _TITLE_NAME, main_window_module.FIGURE_EXPORT_FILTERS, default_filter="PNG (*.png)"
+    )
+    assert (path, ext) == (f"C:/Users/me/{_TITLE_NAME}.png", "png")
+    win.close()
+
+
+def test_export_figure_with_a_title_name_writes_a_png(tmp_path: Path, monkeypatch):
+    _app()
+    win = _loaded_window()
+    out = tmp_path / _TITLE_NAME
+    monkeypatch.setattr(win, "_pick_export_path_for_figure", lambda *args, **kwargs: (str(out), "png"))
+    messages = []
+    monkeypatch.setattr(main_window_module.QMessageBox, "information", lambda *args, **kwargs: messages.append(("info", args[2])))
+    monkeypatch.setattr(main_window_module.QMessageBox, "critical", lambda *args, **kwargs: messages.append(("error", args[2])))
+
+    win.export_figure()
+
+    saved = tmp_path / f"{_TITLE_NAME}.png"
+    assert messages == [("info", f"Figure saved:\n{saved}")]
+    assert not QImage(str(saved)).isNull()
+    win.close()

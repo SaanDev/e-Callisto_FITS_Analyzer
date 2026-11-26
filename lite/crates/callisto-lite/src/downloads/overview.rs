@@ -512,7 +512,7 @@ impl OverviewTab {
         );
         let Some(path) = rfd::FileDialog::new()
             .set_title("Export Spectral Overview")
-            .set_file_name(&name)
+            .set_file_name(crate::figure_export::figure_file_name(&name))
             .add_filter("PNG (*.png)", &["png"])
             .add_filter("PDF (*.pdf)", &["pdf"])
             .add_filter("EPS (*.eps)", &["eps"])
@@ -522,10 +522,8 @@ impl OverviewTab {
         else {
             return;
         };
-        let mut path: PathBuf = path;
-        if path.extension().is_none() {
-            path.set_extension("png");
-        }
+        let path: PathBuf =
+            crate::figure_export::with_figure_extension(path, &crate::figure_export::FIGURE_EXTENSIONS).0;
         match crate::figure_export::save_figure(&sh.ctx, fig, &path, 300.0) {
             Ok(()) => sh.out.notice(
                 NoticeKind::Information,

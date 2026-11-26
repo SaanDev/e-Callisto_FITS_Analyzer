@@ -164,19 +164,60 @@ def _ext_from_filter(name_filter: str) -> str:
     return m.group(1).lower() if m else ""
 
 
+def _filter_exts(filters: str) -> list[str]:
+    """Every suffix a ``;;``-separated filter string offers, in order, lower case."""
+    return [ext.lower() for ext in re.findall(r"\*\.(\w+)", filters or "")]
+
+
+def resolve_export_path(path: str, chosen_filter: str, filters: str) -> tuple[str, str]:
+    """A save dialog's answer as ``(path, ext)``, with a suffix the filters offer.
+
+    The suffix typed is kept when the filters offer it. Otherwise the selected
+    filter's suffix (else PNG) is added and the whole name kept: default names
+    come from plot titles that hold file names, so
+    ``SWISS-FM_…_02.fit-Background Subtracted`` "has" the suffix
+    ``.fit-Background Subtracted``, which is no format, and is saved as
+    ``….fit-Background Subtracted.png``. Dialogs on Linux, and often Windows,
+    return the name as typed, without a suffix of their own.
+    """
+    offered = _filter_exts(filters)
+    ext = os.path.splitext(path)[1].lstrip(".").lower()
+    if ext and (not offered or ext in offered):
+        return path, ext
+    ext = _ext_from_filter(chosen_filter)
+    if not ext or (offered and ext not in offered):
+        ext = "png" if not offered or "png" in offered else offered[0]
+    return f"{path}.{ext}", ext
+
+
+def export_default_name(default_name: str, filters: str, default_filter: str | None = None) -> str:
+    """The name a save dialog offers: with the default filter's suffix unless it
+    already ends in one the filters offer, so the dialog shows the format."""
+    offered = _filter_exts(filters)
+    ext = os.path.splitext(default_name or "")[1].lstrip(".").lower()
+    if not default_name or not offered or ext in offered:
+        return default_name
+    suffix = _ext_from_filter(default_filter or "")
+    if suffix not in offered:
+        suffix = offered[0]
+    return f"{default_name}.{suffix}"
+
+
 def pick_export_path(parent, caption: str, default_name: str, filters: str, default_filter: str = None):
     """
-    Returns (path, ext).
+    Returns (path, ext), the suffix one of those ``filters`` offer
+    (``resolve_export_path``).
     Linux uses a QFileDialog instance (non-native) so selectedNameFilter is reliable.
     Windows/macOS keep using getSaveFileName.
     """
+    name = export_default_name(default_name, filters, default_filter)
     if IS_LINUX:
         dlg = QFileDialog(parent, caption)
         dlg.setAcceptMode(QFileDialog.AcceptSave)
         dlg.setNameFilters(filters.split(";;"))
         if default_filter:
             dlg.selectNameFilter(default_filter)
-        dlg.selectFile(default_name)
+        dlg.selectFile(name)
 
         # Important for Linux reliability
         dlg.setOption(QFileDialog.DontUseNativeDialog, True)
@@ -186,18 +227,11 @@ def pick_export_path(parent, caption: str, default_name: str, filters: str, defa
         path = dlg.selectedFiles()[0]
         chosen_filter = dlg.selectedNameFilter()
     else:
-        path, chosen_filter = QFileDialog.getSaveFileName(parent, caption, default_name, filters)
+        path, chosen_filter = QFileDialog.getSaveFileName(parent, caption, name, filters, default_filter or "")
         if not path:
             return "", ""
 
-    ext = os.path.splitext(path)[1].lstrip(".").lower()
-
-    # If user didn’t type an extension, take it from the selected filter
-    if not ext:
-        ext = _ext_from_filter(chosen_filter) or "png"
-        path = f"{path}.{ext}"
-
-    return path, ext
+    return resolve_export_path(path, chosen_filter, filters)
 
 
 class MplCanvas(FigureCanvas):

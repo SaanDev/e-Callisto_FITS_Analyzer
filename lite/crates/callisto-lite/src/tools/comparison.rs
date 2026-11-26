@@ -1036,9 +1036,9 @@ impl ComparisonWindow {
 
     fn finish_export_options(&mut self, ctx: &egui::Context, options: ExportOptions) {
         self.export_options = options.clone();
-        let Some(mut path) = rfd::FileDialog::new()
+        let Some(path) = rfd::FileDialog::new()
             .set_title("Export Comparison")
-            .set_file_name("multi_station_comparison")
+            .set_file_name("multi_station_comparison.png")
             .add_filter("PNG (*.png)", &["png"])
             .add_filter("PDF (*.pdf)", &["pdf"])
             .add_filter("EPS (*.eps)", &["eps"])
@@ -1048,13 +1048,8 @@ impl ComparisonWindow {
         else {
             return;
         };
-        let ext = match path.extension() {
-            Some(e) => e.to_string_lossy().to_lowercase(),
-            None => {
-                path.set_extension("png");
-                "png".into()
-            }
-        };
+        // PNG unless the name ends in a format both exports write.
+        let (path, ext) = crate::figure_export::with_figure_extension(path, &crate::figure_export::FIGURE_EXTENSIONS);
         if options.grid {
             let result = self.export_grid(ctx, &path, &options);
             self.export_finished(&path, result);

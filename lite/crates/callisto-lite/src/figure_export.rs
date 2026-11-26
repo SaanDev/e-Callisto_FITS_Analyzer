@@ -6,7 +6,7 @@
 //! and EPS are vector files too ([`crate::vector_export`]).
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use callisto_core::mpl::{
@@ -15,6 +15,35 @@ use callisto_core::mpl::{
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
 use crate::fonts::{MplMeasure, mpl_font, with_mpl_face};
+
+/// The suffixes figure exports write (`FIGURE_EXPORT_FILTERS`), lower case.
+pub const FIGURE_EXTENSIONS: [&str; 8] = ["png", "pdf", "eps", "svg", "tiff", "tif", "jpg", "jpeg"];
+
+/// A saved figure's path and format: the path as chosen when its suffix is
+/// one of `supported`, else the path with `.png` added (`pick_export_path`'s
+/// PNG default).
+///
+/// Save dialogs return the name as typed: the Linux portal and Windows add
+/// no suffix of their own. Default names come from plot titles, which hold
+/// file names, so `SWISS-FM_…_02.fit-Background Subtracted` "has" the suffix
+/// `fit-Background Subtracted`. Such a suffix is no format: it stays part of
+/// the name, as `….fit-Background Subtracted.png`.
+pub fn with_figure_extension(path: PathBuf, supported: &[&str]) -> (PathBuf, String) {
+    if let Some(ext) = path.extension().map(|e| e.to_string_lossy().to_lowercase())
+        && supported.contains(&ext.as_str())
+    {
+        return (path, ext);
+    }
+    let mut name = path.into_os_string();
+    name.push(".png");
+    (PathBuf::from(name), "png".to_owned())
+}
+
+/// The name a figure's save dialog offers for `stem`: with `.png` unless it
+/// already ends in a figure format, so the dialog shows the format.
+pub fn figure_file_name(stem: &str) -> String {
+    with_figure_extension(PathBuf::from(stem), &FIGURE_EXTENSIONS).0.to_string_lossy().into_owned()
+}
 
 thread_local! {
     /// `pad_inches` of the export in progress.
@@ -286,7 +315,7 @@ pub fn save_figure_padded(ctx: &egui::Context, fig: &Figure, path: &Path, dpi: f
             let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::BufWriter::new(file), 95);
             enc.encode(&rgb, w, h, image::ExtendedColorType::Rgb8)?;
         }
-        other => bail!("Format '{other}' is not supported."),
+        other => bail!("Format '{other}' is not supported. Use one of: {}.", FIGURE_EXTENSIONS.join(", ")),
     }
     Ok(())
 }
@@ -593,4 +622,54 @@ fn svg(ctx: &egui::Context, fig: &Figure) -> Result<String> {
     }
     s.push_str("</g>\n</svg>\n");
     Ok(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pick(name: &str) -> (String, String) {
+        let (p, ext) = with_figure_extension(PathBuf::from(name), &FIGURE_EXTENSIONS);
+        (p.to_string_lossy().into_owned(), ext)
+    }
+
+    #[test]
+    fn a_name_from_a_file_title_gets_png() {
+        // The Raspberry Pi report: the title's ".fit-Background Subtracted"
+        // was taken for the format.
+        assert_eq!(
+            pick("/home/pi/SWISS-FM_20261126_083847_02.fit-Background Subtracted"),
+            ("/home/pi/SWISS-FM_20261126_083847_02.fit-Background Subtracted.png".into(), "png".into())
+        );
+        assert_eq!(
+            pick("/tmp/burst.fit_MaxIntensityPlot"),
+            ("/tmp/burst.fit_MaxIntensityPlot.png".into(), "png".into())
+        );
+        assert_eq!(pick("/tmp/plot"), ("/tmp/plot.png".into(), "png".into()));
+        assert_eq!(pick("/tmp/plot.fit"), ("/tmp/plot.fit.png".into(), "png".into()));
+    }
+
+    #[test]
+    fn a_figure_format_is_kept() {
+        for ext in FIGURE_EXTENSIONS {
+            assert_eq!(pick(&format!("/tmp/a.fit-Raw.{ext}")), (format!("/tmp/a.fit-Raw.{ext}"), ext.to_owned()));
+        }
+        // Case as typed, format in lower case.
+        assert_eq!(pick("/tmp/Plot.PDF"), ("/tmp/Plot.PDF".into(), "pdf".into()));
+        // A narrower list (an export without JPEG) adds .png to the others.
+        assert_eq!(
+            with_figure_extension(PathBuf::from("/tmp/a.jpg"), &["png", "pdf"]).0,
+            PathBuf::from("/tmp/a.jpg.png")
+        );
+    }
+
+    #[test]
+    fn dialogs_offer_the_format() {
+        assert_eq!(
+            figure_file_name("SWISS-FM_20261126_083847_02.fit-Background Subtracted"),
+            "SWISS-FM_20261126_083847_02.fit-Background Subtracted.png"
+        );
+        assert_eq!(figure_file_name("multi_station_comparison.png"), "multi_station_comparison.png");
+        assert_eq!(figure_file_name("overview.svg"), "overview.svg");
+    }
 }

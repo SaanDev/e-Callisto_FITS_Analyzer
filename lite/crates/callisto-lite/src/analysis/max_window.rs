@@ -637,11 +637,14 @@ impl MaxWindow {
     }
 }
 
-/// `pick_export_path` with `FIGURE_EXPORT_FILTERS`, PNG by default.
+/// `pick_export_path` with `FIGURE_EXPORT_FILTERS`, PNG by default: a name
+/// whose suffix is no figure format (none typed, or one from a file name in
+/// the title, as `….fit-Background Subtracted`) gets `.png`.
 pub(crate) fn export_dialog(default_name: &str) -> Option<PathBuf> {
-    let mut path = rfd::FileDialog::new()
+    use crate::figure_export::{FIGURE_EXTENSIONS, figure_file_name, with_figure_extension};
+    let path = rfd::FileDialog::new()
         .set_title("Export Figure")
-        .set_file_name(default_name)
+        .set_file_name(figure_file_name(default_name))
         .add_filter("PNG (*.png)", &["png"])
         .add_filter("PDF (*.pdf)", &["pdf"])
         .add_filter("EPS (*.eps)", &["eps"])
@@ -649,10 +652,7 @@ pub(crate) fn export_dialog(default_name: &str) -> Option<PathBuf> {
         .add_filter("TIFF (*.tiff *.tif)", &["tiff", "tif"])
         .add_filter("JPG (*.jpg *.jpeg)", &["jpg", "jpeg"])
         .save_file()?;
-    if path.extension().is_none() {
-        path.set_extension("png");
-    }
-    Some(path)
+    Some(with_figure_extension(path, &FIGURE_EXTENSIONS).0)
 }
 
 #[cfg(test)]
