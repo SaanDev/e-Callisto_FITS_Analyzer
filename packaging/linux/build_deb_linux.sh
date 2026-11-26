@@ -16,9 +16,10 @@ VERSION="${VERSION:-$DEFAULT_VERSION}"
 PYTHON_BIN="${PYTHON_BIN:-}"
 ARCH="$(dpkg --print-architecture)"
 OUT_DEB="$ROOT/dist/${APP_ID}_${VERSION}_${ARCH}.deb"
-RUNTIME_REQUIREMENTS="$ROOT/requirements/requirements-runtime.txt"
+# Overridable so build_deb_linux_arm64.sh can swap pins for its platform.
+RUNTIME_REQUIREMENTS="${RUNTIME_REQUIREMENTS:-$ROOT/requirements/requirements-runtime.txt}"
 BUILD_REQUIREMENTS="$ROOT/requirements/requirements-build.txt"
-BUILD_VENV="$ROOT/.venv-build"
+BUILD_VENV="${BUILD_VENV:-$ROOT/.venv-build}"
 
 cd "$ROOT"
 

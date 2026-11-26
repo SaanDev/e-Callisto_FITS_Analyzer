@@ -16,6 +16,20 @@
   #define DistDir RepoRoot + "\dist\e-Callisto FITS Analyzer"
 #endif
 
+; Target CPU: x64 (default) or arm64 (build_windows_arm64.ps1 passes
+; /DArch=arm64). The arm64 installer carries "_arm64" in its name and
+; refuses x64 machines; both share one AppId, so either replaces the other.
+#ifndef Arch
+  #define Arch "x64"
+#endif
+#if Arch == "arm64"
+  #define ArchAllowed "arm64"
+  #define ArchSuffix "_arm64"
+#else
+  #define ArchAllowed "x64compatible"
+  #define ArchSuffix ""
+#endif
+
 [Setup]
 AppId={{8D3A5938-5A86-4E5F-B6D9-0F4BE4E2A94D}
 AppName={#AppName}
@@ -27,13 +41,13 @@ AppUpdatesURL=https://ecallistoanalyzer.org/
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 OutputDir={#RepoRoot}\dist
-OutputBaseFilename=e-CALLISTO_FITS_Analyzer_v{#AppVersion}_Setup
+OutputBaseFilename=e-CALLISTO_FITS_Analyzer_v{#AppVersion}{#ArchSuffix}_Setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=admin
-ArchitecturesAllowed=x64compatible
-ArchitecturesInstallIn64BitMode=x64compatible
+ArchitecturesAllowed={#ArchAllowed}
+ArchitecturesInstallIn64BitMode={#ArchAllowed}
 SetupIconFile={#RepoRoot}\assets\branding\icon.ico
 UninstallDisplayIcon={app}\{#AppExeName}
 CloseApplications=yes

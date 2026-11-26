@@ -26,6 +26,21 @@
   #define StageDir RepoRoot + "\lite\dist\stage"
 #endif
 
+; Target CPU: x64 (default) or arm64 (build_windows_installer.ps1 -Arch arm64
+; passes /DArch=arm64). The arm64 installer is
+; e-CALLISTO_FITS_Analyzer_v3.3.0-lite_arm64_Setup.exe and refuses x64
+; machines; both share one AppId, so either replaces the other.
+#ifndef Arch
+  #define Arch "x64"
+#endif
+#if Arch == "arm64"
+  #define ArchAllowed "arm64"
+  #define ArchSuffix "_arm64"
+#else
+  #define ArchAllowed "x64compatible"
+  #define ArchSuffix ""
+#endif
+
 [Setup]
 AppId={{ABFBF10E-8013-4726-B4D1-9694707E525F}
 AppName={#AppName}
@@ -38,13 +53,13 @@ AppUpdatesURL=https://ecallistoanalyzer.org/
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 OutputDir={#RepoRoot}\lite\dist
-OutputBaseFilename=e-CALLISTO_FITS_Analyzer_v{#AppVersion}_Setup
+OutputBaseFilename=e-CALLISTO_FITS_Analyzer_v{#AppVersion}{#ArchSuffix}_Setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=admin
-ArchitecturesAllowed=x64compatible
-ArchitecturesInstallIn64BitMode=x64compatible
+ArchitecturesAllowed={#ArchAllowed}
+ArchitecturesInstallIn64BitMode={#ArchAllowed}
 SetupIconFile={#RepoRoot}\assets\branding\icon.ico
 UninstallDisplayIcon={app}\{#AppExeName}
 UninstallDisplayName={#AppName}
